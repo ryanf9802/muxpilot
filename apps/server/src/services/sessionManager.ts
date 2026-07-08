@@ -5,7 +5,6 @@ import type {
   ApprovalRequest,
   ChatMessage,
   CollaborationMode,
-  ComposerPart,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -18,6 +17,7 @@ import type {
   SessionModelSelections,
   SessionStatus,
   TranscriptPageResponse,
+  TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
 import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName } from "@muxpilot/core";
@@ -30,7 +30,6 @@ import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
-import type { CodexAppServerClient } from "./codexUsage.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -40,14 +39,19 @@ interface CodexProcessLookup {
   resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
 }
 
-type CodexAppServerInputPart =
-  | { type: "text"; text: string; text_elements: [] }
-  | { type: "localImage"; path: string; detail: "auto" };
-
 interface ApprovalKeyMap {
   approveOnce: string[];
   approveForPrefix: string[];
   deny: string[];
+}
+
+interface SessionManagerStartOptions {
+  runInitialTick?: boolean;
+}
+
+interface IngestSessionResult {
+  incomplete: boolean;
+  progressed: boolean;
 }
 
 export class SessionManager {
@@ -69,15 +73,47 @@ export class SessionManager {
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null,
-    private readonly codexAppServer: CodexAppServerClient | null = null
+    private readonly codexProcessLookup: CodexProcessLookup | null = null
   ) {}
 
-  start(): void {
-    void this.runDiscoverTick();
-    void this.runIngestTick();
+  start(options: SessionManagerStartOptions = {}): void {
+    if (options.runInitialTick ?? true) {
+      void this.runDiscoverTick();
+      void this.runIngestTick();
+    }
     this.discoveryTimer = setInterval(() => void this.runDiscoverTick(), this.discoveryIntervalMs);
     this.parserTimer = setInterval(() => void this.runIngestTick(), this.parserIntervalMs);
+  }
+
+  async reconcileNow(): Promise<void> {
+    await this.runDiscoverTick();
+    await this.runIngestTick();
+  }
+
+  async discoverNow(): Promise<void> {
+    await this.runDiscoverTick();
+  }
+
+  async catchUpIngest(): Promise<void> {
+    if (this.ingestRunning) return;
+    this.ingestRunning = true;
+    try {
+      const sessions = await this.listIngestSessions({ recentFirst: true });
+      for (const initialSession of sessions) {
+        let session: ManagedSession | null = initialSession;
+        while (session) {
+          const result = await this.ingestSession(session);
+          if (!result.incomplete || !result.progressed) break;
+          const refreshed = await this.db.getSession(session.id);
+          session =
+            refreshed && refreshed.codexJsonlPath === initialSession.codexJsonlPath && !refreshed.archived
+              ? refreshed
+              : null;
+        }
+      }
+    } finally {
+      this.ingestRunning = false;
+    }
   }
 
   stop(): void {
@@ -124,12 +160,17 @@ export class SessionManager {
         await this.db.clearSessionTranscript(existingId);
         if (nextCodexJsonlPath) await this.db.resetParserOffset(parserOffsetKey(existingId, nextCodexJsonlPath));
       }
+      const inputMode =
+        (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
+        existing?.inputMode ??
+        "default";
       const inferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
       const latestUserMessage = await this.db.latestUserMessage(existingId);
       const latestQuestionMessage = await this.db.latestQuestionMessage(existingId);
       const status = resolveSessionStatus(
         inferredStatus,
         existing?.status,
+        inputMode,
         await this.db.latestMessage(existingId),
         latestQuestionMessage,
         await this.latestQuestionAnswerMessage(existingId, latestQuestionMessage),
@@ -139,10 +180,6 @@ export class SessionManager {
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
       );
-      const inputMode =
-        (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
-        existing?.inputMode ??
-        "default";
       const liveModelSettings =
         nextCodexJsonlPath ? await readLatestCodexModelSettings(nextCodexJsonlPath) : null;
       const session: ManagedSession = {
@@ -192,82 +229,9 @@ export class SessionManager {
   }
 
   async ingest(): Promise<void> {
-    const sessions = (await this.db.listSessions(true)).filter((session) => session.codexJsonlPath && !session.archived);
+    const sessions = await this.listIngestSessions();
     for (const session of sessions) {
-      const source = session.codexJsonlPath;
-      if (!source) continue;
-
-      try {
-        const offsetKey = parserOffsetKey(session.id, source);
-        const hasOffset = await this.db.hasParserOffset(offsetKey);
-        if (!hasOffset && (await this.db.latestMessageSequence(session.id)) > 0) {
-          await this.db.clearSessionTranscript(session.id);
-        }
-        const offset = await this.db.getParserOffset(offsetKey);
-        const result = await parseCodexJsonl(source, offset);
-        if (result.pendingSkillNames.length > 0) {
-          const previousUserMessage = await this.db.latestUserMessage(session.id);
-          if (previousUserMessage) {
-            const text = appendSkillNamesForDisplay(previousUserMessage.text, result.pendingSkillNames);
-            if (text !== previousUserMessage.text) {
-              const updatedMessage = await this.db.updateMessageText(previousUserMessage, text);
-              if (updatedMessage) this.publish("message.appended", session.id, updatedMessage);
-            }
-          }
-        }
-        for (const partial of result.messages) {
-          const message: ChatMessage = withQuestionCountdown({
-            ...partial,
-            id: stableId(`${session.id}:${source}:${partial.id}`),
-            sessionId: session.id,
-            sequence: await this.db.nextSequence(session.id)
-          });
-          if (await this.db.appendMessage(message)) {
-            this.publish("message.appended", session.id, message);
-            if (message.role === "user") {
-              this.activitySummarizer?.schedule(session.id);
-              const messageMode = collaborationModeFromMessage(message);
-              if (messageMode) {
-                await this.db.setSessionInputMode(session.id, messageMode, nowIso());
-                this.publish("session.updated", session.id, await this.db.getSession(session.id));
-              }
-            }
-            if (message.type === "approval_request") {
-              const now = nowIso();
-              await this.db.setSessionStatus(session.id, "approval", now);
-              this.publish("status.changed", session.id, { status: "approval" });
-            }
-            if (message.type === "question_request") {
-              const now = nowIso();
-              await this.db.setSessionStatus(session.id, "question", now);
-              this.publish("status.changed", session.id, { status: "question" });
-            }
-            if (isPlanReadyMessage(message)) {
-              const now = nowIso();
-              await this.db.setSessionStatus(session.id, "plan_ready", now);
-              this.publish("status.changed", session.id, { status: "plan_ready" });
-            }
-          }
-        }
-        if ((await this.db.deleteEchoedSentQueuedInputs(session.id)) > 0) {
-          this.publish("queue.updated", session.id, { queuedInputs: await this.db.listQueuedInputs(session.id) });
-        }
-        await this.processQueuedInputs(session.id);
-        await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
-      } catch (error) {
-        const text = error instanceof Error ? error.message : String(error);
-        const message: ChatMessage = {
-          id: stableId(`${session.id}:parser:${text}:${Date.now()}`),
-          sessionId: session.id,
-          sequence: await this.db.nextSequence(session.id),
-          type: "parser_notice",
-          role: "system",
-          timestamp: nowIso(),
-          text: `Parser error: ${text}`,
-          payload: { error: text }
-        };
-        if (await this.db.appendMessage(message)) this.publish("message.appended", session.id, message);
-      }
+      await this.ingestSession(session);
     }
   }
 
@@ -278,6 +242,97 @@ export class SessionManager {
       await this.ingest();
     } finally {
       this.ingestRunning = false;
+    }
+  }
+
+  private async listIngestSessions(options: { recentFirst?: boolean } = {}): Promise<ManagedSession[]> {
+    const sessions = (await this.db.listSessions(true)).filter((session) => session.codexJsonlPath && !session.archived);
+    if (!options.recentFirst) return sessions;
+    const targets = await Promise.all(
+      sessions.map(async (session) => ({
+        session,
+        sourceUpdatedAtMs: await sessionSourceUpdatedAtMs(session)
+      }))
+    );
+    return targets.sort(compareIngestTargets).map((target) => target.session);
+  }
+
+  private async ingestSession(session: ManagedSession): Promise<IngestSessionResult> {
+    const source = session.codexJsonlPath;
+    if (!source) return { incomplete: false, progressed: false };
+
+    try {
+      const offsetKey = parserOffsetKey(session.id, source);
+      const hasOffset = await this.db.hasParserOffset(offsetKey);
+      if (!hasOffset && (await this.db.latestMessageSequence(session.id)) > 0) {
+        await this.db.clearSessionTranscript(session.id);
+      }
+      const offset = await this.db.getParserOffset(offsetKey);
+      const result = await parseCodexJsonl(source, offset);
+      if (result.pendingSkillNames.length > 0) {
+        const previousUserMessage = await this.db.latestUserMessage(session.id);
+        if (previousUserMessage) {
+          const text = appendSkillNamesForDisplay(previousUserMessage.text, result.pendingSkillNames);
+          if (text !== previousUserMessage.text) {
+            const updatedMessage = await this.db.updateMessageText(previousUserMessage, text);
+            if (updatedMessage) this.publish("message.appended", session.id, updatedMessage);
+          }
+        }
+      }
+      for (const partial of result.messages) {
+        const message: ChatMessage = withQuestionCountdown({
+          ...partial,
+          id: stableId(`${session.id}:${source}:${partial.id}`),
+          sessionId: session.id,
+          sequence: await this.db.nextSequence(session.id)
+        });
+        if (await this.db.appendMessage(message)) {
+          this.publish("message.appended", session.id, message);
+          if (message.role === "user") {
+            this.activitySummarizer?.schedule(session.id);
+            const messageMode = collaborationModeFromMessage(message);
+            if (messageMode) {
+              await this.db.setSessionInputMode(session.id, messageMode, nowIso());
+              this.publish("session.updated", session.id, await this.db.getSession(session.id));
+            }
+          }
+          if (message.type === "approval_request") {
+            const now = nowIso();
+            await this.db.setSessionStatus(session.id, "approval", now);
+            this.publish("status.changed", session.id, { status: "approval" });
+          }
+          if (message.type === "question_request") {
+            const now = nowIso();
+            await this.db.setSessionStatus(session.id, "question", now);
+            this.publish("status.changed", session.id, { status: "question" });
+          }
+          if (isPlanReadyMessage(message)) {
+            const now = nowIso();
+            await this.db.setSessionStatus(session.id, "plan_ready", now);
+            this.publish("status.changed", session.id, { status: "plan_ready" });
+          }
+        }
+      }
+      if ((await this.db.deleteEchoedSentQueuedInputs(session.id)) > 0) {
+        this.publish("queue.updated", session.id, { queuedInputs: await this.db.listQueuedInputs(session.id) });
+      }
+      await this.processQueuedInputs(session.id);
+      await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
+      return { incomplete: !result.complete, progressed: result.nextOffset > offset };
+    } catch (error) {
+      const text = error instanceof Error ? error.message : String(error);
+      const message: ChatMessage = {
+        id: stableId(`${session.id}:parser:${text}:${Date.now()}`),
+        sessionId: session.id,
+        sequence: await this.db.nextSequence(session.id),
+        type: "parser_notice",
+        role: "system",
+        timestamp: nowIso(),
+        text: `Parser error: ${text}`,
+        payload: { error: text }
+      };
+      if (await this.db.appendMessage(message)) this.publish("message.appended", session.id, message);
+      return { incomplete: false, progressed: false };
     }
   }
 
@@ -293,16 +348,13 @@ export class SessionManager {
     return this.db.listQueuedInputs(sessionId);
   }
 
-  async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<QueuedInput> {
+  async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
     const session = requireSession(await this.db.getSession(sessionId));
-    const normalizedParts = normalizeComposerParts(parts, text);
-    await this.requireComposerAttachments(sessionId, normalizedParts);
     const now = nowIso();
     const input: QueuedInput = {
       id: eventId(),
       sessionId,
       text,
-      parts: normalizedParts,
       mode: mode ?? session.inputMode,
       status: "queued",
       error: null,
@@ -319,17 +371,14 @@ export class SessionManager {
     return input;
   }
 
-  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<QueuedInput> {
+  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
     const current = await this.db.getQueuedInput(sessionId, queuedInputId);
     if (!current) throw new QueuedInputError("Queued input not found", 404);
     if (current.status === "sending") throw new QueuedInputError("Queued input is already sending");
     if (current.status === "sent") throw new QueuedInputError("Queued input has already been sent");
-    const normalizedParts = normalizeComposerParts(parts, text);
-    await this.requireComposerAttachments(sessionId, normalizedParts);
     const updated: QueuedInput = {
       ...current,
       text,
-      parts: normalizedParts,
       mode: mode ?? current.mode,
       status: "queued",
       error: null,
@@ -375,8 +424,16 @@ export class SessionManager {
     return this.withTranscriptSource(sessionId, await this.db.listMessagesAfterPage(sessionId, afterSequence, limit));
   }
 
+  async listMessagesAround(sessionId: string, aroundSequence: number, limit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listMessagesAround(sessionId, aroundSequence, limit));
+  }
+
   async listMessageRange(sessionId: string, fromSequence: number, toSequence: number): Promise<TranscriptPageResponse> {
     return this.withTranscriptSource(sessionId, await this.db.listMessageRange(sessionId, fromSequence, toSequence));
+  }
+
+  async searchMessages(sessionId: string, query: string, limit: number): Promise<TranscriptSearchResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.searchMessages(sessionId, query, limit));
   }
 
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
@@ -403,17 +460,15 @@ export class SessionManager {
     return materializeQuestion(message);
   }
 
-  async sendInput(sessionId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<void> {
+  async sendInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<void> {
     const session = requireSession(await this.db.getSession(sessionId));
-    const normalizedParts = normalizeComposerParts(parts, text);
-    await this.requireComposerAttachments(sessionId, normalizedParts);
     if (await this.shouldQueueInput(session, text)) {
-      await this.enqueueInput(sessionId, text, mode, normalizedParts);
+      await this.enqueueInput(sessionId, text, mode);
       return;
     }
     const targetMode = mode ?? session.inputMode;
     const liveSession = await this.ensureInputMode(session, targetMode);
-    await this.sendRawInput(liveSession, text, normalizedParts);
+    await this.sendRawInput(liveSession, text);
     const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
     if (latestPlanMessage && isPlanActionInput(text)) {
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
@@ -433,39 +488,9 @@ export class SessionManager {
     return !isInputReadyStatus(session.status);
   }
 
-  private async sendRawInput(session: ManagedSession, text: string, parts?: ComposerPart[]): Promise<void> {
-    const normalizedParts = normalizeComposerParts(parts, text);
-    if (composerPartsHaveImages(normalizedParts)) {
-      await this.sendAppServerInput(session, normalizedParts);
-      return;
-    }
+  private async sendRawInput(session: ManagedSession, text: string): Promise<void> {
     const pane = await this.livePane(session);
     await this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
-  }
-
-  private async sendAppServerInput(session: ManagedSession, parts: ComposerPart[]): Promise<void> {
-    if (!this.codexAppServer) throw new Error("Codex app-server is not configured for image input.");
-    if (!session.codexSessionId) throw new Error("This session is not linked to a Codex thread for image input.");
-    const attachments = await this.requireComposerAttachments(session.id, parts);
-    const attachmentById = new Map(attachments.map((attachment) => [attachment.id, attachment]));
-    const input: CodexAppServerInputPart[] = parts.flatMap((part): CodexAppServerInputPart[] => {
-      if (part.type === "text") return part.text ? [{ type: "text", text: part.text, text_elements: [] }] : [];
-      const attachment = attachmentById.get(part.attachmentId);
-      if (!attachment) throw new Error("Image attachment is no longer available.");
-      return [{ type: "localImage", path: attachment.storagePath, detail: "auto" }];
-    });
-    if (!input.length) throw new Error("Input is empty.");
-    await this.codexAppServer.request("thread/resume", { threadId: session.codexSessionId, cwd: session.tmux.cwd });
-    await this.codexAppServer.request("turn/start", { threadId: session.codexSessionId, input });
-  }
-
-  private async requireComposerAttachments(sessionId: string, parts: ComposerPart[]) {
-    const attachmentIds = parts.flatMap((part) => (part.type === "image" ? [part.attachmentId] : []));
-    const attachments = await this.db.listAttachments(sessionId, attachmentIds);
-    if (attachments.length !== new Set(attachmentIds).size) {
-      throw new Error("One or more image attachments are unavailable.");
-    }
-    return attachments;
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
@@ -676,7 +701,7 @@ export class SessionManager {
 
       try {
         const liveSession = await this.ensureInputMode(readySession, sending.mode);
-        await this.sendRawInput(liveSession, sending.text, sending.parts);
+        await this.sendRawInput(liveSession, sending.text);
         const now = nowIso();
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });
         await this.db.setSessionInputMode(sessionId, sending.mode, now);
@@ -823,7 +848,7 @@ export class SessionManager {
     return this.db.latestQuestionAnswerMessage(sessionId, question.id, questionMessage.sequence);
   }
 
-  private async withTranscriptSource(sessionId: string, page: TranscriptPageResponse): Promise<TranscriptPageResponse> {
+  private async withTranscriptSource<T extends TranscriptPageResponse | TranscriptSearchResponse>(sessionId: string, page: T): Promise<T> {
     const session = await this.db.getSession(sessionId);
     if (!session) throw new SessionNotFoundError("Session not found");
     return {
@@ -870,6 +895,7 @@ export class SessionNotFoundError extends Error {
 function resolveSessionStatus(
   inferredStatus: SessionStatus,
   previousStatus: SessionStatus | undefined,
+  inputMode: CollaborationMode,
   latestMessage: ChatMessage | null,
   latestQuestionMessage: ChatMessage | null,
   latestQuestionAnswerMessage: ChatMessage | null,
@@ -890,10 +916,10 @@ function resolveSessionStatus(
     answeredPlanMessageIds,
     answeredQuestionMessageIds
   );
-  if (isWorkingStatus(pendingStatus) && isPlanModeUserMessage(latestUserMessage)) return "planning";
+  if (isWorkingStatus(pendingStatus) && isPlanModeTurn(latestUserMessage, inputMode)) return "planning";
   if (
     isInputReadyStatus(pendingStatus) &&
-    hasPendingPlanTurn(latestAssistantMessage, latestUserMessage, latestPlanReadyMessage, answeredPlanMessageIds)
+    hasPendingPlanTurn(inputMode, previousStatus, latestAssistantMessage, latestUserMessage, latestPlanReadyMessage)
   ) {
     return "planning";
   }
@@ -968,34 +994,13 @@ function queuedInputMatchesSession(input: QueuedInput, session: ManagedSession):
   return input.codexSessionId === session.codexSessionId && input.codexJsonlPath === session.codexJsonlPath;
 }
 
-function normalizeComposerParts(parts: ComposerPart[] | undefined, fallbackText: string): ComposerPart[] {
-  const normalized: ComposerPart[] = [];
-  const source = parts?.length ? parts : fallbackText ? [{ type: "text" as const, text: fallbackText }] : [];
-  for (const part of source) {
-    if (part.type === "text") {
-      if (part.text) appendTextPart(normalized, part.text);
-      continue;
-    }
-    if (part.attachmentId) normalized.push({ type: "image", attachmentId: part.attachmentId });
-  }
-  if (!normalized.some((part) => part.type === "image" || part.text.trim())) {
-    throw new Error("Input is empty.");
-  }
-  return normalized;
-}
-
-function appendTextPart(parts: ComposerPart[], text: string): void {
-  const previous = parts.at(-1);
-  if (previous?.type === "text") previous.text += text;
-  else parts.push({ type: "text", text });
-}
-
-function composerPartsHaveImages(parts: ComposerPart[]): boolean {
-  return parts.some((part) => part.type === "image");
-}
-
 function isPlanModeUserMessage(message: ChatMessage | null): boolean {
   return message?.role === "user" && recordValue(message.payload)?.collaborationMode === "plan";
+}
+
+function isPlanModeTurn(latestUserMessage: ChatMessage | null, inputMode: CollaborationMode): boolean {
+  if (isPlanModeUserMessage(latestUserMessage)) return true;
+  return inputMode === "plan" && latestUserMessage?.role === "user";
 }
 
 function collaborationModeFromMessage(message: ChatMessage): CollaborationMode | null {
@@ -1004,20 +1009,17 @@ function collaborationModeFromMessage(message: ChatMessage): CollaborationMode |
 }
 
 function hasPendingPlanTurn(
+  inputMode: CollaborationMode,
+  previousStatus: SessionStatus | undefined,
   latestAssistantMessage: ChatMessage | null,
   latestUserMessage: ChatMessage | null,
-  latestPlanReadyMessage: ChatMessage | null,
-  answeredPlanMessageIds: Set<string>
+  latestPlanReadyMessage: ChatMessage | null
 ): boolean {
-  if (!latestUserMessage) return false;
-  if (!isPlanModeUserMessage(latestUserMessage)) return false;
-  if (
-    latestPlanReadyMessage &&
-    latestPlanReadyMessage.sequence > latestUserMessage.sequence &&
-    !answeredPlanMessageIds.has(latestPlanReadyMessage.id)
-  ) {
-    return false;
-  }
+  if (!latestUserMessage) return inputMode === "plan" && previousStatus === "planning";
+  if (!isPlanModeTurn(latestUserMessage, inputMode)) return false;
+  if (latestPlanReadyMessage && latestPlanReadyMessage.sequence > latestUserMessage.sequence) return false;
+  if (previousStatus === "planning") return true;
+  if (inputMode === "plan") return true;
   if (!latestAssistantMessage || latestAssistantMessage.sequence <= latestUserMessage.sequence) return true;
   if (latestAssistantMessage.type !== "assistant" && latestAssistantMessage.type !== "assistant_update") return false;
   return hasIncompleteProposedPlan(latestAssistantMessage.text);
@@ -1318,6 +1320,32 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     models: session.models,
     archived: session.archived
   };
+}
+
+interface IngestTarget {
+  session: ManagedSession;
+  sourceUpdatedAtMs: number | null;
+}
+
+function compareIngestTargets(first: IngestTarget, second: IngestTarget): number {
+  const firstSource = first.sourceUpdatedAtMs ?? Number.NEGATIVE_INFINITY;
+  const secondSource = second.sourceUpdatedAtMs ?? Number.NEGATIVE_INFINITY;
+  if (firstSource !== secondSource) return secondSource - firstSource;
+
+  const firstActivity = first.session.lastActivityAt ? Date.parse(first.session.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const secondActivity = second.session.lastActivityAt ? Date.parse(second.session.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  if (firstActivity !== secondActivity) return secondActivity - firstActivity;
+
+  return first.session.id.localeCompare(second.session.id);
+}
+
+async function sessionSourceUpdatedAtMs(session: ManagedSession): Promise<number | null> {
+  if (!session.codexJsonlPath) return null;
+  try {
+    return (await stat(session.codexJsonlPath)).mtimeMs;
+  } catch {
+    return null;
+  }
 }
 
 function emptySessionModels(): SessionModelSelections {

@@ -1,5 +1,6 @@
 import webPush from "web-push";
 import type {
+  CollaborationMode,
   ManagedSession,
   NotificationRuleType,
   NotificationSettings,
@@ -78,11 +79,11 @@ export class NotificationService {
     this.knownStatuses.set(sessionId, nextStatus);
     if (!previousStatus || previousStatus === nextStatus) return;
 
+    const session = await this.db.getSession(sessionId);
     const settings = await this.db.getNotificationSettings();
-    const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus);
+    const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus, { inputMode: session?.inputMode ?? null });
     if (matchedRules.length === 0) return;
 
-    const session = await this.db.getSession(sessionId);
     const payload = notificationPayload(session, sessionId, previousStatus, nextStatus, matchedRules);
     const triggeredEvent: SessionEvent = {
       id: eventId(),
@@ -118,14 +119,21 @@ export function matchingNotificationRules(
   settings: NotificationSettings,
   sessionId: string,
   previousStatus: SessionStatus,
-  status: SessionStatus
+  status: SessionStatus,
+  context: { inputMode?: CollaborationMode | null } = {}
 ): NotificationRuleType[] {
   if (status === "missing") return [];
   const enabled = new Set<NotificationRuleType>([...settings.globalRules, ...(settings.sessionRules[sessionId] ?? [])]);
-  return NOTIFICATION_RULE_TYPES.filter((type) => enabled.has(type) && notificationRuleMatches(type, previousStatus, status));
+  return NOTIFICATION_RULE_TYPES.filter((type) => enabled.has(type) && notificationRuleMatches(type, previousStatus, status, context));
 }
 
-function notificationRuleMatches(type: NotificationRuleType, previousStatus: SessionStatus, status: SessionStatus): boolean {
+function notificationRuleMatches(
+  type: NotificationRuleType,
+  previousStatus: SessionStatus,
+  status: SessionStatus,
+  context: { inputMode?: CollaborationMode | null }
+): boolean {
+  if (context.inputMode === "plan" && isInputReadyStatus(status)) return false;
   if (type === "status_change") return previousStatus !== status;
   if (type === "approval_gate") return statusSeverity(status) === "red";
   return isTaskRunningStatus(previousStatus) && (status === "waiting" || status === "idle");
@@ -133,6 +141,10 @@ function notificationRuleMatches(type: NotificationRuleType, previousStatus: Ses
 
 function isTaskRunningStatus(status: SessionStatus): boolean {
   return status === "working" || status === "generating" || status === "executing";
+}
+
+function isInputReadyStatus(status: SessionStatus): boolean {
+  return status === "waiting" || status === "idle";
 }
 
 function notificationPayload(

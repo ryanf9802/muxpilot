@@ -6,7 +6,6 @@ import {
   Check,
   Copy,
   HelpCircle,
-  Image as ImageIcon,
   ListChecks,
   LoaderCircle,
   MessageSquare,
@@ -32,7 +31,6 @@ import {
   ViewPlugin,
   type DecorationSet,
   type ViewUpdate,
-  WidgetType,
   gutter,
   keymap,
   placeholder as codeMirrorPlaceholder
@@ -56,11 +54,9 @@ import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell
 import type {
   ApprovalDecision,
   ApprovalRequest,
-  ChatAttachment,
   ChatMessage,
   CodexSkill,
   CollaborationMode,
-  ComposerPart,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -70,6 +66,7 @@ import type {
   SessionAction,
   SessionEvent,
   TranscriptPageResponse,
+  TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
 import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcriptMessages } from "@muxpilot/core";
@@ -96,7 +93,6 @@ export interface PendingUserMessage {
   id: string;
   sessionId: string;
   text: string;
-  parts: ComposerPart[];
   mode: CollaborationMode;
   timestamp: string;
 }
@@ -104,10 +100,6 @@ export interface PendingUserMessage {
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
 export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
 export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (hover: hover) and (pointer: fine)";
-const IMAGE_TOKEN_PREFIX = "muxpilot-image";
-const IMAGE_UPLOAD_TOKEN_PREFIX = "muxpilot-upload";
-const IMAGE_ERROR_TOKEN_PREFIX = "muxpilot-error";
-const IMAGE_TOKEN_PATTERN = /\{\{muxpilot-(image|upload|error):([A-Za-z0-9._:-]+)\}\}/g;
 const composerRootInputHints: Record<string, string | boolean> = {
   autoComplete: "off",
   autoCorrect: "off",
@@ -148,56 +140,8 @@ export function saveComposerDraft(sessionId: string, value: string): void {
   }
 }
 
-export function composerPartsFromText(value: string): ComposerPart[] {
-  const parts: ComposerPart[] = [];
-  let cursor = 0;
-  for (const match of value.matchAll(IMAGE_TOKEN_PATTERN)) {
-    const index = match.index ?? 0;
-    if (index > cursor) appendComposerTextPart(parts, value.slice(cursor, index));
-    if (match[1] === "image" && match[2]) parts.push({ type: "image", attachmentId: match[2] });
-    cursor = index + match[0].length;
-  }
-  if (cursor < value.length) appendComposerTextPart(parts, value.slice(cursor));
-  return parts.filter((part) => part.type === "image" || part.text);
-}
-
-export function composerTextFromParts(parts: ComposerPart[]): string {
-  return parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-}
-
-export function composerValueFromParts(parts: ComposerPart[] | undefined, fallbackText: string): string {
-  const source = parts?.length ? parts : fallbackText ? [{ type: "text" as const, text: fallbackText }] : [];
-  return source.map((part) => (part.type === "image" ? imageToken(part.attachmentId) : part.text)).join("");
-}
-
 export function composerHasContent(value: string): boolean {
-  return composerPartsFromText(value).some((part) => part.type === "image" || part.text.trim());
-}
-
-export function composerHasPendingImageTokens(value: string): boolean {
-  for (const match of value.matchAll(IMAGE_TOKEN_PATTERN)) {
-    if (match[1] === "upload" || match[1] === "error") return true;
-  }
-  return false;
-}
-
-function appendComposerTextPart(parts: ComposerPart[], text: string): void {
-  if (!text) return;
-  const previous = parts.at(-1);
-  if (previous?.type === "text") previous.text += text;
-  else parts.push({ type: "text", text });
-}
-
-function imageToken(attachmentId: string): string {
-  return `{{${IMAGE_TOKEN_PREFIX}:${attachmentId}}}`;
-}
-
-function uploadToken(uploadId: string): string {
-  return `{{${IMAGE_UPLOAD_TOKEN_PREFIX}:${uploadId}}}`;
-}
-
-function errorToken(uploadId: string): string {
-  return `{{${IMAGE_ERROR_TOKEN_PREFIX}:${uploadId}}}`;
+  return Boolean(value.trim());
 }
 
 export function loadVimModePreference(): boolean {
@@ -299,6 +243,25 @@ export function shouldIgnoreTranscriptVimKeyTarget(target: EventTarget | null): 
   return Boolean(target.closest("input, textarea, select, button, [contenteditable='true'], .cm-editor, .transcript-find-bar"));
 }
 
+export function shouldHandleSessionBackShortcut(
+  event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target">,
+  ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document
+): boolean {
+  if (event.key !== "Backspace" || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+  if (isSessionBackShortcutEditableTarget(event.target)) return false;
+  return !ownerDocument?.querySelector("[role='dialog'], [role='menu']");
+}
+
+function isSessionBackShortcutEditableTarget(target: EventTarget | null): boolean {
+  const candidate = target as { closest?: unknown } | null;
+  if (typeof candidate?.closest !== "function") return false;
+  return Boolean(
+    candidate.closest(
+      "input, textarea, select, button, [contenteditable]:not([contenteditable='false']), .cm-content, .cm-editor, .transcript-find-bar"
+    )
+  );
+}
+
 export function transcriptVimNavigationCommand(
   event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
   pendingG: boolean
@@ -309,7 +272,7 @@ export function transcriptVimNavigationCommand(
     if (key === "u") return { command: "halfUp", pendingG: false, preventDefault: true };
     if (key === "d") return { command: "halfDown", pendingG: false, preventDefault: true };
     if (key === "b") return { command: "pageUp", pendingG: false, preventDefault: true };
-    if (key === "f") return { command: "pageDown", pendingG: false, preventDefault: true };
+    if (key === "f") return { command: "find", pendingG: false, preventDefault: true };
     return { command: null, pendingG: false, preventDefault: false };
   }
   if (event.key === "g" && !event.shiftKey) {
@@ -390,18 +353,14 @@ export function createPendingUserMessage(
   sessionId: string,
   text: string,
   mode: CollaborationMode,
-  partsOrTimestamp: ComposerPart[] | string = text ? [{ type: "text", text }] : [],
   timestamp = new Date().toISOString()
 ): PendingUserMessage {
-  const parts = Array.isArray(partsOrTimestamp) ? partsOrTimestamp : text ? [{ type: "text" as const, text }] : [];
-  const actualTimestamp = typeof partsOrTimestamp === "string" ? partsOrTimestamp : timestamp;
   return {
-    id: `pending-user-${actualTimestamp}`,
+    id: `pending-user-${timestamp}`,
     sessionId,
     text,
-    parts,
     mode,
-    timestamp: actualTimestamp
+    timestamp
   };
 }
 
@@ -414,14 +373,13 @@ export function pendingUserMessageToChatMessage(message: PendingUserMessage): Ch
     role: "user",
     timestamp: message.timestamp,
     text: message.text,
-    payload: { collaborationMode: message.mode, composerParts: message.parts }
+    payload: { collaborationMode: message.mode }
   };
 }
 
 export function transcriptItemsContainPendingUserMessage(items: CoreTranscriptItem[], pending: PendingUserMessage): boolean {
   return transcriptMessages(items).some((message) => {
     if (message.sessionId !== pending.sessionId || message.role !== "user") return false;
-    if (pending.parts.some((part) => part.type === "image")) return composerPartsEqual(messageComposerParts(message), pending.parts);
     const visibleText = displayText(message);
     if (visibleText === pending.text) return true;
     if (visibleText && userTextDisplayParts(visibleText).body === pending.text) return true;
@@ -533,6 +491,9 @@ export function SessionView() {
   const [transcriptFindOpen, setTranscriptFindOpen] = useState(false);
   const [transcriptFindQuery, setTranscriptFindQuery] = useState("");
   const [transcriptFindMatchIndex, setTranscriptFindMatchIndex] = useState(0);
+  const [transcriptFindMatches, setTranscriptFindMatches] = useState<TranscriptSearchMatch[]>([]);
+  const [transcriptFindLoading, setTranscriptFindLoading] = useState(false);
+  const [transcriptFindError, setTranscriptFindError] = useState("");
   const vimAvailable = useDesktopVimAvailable();
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [hasMoreAfter, setHasMoreAfter] = useState(false);
@@ -548,6 +509,7 @@ export function SessionView() {
   const requestTokenRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
+  const loadingSearchPageRef = useRef(false);
   const liveTailRefreshRunningRef = useRef(false);
   const liveTailRefreshQueuedRef = useRef(false);
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
@@ -566,6 +528,7 @@ export function SessionView() {
   const composerFormRef = useRef<HTMLFormElement>(null);
   const messageMenuRef = useRef<HTMLDivElement>(null);
   const transcriptFindInputRef = useRef<HTMLInputElement>(null);
+  const transcriptFindRequestRef = useRef(0);
   const vimPendingGRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
@@ -586,15 +549,7 @@ export function SessionView() {
   const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan));
   const composerLocked = Boolean(composerLock);
   const effectiveVimEnabled = vimAvailable && vimEnabled;
-  const transcriptFindEntries = useMemo(
-    () => visibleTranscriptFindEntries(transcriptItems, expandedStacks, expandedRangeItems),
-    [expandedRangeItems, expandedStacks, transcriptItems]
-  );
-  const transcriptFindMatchEntryIndexes = useMemo(
-    () => transcriptFindMatches(transcriptFindEntries, transcriptFindQuery),
-    [transcriptFindEntries, transcriptFindQuery]
-  );
-  const currentTranscriptFindEntryIndex = transcriptFindMatchEntryIndexes[transcriptFindMatchIndex] ?? -1;
+  const currentTranscriptFindMatch = transcriptFindMatches[transcriptFindMatchIndex] ?? null;
   const questionRenderedInline = Boolean(
     question &&
       (transcriptItems.some((item) => transcriptItemContainsMessageId(item, question.messageId)) ||
@@ -652,32 +607,100 @@ export function SessionView() {
   );
 
   useEffect(() => {
+    const handleSessionBackShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!shouldHandleSessionBackShortcut(event, document)) return;
+      event.preventDefault();
+      navigate("/");
+    };
+    document.addEventListener("keydown", handleSessionBackShortcut);
+    return () => document.removeEventListener("keydown", handleSessionBackShortcut);
+  }, [navigate]);
+
+  useEffect(() => {
     if (!transcriptFindOpen) return undefined;
     const animationFrame = window.requestAnimationFrame(() => transcriptFindInputRef.current?.focus());
     return () => window.cancelAnimationFrame(animationFrame);
   }, [transcriptFindOpen]);
 
   useEffect(() => {
-    if (!transcriptFindOpen) return;
+    if (!transcriptFindOpen) {
+      transcriptFindRequestRef.current += 1;
+      setTranscriptFindMatches([]);
+      setTranscriptFindLoading(false);
+      setTranscriptFindError("");
+      return undefined;
+    }
+    const query = transcriptFindQuery.trim();
     setTranscriptFindMatchIndex(0);
-  }, [transcriptFindOpen, transcriptFindQuery]);
+    if (!query) {
+      transcriptFindRequestRef.current += 1;
+      setTranscriptFindMatches([]);
+      setTranscriptFindLoading(false);
+      setTranscriptFindError("");
+      return undefined;
+    }
+
+    const request = transcriptFindRequestRef.current + 1;
+    transcriptFindRequestRef.current = request;
+    setTranscriptFindLoading(true);
+    setTranscriptFindError("");
+    const timeout = window.setTimeout(() => {
+      void api
+        .messageSearch(id, query)
+        .then((response) => {
+          if (transcriptFindRequestRef.current !== request || activeIdRef.current !== id) return;
+          if (response.sessionId !== id) return;
+          const expectedSourceKey = transcriptSourceKeyRef.current;
+          if (expectedSourceKey && transcriptSourceKey(response) !== expectedSourceKey) return;
+          setTranscriptFindMatches(response.matches);
+        })
+        .catch(() => {
+          if (transcriptFindRequestRef.current === request && activeIdRef.current === id) {
+            setTranscriptFindMatches([]);
+            setTranscriptFindError("Search failed");
+          }
+        })
+        .finally(() => {
+          if (transcriptFindRequestRef.current === request && activeIdRef.current === id) setTranscriptFindLoading(false);
+        });
+    }, 200);
+
+    return () => window.clearTimeout(timeout);
+  }, [id, transcriptFindOpen, transcriptFindQuery]);
 
   useEffect(() => {
-    if (!transcriptFindMatchEntryIndexes.length) {
+    if (!transcriptFindMatches.length) {
       if (transcriptFindMatchIndex !== 0) setTranscriptFindMatchIndex(0);
       return;
     }
-    if (transcriptFindMatchIndex >= transcriptFindMatchEntryIndexes.length) {
+    if (transcriptFindMatchIndex >= transcriptFindMatches.length) {
       setTranscriptFindMatchIndex(0);
     }
-  }, [transcriptFindMatchEntryIndexes.length, transcriptFindMatchIndex]);
+  }, [transcriptFindMatchIndex, transcriptFindMatches.length]);
 
   useEffect(() => {
-    if (!transcriptFindOpen || currentTranscriptFindEntryIndex < 0) return;
-    const entry = transcriptFindEntries[currentTranscriptFindEntryIndex];
-    if (!entry) return;
-    scrollToTranscriptItem(entry.id);
-  }, [currentTranscriptFindEntryIndex, transcriptFindEntries, transcriptFindOpen]);
+    if (!transcriptFindOpen || !currentTranscriptFindMatch) return;
+    const container = messageListRef.current;
+    if (container && transcriptItemElement(container, currentTranscriptFindMatch.itemId)) {
+      scrollToTranscriptItem(currentTranscriptFindMatch.itemId);
+      return;
+    }
+    void loadTranscriptFindMatchPage(currentTranscriptFindMatch);
+  }, [currentTranscriptFindMatch, transcriptFindOpen, transcriptItems]);
+
+  useEffect(() => {
+    const handleFindKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.altKey || event.shiftKey || (!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== "f") return;
+      event.preventDefault();
+      setTranscriptFindOpen(true);
+      window.requestAnimationFrame(() => {
+        transcriptFindInputRef.current?.focus();
+        transcriptFindInputRef.current?.select();
+      });
+    };
+    window.addEventListener("keydown", handleFindKeyDown);
+    return () => window.removeEventListener("keydown", handleFindKeyDown);
+  }, []);
 
   useEffect(() => {
     if (!effectiveVimEnabled) {
@@ -800,6 +823,13 @@ export function SessionView() {
       setInputModeError("");
       setCopiedTmuxCommand(false);
       setComposerFocused(false);
+      setTranscriptFindOpen(false);
+      setTranscriptFindQuery("");
+      setTranscriptFindMatchIndex(0);
+      setTranscriptFindMatches([]);
+      setTranscriptFindLoading(false);
+      setTranscriptFindError("");
+      transcriptFindRequestRef.current += 1;
       setPagination(false, false);
       setLoadingOlder(false);
       setLoadingNewer(false);
@@ -1020,6 +1050,27 @@ export function SessionView() {
     }
   }
 
+  async function loadTranscriptFindMatchPage(match: TranscriptSearchMatch) {
+    if (loadingSearchPageRef.current) return;
+    const targetId = id;
+    const token = requestTokenRef.current;
+    loadingSearchPageRef.current = true;
+    try {
+      const response = await trackRefreshRequest(() =>
+        api.messages(targetId, { around: match.sequence, limit: MESSAGE_PAGE_SIZE })
+      );
+      if (!isCurrentTranscriptPage(targetId, token, response)) return;
+      scrollBehaviorRef.current = "none";
+      setTranscriptItems(appendUniqueTranscriptItems([], response.items));
+      reconcilePendingUserMessage(response.items);
+      setPagination(response.hasMoreBefore, response.hasMoreAfter);
+      markInitialTranscriptSessionId(targetId);
+      setInitialScrollReady(true);
+    } finally {
+      if (isCurrentRequest(targetId, token)) loadingSearchPageRef.current = false;
+    }
+  }
+
   async function loadApproval(targetId = id, token = requestTokenRef.current) {
     const response = await trackRefreshRequest(() => api.approval(targetId));
     if (!isCurrentRequest(targetId, token)) return;
@@ -1177,7 +1228,7 @@ export function SessionView() {
   }
 
   function moveTranscriptFindMatch(direction: 1 | -1) {
-    const count = transcriptFindMatchEntryIndexes.length;
+    const count = transcriptFindMatches.length;
     if (!count) return;
     setTranscriptFindMatchIndex((current) => (current + direction + count) % count);
   }
@@ -1210,11 +1261,9 @@ export function SessionView() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (submitBusy || composerLocked) return;
-    if (composerHasPendingImageTokens(text)) return;
-    const parts = composerPartsFromText(text);
-    if (!parts.some((part) => part.type === "image" || part.text.trim())) return;
-    const value = composerTextFromParts(parts).trimEnd();
-    const pendingMessage = createPendingUserMessage(id, value, session?.inputMode ?? "default", parts);
+    if (!composerHasContent(text)) return;
+    const value = text.trimEnd();
+    const pendingMessage = createPendingUserMessage(id, value, session?.inputMode ?? "default");
     blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
     updateComposerText("");
     setPendingUserMessage(pendingMessage);
@@ -1224,15 +1273,15 @@ export function SessionView() {
     try {
       const queued = shouldQueueComposerInput(session, queuedInputs);
       if (queued) {
-        await api.enqueueInput(id, value, session?.inputMode ?? "default", parts);
+        await api.enqueueInput(id, value, session?.inputMode ?? "default");
         await loadQueuedInputs(id, requestTokenRef.current);
         setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
       } else {
-        await api.send(id, value, session?.inputMode ?? "default", parts);
+        await api.send(id, value, session?.inputMode ?? "default");
         void refreshSessionStoplight().catch(() => undefined);
       }
     } catch (error) {
-      updateComposerText(composerValueFromParts(parts, value));
+      updateComposerText(value);
       setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
       throw error;
     } finally {
@@ -1368,10 +1417,10 @@ export function SessionView() {
     }
   }
 
-  async function updateQueuedInput(inputId: string, value: string, mode: CollaborationMode, parts?: ComposerPart[]) {
+  async function updateQueuedInput(inputId: string, value: string, mode: CollaborationMode) {
     const targetId = id;
     const token = requestTokenRef.current;
-    await api.updateQueuedInput(targetId, inputId, value, mode, parts);
+    await api.updateQueuedInput(targetId, inputId, value, mode);
     await loadQueuedInputs(targetId, token);
   }
 
@@ -1491,16 +1540,20 @@ export function SessionView() {
               aria-label="Find transcript"
             />
             <span className="transcript-find-count" aria-live="polite">
-              {transcriptFindQuery.trim()
-                ? transcriptFindMatchEntryIndexes.length
-                  ? `${transcriptFindMatchIndex + 1} / ${transcriptFindMatchEntryIndexes.length}`
-                  : "No matches"
-                : "0 / 0"}
+              {transcriptFindError
+                ? transcriptFindError
+                : transcriptFindLoading
+                  ? "Searching"
+                  : transcriptFindQuery.trim()
+                    ? transcriptFindMatches.length
+                      ? `${transcriptFindMatchIndex + 1} / ${transcriptFindMatches.length}`
+                      : "No matches"
+                    : "0 / 0"}
             </span>
-            <button type="button" onClick={() => moveTranscriptFindMatch(-1)} disabled={!transcriptFindMatchEntryIndexes.length} aria-label="Previous match">
+            <button type="button" onClick={() => moveTranscriptFindMatch(-1)} disabled={!transcriptFindMatches.length} aria-label="Previous match">
               <ArrowUpToLine size={15} />
             </button>
-            <button type="button" onClick={() => moveTranscriptFindMatch(1)} disabled={!transcriptFindMatchEntryIndexes.length} aria-label="Next match">
+            <button type="button" onClick={() => moveTranscriptFindMatch(1)} disabled={!transcriptFindMatches.length} aria-label="Next match">
               <ArrowDownToLine size={15} />
             </button>
             <button type="button" onClick={closeTranscriptFind} aria-label="Close transcript find">
@@ -1564,11 +1617,9 @@ export function SessionView() {
           {queuedInputs.length ? (
             <QueuedInputList
               inputs={queuedInputs}
-              sessionId={id}
               skills={codexSkills}
               vimEnabled={effectiveVimEnabled}
               onSkillSearch={() => void refreshCodexSkills()}
-              onImageUpload={(file) => api.uploadAttachment(id, file).then((response) => response.attachment)}
               onUpdate={updateQueuedInput}
               onDelete={deleteQueuedInput}
             />
@@ -1599,8 +1650,6 @@ export function SessionView() {
               }
               focusRequestKey={composerFocusRequest ? String(composerFocusRequest.nonce) : null}
               focusCommand={composerFocusRequest?.command ?? "focus"}
-              sessionId={id}
-              onImageUpload={(file) => api.uploadAttachment(id, file).then((response) => response.attachment)}
               disabled={submitBusy || composerLocked}
             />
             <button
@@ -1609,7 +1658,7 @@ export function SessionView() {
               aria-busy={submitBusy}
               aria-label={submitBusy ? "Sending" : shouldQueueComposerInput(readySession, queuedInputs) ? "Queue" : "Send"}
               data-busy={submitBusy || undefined}
-              disabled={submitBusy || composerLocked || !composerHasContent(text) || composerHasPendingImageTokens(text)}
+              disabled={submitBusy || composerLocked || !composerHasContent(text)}
             >
               {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
             </button>
@@ -1784,120 +1833,6 @@ function codeMirrorSkillHighlightExtension(skillNames: Set<string>): Extension {
   );
 }
 
-class InlineImageWidget extends WidgetType {
-  constructor(
-    private readonly kind: "image" | "upload" | "error",
-    private readonly id: string,
-    private readonly sessionId: string | null
-  ) {
-    super();
-  }
-
-  eq(other: InlineImageWidget): boolean {
-    return other.kind === this.kind && other.id === this.id && other.sessionId === this.sessionId;
-  }
-
-  toDOM(): HTMLElement {
-    const chip = document.createElement("span");
-    chip.className = `inline-image-chip inline-image-chip-${this.kind}`;
-    chip.contentEditable = "false";
-    if (this.kind === "image" && this.sessionId) {
-      const image = document.createElement("img");
-      image.src = api.attachmentUrl(this.sessionId, this.id);
-      image.alt = "";
-      chip.append(image);
-    } else {
-      const icon = document.createElement("span");
-      icon.className = "inline-image-chip-icon";
-      icon.textContent = this.kind === "upload" ? "..." : "!";
-      chip.append(icon);
-    }
-    const label = document.createElement("span");
-    label.textContent = this.kind === "upload" ? "Uploading image" : this.kind === "error" ? "Image upload failed" : "Image";
-    chip.append(label);
-    return chip;
-  }
-
-  ignoreEvent(): boolean {
-    return false;
-  }
-}
-
-function imageChipExtension(sessionId: string | null): Extension {
-  const plugin = ViewPlugin.fromClass(
-    class {
-      decorations: DecorationSet;
-
-      constructor(view: EditorView) {
-        this.decorations = imageChipDecorations(view, sessionId);
-      }
-
-      update(update: ViewUpdate) {
-        if (update.docChanged || update.viewportChanged) this.decorations = imageChipDecorations(update.view, sessionId);
-      }
-    },
-    {
-      decorations: (value) => value.decorations,
-      provide: (value) => EditorView.atomicRanges.of((view) => view.plugin(value)?.decorations ?? Decoration.none)
-    }
-  );
-  return plugin;
-}
-
-function imageChipDecorations(view: EditorView, sessionId: string | null): DecorationSet {
-  const widgets = [];
-  const text = view.state.doc.toString();
-  for (const match of text.matchAll(IMAGE_TOKEN_PATTERN)) {
-    const from = match.index ?? 0;
-    const kind = match[1] === "upload" ? "upload" : match[1] === "error" ? "error" : "image";
-    const id = match[2] ?? "";
-    widgets.push(Decoration.replace({ widget: new InlineImageWidget(kind, id, sessionId), inclusive: false }).range(from, from + match[0].length));
-  }
-  return Decoration.set(widgets, true);
-}
-
-function imageFilesFromClipboard(data: DataTransfer | null): File[] {
-  if (!data) return [];
-  return Array.from(data.items).flatMap((item) => {
-    const file = item.kind === "file" && item.type.startsWith("image/") ? item.getAsFile() : null;
-    return file ? [file] : [];
-  });
-}
-
-function insertUploadingImageToken(view: EditorView, file: File, upload: ((file: File) => Promise<ChatAttachment>) | undefined): boolean {
-  if (!upload) return false;
-  const uploadId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : String(Date.now() + Math.random());
-  const token = uploadToken(uploadId);
-  const selection = view.state.selection.main;
-  view.dispatch({ changes: { from: selection.from, to: selection.to, insert: token }, selection: { anchor: selection.from + token.length } });
-  void upload(file)
-    .then((attachment) => replaceFirstToken(view, token, imageToken(attachment.id)))
-    .catch(() => replaceFirstToken(view, token, errorToken(uploadId)));
-  return true;
-}
-
-function replaceFirstToken(view: EditorView, previousToken: string, nextToken: string): void {
-  const text = view.state.doc.toString();
-  const from = text.indexOf(previousToken);
-  if (from < 0) return;
-  view.dispatch({ changes: { from, to: from + previousToken.length, insert: nextToken } });
-}
-
-function deleteAdjacentImageToken(view: EditorView, direction: "backward" | "forward"): boolean {
-  const selection = view.state.selection.main;
-  if (!selection.empty) return false;
-  const text = view.state.doc.toString();
-  for (const match of text.matchAll(IMAGE_TOKEN_PATTERN)) {
-    const from = match.index ?? 0;
-    const to = from + match[0].length;
-    if ((direction === "backward" && selection.from === to) || (direction === "forward" && selection.from === from)) {
-      view.dispatch({ changes: { from, to } });
-      return true;
-    }
-  }
-  return false;
-}
-
 export function runVimCtrlJCommand(view: EditorView): boolean {
   const cm = getCM(view);
   const vimState = cm?.state.vim ?? null;
@@ -1969,8 +1904,6 @@ function VimPromptEditor({
   placeholder,
   disabled,
   vimEnabled,
-  sessionId,
-  onImageUpload,
   selectionRequest,
   focusRequestKey,
   focusCommand = "focus",
@@ -1986,8 +1919,6 @@ function VimPromptEditor({
   placeholder?: string;
   disabled?: boolean;
   vimEnabled: boolean;
-  sessionId?: string | null;
-  onImageUpload?: (file: File) => Promise<ChatAttachment>;
   selectionRequest: { caret: number; nonce: number } | null;
   focusRequestKey?: string | null;
   focusCommand?: PrimaryInputFocusCommand;
@@ -2002,7 +1933,6 @@ function VimPromptEditor({
   const onFocusRef = useRef(onFocus);
   const onBlurRef = useRef(onBlur);
   const onCaretChangeRef = useRef(onCaretChange);
-  const onImageUploadRef = useRef(onImageUpload);
   const rebuildCaretRef = useRef(0);
   const rebuildFocusedRef = useRef(false);
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
@@ -2015,8 +1945,7 @@ function VimPromptEditor({
     onFocusRef.current = onFocus;
     onBlurRef.current = onBlur;
     onCaretChangeRef.current = onCaretChange;
-    onImageUploadRef.current = onImageUpload;
-  }, [onBlur, onCaretChange, onChange, onFocus, onImageUpload, onSubmitShortcut, onSuggestionCommand]);
+  }, [onBlur, onCaretChange, onChange, onFocus, onSubmitShortcut, onSuggestionCommand]);
 
   useEffect(() => {
     valueRef.current = value;
@@ -2054,14 +1983,6 @@ function VimPromptEditor({
     const extensions: Extension[] = [
       Prec.highest(
         keymap.of([
-          {
-            key: "Backspace",
-            run: (view) => deleteAdjacentImageToken(view, "backward")
-          },
-          {
-            key: "Delete",
-            run: (view) => deleteAdjacentImageToken(view, "forward")
-          },
           {
             key: "ArrowDown",
             run: () => onSuggestionCommandRef.current?.("next") ?? false
@@ -2105,16 +2026,6 @@ function VimPromptEditor({
       EditorView.lineWrapping,
       EditorView.contentAttributes.of(codeMirrorComposerFieldAttributes),
       codeMirrorSkillHighlightExtension(skillNames),
-      imageChipExtension(sessionId ?? null),
-      EditorView.domEventHandlers({
-        paste: (event, view) => {
-          const files = imageFilesFromClipboard(event.clipboardData);
-          if (files.length === 0) return false;
-          event.preventDefault();
-          for (const file of files) insertUploadingImageToken(view, file, onImageUploadRef.current);
-          return true;
-        }
-      }),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
       EditorView.updateListener.of((update) => {
@@ -2158,7 +2069,7 @@ function VimPromptEditor({
       view.destroy();
       if (viewRef.current === view) viewRef.current = null;
     };
-  }, [disabled, placeholder, sessionId, skillNamesKey, vimEnabled]);
+  }, [disabled, placeholder, skillNamesKey, vimEnabled]);
 
   return (
     <div
@@ -2178,8 +2089,6 @@ export function SkillTextArea({
   onBlur,
   skills,
   onSkillSearch,
-  sessionId,
-  onImageUpload,
   placeholder,
   focusRequestKey,
   focusCommand = "focus",
@@ -2193,8 +2102,6 @@ export function SkillTextArea({
   onBlur?: () => void;
   skills: CodexSkill[];
   onSkillSearch?: () => void;
-  sessionId?: string | null;
-  onImageUpload?: (file: File) => Promise<ChatAttachment>;
   placeholder?: string;
   rows?: number;
   focusRequestKey?: string | null;
@@ -2272,8 +2179,6 @@ export function SkillTextArea({
         placeholder={placeholder}
         disabled={disabled}
         vimEnabled={Boolean(vimEnabled)}
-        sessionId={sessionId}
-        onImageUpload={onImageUpload}
         selectionRequest={vimSelectionRequest}
         focusRequestKey={focusRequestKey}
         focusCommand={focusCommand}
@@ -2605,21 +2510,17 @@ function ApprovalBanner({
 
 function QueuedInputList({
   inputs,
-  sessionId,
   skills,
   vimEnabled,
   onSkillSearch,
-  onImageUpload,
   onUpdate,
   onDelete
 }: {
   inputs: QueuedInput[];
-  sessionId: string;
   skills: CodexSkill[];
   vimEnabled: boolean;
   onSkillSearch: () => void;
-  onImageUpload: (file: File) => Promise<ChatAttachment>;
-  onUpdate: (inputId: string, text: string, mode: CollaborationMode, parts?: ComposerPart[]) => Promise<void>;
+  onUpdate: (inputId: string, text: string, mode: CollaborationMode) => Promise<void>;
   onDelete: (inputId: string) => Promise<void>;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2630,18 +2531,17 @@ function QueuedInputList({
   function startEdit(input: QueuedInput) {
     if (!queuedInputEditable(input)) return;
     setEditingId(input.id);
-    setDraft(composerValueFromParts(input.parts, input.text));
+    setDraft(input.text);
     setError("");
   }
 
   async function saveEdit(input: QueuedInput) {
-    if (composerHasPendingImageTokens(draft) || !composerHasContent(draft) || busyId) return;
-    const parts = composerPartsFromText(draft);
-    const value = composerTextFromParts(parts).trimEnd();
+    if (!composerHasContent(draft) || busyId) return;
+    const value = draft.trimEnd();
     setBusyId(input.id);
     setError("");
     try {
-      await onUpdate(input.id, value, input.mode, parts);
+      await onUpdate(input.id, value, input.mode);
       setEditingId(null);
       setDraft("");
     } catch (caught) {
@@ -2685,15 +2585,13 @@ function QueuedInputList({
                     vimEnabled={vimEnabled}
                     skills={skills}
                     onSkillSearch={onSkillSearch}
-                    sessionId={sessionId}
-                    onImageUpload={onImageUpload}
                     disabled={busy}
                   />
                   {input.error ? <p className="queued-input-error">{input.error}</p> : null}
                   <div className="queued-input-actions">
                     <button
                       type="button"
-                      disabled={busy || !composerHasContent(draft) || composerHasPendingImageTokens(draft)}
+                      disabled={busy || !composerHasContent(draft)}
                       aria-busy={busy}
                       data-busy={busy || undefined}
                       onClick={() => void saveEdit(input)}
@@ -2708,7 +2606,7 @@ function QueuedInputList({
               ) : (
                 <>
                   <div className={`queued-input-read${multiline ? " queued-input-read-multiline" : ""}`}>
-                    <InlineComposerParts parts={input.parts?.length ? input.parts : [{ type: "text", text: input.text }]} sessionId={sessionId} />
+                    <PlainText text={input.text} />
                     <div className="queued-input-actions">
                       <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
                         <Pencil size={16} /> Edit
@@ -3191,7 +3089,7 @@ function MessageContent({ message, planAction = null }: { message: ChatMessage; 
     );
   }
 
-  if (message.role === "user") return <UserText text={message.text} parts={messageComposerParts(message)} sessionId={message.sessionId} />;
+  if (message.role === "user") return <UserText text={message.text} />;
 
   return <PlainText text={message.text} />;
 }
@@ -3218,32 +3116,6 @@ export function copyableMessageText(message: ChatMessage): string {
     return text ? userTextDisplayParts(text).body : "";
   }
   return displayText(message) ?? "";
-}
-
-function messageComposerParts(message: ChatMessage): ComposerPart[] {
-  const parts = recordComposerParts(message.payload.composerParts);
-  if (parts.length) return parts;
-  return message.text ? [{ type: "text", text: message.text }] : [];
-}
-
-function recordComposerParts(value: unknown): ComposerPart[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((item): ComposerPart[] => {
-    if (!item || typeof item !== "object") return [];
-    const record = item as Record<string, unknown>;
-    if (record.type === "text" && typeof record.text === "string") return [{ type: "text" as const, text: record.text }];
-    if (record.type === "image" && typeof record.attachmentId === "string") return [{ type: "image" as const, attachmentId: record.attachmentId }];
-    return [];
-  });
-}
-
-function composerPartsEqual(first: ComposerPart[], second: ComposerPart[]): boolean {
-  if (first.length !== second.length) return false;
-  return first.every((part, index) => {
-    const other = second[index];
-    if (!other || part.type !== other.type) return false;
-    return part.type === "text" ? other.type === "text" && part.text === other.text : other.type === "image" && part.attachmentId === other.attachmentId;
-  });
 }
 
 const markdownComponents: Components = {
@@ -3340,27 +3212,9 @@ function trimPlanWrapperWhitespace(text: string): string {
   return text.replace(/^(?:[ \t]*\r?\n)+/, "").replace(/(?:\r?\n[ \t]*)+$/, "");
 }
 
-export function UserText({ text, parts, sessionId }: { text: string; parts?: ComposerPart[]; sessionId?: string }) {
-  if (parts?.some((part) => part.type === "image")) return <InlineComposerParts parts={parts} sessionId={sessionId} />;
+export function UserText({ text }: { text: string }) {
   const { body, skills } = userTextDisplayParts(text);
   return <PlainText text={body} skillNames={skills} />;
-}
-
-function InlineComposerParts({ parts, sessionId }: { parts: ComposerPart[]; sessionId?: string }) {
-  return (
-    <div className="rendered inline-composer-parts">
-      {parts.map((part, index) =>
-        part.type === "image" ? (
-          <span className="inline-image-chip inline-image-chip-readonly" key={`${part.attachmentId}-${index}`}>
-            {sessionId ? <img src={api.attachmentUrl(sessionId, part.attachmentId)} alt="" loading="lazy" /> : <ImageIcon size={16} />}
-            <span>Image</span>
-          </span>
-        ) : (
-          <PlainText key={`text-${index}`} text={part.text} />
-        )
-      )}
-    </div>
-  );
 }
 
 function PlainText({ text, skillNames = [] }: { text: string; skillNames?: string[] }) {

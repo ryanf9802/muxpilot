@@ -11,10 +11,6 @@ import {
   composerLockReason,
   composerDraftStorageKey,
   composerHasContent,
-  composerHasPendingImageTokens,
-  composerPartsFromText,
-  composerTextFromParts,
-  composerValueFromParts,
   copyableMessageText,
   createPendingUserMessage,
   elapsedSince,
@@ -53,6 +49,7 @@ import {
   scrollMessageListToBottom,
   scrollBehaviorForTranscriptUpdate,
   shouldQueueComposerInput,
+  shouldHandleSessionBackShortcut,
   shouldHideInitialMessageList,
   shouldIgnoreTranscriptVimKeyTarget,
   shouldResetInitialTranscriptForLiveTail,
@@ -171,27 +168,10 @@ describe("composer draft storage", () => {
   });
 });
 
-describe("composer image parts", () => {
-  it("round-trips inline image tokens as composer parts", () => {
-    const value = "before {{muxpilot-image:att_123}} after";
-
-    const parts = composerPartsFromText(value);
-
-    expect(parts).toEqual([
-      { type: "text", text: "before " },
-      { type: "image", attachmentId: "att_123" },
-      { type: "text", text: " after" }
-    ]);
-    expect(composerTextFromParts(parts)).toBe("before  after");
-    expect(composerValueFromParts(parts, "")).toBe(value);
-    expect(composerHasContent(value)).toBe(true);
-  });
-
-  it("treats uploading and failed image chips as pending composer state", () => {
-    expect(composerHasPendingImageTokens("{{muxpilot-upload:upload_1}}")).toBe(true);
-    expect(composerHasPendingImageTokens("{{muxpilot-error:upload_1}}")).toBe(true);
-    expect(composerHasPendingImageTokens("{{muxpilot-image:att_123}}")).toBe(false);
-    expect(composerHasContent("{{muxpilot-upload:upload_1}}")).toBe(false);
+describe("composer content", () => {
+  it("treats non-whitespace text as composer content", () => {
+    expect(composerHasContent("message")).toBe(true);
+    expect(composerHasContent(" \n\t ")).toBe(false);
   });
 });
 
@@ -301,7 +281,7 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("u", { ctrlKey: true }), false).command).toBe("halfUp");
     expect(transcriptVimNavigationCommand(keyEvent("d", { ctrlKey: true }), false).command).toBe("halfDown");
     expect(transcriptVimNavigationCommand(keyEvent("b", { ctrlKey: true }), false).command).toBe("pageUp");
-    expect(transcriptVimNavigationCommand(keyEvent("f", { ctrlKey: true }), false).command).toBe("pageDown");
+    expect(transcriptVimNavigationCommand(keyEvent("f", { ctrlKey: true }), false).command).toBe("find");
   });
 
   it("maps slash to transcript find and ignores meta shortcuts", () => {
@@ -335,6 +315,57 @@ describe("transcript vim navigation keys", () => {
     expect(shouldIgnoreTranscriptVimKeyTarget(plain)).toBe(false);
   });
 });
+
+describe("session back shortcut", () => {
+  it("handles unmodified Backspace outside editable targets and overlays", () => {
+    const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
+
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ target: shortcutTarget(null) }), ownerDocument)).toBe(true);
+  });
+
+  it("ignores Backspace while typing in editable targets", () => {
+    const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
+
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ target: shortcutTarget("input") }), ownerDocument)).toBe(false);
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ target: shortcutTarget("textarea") }), ownerDocument)).toBe(false);
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ target: shortcutTarget(".cm-content") }), ownerDocument)).toBe(false);
+  });
+
+  it("ignores modified Backspace and open overlays", () => {
+    const ownerDocument = {
+      querySelector: (selector: string) => (selector === "[role='dialog'], [role='menu']" ? {} : null)
+    } as Pick<Document, "querySelector">;
+
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ ctrlKey: true, target: shortcutTarget(null) }), null)).toBe(false);
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ target: shortcutTarget(null) }), ownerDocument)).toBe(false);
+  });
+
+  it("ignores other keys", () => {
+    const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
+
+    expect(shouldHandleSessionBackShortcut(sessionBackKeyEvent({ key: "Delete", target: shortcutTarget(null) }), ownerDocument)).toBe(false);
+  });
+});
+
+function sessionBackKeyEvent(
+  overrides: Partial<Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target">> = {}
+): Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target"> {
+  return {
+    key: "Backspace",
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    target: null,
+    ...overrides
+  };
+}
+
+function shortcutTarget(match: string | null): EventTarget {
+  return {
+    closest: (selector: string) => (match && selector.includes(match) ? {} : null)
+  } as unknown as EventTarget;
+}
 
 describe("VimModeToggle", () => {
   it("renders pressed state when enabled", () => {
@@ -1346,21 +1377,6 @@ describe("UserText", () => {
     expect(html).not.toContain('class="user-skill-reference"');
   });
 
-  it("renders user image parts as inline chips", () => {
-    const html = renderToStaticMarkup(
-      createElement(UserText, {
-        text: "see this",
-        sessionId: "session-a",
-        parts: [
-          { type: "text", text: "see this " },
-          { type: "image", attachmentId: "att_123" }
-        ]
-      })
-    );
-
-    expect(html).toContain('class="inline-image-chip inline-image-chip-readonly"');
-    expect(html).toContain("/api/sessions/session-a/attachments/att_123");
-  });
 });
 
 describe("MessageBubble", () => {
@@ -1422,23 +1438,6 @@ describe("pending user messages", () => {
       false
     );
     expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(message("session-a", 3, "Different text"))], pending)).toBe(false);
-  });
-
-  it("reconciles image prompts by composer parts", () => {
-    const parts = [
-      { type: "text" as const, text: "Review " },
-      { type: "image" as const, attachmentId: "att_123" }
-    ];
-    const pending = createPendingUserMessage("session-a", "Review ", "default", parts, "2026-07-07T00:00:00.000Z");
-    const parsed = message("session-a", 3, "Review ", "user", "user", { composerParts: parts });
-
-    expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(parsed)], pending)).toBe(true);
-    expect(
-      transcriptItemsContainPendingUserMessage(
-        [transcriptMessageItem(message("session-a", 4, "Review ", "user", "user", { composerParts: [{ type: "text", text: "Review " }] }))],
-        pending
-      )
-    ).toBe(false);
   });
 
   it("reconciles skill prompts that gain display metadata after parsing", () => {

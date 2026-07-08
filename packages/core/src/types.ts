@@ -186,26 +186,10 @@ export interface QuestionResponse {
 
 export type QueuedInputStatus = "queued" | "sending" | "sent" | "failed";
 
-export type ComposerPart = { type: "text"; text: string } | { type: "image"; attachmentId: string };
-
-export interface ChatAttachment {
-  id: string;
-  sessionId: string;
-  filename: string;
-  mimeType: string;
-  sizeBytes: number;
-  createdAt: string;
-}
-
-export interface AttachmentUploadResponse {
-  attachment: ChatAttachment;
-}
-
 export interface QueuedInput {
   id: string;
   sessionId: string;
   text: string;
-  parts: ComposerPart[];
   mode: CollaborationMode;
   status: QueuedInputStatus;
   error: string | null;
@@ -222,13 +206,11 @@ export interface QueuedInputResponse {
 
 export interface CreateQueuedInputRequest {
   text: string;
-  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 
 export interface UpdateQueuedInputRequest {
   text: string;
-  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 
@@ -336,7 +318,6 @@ export interface PwaTrustInfo {
 
 export interface SendInputRequest {
   text: string;
-  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 
@@ -437,6 +418,27 @@ export interface TranscriptPageResponse {
   items: TranscriptItem[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
+}
+
+export interface TranscriptSearchMatch {
+  sequence: number;
+  messageId: string;
+  itemId: string;
+  firstSequence: number;
+  lastSequence: number;
+  role: ChatMessage["role"];
+  type: MessageType;
+  timestamp: string;
+  preview: string;
+}
+
+export interface TranscriptSearchResponse {
+  sessionId: string;
+  codexSessionId: string | null;
+  codexJsonlPath: string | null;
+  query: string;
+  matches: TranscriptSearchMatch[];
+  total: number;
 }
 
 export interface OpenAIUsageDailyPoint {

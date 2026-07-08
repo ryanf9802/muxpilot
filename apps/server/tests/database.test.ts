@@ -587,6 +587,48 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("searches the full persisted transcript and returns match metadata", async () => {
+    const db = await tempDb();
+    const session = testSession("session-transcript-search");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    await db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    await db.appendMessage(testMessage(session.id, 2, "assistant", "Intermediate answer"));
+    await db.appendMessage(testMessage(session.id, 3, "tool", "Tool output with distant needle", undefined, "tool_output"));
+    await db.appendMessage(testMessage(session.id, 4, "assistant", "<oai-mem-citation>needle hidden metadata</oai-mem-citation>"));
+    await db.appendMessage(testMessage(session.id, 5, "user", initialInstructionContext()));
+
+    const search = await db.searchMessages(session.id, "needle", 10);
+
+    expect(search.total).toBe(1);
+    expect(search.matches).toEqual([
+      expect.objectContaining({
+        sequence: 3,
+        messageId: `${session.id}-3`,
+        itemId: `${session.id}-3`,
+        preview: expect.stringContaining("distant needle")
+      })
+    ]);
+    db.close();
+  });
+
+  it("loads a bounded expanded transcript page around a search match", async () => {
+    const db = await tempDb();
+    const session = testSession("session-transcript-around");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    for (let sequence = 1; sequence <= 9; sequence += 1) {
+      const role = sequence === 1 || sequence === 9 ? "user" : "tool";
+      const type = role === "tool" ? "tool_output" : "user";
+      await db.appendMessage(testMessage(session.id, sequence, role, `message ${sequence}`, undefined, type));
+    }
+
+    const page = await db.listMessagesAround(session.id, 5, 3);
+
+    expect(itemSpans(page)).toEqual([[4, 4, "message"], [5, 5, "message"], [6, 6, "message"]]);
+    expect(page.hasMoreBefore).toBe(true);
+    expect(page.hasMoreAfter).toBe(true);
+    db.close();
+  });
+
   it("collapses assistant activity when a newer transcript page starts mid-turn", async () => {
     const db = await tempDb();
     const session = testSession("session-newer-page-mid-turn");
