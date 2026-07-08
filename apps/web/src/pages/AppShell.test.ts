@@ -11,8 +11,10 @@ import {
   SHELL_RECONNECT_INTERVAL_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
+  isPromptHistoryShortcut,
   mergeSessionDirectorySuggestions,
   nextSessionStoplightSearch,
+  promptHistoryResultMeta,
   remoteAccessQrValue,
   sessionDirectorySuggestionsFromSessions,
   sessionNameValidationMessage,
@@ -85,6 +87,26 @@ describe("shouldShowLogoutButton", () => {
 
   it("hides logout for unrestricted remote access", () => {
     expect(shouldShowLogoutButton({ accessMode: "unrestricted" })).toBe(false);
+  });
+});
+
+describe("prompt history helpers", () => {
+  it("recognizes Ctrl+R without browser shortcut modifiers", () => {
+    expect(isPromptHistoryShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(true);
+    expect(isPromptHistoryShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBe(true);
+    expect(isPromptHistoryShortcut({ ctrlKey: false, metaKey: true, altKey: false, shiftKey: false, key: "r" })).toBe(false);
+    expect(isPromptHistoryShortcut({ ctrlKey: true, metaKey: false, altKey: true, shiftKey: false, key: "r" })).toBe(false);
+  });
+
+  it("formats prompt history result metadata with repo, branch, session, and time", () => {
+    const meta = promptHistoryResultMeta({
+      repoName: "muxpilot",
+      repoBranch: "main",
+      sessionName: "codex",
+      timestamp: "2026-07-08T12:34:00.000Z"
+    });
+
+    expect(meta).toContain("muxpilot · main · codex");
   });
 });
 

@@ -134,6 +134,17 @@ describe("api client request headers", () => {
     );
   });
 
+  it("requests prompt history with an encoded query and limit", async () => {
+    const fetchMock = mockJsonResponse({ results: [] });
+
+    await api.promptHistory("graph view", 50);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/prompt-history?q=graph%20view&limit=50",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("sends chat input with the selected collaboration mode", async () => {
     const fetchMock = mockJsonResponse({ ok: true });
 

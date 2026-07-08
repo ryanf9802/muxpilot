@@ -1,9 +1,9 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
+import { AlertTriangle, Bell, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Search, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError } from "../api/client.js";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
   ManagedSession,
@@ -11,6 +11,7 @@ import type {
   NotificationRuleType,
   NotificationSettings,
   NotificationTriggeredPayload,
+  PromptHistoryResult,
   RemoteAccessResponse,
   SessionDirectorySuggestion,
   SessionEvent
@@ -64,10 +65,15 @@ export function AppShell() {
   const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
+  const [promptHistoryOpen, setPromptHistoryOpen] = useState(false);
+  const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
+  const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
   const sessionRequestIdRef = useRef(0);
   const connectionStateRef = useRef<ShellConnectionState>("checking");
   const locationPathRef = useRef(location.pathname);
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
+  const directorySuggestionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const promptHistoryPrefillRef = useRef<() => string>(() => "");
 
   useEffect(() => installCtrlWGuard(), []);
 
@@ -285,6 +291,37 @@ export function AppShell() {
     setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
+  const registerPromptHistoryPrefill = useCallback((provider: () => string) => {
+    promptHistoryPrefillRef.current = provider;
+    return () => {
+      if (promptHistoryPrefillRef.current === provider) promptHistoryPrefillRef.current = () => "";
+    };
+  }, []);
+
+  const openPromptHistory = useCallback(() => {
+    let initialQuery = "";
+    try {
+      initialQuery = promptHistoryPrefillRef.current();
+    } catch {
+      initialQuery = "";
+    }
+    setPromptHistoryInitialQuery(initialQuery);
+    setPromptHistoryRequestKey((key) => key + 1);
+    setPromptHistoryOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (connectionState !== "connected") return undefined;
+    const handlePromptHistoryShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!isPromptHistoryShortcut(event)) return;
+      event.preventDefault();
+      if (createSessionOpen || connectOpen) return;
+      openPromptHistory();
+    };
+    document.addEventListener("keydown", handlePromptHistoryShortcut);
+    return () => document.removeEventListener("keydown", handlePromptHistoryShortcut);
+  }, [connectionState, connectOpen, createSessionOpen, openPromptHistory]);
+
   const retryConnection = useCallback(async () => {
     if (retryBusy) return;
     setRetryBusy(true);
@@ -469,6 +506,7 @@ export function AppShell() {
               refreshSessionStoplight: loadSessions,
               syncSessionStoplight,
               openCreateSession,
+              registerPromptHistoryPrefill,
               connectionEpoch,
               accessMode,
               notificationSettings,
@@ -563,6 +601,13 @@ export function AppShell() {
           </form>
         </div>
       ) : null}
+      {promptHistoryOpen ? (
+        <PromptHistoryDialog
+          initialQuery={promptHistoryInitialQuery}
+          requestKey={promptHistoryRequestKey}
+          onClose={() => setPromptHistoryOpen(false)}
+        />
+      ) : null}
       {connectOpen ? <ConnectDeviceDialog onClose={() => setConnectOpen(false)} /> : null}
     </div>
   );
@@ -581,6 +626,7 @@ export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
   syncSessionStoplight: (session: ManagedSession) => void;
   openCreateSession: (cwd?: string) => void;
+  registerPromptHistoryPrefill: (provider: () => string) => () => void;
   connectionEpoch: number;
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
@@ -841,6 +887,166 @@ export function shouldShowConnectDeviceButton(me: Pick<MeResponse, "accessGrante
 
 export function shouldShowLogoutButton(me: Pick<MeResponse, "accessMode">): boolean {
   return me.accessMode !== "unrestricted";
+}
+
+export function isPromptHistoryShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
+  return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r";
+}
+
+function PromptHistoryDialog({
+  initialQuery,
+  requestKey,
+  onClose
+}: {
+  initialQuery: string;
+  requestKey: number;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState(initialQuery);
+  const [results, setResults] = useState<PromptHistoryResult[]>([]);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const requestIdRef = useRef(0);
+
+  useEffect(() => {
+    setQuery(initialQuery);
+    setSelectedIndex(0);
+  }, [initialQuery, requestKey]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError("");
+    const timer = window.setTimeout(() => {
+      api
+        .promptHistory(query)
+        .then((response) => {
+          if (requestId !== requestIdRef.current) return;
+          setResults(response.results);
+          setSelectedIndex(0);
+        })
+        .catch(() => {
+          if (requestId !== requestIdRef.current) return;
+          setResults([]);
+          setError("Could not load prompt history.");
+        })
+        .finally(() => {
+          if (requestId === requestIdRef.current) setLoading(false);
+        });
+    }, 60);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [query]);
+
+  async function copyResult(result: PromptHistoryResult) {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(result.text);
+    } catch {
+      try {
+        fallbackCopy(result.text);
+      } catch {
+        toast.error("Could not copy prompt.");
+        return;
+      }
+    }
+    onClose();
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedIndex((index) => Math.min(results.length - 1, index + 1));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedIndex((index) => Math.max(0, index - 1));
+      return;
+    }
+    if (event.key === "Enter") {
+      const selected = results[selectedIndex];
+      if (selected) {
+        event.preventDefault();
+        void copyResult(selected);
+      }
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop prompt-history-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
+      <section className="prompt-history-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-history-title">
+        <div className="dialog-head">
+          <h2 id="prompt-history-title">Prompt history</h2>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
+            <X size={18} />
+          </button>
+        </div>
+        <label className="prompt-history-search">
+          <Search size={17} aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Search submitted prompts"
+            aria-controls="prompt-history-results"
+          />
+        </label>
+        {error ? <p className="dialog-error">{error}</p> : null}
+        <div className="prompt-history-results" id="prompt-history-results" role="listbox" aria-label="Submitted prompts">
+          {loading ? <p className="prompt-history-muted">Searching prompts</p> : null}
+          {!loading && !error && results.length === 0 ? <p className="prompt-history-muted">No matching prompts</p> : null}
+          {!loading
+            ? results.map((result, index) => (
+                <button
+                  key={`${result.id}-${result.sequence}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === selectedIndex}
+                  className={index === selectedIndex ? "prompt-history-result prompt-history-result-selected" : "prompt-history-result"}
+                  onMouseEnter={() => setSelectedIndex(index)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => void copyResult(result)}
+                >
+                  <span className="prompt-history-result-text">{result.text}</span>
+                  <span className="prompt-history-result-meta">{promptHistoryResultMeta(result)}</span>
+                </button>
+              ))
+            : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export function promptHistoryResultMeta(result: Pick<PromptHistoryResult, "repoName" | "repoBranch" | "sessionName" | "timestamp">): string {
+  const repo = result.repoBranch ? `${result.repoName} · ${result.repoBranch}` : result.repoName;
+  return `${repo} · ${result.sessionName} · ${formatPromptHistoryTimestamp(result.timestamp)}`;
+}
+
+function formatPromptHistoryTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
 }
 
 function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {

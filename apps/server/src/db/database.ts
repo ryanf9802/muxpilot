@@ -9,6 +9,7 @@ import type {
   NotificationSettings,
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
+  PromptHistoryResult,
   PushSubscriptionInput,
   QueuedInput,
   SessionModelSettings,
@@ -46,6 +47,10 @@ interface MessageRow {
   timestamp: string;
   text: string;
   payload_json: string;
+}
+
+interface PromptHistoryRow extends MessageRow {
+  session_data_json: string;
 }
 
 export interface MessagePage {
@@ -232,6 +237,10 @@ export class AppDatabase {
 
   listMessages(sessionId: string, afterSequence = 0): Promise<ChatMessage[]> {
     return this.call("listMessages", sessionId, afterSequence) as Promise<ChatMessage[]>;
+  }
+
+  listPromptHistory(query: string, limit: number): Promise<PromptHistoryResult[]> {
+    return this.call("listPromptHistory", query, limit) as Promise<PromptHistoryResult[]>;
   }
 
   listRecentMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
@@ -663,6 +672,33 @@ export class SyncAppDatabase {
       .all(sessionId, afterSequence) as unknown as MessageRow[];
 
     return rows.map(hydrateMessage);
+  }
+
+  listPromptHistory(query: string, limit: number): PromptHistoryResult[] {
+    const normalizedQuery = query.trim().toLowerCase();
+    const rows = this.db
+      .prepare(
+        `SELECT messages.*, managed_sessions.data_json AS session_data_json
+         FROM messages
+         INNER JOIN managed_sessions ON managed_sessions.id = messages.session_id
+         WHERE messages.role = 'user'
+           AND messages.text <> ''
+         ORDER BY messages.timestamp DESC, messages.sequence DESC`
+      )
+      .all() as unknown as PromptHistoryRow[];
+
+    const matches = rows
+      .filter((row) => isDisplayableUserPromptText(row.text))
+      .map((row, index) => ({
+        row,
+        score: normalizedQuery ? promptHistoryScore(row.text, normalizedQuery) : 0,
+        index
+      }))
+      .filter((match): match is { row: PromptHistoryRow; score: number; index: number } => match.score !== null)
+      .sort((first, second) => first.score - second.score || second.row.timestamp.localeCompare(first.row.timestamp) || first.index - second.index)
+      .slice(0, limit);
+
+    return matches.map(({ row }) => promptHistoryResult(row));
   }
 
   listRecentMessages(sessionId: string, limit: number): TranscriptPageResponse {
@@ -1555,6 +1591,7 @@ export class SyncAppDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence);
+      CREATE INDEX IF NOT EXISTS idx_messages_role_timestamp ON messages(role, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_activity ON managed_sessions(last_activity_at);
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
@@ -1573,6 +1610,48 @@ export class SyncAppDatabase {
 
 function normalizePreviewText(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
+  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    sequence: row.sequence,
+    timestamp: row.timestamp,
+    text: row.text,
+    sessionName: session.tmux.windowName || session.tmux.sessionName || row.session_id,
+    repoName: session.repo.name,
+    repoBranch: session.repo.branch,
+    cwd: session.tmux.cwd
+  };
+}
+
+function promptHistoryScore(text: string, normalizedQuery: string): number | null {
+  if (!normalizedQuery) return 0;
+  const normalizedText = text.toLowerCase();
+  if (normalizedText === normalizedQuery) return 0;
+  if (normalizedText.startsWith(normalizedQuery)) return 10 + normalizedText.length - normalizedQuery.length;
+  const substringIndex = normalizedText.indexOf(normalizedQuery);
+  if (substringIndex >= 0) return 100 + substringIndex + normalizedText.length - normalizedQuery.length;
+
+  let cursor = 0;
+  let previousIndex = -1;
+  let score = 500;
+  for (const char of normalizedQuery) {
+    const nextIndex = normalizedText.indexOf(char, cursor);
+    if (nextIndex < 0) return null;
+    if (previousIndex >= 0) score += nextIndex - previousIndex - 1;
+    if (isPromptHistoryWordBoundary(normalizedText, nextIndex)) score -= 8;
+    previousIndex = nextIndex;
+    cursor = nextIndex + 1;
+  }
+  return score + normalizedText.length - normalizedQuery.length;
+}
+
+function isPromptHistoryWordBoundary(value: string, index: number): boolean {
+  if (index === 0) return true;
+  return /[\s_\-/:.]/.test(value[index - 1] ?? "");
 }
 
 function compareSessionsByActivity(first: ManagedSession, second: ManagedSession): number {

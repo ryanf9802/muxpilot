@@ -340,7 +340,14 @@ export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
 export function SessionView() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const { refreshSessionStoplight, syncSessionStoplight, openCreateSession, connectionEpoch, accessMode } = useOutletContext<AppShellOutletContext>();
+  const {
+    refreshSessionStoplight,
+    syncSessionStoplight,
+    openCreateSession,
+    registerPromptHistoryPrefill,
+    connectionEpoch,
+    accessMode
+  } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
   const [initialTranscriptSessionId, setInitialTranscriptSessionId] = useState<string | null>(null);
@@ -393,7 +400,9 @@ export function SessionView() {
   const activeIdRef = useRef(id);
   const previousEffectIdRef = useRef(id);
   const composerFormRef = useRef<HTMLFormElement>(null);
+  const promptHistoryPrefillTextRef = useRef(text);
   activeIdRef.current = id;
+  promptHistoryPrefillTextRef.current = text;
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
@@ -443,6 +452,8 @@ export function SessionView() {
     const interval = window.setInterval(() => void refreshCodexSkills(), SKILL_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [refreshCodexSkills]);
+
+  useEffect(() => registerPromptHistoryPrefill(() => promptHistoryPrefillTextRef.current), [registerPromptHistoryPrefill]);
 
   async function toggleExpandedItem(item: CoreTranscriptItem) {
     if (item.type !== "range") return;

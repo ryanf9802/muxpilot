@@ -359,6 +359,22 @@ export interface SessionListResponse {
   sessions: ManagedSession[];
 }
 
+export interface PromptHistoryResult {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  timestamp: string;
+  text: string;
+  sessionName: string;
+  repoName: string;
+  repoBranch: string | null;
+  cwd: string;
+}
+
+export interface PromptHistoryResponse {
+  results: PromptHistoryResult[];
+}
+
 export interface MessageListResponse {
   messages: ChatMessage[];
   hasMoreBefore: boolean;

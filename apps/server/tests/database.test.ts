@@ -55,6 +55,75 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("searches displayable prompt history across active, archived, and missing sessions", async () => {
+    const db = await tempDb();
+    const active = testSession("session-history-active");
+    const archived = { ...testSession("session-history-archived"), archived: true };
+    const missing = { ...testSession("session-history-missing"), status: "missing" as const };
+    db.upsertSession(active, "2026-07-07T00:00:00.000Z");
+    db.upsertSession(archived, "2026-07-07T00:00:00.000Z");
+    db.upsertSession(missing, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(active.id, 1, "user", "Build prompt history search", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(archived.id, 1, "user", "Archived prompt history result", "2026-07-07T00:00:03.000Z"));
+    db.appendMessage(testMessage(missing.id, 1, "user", "Missing session prompt history result", "2026-07-07T00:00:02.000Z"));
+
+    const history = await db.listPromptHistory("history", 10);
+
+    expect(history.map((result) => result.text)).toEqual(expect.arrayContaining([
+      "Archived prompt history result",
+      "Missing session prompt history result",
+      "Build prompt history search"
+    ]));
+    expect(history.map((result) => result.sessionId)).toEqual(expect.arrayContaining([archived.id, missing.id, active.id]));
+    db.close();
+  });
+
+  it("excludes hidden user context from prompt history", async () => {
+    const db = await tempDb();
+    const session = testSession("session-history-context");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", initialInstructionContext(), "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(session.id, 2, "user", "Actual searchable prompt", "2026-07-07T00:00:02.000Z"));
+
+    const history = await db.listPromptHistory("", 10);
+
+    expect(history.map((result) => result.text)).toEqual(["Actual searchable prompt"]);
+    db.close();
+  });
+
+  it("ranks prompt history by exact, substring, fuzzy match, then recency", async () => {
+    const db = await tempDb();
+    const session = testSession("session-history-ranking");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "xylophone graph", "2026-07-07T00:00:04.000Z"));
+    db.appendMessage(testMessage(session.id, 2, "user", "graph", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(session.id, 3, "user", "build a graph view", "2026-07-07T00:00:02.000Z"));
+    db.appendMessage(testMessage(session.id, 4, "user", "gather rough app hints", "2026-07-07T00:00:03.000Z"));
+
+    const history = await db.listPromptHistory("graph", 10);
+
+    expect(history.map((result) => result.text)).toEqual([
+      "graph",
+      "xylophone graph",
+      "build a graph view",
+      "gather rough app hints"
+    ]);
+    db.close();
+  });
+
+  it("returns newest prompt history for an empty query", async () => {
+    const db = await tempDb();
+    const session = testSession("session-history-newest");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "Old prompt", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(session.id, 2, "user", "New prompt", "2026-07-07T00:00:02.000Z"));
+
+    const history = await db.listPromptHistory("", 1);
+
+    expect(history.map((result) => result.text)).toEqual(["New prompt"]);
+    db.close();
+  });
+
   it("hydrates transcript size from message count", async () => {
     const db = await tempDb();
     const session = testSession("session-size");

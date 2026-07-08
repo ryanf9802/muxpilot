@@ -11,6 +11,7 @@ import type {
   MeResponse,
   NotificationSettings,
   OpenAIUsageSummaryResponse,
+  PromptHistoryResponse,
   PushKeyResponse,
   PushSubscriptionInput,
   QueuedInput,
@@ -95,6 +96,7 @@ export const api = {
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
+  promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),

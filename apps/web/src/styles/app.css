@@ -1052,6 +1052,95 @@ select:focus-visible {
   box-shadow: var(--shadow-elevated);
 }
 
+.prompt-history-dialog {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(100%, 720px);
+  max-height: min(720px, calc(100dvh - 36px));
+  padding: 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-elevated);
+}
+
+.prompt-history-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 0 11px;
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+}
+
+.prompt-history-search:focus-within {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 22%, transparent);
+}
+
+.prompt-history-search input {
+  min-width: 0;
+  padding: 0;
+  color: var(--color-text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+.prompt-history-results {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-height: 220px;
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.prompt-history-result {
+  display: grid;
+  gap: 5px;
+  min-height: 58px;
+  justify-items: stretch;
+  padding: 9px 10px;
+  text-align: left;
+  color: var(--color-text);
+  background: transparent;
+  border-color: transparent;
+}
+
+.prompt-history-result:hover,
+.prompt-history-result-selected {
+  background: color-mix(in srgb, var(--color-brand) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-brand) 28%, transparent);
+  box-shadow: none;
+}
+
+.prompt-history-result-text {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.prompt-history-result-meta,
+.prompt-history-muted {
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-history-muted {
+  padding: 18px 4px;
+}
+
 .connect-content {
   display: grid;
   gap: 14px;

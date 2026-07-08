@@ -48,6 +48,8 @@ const createSessionSchema = z.object({
 const queuedInputSchema = z.object({ text: z.string().min(1).max(200_000), mode: collaborationModeSchema.optional() });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
+const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
+const MAX_PROMPT_HISTORY_LIMIT = 100;
 const approvalSchema = z.object({
   decision: z.enum(["approve_once", "approve_for_prefix", "deny"])
 });
@@ -184,6 +186,13 @@ export function registerRoutes(
   app.get("/api/session-directories", { preHandler: access.requireAccess }, async (): Promise<SessionDirectoriesResponse> => ({
     directories: await manager.listSessionDirectories()
   }));
+
+  app.get("/api/prompt-history", { preHandler: access.requireAccess }, async (request) => {
+    const query = request.query as { q?: string; limit?: string };
+    return {
+      results: await db.listPromptHistory(String(query.q ?? "").slice(0, 2000), parsePromptHistoryLimit(query.limit))
+    };
+  });
 
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {
     const body: CreateSessionRequest = createSessionSchema.parse(request.body);
@@ -402,4 +411,10 @@ function parseMessagePageLimit(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_MESSAGE_PAGE_SIZE);
   if (!Number.isFinite(parsed)) return DEFAULT_MESSAGE_PAGE_SIZE;
   return Math.min(MAX_MESSAGE_PAGE_SIZE, Math.max(1, Math.floor(parsed)));
+}
+
+function parsePromptHistoryLimit(value: string | undefined): number {
+  const parsed = Number(value ?? DEFAULT_PROMPT_HISTORY_LIMIT);
+  if (!Number.isFinite(parsed)) return DEFAULT_PROMPT_HISTORY_LIMIT;
+  return Math.min(MAX_PROMPT_HISTORY_LIMIT, Math.max(1, Math.floor(parsed)));
 }
