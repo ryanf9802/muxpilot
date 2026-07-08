@@ -13,6 +13,7 @@ import {
   filterSessionDirectorySuggestions,
   isPromptHistoryShortcut,
   mergeSessionDirectorySuggestions,
+  nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSearch,
   promptHistoryResultMeta,
   remoteAccessQrValue,
@@ -223,6 +224,20 @@ describe("filterSessionDirectorySuggestions", () => {
     expect(filterSessionDirectorySuggestions(suggestions, "team").map((suggestion) => suggestion.path)).toEqual(["/home/dev/teamweave"]);
     expect(filterSessionDirectorySuggestions(suggestions, "main").map((suggestion) => suggestion.path)).toEqual(["/home/dev/muxpilot"]);
     expect(filterSessionDirectorySuggestions(suggestions, "/tmp").map((suggestion) => suggestion.path)).toEqual(["/tmp/scratch"]);
+  });
+});
+
+describe("nextSessionDirectorySuggestionIndex", () => {
+  it("moves through directory suggestions with wrapping arrow-key semantics", () => {
+    expect(nextSessionDirectorySuggestionIndex(0, 3, 1)).toBe(1);
+    expect(nextSessionDirectorySuggestionIndex(2, 3, 1)).toBe(0);
+    expect(nextSessionDirectorySuggestionIndex(0, 3, -1)).toBe(2);
+    expect(nextSessionDirectorySuggestionIndex(1, 3, -1)).toBe(0);
+  });
+
+  it("keeps an empty suggestion list anchored at zero", () => {
+    expect(nextSessionDirectorySuggestionIndex(2, 0, 1)).toBe(0);
+    expect(nextSessionDirectorySuggestionIndex(2, 0, -1)).toBe(0);
   });
 });
 

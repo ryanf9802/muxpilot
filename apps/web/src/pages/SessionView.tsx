@@ -62,6 +62,7 @@ import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcrip
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
 import { StatusPill } from "../components/StatusPill.js";
+import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
 const MESSAGE_PAGE_SIZE = 80;
@@ -1536,6 +1537,7 @@ function VimPromptEditor({
       vimRelativeLineNumbers(),
       minimalSetup,
       EditorView.lineWrapping,
+      EditorView.contentAttributes.of(codeMirrorComposerFieldAttributes),
       codeMirrorSkillHighlightExtension(skillNames),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
@@ -1752,6 +1754,7 @@ function SkillTextArea({
             {renderComposerHighlights(value, skillNames)}
           </div>
           <textarea
+            {...freeformComposerField}
             ref={textareaRef}
             value={value}
             onChange={(event) => {
@@ -2329,6 +2332,7 @@ function QuestionBanner({
               </div>
             ) : null}
             <input
+              {...noAutofillTextField}
               value={answers[prompt.id]?.other ?? ""}
               onChange={(event) =>
                 setAnswers((current) => ({

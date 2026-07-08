@@ -27,6 +27,7 @@ import { api, eventSocket } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
+import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import {
   ensurePushSubscription,
@@ -312,7 +313,7 @@ export function Dashboard() {
       <div className="filters">
         <label className="search-box">
           <Search size={18} />
-          <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search sessions" />
+          <input {...searchField} value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search sessions" />
         </label>
         <button className="dashboard-new-session-button" type="button" onClick={() => openCreateSession()}>
           <Plus size={16} />
@@ -433,6 +434,7 @@ export function Dashboard() {
             <label className="rename-field">
               <span>Name</span>
               <input
+                {...noAutofillTextField}
                 autoFocus
                 value={renameName}
                 onChange={(event) => updateRenameName(event.target.value)}

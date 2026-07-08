@@ -18,6 +18,7 @@ import type {
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
+import { credentialSuppressedField, noAutofillTextField, searchField } from "../utils/formFields.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
@@ -57,6 +58,7 @@ export function AppShell() {
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
   const [createSessionDirectoryFocused, setCreateSessionDirectoryFocused] = useState(false);
+  const [createSessionDirectorySelectedIndex, setCreateSessionDirectorySelectedIndex] = useState(0);
   const [createSessionNameAutofocus, setCreateSessionNameAutofocus] = useState(false);
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
@@ -278,8 +280,24 @@ export function AppShell() {
     [createSessionCwd, directorySuggestions]
   );
   const showDirectorySuggestions = createSessionOpen && createSessionDirectoryFocused && visibleDirectorySuggestions.length > 0;
+  const activeDirectorySuggestionId = showDirectorySuggestions ? sessionDirectorySuggestionOptionId(visibleDirectorySuggestions[createSessionDirectorySelectedIndex]?.path) : undefined;
   const contentClassName = location.pathname.startsWith("/sessions/") ? "content content-session" : "content";
   const activeStoplightSeverity = activeSessionStoplightSeverity(location.search);
+
+  useEffect(() => {
+    if (!showDirectorySuggestions) {
+      setCreateSessionDirectorySelectedIndex(0);
+      return;
+    }
+    setCreateSessionDirectorySelectedIndex((index) => Math.min(index, visibleDirectorySuggestions.length - 1));
+  }, [showDirectorySuggestions, visibleDirectorySuggestions.length]);
+
+  useEffect(() => {
+    if (!showDirectorySuggestions) return;
+    const path = visibleDirectorySuggestions[createSessionDirectorySelectedIndex]?.path;
+    if (!path) return;
+    directorySuggestionRefs.current.get(path)?.scrollIntoView({ block: "nearest" });
+  }, [createSessionDirectorySelectedIndex, showDirectorySuggestions, visibleDirectorySuggestions]);
 
   const openCreateSession = useCallback((cwd = "") => {
     const hasPrefilledCwd = cwd.trim().length > 0;
@@ -288,6 +306,7 @@ export function AppShell() {
     setCreateSessionName("");
     setCreateSessionError(null);
     setCreateSessionDirectoryFocused(!hasPrefilledCwd);
+    setCreateSessionDirectorySelectedIndex(0);
     setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
@@ -385,18 +404,53 @@ export function AppShell() {
     setCreateSessionOpen(false);
     setCreateSessionError(null);
     setCreateSessionDirectoryFocused(false);
+    setCreateSessionDirectorySelectedIndex(0);
     setCreateSessionNameAutofocus(false);
   }
 
   function updateCreateSessionCwd(value: string) {
     setCreateSessionCwd(value);
     setCreateSessionError(null);
+    setCreateSessionDirectorySelectedIndex(0);
   }
 
   function chooseCreateSessionDirectory(path: string) {
     setCreateSessionCwd(path);
     setCreateSessionDirectoryFocused(false);
     setCreateSessionError(null);
+    setCreateSessionDirectorySelectedIndex(0);
+  }
+
+  function handleCreateSessionDirectoryKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (!showDirectorySuggestions) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      setCreateSessionDirectorySelectedIndex((index) =>
+        nextSessionDirectorySuggestionIndex(index, visibleDirectorySuggestions.length, event.key === "ArrowDown" ? 1 : -1)
+      );
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      setCreateSessionDirectorySelectedIndex(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      setCreateSessionDirectorySelectedIndex(visibleDirectorySuggestions.length - 1);
+      return;
+    }
+    if (event.key === "Enter") {
+      const selectedSuggestion = visibleDirectorySuggestions[createSessionDirectorySelectedIndex] ?? visibleDirectorySuggestions[0];
+      if (!selectedSuggestion) return;
+      event.preventDefault();
+      chooseCreateSessionDirectory(selectedSuggestion.path);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCreateSessionDirectoryFocused(false);
+    }
   }
 
   function updateCreateSessionName(value: string) {
@@ -533,26 +587,34 @@ export function AppShell() {
               <span>Directory</span>
               <div className="session-directory-combobox">
                 <input
+                  {...noAutofillTextField}
                   autoFocus={!createSessionNameAutofocus}
                   value={createSessionCwd}
                   onChange={(event) => updateCreateSessionCwd(event.target.value)}
                   onFocus={() => setCreateSessionDirectoryFocused(true)}
                   onBlur={() => window.setTimeout(() => setCreateSessionDirectoryFocused(false), 120)}
+                  onKeyDown={handleCreateSessionDirectoryKeyDown}
                   maxLength={4096}
                   disabled={createSessionBusy}
                   role="combobox"
                   aria-expanded={showDirectorySuggestions}
                   aria-controls="session-directory-suggestions"
+                  aria-activedescendant={activeDirectorySuggestionId}
                   aria-autocomplete="list"
                 />
                 {showDirectorySuggestions ? (
                   <div className="session-directory-suggestions" id="session-directory-suggestions" role="listbox" aria-label="Session directories">
-                    {visibleDirectorySuggestions.map((suggestion) => (
+                    {visibleDirectorySuggestions.map((suggestion, index) => (
                       <button
                         key={suggestion.path}
+                        id={sessionDirectorySuggestionOptionId(suggestion.path)}
+                        ref={(element) => updateDirectorySuggestionRef(directorySuggestionRefs.current, suggestion.path, element)}
                         type="button"
                         role="option"
+                        aria-selected={index === createSessionDirectorySelectedIndex}
+                        className={index === createSessionDirectorySelectedIndex ? "session-directory-suggestion-selected" : undefined}
                         onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => setCreateSessionDirectorySelectedIndex(index)}
                         onClick={() => chooseCreateSessionDirectory(suggestion.path)}
                       >
                         <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
@@ -566,6 +628,7 @@ export function AppShell() {
             <label className="rename-field">
               <span>Name</span>
               <input
+                {...noAutofillTextField}
                 autoFocus={createSessionNameAutofocus}
                 value={createSessionName}
                 onChange={(event) => updateCreateSessionName(event.target.value)}
@@ -712,6 +775,11 @@ export function filterSessionDirectorySuggestions(
   return matches.slice(0, limit);
 }
 
+export function nextSessionDirectorySuggestionIndex(currentIndex: number, suggestionCount: number, direction: 1 | -1): number {
+  if (suggestionCount <= 0) return 0;
+  return (currentIndex + direction + suggestionCount) % suggestionCount;
+}
+
 export function sessionDirectorySuggestionsFromSessions(sessions: ManagedSession[]): SessionDirectorySuggestion[] {
   return mergeSessionDirectorySuggestions(
     sessions
@@ -773,6 +841,16 @@ function compareSessionDirectorySuggestionsByRecency(first: SessionDirectorySugg
 function directoryBaseName(path: string): string {
   const trimmed = path.replace(/\/+$/, "");
   return trimmed.split("/").filter(Boolean).pop() ?? path;
+}
+
+function sessionDirectorySuggestionOptionId(path: string | undefined): string | undefined {
+  if (!path) return undefined;
+  return `session-directory-suggestion-${encodeURIComponent(path).replaceAll("%", "_")}`;
+}
+
+function updateDirectorySuggestionRef(refs: Map<string, HTMLButtonElement>, path: string, element: HTMLButtonElement | null): void {
+  if (element) refs.set(path, element);
+  else refs.delete(path);
 }
 
 export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession[], session: ManagedSession): ManagedSession[] {
@@ -998,6 +1076,7 @@ function PromptHistoryDialog({
         <label className="prompt-history-search">
           <Search size={17} aria-hidden="true" />
           <input
+            {...searchField}
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -1196,7 +1275,7 @@ export function ConnectDeviceContent({
             <label className="connect-access-key">
               <span>Access key</span>
               <div>
-                <input readOnly type={keyVisible ? "text" : "password"} value={remoteAccess.accessKey} />
+                <input {...credentialSuppressedField} readOnly type={keyVisible ? "text" : "password"} value={remoteAccess.accessKey} />
                 <button type="button" className="icon-button" onClick={() => setKeyVisible((visible) => !visible)} aria-label={keyVisible ? "Hide access key" : "Show access key"}>
                   {keyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>

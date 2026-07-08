@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Camera, Lock, X } from "lucide-react";
 import { api } from "../api/client.js";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
+import { credentialSuppressedField } from "../utils/formFields.js";
 
 interface QrScanResult {
   data: string;
@@ -112,10 +113,10 @@ export function AccessPage() {
         <label>
           Access key
           <input
+            {...credentialSuppressedField}
             value={accessKey}
             onChange={(event) => setAccessKey(event.target.value)}
             type="password"
-            autoComplete="current-password"
             autoFocus
           />
         </label>
