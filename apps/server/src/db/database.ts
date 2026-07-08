@@ -16,6 +16,7 @@ import type {
   SessionEvent,
   SessionStatus,
   TranscriptItem,
+  TranscriptRangeKind,
   TranscriptPageResponse
 } from "@muxpilot/core";
 import { buildExpandedTranscriptItems, buildTranscriptItems, hasCompleteProposedPlan, isDisplayableUserPromptText } from "@muxpilot/core";
@@ -686,18 +687,12 @@ export class SyncAppDatabase {
     if (!prompt) return this.listRecentMessages(sessionId, fallbackLimit);
 
     const previousOutput = this.latestAssistantOutputBefore(sessionId, prompt.sequence);
-    const anchorSequence = previousOutput ? this.activeTailOutputAnchorSequence(sessionId, previousOutput) : prompt.sequence;
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM messages
-         WHERE session_id = ? AND sequence >= ?
-         ORDER BY sequence ASC`
-      )
-      .all(sessionId, anchorSequence) as unknown as MessageRow[];
-    const activeItems = buildTranscriptItems(rows.map(hydrateMessage));
+    const activeItems = this.compactActiveTailItems(sessionId, prompt, previousOutput);
+    const pageItems = activeItems.slice(Math.max(0, activeItems.length - fallbackLimit));
+    const firstPageSequence = pageItems[0]?.firstSequence ?? prompt.sequence;
 
-    return transcriptItemsPage(sessionId, activeItems, {
-      hasMoreBefore: this.hasMessageBefore(sessionId, anchorSequence),
+    return transcriptItemsPage(sessionId, pageItems, {
+      hasMoreBefore: this.hasMessageBefore(sessionId, firstPageSequence),
       hasMoreAfter: false
     });
   }
@@ -760,6 +755,94 @@ export class SyncAppDatabase {
       return previous.sequence;
     }
     return output.sequence;
+  }
+
+  private compactActiveTailItems(sessionId: string, prompt: MessageRow, previousOutput: MessageRow | null): TranscriptItem[] {
+    const boundaryRows = [
+      previousOutput,
+      prompt,
+      ...this.activeTailBoundaryRowsAfterPrompt(sessionId, prompt.sequence)
+    ].filter((row): row is MessageRow => Boolean(row));
+    const items: TranscriptItem[] = [];
+    let previousSequence = previousOutput ? this.activeTailOutputAnchorSequence(sessionId, previousOutput) - 1 : prompt.sequence - 1;
+    let inPromptTurn = false;
+    let afterVisibleAssistant = false;
+
+    for (const row of boundaryRows) {
+      const rangeKind: TranscriptRangeKind = inPromptTurn && !afterVisibleAssistant ? "activity" : "stack";
+      appendRangeItem(items, this.collapsedRangeItem(sessionId, previousSequence + 1, row.sequence - 1, rangeKind));
+      items.push(...buildTranscriptItems([hydrateMessage(row)]));
+      previousSequence = row.sequence;
+      if (row.sequence === prompt.sequence) {
+        inPromptTurn = true;
+        afterVisibleAssistant = false;
+      } else if (inPromptTurn && row.role === "assistant" && row.type === "assistant") {
+        afterVisibleAssistant = true;
+      }
+    }
+
+    const tailKind: TranscriptRangeKind = inPromptTurn && !afterVisibleAssistant ? "activity" : "stack";
+    appendRangeItem(items, this.collapsedRangeItem(sessionId, previousSequence + 1, Number.MAX_SAFE_INTEGER, tailKind));
+    return items;
+  }
+
+  private activeTailBoundaryRowsAfterPrompt(sessionId: string, promptSequence: number): MessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ?
+           AND sequence > ?
+           AND (
+             role = 'user'
+             OR type = 'question_request'
+             OR (
+               role = 'assistant'
+               AND type = 'assistant'
+               AND payload_json NOT LIKE '%"type":"event_msg"%'
+               AND sequence = (
+                 SELECT MAX(sequence)
+                 FROM messages
+                 WHERE session_id = ?
+                   AND sequence > ?
+                   AND role = 'assistant'
+                   AND type = 'assistant'
+                   AND payload_json NOT LIKE '%"type":"event_msg"%'
+               )
+             )
+           )
+         ORDER BY sequence ASC`
+      )
+      .all(sessionId, promptSequence, sessionId, promptSequence) as unknown as MessageRow[];
+  }
+
+  private collapsedRangeItem(
+    sessionId: string,
+    fromSequence: number,
+    toSequence: number,
+    rangeKind: TranscriptRangeKind
+  ): Extract<TranscriptItem, { type: "range" }> | null {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COUNT(*) AS message_count,
+           MIN(sequence) AS first_sequence,
+           MAX(sequence) AS last_sequence
+         FROM messages
+         WHERE session_id = ?
+           AND sequence >= ?
+           AND sequence <= ?`
+      )
+      .get(sessionId, fromSequence, toSequence) as { message_count: number; first_sequence: number | null; last_sequence: number | null };
+    if (!row.message_count || row.first_sequence === null || row.last_sequence === null) return null;
+    return {
+      type: "range",
+      id: `${rangeKind}-${sessionId}-${row.first_sequence}-${row.last_sequence}-${row.message_count}`,
+      rangeKind,
+      label: collapsedRangeLabel(rangeKind, row.message_count),
+      firstSequence: row.first_sequence,
+      lastSequence: row.last_sequence,
+      messageCount: row.message_count
+    };
   }
 
   listMessagesBefore(sessionId: string, beforeSequence: number, limit: number): TranscriptPageResponse {
@@ -1608,6 +1691,19 @@ function transcriptItemsPage(
     hasMoreBefore: page.hasMoreBefore,
     hasMoreAfter: page.hasMoreAfter
   };
+}
+
+function appendRangeItem(items: TranscriptItem[], item: Extract<TranscriptItem, { type: "range" }> | null): void {
+  if (item) items.push(item);
+}
+
+function collapsedRangeLabel(kind: TranscriptRangeKind, count: number): string {
+  if (kind === "activity") return `${count} intermediate ${pluralize(count, "item")}`;
+  return `${count} ${pluralize(count, "event")}`;
+}
+
+function pluralize(count: number, singular: string): string {
+  return count === 1 ? singular : `${singular}s`;
 }
 
 function isResponseItemUserMessage(message: ChatMessage): boolean {

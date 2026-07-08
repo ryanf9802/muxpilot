@@ -150,7 +150,7 @@ describe("AppDatabase activity summaries", () => {
       db.appendMessage(testMessage(session.id, sequence, "tool", `Collapsed row ${sequence}`, undefined, "tool_output"));
     }
 
-    const tail = db.listActiveTailMessages(session.id, 3);
+    const tail = db.listActiveTailMessages(session.id, 4);
 
     expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "range:stack"], [6, 6, "message"], [7, 16, "range:activity"]]);
     expect(tail.hasMoreBefore).toBe(true);
@@ -192,6 +192,83 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("bounds the active transcript tail by visible items", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-visible-limit");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "First answer"));
+    db.appendMessage(testMessage(session.id, 3, "tool", "First hidden output", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 4, "user", "Second prompt"));
+    db.appendMessage(testMessage(session.id, 5, "assistant", "Second answer"));
+    db.appendMessage(testMessage(session.id, 6, "tool", "Second hidden output", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 7, "assistant", "Prior assistant output"));
+    db.appendMessage(testMessage(session.id, 8, "tool", "Tool before current prompt", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 9, "user", "Current prompt"));
+    for (let sequence = 10; sequence <= 120; sequence += 1) {
+      db.appendMessage(testMessage(session.id, sequence, "tool", `Collapsed row ${sequence}`, undefined, "tool_output"));
+    }
+
+    const tail = db.listActiveTailMessages(session.id, 3);
+    const older = db.listMessagesBefore(session.id, tail.items[0]?.firstSequence ?? 0, 4);
+    const activeRange = tail.items.at(-1);
+    const expandedRange =
+      activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
+
+    expect(itemSpans(tail)).toEqual([
+      [8, 8, "range:stack"],
+      [9, 9, "message"],
+      [10, 120, "range:activity"]
+    ]);
+    expect(tail.hasMoreBefore).toBe(true);
+    expect(tail.hasMoreAfter).toBe(false);
+    expect(itemSpans(older)).toEqual([[3, 3, "range:stack"], [4, 4, "message"], [5, 6, "range:activity"], [7, 7, "message"]]);
+    expect(expandedRange?.items[0]).toMatchObject({ type: "message", message: { text: "Collapsed row 10" } });
+    db.close();
+  });
+
+  it("collapses repeated assistant output in the active turn to the latest assistant message", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-assistant-churn");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "Older prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "Older answer"));
+    db.appendMessage(testMessage(session.id, 3, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 4, "tool", "Tool batch 1", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 5, "assistant", "Assistant update 1"));
+    db.appendMessage(testMessage(session.id, 6, "tool", "Tool batch 2", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 7, "assistant", "Assistant update 2"));
+    db.appendMessage(testMessage(session.id, 8, "tool", "Tool batch 3", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 9, "assistant", "Newest assistant output"));
+    db.appendMessage(testMessage(session.id, 10, "tool", "Trailing tool output", undefined, "tool_output"));
+
+    const tail = db.listActiveTailMessages(session.id, 10);
+    const assistantMessages = tail.items.filter((item) => item.type === "message" && item.message.role === "assistant");
+    const activeRange = tail.items.find((item) => item.type === "range" && item.firstSequence === 4 && item.lastSequence === 8);
+    const expandedRange =
+      activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
+
+    expect(itemSpans(tail)).toEqual([
+      [2, 2, "message"],
+      [3, 3, "message"],
+      [4, 8, "range:activity"],
+      [9, 9, "message"],
+      [10, 10, "range:stack"]
+    ]);
+    expect(assistantMessages.map((item) => (item.type === "message" ? item.message.text : ""))).toEqual([
+      "Older answer",
+      "Newest assistant output"
+    ]);
+    expect(expandedRange?.items.map((item) => (item.type === "message" ? item.message.text : item.label))).toEqual([
+      "Tool batch 1",
+      "Assistant update 1",
+      "Tool batch 2",
+      "Assistant update 2",
+      "Tool batch 3"
+    ]);
+    db.close();
+  });
+
   it("skips hidden user context rows when choosing the active tail prompt anchor", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-hidden-context");
@@ -202,7 +279,7 @@ describe("AppDatabase activity summaries", () => {
     db.appendMessage(testMessage(session.id, 4, "assistant", "Current assistant output"));
     db.appendMessage(testMessage(session.id, 5, "user", "<environment_context>\n  <cwd>/repo</cwd>\n</environment_context>"));
 
-    const tail = db.listActiveTailMessages(session.id, 2);
+    const tail = db.listActiveTailMessages(session.id, 3);
 
     expect(itemSpans(tail)).toEqual([[2, 2, "message"], [3, 3, "message"], [4, 4, "message"]]);
     expect(tail.hasMoreBefore).toBe(true);
@@ -219,7 +296,7 @@ describe("AppDatabase activity summaries", () => {
     db.appendMessage(testMessage(session.id, 4, "assistant", "Current assistant output"));
     db.appendMessage(testMessage(session.id, 5, "user", initialInstructionContext()));
 
-    const tail = db.listActiveTailMessages(session.id, 2);
+    const tail = db.listActiveTailMessages(session.id, 4);
 
     expect(itemSpans(tail)).toEqual([[2, 2, "message"], [3, 3, "message"], [4, 4, "message"], [5, 5, "user_action"]]);
     expect(tail.hasMoreBefore).toBe(true);
@@ -234,7 +311,7 @@ describe("AppDatabase activity summaries", () => {
     db.appendMessage(testMessage(session.id, 2, "user", "First prompt"));
     db.appendMessage(testMessage(session.id, 3, "tool", "Tool output", undefined, "tool_output"));
 
-    const tail = db.listActiveTailMessages(session.id, 1);
+    const tail = db.listActiveTailMessages(session.id, 2);
 
     expect(itemSpans(tail)).toEqual([[2, 2, "message"], [3, 3, "range:activity"]]);
     expect(tail.hasMoreBefore).toBe(true);
@@ -252,7 +329,7 @@ describe("AppDatabase activity summaries", () => {
     db.appendMessage(testMessage(session.id, 4, "user", "Current prompt"));
     db.appendMessage(testMessage(session.id, 5, "tool", "Tool output", undefined, "tool_output"));
 
-    const tail = db.listActiveTailMessages(session.id, 1);
+    const tail = db.listActiveTailMessages(session.id, 3);
 
     expect(itemSpans(tail)).toEqual([[3, 3, "message"], [4, 4, "message"], [5, 5, "range:activity"]]);
     expect(tail.hasMoreBefore).toBe(true);

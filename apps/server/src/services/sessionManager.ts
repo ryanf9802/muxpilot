@@ -980,6 +980,11 @@ async function claimCodexFile(
     return startTimeMatch;
   }
 
+  if (existingMatch && !claims.has(existingMatch.path)) {
+    claims.add(existingMatch.path);
+    return existingMatch;
+  }
+
   const unclaimedExact = exact.filter((file) => !claims.has(file.path));
   if (unclaimedExact.length === 1) {
     const match = unclaimedExact[0];

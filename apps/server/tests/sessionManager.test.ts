@@ -1910,6 +1910,44 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("keeps an existing same-cwd binding when discovery has no stronger match", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+
+    await writeCodexSession(harness.codexHome, "bound.jsonl", {
+      sessionId: "codex-bound",
+      cwd: repo,
+      user: "bound prompt",
+      assistant: "bound answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› ";
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.codexSessionId).toBe("codex-bound");
+
+    await writeCodexSession(harness.codexHome, "newer-ambiguous.jsonl", {
+      sessionId: "codex-newer-ambiguous",
+      cwd: repo,
+      user: "newer ambiguous prompt",
+      assistant: "newer ambiguous answer",
+      mtime: new Date("2026-07-07T00:05:00.000Z")
+    });
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+
+    const rebound = harness.manager.getSession(session!.id);
+    expect(rebound?.codexSessionId).toBe("codex-bound");
+    expect(harness.manager.listMessages(session!.id, 0).map((message) => message.text)).toEqual(["bound prompt", "bound answer"]);
+    harness.db.close();
+  });
+
   it("repairs a stale shared-cwd binding when the visible transcript matches another pane", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "shared-repo");
