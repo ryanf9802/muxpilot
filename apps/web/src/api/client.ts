@@ -1,11 +1,9 @@
 import type {
   ApprovalResponse,
   ActivitySummarySettingsResponse,
-  AttachmentUploadResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
-  ComposerPart,
   AccessResponse,
   ConnectivityResponse,
   CreateSessionRequest,
@@ -26,6 +24,7 @@ import type {
   SessionActionResponse,
   SessionAction,
   TranscriptPageResponse,
+  TranscriptSearchResponse,
   UpdateNotificationSettingRequest,
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
@@ -72,6 +71,7 @@ function dispatchAuthExpired(): void {
 
 interface MessageQuery {
   after?: number;
+  around?: number;
   before?: number;
   limit?: number;
   position?: "oldest";
@@ -112,6 +112,8 @@ export const api = {
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
   messages: (id: string, query: MessageQuery = {}) =>
     json<TranscriptPageResponse>(`/api/sessions/${id}/messages${messageQueryString(query)}`),
+  messageSearch: (id: string, query: string, limit = 100) =>
+    json<TranscriptSearchResponse>(`/api/sessions/${id}/messages/search?q=${encodeURIComponent(query)}&limit=${limit}`),
   messageRange: (id: string, from: number, to: number) =>
     json<TranscriptPageResponse>(`/api/sessions/${id}/messages/range?from=${from}&to=${to}`),
   approval: (id: string) => json<ApprovalResponse>(`/api/sessions/${id}/approval`),
@@ -121,23 +123,17 @@ export const api = {
   answerQuestion: (id: string, request: QuestionAnswerRequest) =>
     json<{ ok: true }>(`/api/sessions/${id}/question`, { method: "POST", body: JSON.stringify(request) }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
-  uploadAttachment: (id: string, file: File) => {
-    const body = new FormData();
-    body.set("file", file, file.name || "image");
-    return json<AttachmentUploadResponse>(`/api/sessions/${id}/attachments`, { method: "POST", body });
-  },
-  attachmentUrl: (id: string, attachmentId: string) => `/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}`,
-  enqueueInput: (id: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
-    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode, parts }) }),
-  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
+  enqueueInput: (id: string, text: string, mode?: CollaborationMode) =>
+    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode }) }),
+  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, {
       method: "PATCH",
-      body: JSON.stringify({ text, mode, parts })
+      body: JSON.stringify({ text, mode })
     }),
   deleteQueuedInput: (id: string, queuedId: string) =>
     json<{ ok: true }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, { method: "DELETE" }),
-  send: (id: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
-    json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode, parts }) }),
+  send: (id: string, text: string, mode?: CollaborationMode) =>
+    json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode }) }),
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) })
 };
@@ -145,6 +141,7 @@ export const api = {
 function messageQueryString(query: MessageQuery): string {
   const params = new URLSearchParams();
   if (query.after !== undefined) params.set("after", String(query.after));
+  if (query.around !== undefined) params.set("around", String(query.around));
   if (query.before !== undefined) params.set("before", String(query.before));
   if (query.limit !== undefined) params.set("limit", String(query.limit));
   if (query.position !== undefined) params.set("position", query.position);

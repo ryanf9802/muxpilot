@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import webPush from "web-push";
 import type { ManagedSession, SessionEvent } from "@muxpilot/core";
 import { matchingNotificationRules, NotificationService } from "../src/services/notifications.js";
 import { EventBus } from "../src/services/eventBus.js";
@@ -10,6 +11,7 @@ describe("matchingNotificationRules", () => {
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "generating", "idle")).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "planning", "waiting")).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "working", "waiting", { inputMode: "plan" })).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "waiting", "waiting")).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "approval", "waiting")).toEqual([]);
   });
@@ -26,6 +28,7 @@ describe("matchingNotificationRules", () => {
     const settings = { globalRules: ["status_change" as const], sessionRules: {} };
 
     expect(matchingNotificationRules(settings, "a", "working", "planning")).toEqual(["status_change"]);
+    expect(matchingNotificationRules(settings, "a", "working", "waiting", { inputMode: "plan" })).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "working", "working")).toEqual([]);
   });
 
@@ -78,6 +81,124 @@ describe("matchingNotificationRules", () => {
         status: "waiting"
       }
     });
+  });
+
+  it("does not fire done task for plan-mode sessions that briefly look waiting", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working", inputMode: "plan" })],
+        getNotificationSettings: async () => ({ globalRules: ["done_task"], sessionRules: {} }),
+        getSession: async () => testSession({ status: "waiting", inputMode: "plan" }),
+        appendEvent: async (event: SessionEvent) => {
+          appendedEvents.push(event);
+        },
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void> };
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+
+    expect(appendedEvents).toEqual([]);
+  });
+
+  it("uses reconciled startup statuses as the notification baseline", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    let currentStatus: ManagedSession["status"] = "waiting";
+    const vapidKeys = webPush.generateVAPIDKeys();
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => vapidKeys,
+        listSessions: async () => [testSession({ status: currentStatus })],
+        getNotificationSettings: async () => ({ globalRules: ["done_task"], sessionRules: {} }),
+        getSession: async () => testSession({ status: currentStatus }),
+        appendEvent: async (event: SessionEvent) => {
+          appendedEvents.push(event);
+        },
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+
+    await service.start();
+    events.publish({
+      id: "event-startup-waiting",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "waiting" }),
+      timestamp: "2026-07-08T00:00:00.000Z"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendedEvents).toEqual([]);
+
+    currentStatus = "working";
+    events.publish({
+      id: "event-working",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "working" }),
+      timestamp: "2026-07-08T00:00:01.000Z"
+    });
+    currentStatus = "waiting";
+    events.publish({
+      id: "event-waiting",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "waiting" }),
+      timestamp: "2026-07-08T00:00:02.000Z"
+    });
+
+    await vi.waitFor(() => expect(appendedEvents).toHaveLength(1));
+    expect(appendedEvents[0]).toMatchObject({
+      type: "notification.triggered",
+      sessionId: "a",
+      payload: {
+        rules: ["done_task"],
+        previousStatus: "working",
+        status: "waiting"
+      }
+    });
+    service.stop();
+  });
+
+  it("does not alert for an already-actionable status present at startup", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    const vapidKeys = webPush.generateVAPIDKeys();
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => vapidKeys,
+        listSessions: async () => [testSession({ status: "question" })],
+        getNotificationSettings: async () => ({ globalRules: ["approval_gate"], sessionRules: {} }),
+        getSession: async () => testSession({ status: "question" }),
+        appendEvent: async (event: SessionEvent) => {
+          appendedEvents.push(event);
+        },
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+
+    await service.start();
+    events.publish({
+      id: "event-startup-question",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "question" }),
+      timestamp: "2026-07-08T00:00:00.000Z"
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendedEvents).toEqual([]);
+    service.stop();
   });
 });
 

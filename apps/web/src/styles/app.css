@@ -1069,10 +1069,6 @@ select:focus-visible {
   box-shadow: var(--shadow-elevated);
 }
 
-.prompt-history-dialog[data-loading="true"] {
-  height: min(720px, calc(100dvh - 36px));
-}
-
 .prompt-history-search {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1107,6 +1103,10 @@ select:focus-visible {
   min-height: 220px;
   max-height: 520px;
   overflow-y: auto;
+}
+
+.prompt-history-dialog[data-loading="true"] .prompt-history-results {
+  height: min(520px, calc(100dvh - 168px));
 }
 
 .prompt-history-result {
@@ -2743,60 +2743,6 @@ select:focus-visible {
   min-width: 2.4ch;
   padding: 0 8px 0 10px;
   text-align: right;
-}
-
-.inline-image-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: min(220px, 100%);
-  min-height: 30px;
-  margin: 0 3px;
-  padding: 3px 8px 3px 4px;
-  vertical-align: middle;
-  color: var(--color-text);
-  background: color-mix(in srgb, var(--color-surface-raised) 90%, var(--color-tertiary));
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  font-size: 0.82rem;
-  white-space: nowrap;
-}
-
-.inline-image-chip img {
-  width: 26px;
-  height: 26px;
-  object-fit: cover;
-  border-radius: 5px;
-}
-
-.inline-image-chip-upload {
-  color: var(--color-text-muted);
-}
-
-.inline-image-chip-error {
-  color: var(--color-error);
-  border-color: color-mix(in srgb, var(--color-error) 45%, var(--color-border));
-}
-
-.inline-image-chip-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 5px;
-  background: var(--color-surface);
-  font-weight: 700;
-}
-
-.inline-composer-parts {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 6px;
-}
-
-.inline-composer-parts > .rendered {
-  display: contents;
 }
 
 .vim-editor .cm-activeLineGutter,

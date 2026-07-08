@@ -882,6 +882,47 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("keeps planning from session input mode when transcript mode metadata is missing", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "planning-without-mode-metadata.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "make a plan" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "I will inspect the code and produce a plan." }
+        }),
+        ""
+      ].join("\n")
+    );
+    await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", title: "plan-mode" })];
+    harness.tmux.capturePane = async () => "Plan mode prompt:\n› ";
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+    expect(session.inputMode).toBe("plan");
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+    harness.db.close();
+  });
+
   it("marks complete proposed plans as plan ready until a plan action is chosen", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2250,6 +2291,41 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("catches up transcript backfill from the most recently updated Codex file first", async () => {
+    const harness = await createHarness();
+    const olderRepo = join(harness.dir, "older-repo");
+    const newerRepo = join(harness.dir, "newer-repo");
+    await mkdir(olderRepo);
+    await mkdir(newerRepo);
+    await writeCodexSession(harness.codexHome, "older.jsonl", {
+      sessionId: "codex-older",
+      cwd: olderRepo,
+      user: "older prompt",
+      assistant: "older answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    await writeCodexSession(harness.codexHome, "newer.jsonl", {
+      sessionId: "codex-newer",
+      cwd: newerRepo,
+      user: "newer prompt",
+      assistant: "newer answer",
+      mtime: new Date("2026-07-07T00:01:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [testPane({ cwd: olderRepo, paneId: "%1" }), testPane({ cwd: newerRepo, paneId: "%2" })];
+    await harness.manager.discover();
+
+    const appendedMessages: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "message.appended") appendedMessages.push((event.payload as { text?: string }).text ?? "");
+    });
+    await harness.manager.catchUpIngest();
+    unsubscribe();
+
+    expect(appendedMessages.slice(0, 2)).toEqual(["newer prompt", "newer answer"]);
+    expect(appendedMessages.slice(2, 4)).toEqual(["older prompt", "older answer"]);
+    harness.db.close();
+  });
+
   it("normalizes renamed session names before applying tmux window names", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2451,6 +2527,7 @@ async function createHarness(): Promise<{
   db: AppDatabase;
   tmux: TmuxAdapter;
   codexStore: CodexSessionStore;
+  events: EventBus;
   manager: SessionManager;
   activitySummarizer: FakeActivitySummarizer;
   processLookup: FakeCodexProcessLookup;
@@ -2465,11 +2542,12 @@ async function createHarness(): Promise<{
   tmux.listPanes = async () => [];
   tmux.capturePane = async () => "› ";
   const codexStore = new CodexSessionStore(codexHome);
+  const events = new EventBus();
   const manager = new SessionManager(
     db,
     tmux,
     codexStore,
-    new EventBus(),
+    events,
     60_000,
     60_000,
     { approveOnce: [], approveForPrefix: [], deny: [] },
@@ -2477,7 +2555,7 @@ async function createHarness(): Promise<{
     activitySummarizer,
     processLookup
   );
-  return { dir, codexHome, db, tmux, codexStore, manager, activitySummarizer, processLookup };
+  return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
 }
 
 class FakeActivitySummarizer {

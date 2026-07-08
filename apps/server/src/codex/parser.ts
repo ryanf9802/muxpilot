@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
-import { basename, extname } from "node:path";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
-import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, ComposerPart, MessageType, QuestionRequest } from "@muxpilot/core";
+import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
 
 export const PARSER_VERSION = "codex-jsonl-v1";
 
@@ -30,6 +29,7 @@ export interface ParseResult {
   messages: Omit<ChatMessage, "sessionId" | "sequence">[];
   nextOffset: number;
   pendingSkillNames: string[];
+  complete: boolean;
 }
 
 export async function parseCodexJsonl(path: string, offset: number): Promise<ParseResult> {
@@ -38,17 +38,18 @@ export async function parseCodexJsonl(path: string, offset: number): Promise<Par
     const stat = await file.stat();
     if (offset > stat.size) offset = 0;
     const length = Math.max(0, stat.size - offset);
-    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [] };
+    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [], complete: true };
     const buffer = Buffer.allocUnsafe(Math.min(length, 1024 * 1024));
     const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
     const chunk = buffer.subarray(0, bytesRead).toString("utf8");
-    return parseCodexJsonlChunk(chunk, offset);
+    const parsed = parseCodexJsonlChunk(chunk, offset);
+    return { ...parsed, complete: parsed.nextOffset >= stat.size };
   } finally {
     await file.close();
   }
 }
 
-function parseCodexJsonlChunk(chunk: string, offset: number): ParseResult {
+function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, "complete"> {
   const lines = chunk.split("\n");
   const completeLines = chunk.endsWith("\n") ? lines.slice(0, -1) : lines.slice(0, -1);
   let consumed = offset;
@@ -146,14 +147,9 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
   if (topType === "response_item" && payloadType === "message") {
     const role = event.payload?.role;
     if (role === "assistant" || role === "user") {
-      const composerParts = contentToComposerParts(event.payload?.content);
-      const text = composerParts.length ? composerParts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") : contentToText(event.payload?.content);
-      if (!text && !composerParts.some((part) => part.type === "image")) return null;
-      const payload =
-        composerParts.length > 0
-          ? { ...(event as unknown as Record<string, unknown>), composerParts }
-          : (event as unknown as Record<string, unknown>);
-      if (role === "user") return userMessageFromText(text, timestamp, payload, collaborationMode);
+      const text = contentToText(event.payload?.content);
+      if (!text) return null;
+      if (role === "user") return userMessageFromText(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
       return message(role, role, timestamp, text, event as unknown as Record<string, unknown>, collaborationMode);
     }
   }
@@ -179,11 +175,20 @@ function isDuplicateUserEcho(
 ): boolean {
   if (message.role !== "user") return false;
   const previousUser = findPreviousUserMessage(messages);
-  if (!previousUser || previousUser.text !== message.text) return false;
+  if (!previousUser || !userEchoTextMatches(previousUser.text, message.text)) return false;
   return (
     isResponseItemUserMessage(message) !== isResponseItemUserMessage(previousUser) &&
     timestampsAreNear(previousUser.timestamp, message.timestamp)
   );
+}
+
+function userEchoTextMatches(first: string, second: string): boolean {
+  if (first === second) return true;
+  return normalizeImageEchoText(first) === normalizeImageEchoText(second);
+}
+
+function normalizeImageEchoText(text: string): string {
+  return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function findPreviousUserMessage(
@@ -431,39 +436,6 @@ function contentToText(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
-}
-
-function contentToComposerParts(content: unknown): ComposerPart[] {
-  if (!Array.isArray(content)) return [];
-  const parts: ComposerPart[] = [];
-  for (const item of content) {
-    const record = recordValue(item);
-    if (!record) continue;
-    if ((record.type === "input_text" || record.type === "text") && typeof record.text === "string" && record.text) {
-      appendComposerTextPart(parts, record.text);
-      continue;
-    }
-    if (record.type === "input_image" && typeof record.image_url === "string") {
-      parts.push({ type: "image", attachmentId: attachmentIdFromImageReference(record.image_url) });
-      continue;
-    }
-    if (record.type === "localImage" && typeof record.path === "string") {
-      parts.push({ type: "image", attachmentId: attachmentIdFromImageReference(record.path) });
-    }
-  }
-  return parts;
-}
-
-function attachmentIdFromImageReference(value: string): string {
-  const filename = basename(value);
-  const extension = extname(filename);
-  return extension ? filename.slice(0, -extension.length) : value;
-}
-
-function appendComposerTextPart(parts: ComposerPart[], text: string): void {
-  const previous = parts.at(-1);
-  if (previous?.type === "text") previous.text += text;
-  else parts.push({ type: "text", text });
 }
 
 function standaloneSkillContextNames(line: string): string[] {

@@ -1,6 +1,4 @@
 import type { FastifyInstance } from "fastify";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, extname, join, resolve } from "node:path";
 import { z } from "zod";
 import type {
   CodexSkillsResponse,
@@ -35,17 +33,11 @@ import { discoverCodexSkills } from "../services/skillDiscovery.js";
 import type { CodexUsageService } from "../services/codexUsage.js";
 import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 import type { NotificationService } from "../services/notifications.js";
-import { eventId } from "../utils/ids.js";
-import { nowIso } from "../utils/time.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
-const composerPartSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("text"), text: z.string().max(200_000) }),
-  z.object({ type: z.literal("image"), attachmentId: z.string().min(1).max(200) })
-]);
 const inputBodySchema = z
-  .object({ text: z.string().max(200_000).default(""), parts: z.array(composerPartSchema).max(200).optional(), mode: collaborationModeSchema.optional() })
-  .refine((value) => inputBodyHasContent(value.text, value.parts), { message: "Input is empty" });
+  .object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() })
+  .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
 const sendInputSchema = inputBodySchema;
 const sessionNameSchema = z
   .string()
@@ -57,17 +49,12 @@ const createSessionSchema = z.object({
   name: sessionNameSchema
 });
 const queuedInputSchema = inputBodySchema;
-const IMAGE_MIME_EXTENSIONS: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/webp": ".webp",
-  "image/gif": ".gif"
-};
-const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
 const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
 const MAX_PROMPT_HISTORY_LIMIT = 100;
+const DEFAULT_TRANSCRIPT_SEARCH_LIMIT = 100;
+const MAX_TRANSCRIPT_SEARCH_LIMIT = 500;
 const approvalSchema = z.object({
   decision: z.enum(["approve_once", "approve_for_prefix", "deny"])
 });
@@ -231,54 +218,15 @@ export function registerRoutes(
     return { session };
   });
 
-  app.post("/api/sessions/:id/attachments", { preHandler: access.requireAccess }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const session = await manager.getSession(id);
-    if (!session) return reply.code(404).send({ error: "Session not found" });
-    let upload: MultipartImageUpload;
-    try {
-      upload = await readMultipartImage(request.headers["content-type"], request.raw);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(message.includes("large") ? 413 : 400).send({ error: message });
-    }
-    const extension = IMAGE_MIME_EXTENSIONS[upload.mimeType];
-    if (!extension) return reply.code(415).send({ error: "Unsupported image type" });
-    if (upload.data.length > MAX_ATTACHMENT_BYTES) return reply.code(413).send({ error: "Image is too large" });
-    const attachmentId = eventId();
-    const attachmentDir = resolve(config.dataDir, "attachments", id);
-    await mkdir(attachmentDir, { recursive: true });
-    const filename = safeAttachmentFilename(upload.filename, extension);
-    const storagePath = join(attachmentDir, `${attachmentId}${extension}`);
-    await writeFile(storagePath, upload.data);
-    const attachment = {
-      id: attachmentId,
-      sessionId: id,
-      filename,
-      mimeType: upload.mimeType,
-      sizeBytes: upload.data.length,
-      storagePath,
-      createdAt: nowIso()
-    };
-    await db.upsertAttachment(attachment);
-    const { storagePath: _storagePath, ...publicAttachment } = attachment;
-    return reply.code(201).send({ attachment: publicAttachment });
-  });
-
-  app.get("/api/sessions/:id/attachments/:attachmentId", { preHandler: access.requireAccess }, async (request, reply) => {
-    const { id, attachmentId } = request.params as { id: string; attachmentId: string };
-    const attachment = await db.getAttachment(id, attachmentId);
-    if (!attachment) return reply.code(404).send({ error: "Attachment not found" });
-    const data = await readFile(attachment.storagePath);
-    return reply.type(attachment.mimeType).send(data);
-  });
-
   app.get("/api/sessions/:id/messages", { preHandler: access.requireAccess }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const query = request.query as { after?: string; before?: string; limit?: string; position?: string };
+    const query = request.query as { after?: string; around?: string; before?: string; limit?: string; position?: string };
     const limit = parseMessagePageLimit(query.limit);
     try {
       if (query.position === "oldest") return await manager.listEarliestMessages(id, limit);
+
+      const around = parsePositiveSequence(query.around);
+      if (around !== null) return await manager.listMessagesAround(id, around, limit);
 
       const before = parsePositiveSequence(query.before);
       if (before !== null) return await manager.listMessagesBefore(id, before, limit);
@@ -291,6 +239,19 @@ export function registerRoutes(
       if (error instanceof SessionNotFoundError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      throw error;
+    }
+  });
+
+  app.get("/api/sessions/:id/messages/search", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { q?: string; limit?: string };
+    const q = typeof query.q === "string" ? query.q : "";
+    const limit = parseBoundedPositiveInteger(query.limit, DEFAULT_TRANSCRIPT_SEARCH_LIMIT, MAX_TRANSCRIPT_SEARCH_LIMIT);
+    try {
+      return await manager.searchMessages(id, q, limit);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });
@@ -351,7 +312,7 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body: SendInputRequest = sendInputSchema.parse(request.body);
     try {
-      await manager.sendInput(id, body.text, body.mode, body.parts);
+      await manager.sendInput(id, body.text, body.mode);
       return reply.code(202).send({ ok: true });
     } catch (error) {
       if (error instanceof InputModeSwitchError) {
@@ -370,7 +331,7 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body = queuedInputSchema.parse(request.body);
     try {
-      const input = await manager.enqueueInput(id, body.text, body.mode, body.parts);
+      const input = await manager.enqueueInput(id, body.text, body.mode);
       return reply.code(201).send({ queuedInput: input });
     } catch (error) {
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
@@ -382,7 +343,7 @@ export function registerRoutes(
     const { id, queuedId } = request.params as { id: string; queuedId: string };
     const body = queuedInputSchema.parse(request.body);
     try {
-      const input = await manager.updateQueuedInput(id, queuedId, body.text, body.mode, body.parts);
+      const input = await manager.updateQueuedInput(id, queuedId, body.text, body.mode);
       return { queuedInput: input };
     } catch (error) {
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
@@ -473,72 +434,14 @@ function parseMessagePageLimit(value: string | undefined): number {
   return Math.min(MAX_MESSAGE_PAGE_SIZE, Math.max(1, Math.floor(parsed)));
 }
 
+function parseBoundedPositiveInteger(value: string | undefined, fallback: number, max: number): number {
+  const parsed = Number(value ?? fallback);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(1, Math.floor(parsed)));
+}
+
 function parsePromptHistoryLimit(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_PROMPT_HISTORY_LIMIT);
   if (!Number.isFinite(parsed)) return DEFAULT_PROMPT_HISTORY_LIMIT;
   return Math.min(MAX_PROMPT_HISTORY_LIMIT, Math.max(1, Math.floor(parsed)));
-}
-
-function inputBodyHasContent(text: string, parts: Array<z.infer<typeof composerPartSchema>> | undefined): boolean {
-  if (parts?.some((part) => part.type === "image" || (part.type === "text" && part.text.trim()))) return true;
-  return Boolean(text.trim());
-}
-
-interface MultipartImageUpload {
-  filename: string;
-  mimeType: string;
-  data: Buffer;
-}
-
-async function readMultipartImage(contentType: string | string[] | undefined, stream: NodeJS.ReadableStream): Promise<MultipartImageUpload> {
-  const header = Array.isArray(contentType) ? contentType[0] : contentType;
-  const boundary = multipartBoundary(header ?? "");
-  if (!boundary) throw new Error("Expected multipart upload");
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > MAX_ATTACHMENT_BYTES + 64 * 1024) throw new Error("Image is too large");
-    chunks.push(buffer);
-  }
-  const body = Buffer.concat(chunks);
-  const parsed = parseMultipartBody(body, boundary);
-  if (!parsed) throw new Error("Image file is required");
-  return parsed;
-}
-
-function multipartBoundary(contentType: string): string | null {
-  const match = contentType.match(/(?:^|;\s*)boundary=(?:"([^"]+)"|([^;]+))/i);
-  return match?.[1] ?? match?.[2] ?? null;
-}
-
-function parseMultipartBody(body: Buffer, boundary: string): MultipartImageUpload | null {
-  const delimiter = Buffer.from(`--${boundary}`);
-  let cursor = body.indexOf(delimiter);
-  while (cursor >= 0) {
-    cursor += delimiter.length;
-    if (body.subarray(cursor, cursor + 2).toString() === "--") return null;
-    if (body.subarray(cursor, cursor + 2).toString() === "\r\n") cursor += 2;
-    const headerEnd = body.indexOf(Buffer.from("\r\n\r\n"), cursor);
-    if (headerEnd < 0) return null;
-    const headers = body.subarray(cursor, headerEnd).toString("utf8");
-    const dataStart = headerEnd + 4;
-    const nextBoundary = body.indexOf(Buffer.from(`\r\n--${boundary}`), dataStart);
-    if (nextBoundary < 0) return null;
-    const disposition = headers.match(/content-disposition:[^\r\n]*/i)?.[0] ?? "";
-    const filename = disposition.match(/filename="([^"]*)"/i)?.[1] ?? "image";
-    const contentType = headers.match(/content-type:\s*([^\r\n;]+)/i)?.[1]?.trim().toLowerCase() ?? "";
-    if (filename && contentType.startsWith("image/")) {
-      return { filename, mimeType: contentType, data: body.subarray(dataStart, nextBoundary) };
-    }
-    cursor = body.indexOf(delimiter, nextBoundary);
-  }
-  return null;
-}
-
-function safeAttachmentFilename(filename: string, extension: string): string {
-  const base = basename(filename).replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "");
-  const withoutExtension = base ? base.slice(0, Math.max(0, base.length - extname(base).length)) : "image";
-  return `${withoutExtension || "image"}${extension}`;
 }

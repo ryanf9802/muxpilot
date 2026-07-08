@@ -152,6 +152,12 @@ These work when focus is not already inside an input, editor, menu, or dialog.
 
 On the dashboard, the primary input is search. In a session, it is the composer.
 
+### Session
+
+| Key         | Action                   |
+| ----------- | ------------------------ |
+| `Backspace` | Return to the dashboard  |
+
 ### Composer
 
 | Key              | Action                           |
@@ -192,7 +198,7 @@ When Vim mode is enabled and focus is on the transcript, these navigation keys a
 
 Notifications are local to the muxpilot install. They are useful when you have several sessions running and only want to look over when something changes.
 
-Rules can be enabled globally from the top-bar bell or per session from a session card menu:
+Rules can be enabled globally from the top-bar bell or per session from a right-click context menu on the dashboard:
 
 - Done task: a running task returns to `waiting` or `idle`.
 - Approval gate: a session enters an attention state such as approval, question, plan-ready, or blocked.
@@ -275,26 +281,26 @@ Development and production use separate ports, databases, and runtime logs.
 
 Use `pnpm app ...` for normal operation. The app runs on the host machine under the current user so it can control that user's tmux/Codex sessions. The command starts a small supervisor in the background; you do not need to leave the terminal open.
 
-| Command                                      | Purpose                                                    |
-| -------------------------------------------- | ---------------------------------------------------------- |
-| `pnpm app start`                             | Build, then start or reuse production                      |
-| `pnpm app start dev`                         | Start or reuse development                                 |
-| `pnpm app stop`                              | Stop production                                            |
-| `pnpm app stop dev`                          | Stop development                                           |
-| `pnpm app restart`                           | Restart production                                         |
-| `pnpm app restart dev`                       | Restart development                                        |
-| `pnpm app restart all` or `pnpm restart`     | Restart only modes that are already running                |
-| `pnpm app status` or `pnpm status`           | Show production and development process health             |
-| `pnpm app logs` or `pnpm logs`               | Show production backend logs                               |
-| `pnpm app logs prod --process all --follow`  | Follow production supervisor, backend, and web logs        |
-| `pnpm db:reset:dev`                          | Reset dev SQLite state                                     |
-| `pnpm db:reset:prod`                         | Reset production SQLite state                              |
-| `pnpm pwa:setup`                             | Create/reuse HTTPS/PWA certificates and write `.env.local` |
-| `pnpm pwa:trust`                             | Run the phone trust-file helper                            |
-| `pnpm pwa:certs:status`                      | Print PWA certificate status                               |
-| `pnpm build`                                 | Build all packages/apps                                    |
-| `pnpm typecheck`                             | Type-check all packages/apps                               |
-| `pnpm test`                                  | Run tests                                                  |
+| Command                                     | Purpose                                                    |
+| ------------------------------------------- | ---------------------------------------------------------- |
+| `pnpm app start`                            | Build, then start or reuse production                      |
+| `pnpm app start dev`                        | Start or reuse development                                 |
+| `pnpm app stop`                             | Stop production                                            |
+| `pnpm app stop dev`                         | Stop development                                           |
+| `pnpm app restart`                          | Restart production                                         |
+| `pnpm app restart dev`                      | Restart development                                        |
+| `pnpm app restart all` or `pnpm restart`    | Restart only modes that are already running                |
+| `pnpm app status` or `pnpm status`          | Show production and development process health             |
+| `pnpm app logs` or `pnpm logs`              | Show production backend logs                               |
+| `pnpm app logs prod --process all --follow` | Follow production supervisor, backend, and web logs        |
+| `pnpm db:reset:dev`                         | Reset dev SQLite state                                     |
+| `pnpm db:reset:prod`                        | Reset production SQLite state                              |
+| `pnpm pwa:setup`                            | Create/reuse HTTPS/PWA certificates and write `.env.local` |
+| `pnpm pwa:trust`                            | Run the phone trust-file helper                            |
+| `pnpm pwa:certs:status`                     | Print PWA certificate status                               |
+| `pnpm build`                                | Build all packages/apps                                    |
+| `pnpm typecheck`                            | Type-check all packages/apps                               |
+| `pnpm test`                                 | Run tests                                                  |
 
 `pnpm dev` intentionally exits and points you to `pnpm app start dev`.
 
