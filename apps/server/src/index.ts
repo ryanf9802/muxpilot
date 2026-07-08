@@ -13,7 +13,7 @@ import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
 import { ActivitySummarizer, OpenAIActivitySummaryClient } from "./services/activitySummarizer.js";
 import { buildOpenAIModelPricingTable } from "./services/openaiPricing.js";
-import { CodexModelsService, CodexUsageService } from "./services/codexUsage.js";
+import { CodexUsageService } from "./services/codexUsage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
@@ -25,7 +25,6 @@ const tmux = new TmuxAdapter(config.inputSubmitKeys);
 const codex = new CodexSessionStore(config.codexHome);
 const codexProcessResolver = new CodexProcessResolver();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
-const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
 const summaryClient = config.openaiApiKey
@@ -66,8 +65,7 @@ const manager = new SessionManager(
   config.approvalKeys,
   config.inputModeCycleKeys,
   activitySummarizer,
-  codexProcessResolver,
-  codexModels
+  codexProcessResolver
 );
 const access = createAccessControl(config, {
   unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()
@@ -87,7 +85,7 @@ await app.register(cors, {
 await app.register(websocket);
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, codexModels, activitySummarizer);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer);
 
 app.get("/healthz", async () => ({ ok: true }));
 
@@ -97,7 +95,6 @@ pwaTrustServer.start();
 const close = async () => {
   manager.stop();
   codexUsage.stop();
-  codexModels.stop();
   await pwaTrustServer.close();
   await db.close();
   await app.close();

@@ -1,7 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type {
-  CodexModelsResponse,
   CodexSkillsResponse,
   CreateSessionRequest,
   QuestionAnswerRequest,
@@ -19,6 +18,7 @@ import {
   InputModeSwitchError,
   QuestionResolutionError,
   QueuedInputError,
+  SessionNotFoundError,
   SessionNameError,
   type SessionManager
 } from "../services/sessionManager.js";
@@ -28,12 +28,10 @@ import type { AppConfig } from "../config/config.js";
 import type { AccessControl } from "../auth/auth.js";
 import { buildConnectivity, buildRemoteAccess } from "../services/connectivity.js";
 import { discoverCodexSkills } from "../services/skillDiscovery.js";
-import type { CodexModelsService, CodexUsageService } from "../services/codexUsage.js";
+import type { CodexUsageService } from "../services/codexUsage.js";
 import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
-const modelSchema = z.string().trim().min(1).max(120);
-const reasoningEffortSchema = z.string().trim().min(1).max(40).nullable().optional();
 const sendInputSchema = z.object({ text: z.string().min(1).max(200_000), mode: collaborationModeSchema.optional() });
 const sessionNameSchema = z
   .string()
@@ -63,7 +61,6 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
-  z.object({ type: z.literal("setModelSettings"), mode: collaborationModeSchema, model: modelSchema, reasoningEffort: reasoningEffortSchema }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
   z.object({ type: z.literal("rename"), name: sessionNameSchema }),
   z.object({ type: z.literal("detach") }),
@@ -78,7 +75,6 @@ export function registerRoutes(
   config: AppConfig,
   access: AccessControl,
   codexUsage?: CodexUsageService,
-  codexModels?: CodexModelsService,
   activitySummarizer?: ActivitySummarizer
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
@@ -103,10 +99,6 @@ export function registerRoutes(
 
   app.get("/api/codex/skills", { preHandler: access.requireAccess }, async (): Promise<CodexSkillsResponse> => ({
     skills: await discoverCodexSkills(config.codexHome)
-  }));
-
-  app.get("/api/codex/models", { preHandler: access.requireAccess }, async (): Promise<CodexModelsResponse> => ({
-    models: codexModels ? await codexModels.listModels() : []
   }));
 
   app.get("/api/sessions/:id/skills", { preHandler: access.requireAccess }, async (request, reply): Promise<CodexSkillsResponse | void> => {
@@ -172,19 +164,26 @@ export function registerRoutes(
     return { session };
   });
 
-  app.get("/api/sessions/:id/messages", { preHandler: access.requireAccess }, async (request) => {
+  app.get("/api/sessions/:id/messages", { preHandler: access.requireAccess }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const query = request.query as { after?: string; before?: string; limit?: string; position?: string };
     const limit = parseMessagePageLimit(query.limit);
-    if (query.position === "oldest") return manager.listEarliestMessages(id, limit);
+    try {
+      if (query.position === "oldest") return await manager.listEarliestMessages(id, limit);
 
-    const before = parsePositiveSequence(query.before);
-    if (before !== null) return manager.listMessagesBefore(id, before, limit);
+      const before = parsePositiveSequence(query.before);
+      if (before !== null) return await manager.listMessagesBefore(id, before, limit);
 
-    const after = parsePositiveSequence(query.after);
-    if (after !== null) return manager.listMessagesAfterPage(id, after, limit);
+      const after = parsePositiveSequence(query.after);
+      if (after !== null) return await manager.listMessagesAfterPage(id, after, limit);
 
-    return manager.listActiveTailMessages(id, limit);
+      return await manager.listActiveTailMessages(id, limit);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      throw error;
+    }
   });
 
   app.get("/api/sessions/:id/messages/range", { preHandler: access.requireAccess }, async (request, reply) => {
@@ -193,7 +192,12 @@ export function registerRoutes(
     const from = parsePositiveSequence(query.from);
     const to = parsePositiveSequence(query.to);
     if (from === null || to === null) return reply.code(400).send({ error: "from and to are required positive sequence values" });
-    return manager.listMessageRange(id, from, to);
+    try {
+      return await manager.listMessageRange(id, from, to);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
   });
 
   app.get("/api/sessions/:id/approval", { preHandler: access.requireAccess }, async (request) => {

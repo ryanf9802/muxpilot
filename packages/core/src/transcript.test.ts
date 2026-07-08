@@ -3,6 +3,32 @@ import { buildTranscriptItems } from "./transcript.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
+  it("collapses leading partial-turn assistant activity before the newest assistant message", () => {
+    const items = buildTranscriptItems([
+      message(1, "first answer", "assistant", "assistant"),
+      message(2, "tool_result", "tool", "tool_output"),
+      message(3, "second answer", "assistant", "assistant"),
+      message(4, "next prompt")
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        type: "range",
+        rangeKind: "activity",
+        firstSequence: 1,
+        lastSequence: 2
+      }),
+      expect.objectContaining({
+        type: "message",
+        message: expect.objectContaining({ text: "second answer" })
+      }),
+      expect.objectContaining({
+        type: "message",
+        message: expect.objectContaining({ text: "next prompt" })
+      })
+    ]);
+  });
+
   it("collapses persisted subagent notifications as subagent activity", () => {
     const items = buildTranscriptItems([
       message(1, "Review the change"),
@@ -51,13 +77,18 @@ describe("buildTranscriptItems", () => {
   });
 });
 
-function message(sequence: number, text: string): ChatMessage {
+function message(
+  sequence: number,
+  text: string,
+  role: ChatMessage["role"] = "user",
+  type: ChatMessage["type"] = "user"
+): ChatMessage {
   return {
     id: `message-${sequence}`,
     sessionId: "session-a",
     sequence,
-    type: "user",
-    role: "user",
+    type,
+    role,
     timestamp: `2026-07-07T00:00:0${sequence}.000Z`,
     text,
     payload: {}

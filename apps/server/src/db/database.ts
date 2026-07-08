@@ -620,7 +620,7 @@ export class SyncAppDatabase {
     const items = buildTranscriptItems(rows.map(hydrateMessage));
     const pageItems = items.slice(Math.max(0, items.length - limit));
 
-    return transcriptItemsPage(pageItems, {
+    return transcriptItemsPage(sessionId, pageItems, {
       hasMoreBefore: items.length > pageItems.length,
       hasMoreAfter: false
     });
@@ -640,25 +640,9 @@ export class SyncAppDatabase {
       )
       .all(sessionId, anchorSequence) as unknown as MessageRow[];
     const activeItems = buildTranscriptItems(rows.map(hydrateMessage));
-    if (activeItems.length >= fallbackLimit) {
-      return transcriptItemsPage(activeItems, {
-        hasMoreBefore: this.hasMessageBefore(sessionId, anchorSequence),
-        hasMoreAfter: false
-      });
-    }
 
-    const allRows = this.db
-      .prepare(
-        `SELECT * FROM messages
-         WHERE session_id = ?
-         ORDER BY sequence ASC`
-      )
-      .all(sessionId) as unknown as MessageRow[];
-    const allItems = buildTranscriptItems(allRows.map(hydrateMessage));
-    const pageItems = allItems.slice(Math.max(0, allItems.length - fallbackLimit));
-
-    return transcriptItemsPage(pageItems, {
-      hasMoreBefore: allItems.length > pageItems.length,
+    return transcriptItemsPage(sessionId, activeItems, {
+      hasMoreBefore: this.hasMessageBefore(sessionId, anchorSequence),
       hasMoreAfter: false
     });
   }
@@ -674,7 +658,7 @@ export class SyncAppDatabase {
     const items = buildTranscriptItems(rows.map(hydrateMessage));
     const pageItems = items.slice(0, limit);
 
-    return transcriptItemsPage(pageItems, {
+    return transcriptItemsPage(sessionId, pageItems, {
       hasMoreBefore: false,
       hasMoreAfter: items.length > pageItems.length
     });
@@ -734,7 +718,7 @@ export class SyncAppDatabase {
     const items = buildTranscriptItems(rows.map(hydrateMessage));
     const pageItems = items.slice(Math.max(0, items.length - limit));
 
-    return transcriptItemsPage(pageItems, {
+    return transcriptItemsPage(sessionId, pageItems, {
       hasMoreBefore: items.length > pageItems.length,
       hasMoreAfter: pageItems.length > 0
     });
@@ -751,7 +735,7 @@ export class SyncAppDatabase {
     const items = buildTranscriptItems(rows.map(hydrateMessage));
     const pageItems = items.slice(0, limit);
 
-    return transcriptItemsPage(pageItems, {
+    return transcriptItemsPage(sessionId, pageItems, {
       hasMoreBefore: pageItems.length > 0,
       hasMoreAfter: items.length > pageItems.length
     });
@@ -781,6 +765,9 @@ export class SyncAppDatabase {
       .all(sessionId, start, end) as unknown as MessageRow[];
 
     return {
+      sessionId,
+      codexSessionId: null,
+      codexJsonlPath: null,
       items: buildExpandedTranscriptItems(rows.map(hydrateMessage)),
       hasMoreBefore: false,
       hasMoreAfter: false
@@ -1460,10 +1447,14 @@ function stringValue(value: unknown): string | null {
 }
 
 function transcriptItemsPage(
+  sessionId: string,
   items: TranscriptPageResponse["items"],
   page: Pick<TranscriptPageResponse, "hasMoreBefore" | "hasMoreAfter">
 ): TranscriptPageResponse {
   return {
+    sessionId,
+    codexSessionId: null,
+    codexJsonlPath: null,
     items,
     hasMoreBefore: page.hasMoreBefore,
     hasMoreAfter: page.hasMoreAfter

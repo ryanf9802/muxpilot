@@ -1,7 +1,6 @@
 import type {
   ApprovalResponse,
   ActivitySummarySettingsResponse,
-  CodexModelsResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
@@ -82,7 +81,6 @@ export const api = {
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
     json<RemoteAccessResponse>("/api/remote-access/settings", { method: "PATCH", body: JSON.stringify(request) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
-  codexModels: () => json<CodexModelsResponse>("/api/codex/models"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),

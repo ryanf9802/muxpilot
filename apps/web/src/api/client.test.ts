@@ -161,47 +161,12 @@ describe("api client request headers", () => {
     expect(response.session?.inputMode).toBe("plan");
   });
 
-  it("sends session actions with explicit model settings", async () => {
-    const fetchMock = mockJsonResponse({
-      ok: true,
-      session: {
-        id: "session-1",
-        models: { default: { model: "gpt-5.4", reasoningEffort: "high" }, plan: { model: null, reasoningEffort: null } }
-      }
-    });
-
-    const response = await api.action("session-1", {
-      type: "setModelSettings",
-      mode: "default",
-      model: "gpt-5.4",
-      reasoningEffort: "high"
-    });
-
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/sessions/session-1/actions",
-      expect.objectContaining({ method: "POST", credentials: "include" })
-    );
-    expect(init.body).toBe(
-      JSON.stringify({ type: "setModelSettings", mode: "default", model: "gpt-5.4", reasoningEffort: "high" })
-    );
-    expect(response.session?.models.default).toEqual({ model: "gpt-5.4", reasoningEffort: "high" });
-  });
-
   it("fetches discovered Codex skills", async () => {
     const fetchMock = mockJsonResponse({ skills: [] });
 
     await api.codexSkills();
 
     expect(fetchMock).toHaveBeenCalledWith("/api/codex/skills", expect.objectContaining({ credentials: "include" }));
-  });
-
-  it("fetches Codex models", async () => {
-    const fetchMock = mockJsonResponse({ models: [] });
-
-    await api.codexModels();
-
-    expect(fetchMock).toHaveBeenCalledWith("/api/codex/models", expect.objectContaining({ credentials: "include" }));
   });
 
   it("fetches session-scoped Codex skills", async () => {

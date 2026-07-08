@@ -4,7 +4,6 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
-  CodexModel,
   CollaborationMode,
   ManagedSession,
   PlanActionChoice,
@@ -39,12 +38,6 @@ interface CodexProcessLookup {
   resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
 }
 
-interface CodexModelCatalog {
-  listModels(): Promise<CodexModel[]>;
-}
-
-const FALLBACK_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
-
 interface ApprovalKeyMap {
   approveOnce: string[];
   approveForPrefix: string[];
@@ -70,8 +63,7 @@ export class SessionManager {
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null,
-    private readonly modelCatalog: CodexModelCatalog | null = null
+    private readonly codexProcessLookup: CodexProcessLookup | null = null
   ) {}
 
   start(): void {
@@ -94,7 +86,6 @@ export class SessionManager {
     const now = nowIso();
     const seen = new Set<string>();
     const paneIds = panes.map(tmuxPaneSessionId);
-    const modelOptions = await this.safeListModels();
 
     for (const [index, pane] of panes.entries()) {
       const existingId = paneIds[index] ?? tmuxPaneSessionId(pane);
@@ -145,7 +136,8 @@ export class SessionManager {
         (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
         existing?.inputMode ??
         "default";
-      const liveModel = await detectLiveModel(pane, modelOptions, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
+      const liveModelSettings =
+        nextCodexJsonlPath ? await readLatestCodexModelSettings(nextCodexJsonlPath) : null;
       const session: ManagedSession = {
         id: existingId,
         tmux: pane,
@@ -161,7 +153,7 @@ export class SessionManager {
         activitySummaryGeneratedAt: sourceChanged ? null : existing?.activitySummaryGeneratedAt ?? null,
         activitySummarySourceSequence: sourceChanged ? null : existing?.activitySummarySourceSequence ?? null,
         inputMode,
-        models: mergeSessionModels(existing?.models, inputMode, liveModel),
+        models: mergeSessionModels(existing?.models, inputMode, liveModelSettings),
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         archived: existing?.archived ?? false
@@ -349,28 +341,28 @@ export class SessionManager {
     return this.db.listMessages(sessionId, afterSequence);
   }
 
-  listRecentMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
-    return this.db.listRecentMessages(sessionId, limit);
+  async listRecentMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listRecentMessages(sessionId, limit));
   }
 
-  listActiveTailMessages(sessionId: string, fallbackLimit: number): Promise<TranscriptPageResponse> {
-    return this.db.listActiveTailMessages(sessionId, fallbackLimit);
+  async listActiveTailMessages(sessionId: string, fallbackLimit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listActiveTailMessages(sessionId, fallbackLimit));
   }
 
-  listEarliestMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
-    return this.db.listEarliestMessages(sessionId, limit);
+  async listEarliestMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listEarliestMessages(sessionId, limit));
   }
 
-  listMessagesBefore(sessionId: string, beforeSequence: number, limit: number): Promise<TranscriptPageResponse> {
-    return this.db.listMessagesBefore(sessionId, beforeSequence, limit);
+  async listMessagesBefore(sessionId: string, beforeSequence: number, limit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listMessagesBefore(sessionId, beforeSequence, limit));
   }
 
-  listMessagesAfterPage(sessionId: string, afterSequence: number, limit: number): Promise<TranscriptPageResponse> {
-    return this.db.listMessagesAfterPage(sessionId, afterSequence, limit);
+  async listMessagesAfterPage(sessionId: string, afterSequence: number, limit: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listMessagesAfterPage(sessionId, afterSequence, limit));
   }
 
-  listMessageRange(sessionId: string, fromSequence: number, toSequence: number): Promise<TranscriptPageResponse> {
-    return this.db.listMessageRange(sessionId, fromSequence, toSequence);
+  async listMessageRange(sessionId: string, fromSequence: number, toSequence: number): Promise<TranscriptPageResponse> {
+    return this.withTranscriptSource(sessionId, await this.db.listMessageRange(sessionId, fromSequence, toSequence));
   }
 
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
@@ -566,26 +558,6 @@ export class SessionManager {
           switchMethod: "cycle_keys",
           cycleKeys: this.inputModeCycleKeys,
           resultingMode: updatedSession?.inputMode ?? null
-        }),
-        updatedAt
-      );
-    }
-    if (action.type === "setModelSettings") {
-      const model = await this.requireKnownModel(action.model);
-      const reasoningEffort = requireSupportedReasoningEffort(model, action.reasoningEffort ?? null);
-      const liveSession = await this.ensureInputMode(session, action.mode);
-      await this.tmux.sendInput(liveSession.tmux.paneId, slashCommandForModel(model.model, reasoningEffort));
-      const updatedAt = nowIso();
-      const updatedSession = await this.db.setSessionModelSettings(sessionId, action.mode, model.model, reasoningEffort, updatedAt);
-      await this.db.addAudit(
-        "local",
-        "set_model_settings",
-        sessionId,
-        JSON.stringify({
-          mode: action.mode,
-          requestedModel: action.model,
-          requestedReasoningEffort: action.reasoningEffort ?? null,
-          resultingSettings: updatedSession?.models[action.mode] ?? null
         }),
         updatedAt
       );
@@ -789,34 +761,15 @@ export class SessionManager {
     return this.db.latestQuestionAnswerMessage(sessionId, question.id, questionMessage.sequence);
   }
 
-  private async safeListModels(): Promise<CodexModel[]> {
-    if (!this.modelCatalog) return [];
-    try {
-      return await this.modelCatalog.listModels();
-    } catch {
-      return [];
-    }
-  }
-
-  private async requireKnownModel(model: string): Promise<CodexModel> {
-    const normalized = model.trim();
-    if (!normalized) throw new InputModeSwitchError("Model is required");
-    const models = await this.safeListModels();
-    if (models.length === 0) {
-      return {
-        id: normalized,
-        model: normalized,
-        displayName: normalized,
-        description: "",
-        hidden: false,
-        isDefault: false,
-        supportedReasoningEfforts: [],
-        defaultReasoningEffort: null
-      };
-    }
-    const match = models.find((candidate) => candidate.model === normalized || candidate.id === normalized);
-    if (!match) throw new InputModeSwitchError(`Unknown Codex model: ${normalized}`);
-    return match;
+  private async withTranscriptSource(sessionId: string, page: TranscriptPageResponse): Promise<TranscriptPageResponse> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    return {
+      ...page,
+      sessionId: session.id,
+      codexSessionId: session.codexSessionId,
+      codexJsonlPath: session.codexJsonlPath
+    };
   }
 }
 
@@ -846,6 +799,10 @@ export class QueuedInputError extends Error {
   constructor(message: string, readonly statusCode = 409) {
     super(message);
   }
+}
+
+export class SessionNotFoundError extends Error {
+  readonly statusCode = 404;
 }
 
 function resolveSessionStatus(
@@ -975,10 +932,6 @@ function isPlanActionInput(text: string): boolean {
 
 function codexTerminalUserText(text: string): string {
   return text.endsWith(" ") ? text : `${text} `;
-}
-
-function slashCommandForModel(model: string, reasoningEffort: string | null): string {
-  return reasoningEffort ? `/model ${model} ${reasoningEffort}` : `/model ${model}`;
 }
 
 function keysForPlanAction(action: PlanActionChoice): string[] {
@@ -1136,6 +1089,53 @@ async function readFileTail(path: string, maxBytes: number): Promise<string> {
   }
 }
 
+async function readLatestCodexModelSettings(path: string): Promise<SessionModelSettings | null> {
+  try {
+    return latestCodexModelSettingsFromText(await readFileTail(path, 256 * 1024));
+  } catch {
+    return null;
+  }
+}
+
+function latestCodexModelSettingsFromText(text: string): SessionModelSettings | null {
+  let latest: SessionModelSettings | null = null;
+  for (const line of text.split("\n")) {
+    const settings = codexModelSettingsFromLine(line);
+    if (settings) latest = settings;
+  }
+  return latest;
+}
+
+function codexModelSettingsFromLine(line: string): SessionModelSettings | null {
+  if (!line.trim()) return null;
+  try {
+    const event = JSON.parse(line) as {
+      type?: string;
+      payload?: {
+        model?: unknown;
+        effort?: unknown;
+        reasoning_effort?: unknown;
+        collaboration_mode?: {
+          settings?: {
+            model?: unknown;
+            reasoning_effort?: unknown;
+          };
+        };
+      };
+    };
+    const payload = event.payload;
+    if (!payload) return null;
+    const collaborationSettings = payload.collaboration_mode?.settings;
+    const model = stringValue(collaborationSettings?.model) ?? stringValue(payload.model);
+    const reasoningEffort =
+      stringValue(collaborationSettings?.reasoning_effort) ?? stringValue(payload.reasoning_effort) ?? stringValue(payload.effort);
+    if (!model && !reasoningEffort) return null;
+    return { model, reasoningEffort };
+  } catch {
+    return null;
+  }
+}
+
 function extractJsonlStrings(line: string): string[] {
   if (!line.trim()) return [];
   try {
@@ -1211,27 +1211,18 @@ function emptySessionModelSettings(): SessionModelSettings {
 function mergeSessionModels(
   existing: SessionModelSelections | undefined,
   mode: CollaborationMode,
-  liveModel: string | null
+  liveSettings: SessionModelSettings | null
 ): SessionModelSelections {
   const models = existing ?? emptySessionModels();
-  if (!liveModel) return models;
-  return { ...models, [mode]: { ...models[mode], model: liveModel } };
-}
-
-function requireSupportedReasoningEffort(model: CodexModel, reasoningEffort: string | null): string | null {
-  const normalized = reasoningEffort?.trim() ?? "";
-  if (!normalized) return null;
-  const supported = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
-  if (supported.length === 0) {
-    if (FALLBACK_REASONING_EFFORTS.has(normalized)) return normalized;
-    throw new InputModeSwitchError(`Unknown Codex reasoning effort: ${normalized}`);
-  }
-  if (!supported.includes(normalized)) {
-    throw new InputModeSwitchError(
-      `Reasoning effort ${normalized} is not supported for ${model.model}. Supported reasoning efforts: ${supported.join(", ")}`
-    );
-  }
-  return normalized;
+  if (!liveSettings?.model && !liveSettings?.reasoningEffort) return models;
+  return {
+    ...models,
+    [mode]: {
+      ...models[mode],
+      ...(liveSettings.model ? { model: liveSettings.model } : {}),
+      ...(liveSettings.reasoningEffort ? { reasoningEffort: liveSettings.reasoningEffort } : {})
+    }
+  };
 }
 
 function detectCollaborationModeFromPane(pane: TmuxPane): CollaborationMode | null {
@@ -1249,42 +1240,6 @@ async function detectLiveCollaborationMode(
   } catch {
     return null;
   }
-}
-
-async function detectLiveModel(
-  pane: TmuxPane,
-  models: CodexModel[],
-  capturePane: (paneId: string, lines: number) => Promise<string>
-): Promise<string | null> {
-  if (models.length === 0) return null;
-  const paneModel = detectModelFromText(`${pane.title}\n${pane.windowName}`, models);
-  if (paneModel) return paneModel;
-  try {
-    return detectModelFromText(await capturePane(pane.paneId, 30), models);
-  } catch {
-    return null;
-  }
-}
-
-function detectModelFromText(text: string, models: CodexModel[]): string | null {
-  const normalized = normalizeModelSearchText(text);
-  if (!normalized) return null;
-  const bySlug = models.find((model) => model.model && modelTokenPattern(model.model).test(normalized));
-  if (bySlug) return bySlug.model;
-  const byName = models.find((model) => model.displayName && modelTokenPattern(model.displayName).test(normalized));
-  return byName?.model ?? null;
-}
-
-function normalizeModelSearchText(text: string): string {
-  return text
-    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
-function modelTokenPattern(value: string): RegExp {
-  return new RegExp(`(^|[^a-z0-9._-])${escapeRegExp(value.toLowerCase())}([^a-z0-9._-]|$)`);
 }
 
 function escapeRegExp(value: string): string {

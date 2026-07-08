@@ -38,7 +38,7 @@ function groupTurnActivity(messages: ChatMessage[]): InternalTranscriptItem[] {
 
   function flushLooseMessages() {
     if (looseMessages.length === 0) return;
-    items.push(...groupEventStackItems(looseMessages));
+    items.push(...groupLooseActivityItems(looseMessages));
     looseMessages = [];
   }
 
@@ -111,6 +111,21 @@ function groupEventStackItems(messages: ChatMessage[]): InternalTranscriptItem[]
   }
 
   flushStack(items, stack);
+  return items;
+}
+
+function groupLooseActivityItems(messages: ChatMessage[]): InternalTranscriptItem[] {
+  const visibleIndex = latestVisibleAssistantIndex(messages);
+  if (visibleIndex < 0) return groupEventStackItems(messages);
+
+  const items: InternalTranscriptItem[] = [];
+  const beforeVisible = messages.slice(0, visibleIndex);
+  const visibleMessage = messages[visibleIndex];
+  const afterVisible = messages.slice(visibleIndex + 1);
+
+  pushActivity(items, beforeVisible);
+  if (visibleMessage) items.push({ type: "message", message: visibleMessage });
+  items.push(...groupEventStackItems(afterVisible));
   return items;
 }
 

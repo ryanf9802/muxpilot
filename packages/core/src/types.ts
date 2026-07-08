@@ -53,10 +53,6 @@ export interface CodexReasoningEffortOption {
   description: string;
 }
 
-export interface CodexModelsResponse {
-  models: CodexModel[];
-}
-
 export type MessageType =
   | "user"
   | "assistant"
@@ -307,7 +303,6 @@ export type SessionAction =
   | { type: "interrupt" }
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
-  | { type: "setModelSettings"; mode: CollaborationMode; model: string; reasoningEffort?: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }
   | { type: "rename"; name: string }
   | { type: "detach" }
@@ -359,6 +354,9 @@ export interface TranscriptRangeItem {
 export type TranscriptItem = TranscriptMessageItem | TranscriptUserActionItem | TranscriptRangeItem;
 
 export interface TranscriptPageResponse {
+  sessionId: string;
+  codexSessionId: string | null;
+  codexJsonlPath: string | null;
   items: TranscriptItem[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;

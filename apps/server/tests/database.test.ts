@@ -162,7 +162,7 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("fills the active transcript tail with older visible items when current noise collapses", async () => {
+  it("does not backfill the active transcript tail with older turns when current noise collapses", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-visible-page");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -181,12 +181,7 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 8);
 
-    expect(tail.items).toHaveLength(8);
     expect(itemSpans(tail)).toEqual([
-      [2, 2, "message"],
-      [3, 3, "range:stack"],
-      [4, 4, "message"],
-      [5, 6, "range:activity"],
       [7, 7, "message"],
       [8, 8, "range:stack"],
       [9, 9, "message"],
@@ -316,6 +311,22 @@ describe("AppDatabase activity summaries", () => {
     expect(earliest.hasMoreAfter).toBe(true);
     expect(itemSpans(newer)).toEqual([[4, 4, "message"], [5, 5, "message"], [6, 6, "message"]]);
     expect(newer.hasMoreAfter).toBe(true);
+    db.close();
+  });
+
+  it("collapses assistant activity when a newer transcript page starts mid-turn", async () => {
+    const db = await tempDb();
+    const session = testSession("session-newer-page-mid-turn");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "Prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "First answer"));
+    db.appendMessage(testMessage(session.id, 3, "tool", "Tool output", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 4, "assistant", "Second answer"));
+    db.appendMessage(testMessage(session.id, 5, "user", "Next prompt"));
+
+    const newer = db.listMessagesAfterPage(session.id, 1, 10);
+
+    expect(itemSpans(newer)).toEqual([[2, 3, "range:activity"], [4, 4, "message"], [5, 5, "message"]]);
     db.close();
   });
 

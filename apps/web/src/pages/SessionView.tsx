@@ -4,7 +4,7 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   Check,
-  ChevronLeft,
+  Copy,
   HelpCircle,
   ListChecks,
   LoaderCircle,
@@ -19,8 +19,9 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { cursorLineDown, insertNewlineAndIndent } from "@codemirror/commands";
 import { minimalSetup } from "codemirror";
-import { vim } from "@replit/codemirror-vim";
+import { getCM, Vim, vim } from "@replit/codemirror-vim";
 import { EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   Decoration,
@@ -44,7 +45,6 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
-  CodexModel,
   CodexSkill,
   CollaborationMode,
   ManagedSession,
@@ -52,9 +52,10 @@ import type {
   QuestionAnswerRequest,
   QuestionRequest,
   QueuedInput,
+  SessionModelSettings,
   SessionAction,
   SessionEvent,
-  SessionModelSettings,
+  TranscriptPageResponse,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
 import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcriptMessages } from "@muxpilot/core";
@@ -73,6 +74,7 @@ export type ScrollBehavior = "bottom" | "top" | "preserve" | "none";
 export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live" | "older_page" | "manual_newer";
 export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
+export type MessageListAutoPageAction = "older" | "newer" | null;
 export interface PendingUserMessage {
   id: string;
   sessionId: string;
@@ -163,10 +165,6 @@ export function inputModeAction(mode: CollaborationMode): SessionAction {
   return { type: "setInputMode", mode };
 }
 
-export function modelAction(mode: CollaborationMode, model: string, reasoningEffort?: string | null): SessionAction {
-  return { type: "setModelSettings", mode, model, reasoningEffort };
-}
-
 export function sessionWithPendingInputMode(session: ManagedSession, pendingMode: CollaborationMode | null): ManagedSession {
   return pendingMode ? { ...session, inputMode: pendingMode } : session;
 }
@@ -204,6 +202,37 @@ export function restoreScrollTopForAnchor(
 
 export function scrollMessageListToBottom(container: Pick<HTMLElement, "scrollHeight" | "scrollTop">): void {
   container.scrollTop = container.scrollHeight;
+}
+
+export function messageListAutoPageAction(
+  metrics: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  state: {
+    initialScrollReady: boolean;
+    hasMoreBefore: boolean;
+    hasMoreAfter: boolean;
+    firstSequence: number;
+    lastSequence: number;
+    loadingOlder: boolean;
+    loadingNewer: boolean;
+    previousScrollTop: number;
+    topThresholdPx?: number;
+    bottomThresholdPx?: number;
+  }
+): MessageListAutoPageAction {
+  if (!state.initialScrollReady) return null;
+  if (metrics.scrollHeight <= metrics.clientHeight) return null;
+  const scrollingUp = metrics.scrollTop < state.previousScrollTop;
+  const scrollingDown = metrics.scrollTop > state.previousScrollTop;
+  const topThresholdPx = state.topThresholdPx ?? MESSAGE_TOP_LOAD_THRESHOLD_PX;
+  const bottomThresholdPx = state.bottomThresholdPx ?? MESSAGE_BOTTOM_LOAD_THRESHOLD_PX;
+  if (scrollingUp && state.hasMoreBefore && !state.loadingOlder && state.firstSequence > 0 && metrics.scrollTop <= topThresholdPx) {
+    return "older";
+  }
+  const distanceFromBottom = metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight;
+  if (scrollingDown && state.hasMoreAfter && !state.loadingNewer && state.lastSequence > 0 && distanceFromBottom <= bottomThresholdPx) {
+    return "newer";
+  }
+  return null;
 }
 
 export function createPendingUserMessage(
@@ -268,6 +297,28 @@ export function shouldHideInitialMessageList(initialTranscriptSessionId: string 
   return initialTranscriptSessionId === routeSessionId && !initialScrollReady;
 }
 
+interface TranscriptSourceIdentity {
+  sessionId: string;
+  codexSessionId: string | null;
+  codexJsonlPath: string | null;
+}
+
+export function transcriptSourceKey(source: TranscriptSourceIdentity): string {
+  return [source.sessionId, source.codexSessionId ?? "", source.codexJsonlPath ?? ""].join("\u0000");
+}
+
+export function sessionTranscriptSource(session: ManagedSession): TranscriptSourceIdentity {
+  return {
+    sessionId: session.id,
+    codexSessionId: session.codexSessionId,
+    codexJsonlPath: session.codexJsonlPath
+  };
+}
+
+export function shouldReplaceTranscriptForSource(currentSourceKey: string | null, nextSourceKey: string): boolean {
+  return currentSourceKey !== null && currentSourceKey !== nextSourceKey;
+}
+
 export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
   implement: "Yes, implement the plan",
   clear_context_implement: "Yes, clear context and implement",
@@ -296,9 +347,8 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputModeError, setInputModeError] = useState("");
-  const [modelError, setModelError] = useState("");
+  const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
-  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
   const vimAvailable = useDesktopVimAvailable();
@@ -318,9 +368,11 @@ export function SessionView() {
   const liveTailRefreshRunningRef = useRef(false);
   const liveTailRefreshQueuedRef = useRef(false);
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
+  const transcriptSourceKeyRef = useRef<string | null>(null);
   const hasMoreAfterRef = useRef(false);
   const isNearBottomRef = useRef(true);
   const lastSequenceRef = useRef(0);
+  const lastMessageListScrollTopRef = useRef(0);
   const preserveScrollRef = useRef<ScrollAnchorSnapshot | null>(null);
   const scrollBehaviorRef = useRef<ScrollBehavior>("bottom");
   const skillsRefreshRunningRef = useRef(false);
@@ -373,29 +425,21 @@ export function SessionView() {
 
   useEffect(() => {
     setCodexSkills([]);
-    setCodexModels([]);
     skillsLastRefreshRef.current = 0;
     void refreshCodexSkills({ force: true });
-    void loadCodexModels();
     const interval = window.setInterval(() => void refreshCodexSkills(), SKILL_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [refreshCodexSkills]);
 
-  async function loadCodexModels() {
-    try {
-      const response = await api.codexModels();
-      if (activeIdRef.current === id) setCodexModels(response.models);
-    } catch {
-      if (activeIdRef.current === id) setCodexModels([]);
-    }
-  }
-
   async function toggleExpandedItem(item: CoreTranscriptItem) {
     if (item.type !== "range") return;
     if (!expandedStacks.has(item.id) && !expandedRangeItems[item.id]) {
+      const expectedSourceKey = transcriptSourceKeyRef.current;
       setLoadingRanges((current) => new Set(current).add(item.id));
       try {
         const response = await api.messageRange(id, item.firstSequence, item.lastSequence);
+        if (!isCurrentTranscriptResponse(id, requestTokenRef.current, response)) return;
+        if (!expectedSourceKey || transcriptSourceKey(response) !== expectedSourceKey) return;
         setExpandedRangeItems((current) => ({ ...current, [item.id]: response.items }));
       } finally {
         setLoadingRanges((current) => {
@@ -472,7 +516,7 @@ export function SessionView() {
       setSubmitBusy(false);
       setActionBusy(null);
       setInputModeError("");
-      setModelError("");
+      setCopiedTmuxCommand(false);
       setComposerFocused(false);
       setPagination(false, false);
       setLoadingOlder(false);
@@ -481,11 +525,13 @@ export function SessionView() {
       setPendingUserMessage(null);
       setExpandedRangeItems({});
       setLoadingRanges(new Set());
+      transcriptSourceKeyRef.current = null;
       loadingOlderRef.current = false;
       loadingNewerRef.current = false;
       liveTailRefreshRunningRef.current = false;
       liveTailRefreshQueuedRef.current = false;
       isNearBottomRef.current = true;
+      lastMessageListScrollTopRef.current = 0;
       preserveScrollRef.current = null;
       scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
       setExpandedStacks(new Set());
@@ -536,20 +582,20 @@ export function SessionView() {
     if (container && behavior === "preserve" && preserved) {
       const anchor = preserved.itemId ? transcriptItemElement(container, preserved.itemId) : null;
       container.scrollTop = restoreScrollTopForAnchor(preserved, anchor, container.scrollHeight);
-      updateNearBottomState(container);
+      updateMessageListScrollState(container);
       return;
     }
     if (container && behavior === "top") {
       container.scrollTop = 0;
-      updateNearBottomState(container);
+      updateMessageListScrollState(container);
       return;
     }
     if (behavior === "none") return;
     scrollMessageListToBottom(container);
-    updateNearBottomState(container);
+    updateMessageListScrollState(container);
     const animationFrame = window.requestAnimationFrame(() => {
       scrollMessageListToBottom(container);
-      updateNearBottomState(container);
+      updateMessageListScrollState(container);
       if (initialTranscriptSessionId === id && !initialScrollReady) setInitialScrollReady(true);
     });
     return () => window.cancelAnimationFrame(animationFrame);
@@ -573,6 +619,7 @@ export function SessionView() {
     const response = await trackRefreshRequest(() => api.session(targetId));
     if (!isCurrentRequest(targetId, token)) return;
     const nextSession = sessionWithPendingInputMode(response.session, pendingInputModeRef.current);
+    clearTranscriptOnSessionSourceChange(nextSession);
     setSession(nextSession);
     syncSessionStoplight(nextSession);
   }
@@ -580,7 +627,8 @@ export function SessionView() {
   async function loadRecentMessages(targetId = id, token = requestTokenRef.current) {
     scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
     const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
-    if (!isCurrentRequest(targetId, token)) return;
+    if (!isCurrentTranscriptResponse(targetId, token, response)) return;
+    acceptTranscriptSource(response);
     setTranscriptItems(appendUniqueTranscriptItems([], response.items));
     reconcilePendingUserMessage(response.items);
     setPagination(response.hasMoreBefore, response.hasMoreAfter);
@@ -611,8 +659,14 @@ export function SessionView() {
         liveTailRefreshQueuedRef.current = false;
         scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
         const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
-        if (!isCurrentRequest(targetId, token)) return;
-        setTranscriptItems((current) => replaceTranscriptTail(current, response.items));
+        if (!isCurrentTranscriptResponse(targetId, token, response)) return;
+        const sourceChanged = acceptTranscriptSource(response);
+        if (sourceChanged) {
+          scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
+          setInitialTranscriptSessionId(targetId);
+          setInitialScrollReady(false);
+        }
+        setTranscriptItems((current) => (sourceChanged ? appendUniqueTranscriptItems([], response.items) : replaceTranscriptTail(current, response.items)));
         reconcilePendingUserMessage(response.items);
         setHasMoreBefore((current) => current || response.hasMoreBefore);
         setHasMoreAfterState(response.hasMoreAfter);
@@ -629,7 +683,8 @@ export function SessionView() {
     const response = await trackRefreshRequest(() =>
       api.messages(targetId, { position: "oldest", limit: MESSAGE_PAGE_SIZE })
     );
-    if (!isCurrentRequest(targetId, token)) return;
+    if (!isCurrentTranscriptResponse(targetId, token, response)) return;
+    acceptTranscriptSource(response);
     setTranscriptItems(appendUniqueTranscriptItems([], response.items));
     reconcilePendingUserMessage(response.items);
     setPagination(response.hasMoreBefore, response.hasMoreAfter);
@@ -645,7 +700,7 @@ export function SessionView() {
       const response = await trackRefreshRequest(() =>
         api.messages(targetId, { before: firstSequence, limit: MESSAGE_PAGE_SIZE })
       );
-      if (!isCurrentRequest(targetId, token)) return;
+      if (!isCurrentTranscriptPage(targetId, token, response)) return;
       preserveScrollRef.current = captureScrollAnchor(messageListRef.current);
       scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("older_page", isNearBottomRef.current);
       setTranscriptItems((current) => appendUniqueTranscriptItems(current, response.items));
@@ -670,7 +725,7 @@ export function SessionView() {
       const response = await trackRefreshRequest(() =>
         api.messages(targetId, { after: lastSequence, limit: MESSAGE_PAGE_SIZE })
       );
-      if (!isCurrentRequest(targetId, token)) return;
+      if (!isCurrentTranscriptPage(targetId, token, response)) return;
       setTranscriptItems((current) => appendUniqueTranscriptItems(current, response.items));
       reconcilePendingUserMessage(response.items);
       setHasMoreAfterState(response.hasMoreAfter);
@@ -706,6 +761,41 @@ export function SessionView() {
     return activeIdRef.current === targetId && requestTokenRef.current === token;
   }
 
+  function isCurrentTranscriptResponse(targetId: string, token: number, response: TranscriptPageResponse): boolean {
+    return isCurrentRequest(targetId, token) && response.sessionId === targetId;
+  }
+
+  function isCurrentTranscriptPage(targetId: string, token: number, response: TranscriptPageResponse): boolean {
+    return isCurrentTranscriptResponse(targetId, token, response) && transcriptSourceKey(response) === transcriptSourceKeyRef.current;
+  }
+
+  function acceptTranscriptSource(response: TranscriptPageResponse): boolean {
+    const nextSourceKey = transcriptSourceKey(response);
+    const sourceChanged = shouldReplaceTranscriptForSource(transcriptSourceKeyRef.current, nextSourceKey);
+    transcriptSourceKeyRef.current = nextSourceKey;
+    if (sourceChanged) clearTranscriptSourceCaches();
+    return sourceChanged;
+  }
+
+  function clearTranscriptSourceCaches() {
+    setExpandedRangeItems({});
+    setLoadingRanges(new Set());
+    setExpandedStacks(new Set());
+  }
+
+  function clearTranscriptOnSessionSourceChange(nextSession: ManagedSession) {
+    const currentSourceKey = transcriptSourceKeyRef.current;
+    if (!currentSourceKey) return;
+    const nextSourceKey = transcriptSourceKey(sessionTranscriptSource(nextSession));
+    if (nextSourceKey === currentSourceKey) return;
+    transcriptSourceKeyRef.current = null;
+    setTranscriptItems([]);
+    setInitialTranscriptSessionId(null);
+    setInitialScrollReady(false);
+    setPagination(false, false);
+    clearTranscriptSourceCaches();
+  }
+
   function setPagination(before: boolean, after: boolean) {
     setHasMoreBefore(before);
     setHasMoreAfterState(after);
@@ -720,6 +810,11 @@ export function SessionView() {
     isNearBottomRef.current = isNearMessageListBottom(container);
   }
 
+  function updateMessageListScrollState(container: HTMLElement) {
+    updateNearBottomState(container);
+    lastMessageListScrollTopRef.current = container.scrollTop;
+  }
+
   function reconcilePendingUserMessage(items: CoreTranscriptItem[]) {
     setPendingUserMessage((pending) => (pending && transcriptItemsContainPendingUserMessage(items, pending) ? null : pending));
   }
@@ -727,10 +822,21 @@ export function SessionView() {
   function handleMessageListScroll() {
     const container = messageListRef.current;
     if (!container) return;
+    const previousScrollTop = lastMessageListScrollTopRef.current;
     updateNearBottomState(container);
-    if (container.scrollTop <= MESSAGE_TOP_LOAD_THRESHOLD_PX) void loadOlderMessages();
-    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-    if (distanceFromBottom <= MESSAGE_BOTTOM_LOAD_THRESHOLD_PX) void loadNewerMessages();
+    lastMessageListScrollTopRef.current = container.scrollTop;
+    const action = messageListAutoPageAction(container, {
+      initialScrollReady,
+      hasMoreBefore,
+      hasMoreAfter,
+      firstSequence,
+      lastSequence,
+      loadingOlder: loadingOlderRef.current,
+      loadingNewer: loadingNewerRef.current,
+      previousScrollTop
+    });
+    if (action === "older") void loadOlderMessages();
+    if (action === "newer") void loadNewerMessages();
   }
 
   async function jumpToTop() {
@@ -844,25 +950,15 @@ export function SessionView() {
     }
   }
 
-  async function setModelSettings(model: string, reasoningEffort: string | null) {
-    const currentSettings = session?.models[session.inputMode];
-    if (!session || actionBusy || !model) return;
-    if (currentSettings?.model === model && (currentSettings.reasoningEffort ?? null) === reasoningEffort) return;
-    const targetId = id;
-    const token = requestTokenRef.current;
-    const mode = session.inputMode;
-    setActionBusy("setModelSettings");
-    setModelError("");
+  async function copyTmuxCommand() {
+    if (!session) return;
+    const command = tmuxAttachCommand(session);
     try {
-      const response = await api.action(targetId, modelAction(mode, model, reasoningEffort));
-      if (!isCurrentRequest(targetId, token)) return;
-      if (response.session) setSession(response.session);
-    } catch (error) {
-      if (!isCurrentRequest(targetId, token)) return;
-      setModelError(error instanceof Error ? error.message : String(error));
-      await loadSession(targetId, token);
-    } finally {
-      if (isCurrentRequest(targetId, token)) setActionBusy(null);
+      await copyText(command);
+      setCopiedTmuxCommand(true);
+      window.setTimeout(() => setCopiedTmuxCommand(false), 1600);
+    } catch {
+      setCopiedTmuxCommand(false);
     }
   }
 
@@ -950,17 +1046,9 @@ export function SessionView() {
           <SessionHeaderMeta session={readySession} />
         </div>
         <StatusPill status={readySession.status} />
-        <ModelSelector
-          mode={readySession.inputMode}
-          value={readySession.models[readySession.inputMode]}
-          models={codexModels}
-          busy={actionBusy === "setModelSettings"}
-          disabled={Boolean(actionBusy) || readySession.status === "missing"}
-          onChange={setModelSettings}
-        />
+        <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
-        {modelError ? <p className="mode-toggle-error">{modelError}</p> : null}
       </div>
 
       <div className="actions">
@@ -1281,6 +1369,16 @@ function codeMirrorSkillHighlightExtension(skillNames: Set<string>): Extension {
   );
 }
 
+export function runVimCtrlJCommand(view: EditorView): boolean {
+  const cm = getCM(view);
+  const vimState = cm?.state.vim ?? null;
+  if (cm && vimState && !vimState.insertMode) {
+    const handled = Vim.handleKey(cm, "j", "user");
+    return handled === true || cursorLineDown(view);
+  }
+  return insertNewlineAndIndent(view);
+}
+
 function VimPromptEditor({
   value,
   onChange,
@@ -1388,6 +1486,13 @@ function VimPromptEditor({
             run: () => {
               onSubmitShortcutRef.current?.();
               return true;
+            }
+          },
+          {
+            key: "Ctrl-j",
+            run: (view) => {
+              if (onSuggestionCommandRef.current?.("next")) return true;
+              return runVimCtrlJCommand(view);
             }
           }
         ])
@@ -1812,181 +1917,80 @@ function VimLogoMark() {
   );
 }
 
-function ModelSelector({
-  mode,
-  value,
-  models,
-  busy,
-  disabled,
-  onChange
+export function TmuxCommandButton({
+  session,
+  copied,
+  onCopy
 }: {
-  mode: CollaborationMode;
-  value: SessionModelSettings;
-  models: CodexModel[];
-  busy: boolean;
-  disabled: boolean;
-  onChange: (model: string, reasoningEffort: string | null) => void;
+  session: ManagedSession;
+  copied: boolean;
+  onCopy: () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [reasoningModel, setReasoningModel] = useState<CodexModel | null>(null);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const options = modelSelectorOptions(models, value.model);
-  const label = mode === "plan" ? "Plan model" : "Normal model";
-  const selectedModel = options.find((model) => model.model === value.model) ?? null;
-  const selectedLabel = selectedModel?.displayName || value.model || "Model";
-  const selectedReasoning = value.reasoningEffort ?? selectedModel?.defaultReasoningEffort ?? null;
-  const triggerTitle = selectedReasoning ? `${label}: ${selectedLabel}, ${selectedReasoning}` : `${label}: ${selectedLabel}`;
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (rootRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-      setReasoningModel(null);
-    };
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      setOpen(false);
-      setReasoningModel(null);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (disabled || busy) {
-      setOpen(false);
-      setReasoningModel(null);
-    }
-  }, [busy, disabled]);
-
-  function chooseModel(model: CodexModel) {
-    if (model.supportedReasoningEfforts.length === 0) {
-      onChange(model.model, null);
-      setOpen(false);
-      setReasoningModel(null);
-      return;
-    }
-    setReasoningModel(model);
-  }
-
-  function chooseReasoning(model: CodexModel, reasoningEffort: string) {
-    onChange(model.model, reasoningEffort);
-    setOpen(false);
-    setReasoningModel(null);
-  }
-
+  const command = tmuxAttachCommand(session);
+  const model = sessionModelDisplay(session);
   return (
-    <div className="model-selector" aria-busy={busy} ref={rootRef}>
-      <button
-        type="button"
-        className="model-selector-trigger"
-        disabled={disabled || options.length === 0}
-        aria-label={label}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        title={triggerTitle}
-        onClick={() => {
-          setOpen((current) => !current);
-          setReasoningModel(null);
-        }}
-      >
-        <span className="model-selector-value">{selectedLabel}</span>
-        {selectedReasoning ? <span className="model-selector-effort">{selectedReasoning}</span> : null}
-      </button>
-      {open ? (
-        <div className="model-selector-popover" role="dialog" aria-label={label}>
-          {reasoningModel ? (
-            <div className="model-selector-panel">
-              <div className="model-selector-panel-head">
-                <button type="button" className="model-selector-back" onClick={() => setReasoningModel(null)} aria-label="Back to models">
-                  <ChevronLeft size={16} aria-hidden="true" />
-                </button>
-                <div>
-                  <span>Reasoning</span>
-                  <strong>{reasoningModel.displayName || reasoningModel.model}</strong>
-                </div>
-              </div>
-              <div className="model-selector-options" role="listbox" aria-label={`${reasoningModel.model} reasoning`}>
-                {reasoningModel.supportedReasoningEfforts.map((option) => {
-                  const selected = value.model === reasoningModel.model && value.reasoningEffort === option.reasoningEffort;
-                  return (
-                    <button
-                      type="button"
-                      key={option.reasoningEffort}
-                      className={selected ? "model-selector-option selected" : "model-selector-option"}
-                      role="option"
-                      aria-selected={selected}
-                      onClick={() => chooseReasoning(reasoningModel, option.reasoningEffort)}
-                    >
-                      <span>
-                        <strong>{reasoningEffortLabel(option.reasoningEffort)}</strong>
-                        {option.description ? <small>{option.description}</small> : null}
-                      </span>
-                      {selected ? <Check size={16} aria-hidden="true" /> : null}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          ) : (
-            <div className="model-selector-panel">
-              <div className="model-selector-options" role="listbox" aria-label={label}>
-                {options.map((model) => {
-                  const selected = model.model === value.model;
-                  return (
-                    <button
-                      type="button"
-                      key={model.model}
-                      className={selected ? "model-selector-option selected" : "model-selector-option"}
-                      role="option"
-                      aria-selected={selected}
-                      onClick={() => chooseModel(model)}
-                    >
-                      <span>
-                        <strong>{model.displayName || model.model}</strong>
-                        {model.description ? <small>{model.description}</small> : null}
-                      </span>
-                      <span className="model-selector-option-meta">
-                        {model.isDefault ? <em>Default</em> : null}
-                        {selected ? <Check size={16} aria-hidden="true" /> : null}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
-      ) : null}
-    </div>
+    <button
+      type="button"
+      className="tmux-command-button"
+      onClick={onCopy}
+      title={`${model.model} / ${model.reasoningEffort}\n${command}`}
+      aria-label={`Copy tmux attach command for ${model.model} ${model.reasoningEffort}`}
+    >
+      {copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+      <span className="tmux-command-label">
+        <span className="tmux-command-model">{model.model}</span>
+        <span className="tmux-command-effort">{model.reasoningEffort}</span>
+      </span>
+      {copied ? <span className="tmux-command-copied">Copied</span> : null}
+    </button>
   );
 }
 
-export function modelSelectorOptions(models: CodexModel[], value: string | null): CodexModel[] {
-  if (!value || models.some((model) => model.model === value)) return models;
-  return [
-    {
-      id: value,
-      model: value,
-      displayName: value,
-      description: "",
-      hidden: false,
-      isDefault: false,
-      supportedReasoningEfforts: [],
-      defaultReasoningEffort: null
-    },
-    ...models
-  ];
+export function sessionModelDisplay(session: Pick<ManagedSession, "inputMode" | "models">): { model: string; reasoningEffort: string } {
+  const settings = session.models[session.inputMode];
+  const fallback = fallbackModelSettings(session.models.default, session.models.plan);
+  return {
+    model: settings.model ?? fallback.model ?? "Model unknown",
+    reasoningEffort: settings.reasoningEffort ?? fallback.reasoningEffort ?? "Effort unknown"
+  };
 }
 
-export function reasoningEffortLabel(value: string): string {
-  if (value === "xhigh") return "X-high";
-  return value.charAt(0).toUpperCase() + value.slice(1);
+function fallbackModelSettings(...settings: SessionModelSettings[]): SessionModelSettings {
+  return {
+    model: settings.find((setting) => setting.model)?.model ?? null,
+    reasoningEffort: settings.find((setting) => setting.reasoningEffort)?.reasoningEffort ?? null
+  };
+}
+
+export function tmuxAttachCommand(session: Pick<ManagedSession, "tmux">): string {
+  const sessionTarget = shellQuote(session.tmux.sessionName);
+  const windowTarget = shellQuote(`${session.tmux.sessionName}:${session.tmux.windowIndex}`);
+  return `tmux select-window -t ${windowTarget} && tmux attach-session -t ${sessionTarget}`;
+}
+
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function copyText(value: string): Promise<void> {
+  try {
+    if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
+    await navigator.clipboard.writeText(value);
+  } catch {
+    fallbackCopy(value);
+  }
+}
+
+function fallbackCopy(value: string): void {
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "true");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
 }
 
 function ApprovalBanner({
@@ -2817,7 +2821,7 @@ export function groupTurnActivity(messages: ChatMessage[]): TranscriptItem[] {
 
   function flushLooseMessages() {
     if (looseMessages.length === 0) return;
-    items.push(...groupEventStackItems(looseMessages));
+    items.push(...groupLooseActivityItems(looseMessages));
     looseMessages = [];
   }
 
@@ -2895,6 +2899,21 @@ function groupEventStackItems(messages: ChatMessage[]): TranscriptItem[] {
   }
 
   flushStack(items, stack);
+  return items;
+}
+
+function groupLooseActivityItems(messages: ChatMessage[]): TranscriptItem[] {
+  const visibleIndex = latestVisibleAssistantIndex(messages);
+  if (visibleIndex < 0) return groupEventStackItems(messages);
+
+  const items: TranscriptItem[] = [];
+  const beforeVisible = messages.slice(0, visibleIndex);
+  const visibleMessage = messages[visibleIndex];
+  const afterVisible = messages.slice(visibleIndex + 1);
+
+  pushActivity(items, beforeVisible);
+  if (visibleMessage) items.push({ type: "message", message: visibleMessage });
+  items.push(...groupEventStackItems(afterVisible));
   return items;
 }
 

@@ -19,10 +19,9 @@ import {
   inputModeAction,
   latestUserPromptTimestamp,
   MarkdownBlock,
+  messageListAutoPageAction,
   MessageBubble,
   ModeToggle,
-  modelAction,
-  modelSelectorOptions,
   pendingProposedPlanMessage,
   pendingUserMessageToChatMessage,
   planActionRequest,
@@ -49,14 +48,20 @@ import {
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
   shouldReconcileSessionForEvent,
+  shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
+  sessionModelDisplay,
   skillSuggestionScore,
   skillSuggestions,
   stripAssistantSideChannelBlocks,
   transcriptItemsContainPendingUserMessage,
+  transcriptSourceKey,
   replaceSkillToken,
   resizeComposerTextarea,
-  reasoningEffortLabel,
+  sessionTranscriptSource,
+  shellQuote,
+  tmuxAttachCommand,
+  TmuxCommandButton,
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
@@ -404,21 +409,6 @@ describe("input mode helpers", () => {
     expect(inputModeAction("default")).toEqual({ type: "setInputMode", mode: "default" });
   });
 
-  it("builds model setting actions for the selected mode", () => {
-    expect(modelAction("plan", "gpt-5.5", "high")).toEqual({
-      type: "setModelSettings",
-      mode: "plan",
-      model: "gpt-5.5",
-      reasoningEffort: "high"
-    });
-    expect(modelAction("default", "gpt-5.4", null)).toEqual({
-      type: "setModelSettings",
-      mode: "default",
-      model: "gpt-5.4",
-      reasoningEffort: null
-    });
-  });
-
   it("preserves a pending input mode over stale session refreshes", () => {
     const staleSession = managedSession({ inputMode: "default" });
 
@@ -438,25 +428,59 @@ describe("ModeToggle", () => {
   });
 });
 
-describe("model selector helpers", () => {
-  it("keeps the current model visible when the catalog does not include it", () => {
-    expect(modelSelectorOptions([], "gpt-local")).toEqual([
-      {
-        id: "gpt-local",
-        model: "gpt-local",
-        displayName: "gpt-local",
-        description: "",
-        hidden: false,
-        isDefault: false,
-        supportedReasoningEfforts: [],
-        defaultReasoningEffort: null
-      }
-    ]);
+describe("tmux command helpers", () => {
+  it("builds a WSL bash command for the session tmux window", () => {
+    expect(tmuxAttachCommand(managedSession())).toBe("tmux select-window -t 'work:1' && tmux attach-session -t 'work'");
   });
 
-  it("formats reasoning effort labels", () => {
-    expect(reasoningEffortLabel("xhigh")).toBe("X-high");
-    expect(reasoningEffortLabel("medium")).toBe("Medium");
+  it("shell-quotes tmux targets for bash", () => {
+    expect(shellQuote("work'session:2")).toBe("'work'\\''session:2'");
+  });
+
+  it("formats the visible model state from the active session mode", () => {
+    expect(
+      sessionModelDisplay(
+        managedSession({
+          inputMode: "plan",
+          models: {
+            default: { model: "gpt-5.1", reasoningEffort: "medium" },
+            plan: { model: "gpt-5.5", reasoningEffort: "high" }
+          }
+        })
+      )
+    ).toEqual({ model: "gpt-5.5", reasoningEffort: "high" });
+  });
+
+  it("falls back to any known model state when the active mode is unknown", () => {
+    expect(
+      sessionModelDisplay(
+        managedSession({
+          inputMode: "plan",
+          models: {
+            default: { model: "gpt-5.1", reasoningEffort: "medium" },
+            plan: { model: null, reasoningEffort: null }
+          }
+        })
+      )
+    ).toEqual({ model: "gpt-5.1", reasoningEffort: "medium" });
+  });
+
+  it("renders model state while copying the tmux command", () => {
+    const session = managedSession({
+      models: {
+        default: { model: "gpt-5.5", reasoningEffort: "medium" },
+        plan: { model: null, reasoningEffort: null }
+      }
+    });
+    const copyHtml = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, onCopy: () => undefined }));
+    const copiedHtml = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: true, onCopy: () => undefined }));
+
+    expect(copyHtml).toContain("gpt-5.5");
+    expect(copyHtml).toContain("medium");
+    expect(copyHtml).toContain('class="tmux-command-effort"');
+    expect(copyHtml).toContain("tmux select-window -t &#x27;work:1&#x27;");
+    expect(copiedHtml).toContain("Copied");
+    expect(copiedHtml).toContain("gpt-5.5");
   });
 });
 
@@ -484,9 +508,134 @@ describe("session scroll behavior", () => {
     expect(shouldHideInitialMessageList("session-a", "session-a", true)).toBe(false);
   });
 
+  it("detects transcript source changes before merging transcript pages", () => {
+    const session = managedSession({
+      id: "session-a",
+      codexSessionId: "codex-a",
+      codexJsonlPath: "/tmp/codex-a.jsonl"
+    });
+    const currentSource = transcriptSourceKey(sessionTranscriptSource(session));
+    const sameSource = transcriptSourceKey({
+      sessionId: "session-a",
+      codexSessionId: "codex-a",
+      codexJsonlPath: "/tmp/codex-a.jsonl"
+    });
+    const reboundSource = transcriptSourceKey({
+      sessionId: "session-a",
+      codexSessionId: "codex-b",
+      codexJsonlPath: "/tmp/codex-b.jsonl"
+    });
+
+    expect(shouldReplaceTranscriptForSource(null, currentSource)).toBe(false);
+    expect(shouldReplaceTranscriptForSource(currentSource, sameSource)).toBe(false);
+    expect(shouldReplaceTranscriptForSource(currentSource, reboundSource)).toBe(true);
+  });
+
   it("detects when the message list is near the bottom", () => {
     expect(isNearMessageListBottom({ scrollHeight: 1000, scrollTop: 780, clientHeight: 120 })).toBe(true);
     expect(isNearMessageListBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 120 })).toBe(false);
+  });
+
+  it("does not auto-page transcript history before the initial bottom scroll is ready", () => {
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 1000, scrollTop: 0, clientHeight: 400 },
+        {
+          initialScrollReady: false,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 20
+        }
+      )
+    ).toBeNull();
+  });
+
+  it("does not auto-page transcript history when the recent tail does not overflow", () => {
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 320, scrollTop: 0, clientHeight: 400 },
+        {
+          initialScrollReady: true,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 20
+        }
+      )
+    ).toBeNull();
+  });
+
+  it("auto-pages older transcript history only after an upward near-top scroll", () => {
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 1200, scrollTop: 40, clientHeight: 400 },
+        {
+          initialScrollReady: true,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 100
+        }
+      )
+    ).toBe("older");
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 1200, scrollTop: 40, clientHeight: 400 },
+        {
+          initialScrollReady: true,
+          hasMoreBefore: true,
+          hasMoreAfter: false,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 0
+        }
+      )
+    ).toBeNull();
+  });
+
+  it("auto-pages newer transcript history only after a downward near-bottom scroll", () => {
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 1200, scrollTop: 700, clientHeight: 400 },
+        {
+          initialScrollReady: true,
+          hasMoreBefore: false,
+          hasMoreAfter: true,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 640
+        }
+      )
+    ).toBe("newer");
+    expect(
+      messageListAutoPageAction(
+        { scrollHeight: 1200, scrollTop: 700, clientHeight: 400 },
+        {
+          initialScrollReady: true,
+          hasMoreBefore: false,
+          hasMoreAfter: true,
+          firstSequence: 10,
+          lastSequence: 30,
+          loadingOlder: false,
+          loadingNewer: false,
+          previousScrollTop: 760
+        }
+      )
+    ).toBeNull();
   });
 
   it("only sticks to bottom for live updates when already near bottom", () => {
@@ -614,6 +763,25 @@ describe("groupStackableMessages", () => {
       ]
     });
     expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
+  });
+
+  it("keeps only the newest assistant message visible when a page starts mid-turn", () => {
+    const items = groupStackableMessages([
+      message("session-a", 2, "first answer", "assistant", "assistant"),
+      message("session-a", 3, "tool_result", "tool", "tool_output"),
+      message("session-a", 4, "second answer", "assistant", "assistant"),
+      message("session-a", 5, "next prompt")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["activity", "message", "message"]);
+    expect(items[0]).toMatchObject({
+      messages: [
+        expect.objectContaining({ text: "first answer" }),
+        expect.objectContaining({ text: "tool_result" })
+      ]
+    });
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
+    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "next prompt" }) });
   });
 
   it("uses the newest assistant response when duplicate progress responses are present", () => {
