@@ -25,6 +25,7 @@ export function AppShell() {
   const [showConnectButton, setShowConnectButton] = useState(false);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
   const sessionRequestIdRef = useRef(0);
   const connectionStateRef = useRef<ShellConnectionState>("checking");
 
@@ -97,21 +98,44 @@ export function AppShell() {
     const interval = setInterval(() => void loadSessions().catch(markDisconnected), SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    const reconnectSockets = () => {
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (closing) return;
+        setConnectionEpoch((epoch) => epoch + 1);
+        setShellSocketEpoch((epoch) => epoch + 1);
+      }, SHELL_RECONNECT_INTERVAL_MS);
+    };
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
       if (shouldRefreshSessionsForEvent(event)) scheduleLoad();
     };
     socket.onclose = () => {
       if (closing) return;
-      markDisconnected();
+      void api
+        .me()
+        .then((me) => {
+          if (closing) return;
+          if (!me.accessGranted) {
+            markUnauthorized();
+            return;
+          }
+          applyMe(me);
+          reconnectSockets();
+        })
+        .catch((error) => {
+          if (!closing) markDisconnected(error);
+        });
     };
     return () => {
       closing = true;
       if (refreshTimer) clearTimeout(refreshTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(interval);
       socket.close();
     };
-  }, [connectionState, loadSessions, markDisconnected]);
+  }, [applyMe, connectionState, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "disconnected") return undefined;
@@ -155,7 +179,6 @@ export function AppShell() {
       <header className="topbar">
         <div className="brand">
           <strong>muxpilot</strong>
-          <span>tmux managed</span>
         </div>
         <SessionStoplight counts={stoplightCounts} onSelect={(severity) => navigate(`/?statusSeverity=${severity}`)} />
         <div className="topbar-actions">
