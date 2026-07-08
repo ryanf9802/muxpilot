@@ -22,7 +22,12 @@ export function globalNotificationRules(settings: NotificationSettings | null): 
 }
 
 export function notificationToastMessage(payload: NotificationTriggeredPayload): string {
-  return `${payload.sessionName}: ${notificationRulesLabel(payload.rules)} (${payload.previousStatus} -> ${payload.status})`;
+  return `${payload.sessionName}: ${notificationStatusLabel(payload.status)}`;
+}
+
+export function notificationStatusLabel(status: NotificationTriggeredPayload["status"]): string {
+  if (status === "plan_ready") return "plan ready";
+  return status.replace(/_/g, " ");
 }
 
 export function playNotificationBell(): void {

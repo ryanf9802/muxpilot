@@ -60,8 +60,8 @@ export class NotificationService {
   private async handleEvent(event: SessionEvent): Promise<void> {
     if (event.type === "session.updated") {
       const session = event.payload as Partial<ManagedSession>;
-      if (typeof session.id === "string" && isSessionStatus(session.status) && !this.knownStatuses.has(session.id)) {
-        this.knownStatuses.set(session.id, session.status);
+      if (typeof session.id === "string" && isSessionStatus(session.status)) {
+        await this.handleStatusTransition(session.id, session.status);
       }
       return;
     }
@@ -70,20 +70,24 @@ export class NotificationService {
     const nextStatus = statusFromPayload(event.payload);
     if (!nextStatus) return;
 
-    const previousStatus = this.knownStatuses.get(event.sessionId);
-    this.knownStatuses.set(event.sessionId, nextStatus);
+    await this.handleStatusTransition(event.sessionId, nextStatus);
+  }
+
+  private async handleStatusTransition(sessionId: string, nextStatus: SessionStatus): Promise<void> {
+    const previousStatus = this.knownStatuses.get(sessionId);
+    this.knownStatuses.set(sessionId, nextStatus);
     if (!previousStatus || previousStatus === nextStatus) return;
 
     const settings = await this.db.getNotificationSettings();
-    const matchedRules = matchingNotificationRules(settings, event.sessionId, previousStatus, nextStatus);
+    const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus);
     if (matchedRules.length === 0) return;
 
-    const session = await this.db.getSession(event.sessionId);
-    const payload = notificationPayload(session, event.sessionId, previousStatus, nextStatus, matchedRules);
+    const session = await this.db.getSession(sessionId);
+    const payload = notificationPayload(session, sessionId, previousStatus, nextStatus, matchedRules);
     const triggeredEvent: SessionEvent = {
       id: eventId(),
       type: "notification.triggered",
-      sessionId: event.sessionId,
+      sessionId,
       payload,
       timestamp: nowIso()
     };
@@ -116,6 +120,7 @@ export function matchingNotificationRules(
   previousStatus: SessionStatus,
   status: SessionStatus
 ): NotificationRuleType[] {
+  if (status === "missing") return [];
   const enabled = new Set<NotificationRuleType>([...settings.globalRules, ...(settings.sessionRules[sessionId] ?? [])]);
   return NOTIFICATION_RULE_TYPES.filter((type) => enabled.has(type) && notificationRuleMatches(type, previousStatus, status));
 }
@@ -135,7 +140,7 @@ function notificationPayload(
 ): NotificationTriggeredPayload {
   const sessionName = session?.tmux.windowName || session?.repo.name || "Session";
   const title = rules.length === 1 ? notificationRuleLabel(rules[0]!) : "Multiple muxpilot alerts";
-  const body = `${sessionName}: ${previousStatus} -> ${status}`;
+  const body = `${sessionName}: ${notificationStatusLabel(status)}`;
   return {
     sessionId,
     sessionName,
@@ -165,6 +170,11 @@ function notificationRuleLabel(type: NotificationRuleType): string {
   if (type === "done_task") return "Task done";
   if (type === "approval_gate") return "Approval gate";
   return "Status changed";
+}
+
+function notificationStatusLabel(status: SessionStatus): string {
+  if (status === "plan_ready") return "plan ready";
+  return status.replace(/_/g, " ");
 }
 
 function statusFromPayload(payload: unknown): SessionStatus | null {
