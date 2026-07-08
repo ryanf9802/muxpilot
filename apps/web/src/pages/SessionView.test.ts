@@ -6,6 +6,7 @@ import {
   activeSkillToken,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
+  blurActiveElementForVimSubmit,
   buildQuestionAnswerRequest,
   composerLockReason,
   composerDraftStorageKey,
@@ -104,6 +105,22 @@ describe("shouldSubmitComposer", () => {
 
   it("does not submit on plain Enter", () => {
     expect(shouldSubmitComposer({ ctrlKey: false, key: "Enter" })).toBe(false);
+  });
+});
+
+describe("blurActiveElementForVimSubmit", () => {
+  it("blurs the active element only when Vim mode is enabled", () => {
+    class FakeHTMLElement {
+      blur = vi.fn();
+    }
+    vi.stubGlobal("HTMLElement", FakeHTMLElement);
+    const input = new FakeHTMLElement() as unknown as HTMLElement;
+
+    blurActiveElementForVimSubmit(false, input);
+    expect(input.blur).not.toHaveBeenCalled();
+
+    blurActiveElementForVimSubmit(true, input);
+    expect(input.blur).toHaveBeenCalledOnce();
   });
 });
 
@@ -237,16 +254,19 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("g"), false)).toEqual({
       command: null,
       pendingG: true,
+      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("g"), true)).toEqual({
       command: "jumpTop",
       pendingG: false,
+      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("G", { shiftKey: true }), false)).toEqual({
       command: "jumpBottom",
       pendingG: false,
+      pendingCtrlW: false,
       preventDefault: true
     });
   });
@@ -262,12 +282,35 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("/"), false)).toEqual({
       command: "find",
       pendingG: false,
+      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("f", { metaKey: true }), false)).toEqual({
       command: null,
       pendingG: false,
+      pendingCtrlW: false,
       preventDefault: false
+    });
+  });
+
+  it("maps ctrl-w j to normal-mode composer focus", () => {
+    expect(transcriptVimNavigationCommand(keyEvent("w", { ctrlKey: true }), false)).toEqual({
+      command: null,
+      pendingG: false,
+      pendingCtrlW: true,
+      preventDefault: true
+    });
+    expect(transcriptVimNavigationCommand(keyEvent("j"), false, true)).toEqual({
+      command: "focusInput",
+      pendingG: false,
+      pendingCtrlW: false,
+      preventDefault: true
+    });
+    expect(transcriptVimNavigationCommand(keyEvent("j", { ctrlKey: true }), false, true)).toEqual({
+      command: "focusInput",
+      pendingG: false,
+      pendingCtrlW: false,
+      preventDefault: true
     });
   });
 

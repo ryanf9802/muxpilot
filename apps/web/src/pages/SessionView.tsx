@@ -87,7 +87,7 @@ export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live"
 export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
-export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
+export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find" | "focusInput";
 export interface PendingUserMessage {
   id: string;
   sessionId: string;
@@ -233,27 +233,32 @@ export function shouldIgnoreTranscriptVimKeyTarget(target: EventTarget | null): 
 
 export function transcriptVimNavigationCommand(
   event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
-  pendingG: boolean
-): { command: TranscriptVimNavigationCommand | null; pendingG: boolean; preventDefault: boolean } {
-  if (event.metaKey || event.altKey) return { command: null, pendingG: false, preventDefault: false };
+  pendingG: boolean,
+  pendingCtrlW = false
+): { command: TranscriptVimNavigationCommand | null; pendingG: boolean; pendingCtrlW: boolean; preventDefault: boolean } {
+  if (event.metaKey || event.altKey) return { command: null, pendingG: false, pendingCtrlW: false, preventDefault: false };
+  if (pendingCtrlW && event.key.toLowerCase() === "j") {
+    return { command: "focusInput", pendingG: false, pendingCtrlW: false, preventDefault: true };
+  }
   if (event.ctrlKey) {
     const key = event.key.toLowerCase();
-    if (key === "u") return { command: "halfUp", pendingG: false, preventDefault: true };
-    if (key === "d") return { command: "halfDown", pendingG: false, preventDefault: true };
-    if (key === "b") return { command: "pageUp", pendingG: false, preventDefault: true };
-    if (key === "f") return { command: "pageDown", pendingG: false, preventDefault: true };
-    return { command: null, pendingG: false, preventDefault: false };
+    if (key === "w") return { command: null, pendingG: false, pendingCtrlW: true, preventDefault: true };
+    if (key === "u") return { command: "halfUp", pendingG: false, pendingCtrlW: false, preventDefault: true };
+    if (key === "d") return { command: "halfDown", pendingG: false, pendingCtrlW: false, preventDefault: true };
+    if (key === "b") return { command: "pageUp", pendingG: false, pendingCtrlW: false, preventDefault: true };
+    if (key === "f") return { command: "pageDown", pendingG: false, pendingCtrlW: false, preventDefault: true };
+    return { command: null, pendingG: false, pendingCtrlW: false, preventDefault: false };
   }
   if (event.key === "g" && !event.shiftKey) {
     return pendingG
-      ? { command: "jumpTop", pendingG: false, preventDefault: true }
-      : { command: null, pendingG: true, preventDefault: true };
+      ? { command: "jumpTop", pendingG: false, pendingCtrlW: false, preventDefault: true }
+      : { command: null, pendingG: true, pendingCtrlW: false, preventDefault: true };
   }
   if (event.key === "G" || (event.key === "g" && event.shiftKey)) {
-    return { command: "jumpBottom", pendingG: false, preventDefault: true };
+    return { command: "jumpBottom", pendingG: false, pendingCtrlW: false, preventDefault: true };
   }
-  if (event.key === "/") return { command: "find", pendingG: false, preventDefault: true };
-  return { command: null, pendingG: false, preventDefault: false };
+  if (event.key === "/") return { command: "find", pendingG: false, pendingCtrlW: false, preventDefault: true };
+  return { command: null, pendingG: false, pendingCtrlW: false, preventDefault: false };
 }
 
 export interface TranscriptFindEntry {
@@ -494,6 +499,7 @@ export function SessionView() {
   const messageMenuRef = useRef<HTMLDivElement>(null);
   const transcriptFindInputRef = useRef<HTMLInputElement>(null);
   const vimPendingGRef = useRef(false);
+  const vimPendingCtrlWRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
   activeIdRef.current = id;
@@ -608,17 +614,21 @@ export function SessionView() {
 
   useEffect(() => {
     if (!effectiveVimEnabled) {
-      clearPendingTranscriptGKey();
+      clearPendingTranscriptVimPrefix();
       return undefined;
     }
 
     const handleTranscriptVimKeyDown = (event: globalThis.KeyboardEvent) => {
       if (shouldIgnoreTranscriptVimKeyTarget(event.target)) return;
-      const result = transcriptVimNavigationCommand(event, vimPendingGRef.current);
-      clearPendingTranscriptGKey();
+      const result = transcriptVimNavigationCommand(event, vimPendingGRef.current, vimPendingCtrlWRef.current);
+      clearPendingTranscriptVimPrefix();
       if (result.pendingG) {
         vimPendingGRef.current = true;
-        vimPendingGTimerRef.current = window.setTimeout(clearPendingTranscriptGKey, 800);
+        vimPendingGTimerRef.current = window.setTimeout(clearPendingTranscriptVimPrefix, 800);
+      }
+      if (result.pendingCtrlW) {
+        vimPendingCtrlWRef.current = true;
+        vimPendingGTimerRef.current = window.setTimeout(clearPendingTranscriptVimPrefix, 800);
       }
       if (result.preventDefault) event.preventDefault();
       if (!result.command) return;
@@ -628,7 +638,7 @@ export function SessionView() {
     window.addEventListener("keydown", handleTranscriptVimKeyDown);
     return () => {
       window.removeEventListener("keydown", handleTranscriptVimKeyDown);
-      clearPendingTranscriptGKey();
+      clearPendingTranscriptVimPrefix();
     };
   }, [effectiveVimEnabled, id, jumpBusy]);
 
@@ -1059,8 +1069,9 @@ export function SessionView() {
     if (action === "newer") void loadNewerMessages();
   }
 
-  function clearPendingTranscriptGKey() {
+  function clearPendingTranscriptVimPrefix() {
     vimPendingGRef.current = false;
+    vimPendingCtrlWRef.current = false;
     if (vimPendingGTimerRef.current !== null) {
       window.clearTimeout(vimPendingGTimerRef.current);
       vimPendingGTimerRef.current = null;
@@ -1078,6 +1089,11 @@ export function SessionView() {
     }
     if (command === "find") {
       setTranscriptFindOpen(true);
+      return;
+    }
+    if (command === "focusInput") {
+      if (!sessionRef.current || approval || submitBusy || composerLocked) return;
+      setComposerFocusRequest((current) => ({ nonce: (current?.nonce ?? 0) + 1, command: "focus" }));
       return;
     }
     const container = messageListRef.current;
@@ -1140,6 +1156,7 @@ export function SessionView() {
     const value = text.trimEnd();
     if (!value) return;
     const pendingMessage = createPendingUserMessage(id, value, session?.inputMode ?? "default");
+    blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
     updateComposerText("");
     setPendingUserMessage(pendingMessage);
     setSubmitBusy(true);
@@ -1512,6 +1529,7 @@ export function SessionView() {
               }}
               onFocus={() => setComposerFocused(true)}
               onBlur={() => setComposerFocused(false)}
+              onTranscriptFocus={() => messageListRef.current?.focus()}
               skills={codexSkills}
               onSkillSearch={() => void refreshCodexSkills()}
               placeholder={
@@ -1548,6 +1566,11 @@ export function SessionView() {
 
 export function shouldSubmitComposer(event: Pick<KeyboardEvent<HTMLTextAreaElement>, "ctrlKey" | "key">): boolean {
   return event.ctrlKey && event.key === "Enter";
+}
+
+export function blurActiveElementForVimSubmit(vimEnabled: boolean, activeElement: Element | null): void {
+  if (!vimEnabled || typeof HTMLElement === "undefined" || !(activeElement instanceof HTMLElement)) return;
+  activeElement.blur();
 }
 
 export function composerLockReason(hasPendingQuestion: boolean, hasPendingPlan: boolean): string | null {
@@ -1724,6 +1747,21 @@ export function runVimEscapeCommand(view: EditorView): boolean {
   return true;
 }
 
+export function runVimTranscriptFocusCommand(view: EditorView, onTranscriptFocus?: () => void): boolean {
+  if (!canRunVimWindowCommand(view)) return false;
+  view.contentDOM.blur();
+  view.dom.blur();
+  onTranscriptFocus?.();
+  return true;
+}
+
+function canRunVimWindowCommand(view: EditorView): boolean {
+  const cm = getCM(view);
+  const vimState = cm?.state.vim ?? null;
+  if (!cm || !vimState || vimState.insertMode || vimState.visualMode) return false;
+  return true;
+}
+
 export function resetVimToNormalMode(view: EditorView): boolean {
   const cm = getCM(view);
   const vimState = cm?.state.vim ?? null;
@@ -1772,6 +1810,7 @@ function VimPromptEditor({
   onSuggestionCommand,
   onFocus,
   onBlur,
+  onTranscriptFocus,
   skills,
   placeholder,
   disabled,
@@ -1786,6 +1825,7 @@ function VimPromptEditor({
   onSuggestionCommand?: (command: SkillSuggestionCommand) => boolean;
   onFocus?: () => void;
   onBlur?: () => void;
+  onTranscriptFocus?: () => void;
   skills: CodexSkill[];
   placeholder?: string;
   disabled?: boolean;
@@ -1802,7 +1842,10 @@ function VimPromptEditor({
   const onSuggestionCommandRef = useRef(onSuggestionCommand);
   const onFocusRef = useRef(onFocus);
   const onBlurRef = useRef(onBlur);
+  const onTranscriptFocusRef = useRef(onTranscriptFocus);
   const onCaretChangeRef = useRef(onCaretChange);
+  const pendingCtrlWRef = useRef(false);
+  const pendingCtrlWTimerRef = useRef<number | null>(null);
   const rebuildCaretRef = useRef(0);
   const rebuildFocusedRef = useRef(false);
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
@@ -1814,8 +1857,9 @@ function VimPromptEditor({
     onSuggestionCommandRef.current = onSuggestionCommand;
     onFocusRef.current = onFocus;
     onBlurRef.current = onBlur;
+    onTranscriptFocusRef.current = onTranscriptFocus;
     onCaretChangeRef.current = onCaretChange;
-  }, [onBlur, onCaretChange, onChange, onFocus, onSubmitShortcut, onSuggestionCommand]);
+  }, [onBlur, onCaretChange, onChange, onFocus, onSubmitShortcut, onSuggestionCommand, onTranscriptFocus]);
 
   useEffect(() => {
     valueRef.current = value;
@@ -1849,6 +1893,24 @@ function VimPromptEditor({
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
+
+    const clearPendingCtrlW = () => {
+      pendingCtrlWRef.current = false;
+      if (pendingCtrlWTimerRef.current !== null) {
+        window.clearTimeout(pendingCtrlWTimerRef.current);
+        pendingCtrlWTimerRef.current = null;
+      }
+    };
+    const armPendingCtrlW = () => {
+      clearPendingCtrlW();
+      pendingCtrlWRef.current = true;
+      pendingCtrlWTimerRef.current = window.setTimeout(clearPendingCtrlW, 800);
+    };
+    const runPendingCtrlWCommand = (view: EditorView) => {
+      if (!pendingCtrlWRef.current) return false;
+      clearPendingCtrlW();
+      return runVimTranscriptFocusCommand(view, onTranscriptFocusRef.current);
+    };
 
     const extensions: Extension[] = [
       Prec.highest(
@@ -1889,6 +1951,22 @@ function VimPromptEditor({
               if (onSuggestionCommandRef.current?.("next")) return true;
               return runVimCtrlJCommand(view);
             }
+          },
+          {
+            key: "Ctrl-w",
+            run: (view) => {
+              if (!canRunVimWindowCommand(view)) return false;
+              armPendingCtrlW();
+              return true;
+            }
+          },
+          {
+            key: "k",
+            run: runPendingCtrlWCommand
+          },
+          {
+            key: "Ctrl-k",
+            run: runPendingCtrlWCommand
           }
         ])
       ),
@@ -1935,6 +2013,7 @@ function VimPromptEditor({
     onCaretChangeRef.current(view.state.selection.main.head);
 
     return () => {
+      clearPendingCtrlW();
       rebuildCaretRef.current = view.state.selection.main.head;
       rebuildFocusedRef.current = view.hasFocus;
       view.destroy();
@@ -1953,6 +2032,7 @@ export function SkillTextArea({
   onSubmitShortcut,
   onFocus,
   onBlur,
+  onTranscriptFocus,
   skills,
   onSkillSearch,
   placeholder,
@@ -1968,6 +2048,7 @@ export function SkillTextArea({
   onSubmitShortcut?: () => void;
   onFocus?: () => void;
   onBlur?: () => void;
+  onTranscriptFocus?: () => void;
   skills: CodexSkill[];
   onSkillSearch?: () => void;
   placeholder?: string;
@@ -2119,6 +2200,7 @@ export function SkillTextArea({
             setFocused(false);
             onBlur?.();
           }}
+          onTranscriptFocus={onTranscriptFocus}
           skills={skills}
           placeholder={placeholder}
           disabled={disabled}
