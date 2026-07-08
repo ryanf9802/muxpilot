@@ -53,6 +53,7 @@ import {
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
   sessionModelDisplay,
+  SkillTextArea,
   skillSuggestionScore,
   skillSuggestions,
   stripAssistantSideChannelBlocks,
@@ -258,6 +259,24 @@ describe("skill composer helpers", () => {
     { name: "github:yeet", description: "Publish local changes", source: "plugin" as const, pluginName: "github" },
     { name: "pr-to-stage", description: "Prepare stage PRs", source: "user" as const }
   ];
+
+  it("renders the native composer with mobile autofill hints", () => {
+    const html = renderToStaticMarkup(
+      createElement(SkillTextArea, {
+        value: "",
+        onChange: () => undefined,
+        skills: [],
+        placeholder: "Send a message",
+        rows: 1
+      })
+    );
+
+    expect(html).toContain('autoComplete="off"');
+    expect(html).toContain('autoCorrect="off"');
+    expect(html).toContain('autoCapitalize="sentences"');
+    expect(html).toContain('spellCheck="true"');
+    expect(html).toContain('inputMode="text"');
+  });
 
   it("detects active dollar skill tokens until whitespace", () => {
     expect(activeSkillToken("use $team", 9)).toEqual({ start: 4, end: 9, query: "team" });

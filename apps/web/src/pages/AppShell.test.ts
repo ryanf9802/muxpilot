@@ -117,6 +117,9 @@ describe("ConnectDeviceContent", () => {
 
     expect(html).toContain("http://192.168.1.174:12778");
     expect(html).toContain('type="password"');
+    expect(html).toContain('autoComplete="off"');
+    expect(html).toContain('autoCorrect="off"');
+    expect(html).toContain('autoCapitalize="none"');
     expect(html).toContain('value="river-slate-42-orbit-copper-17"');
     expect(html).toContain("Show QR code");
     expect(html).toContain("Revoke remote access");

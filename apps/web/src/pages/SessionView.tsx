@@ -1583,7 +1583,7 @@ function VimPromptEditor({
   return <div className="vim-editor" ref={rootRef} />;
 }
 
-function SkillTextArea({
+export function SkillTextArea({
   value,
   onChange,
   onKeyDown,
