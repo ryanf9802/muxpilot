@@ -77,6 +77,22 @@ describe("operator access routes", () => {
     await app.close();
   });
 
+  it("grants remote access without a key when unrestricted remote access is enabled", async () => {
+    const app = await buildProtectedApp(testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" }), {
+      unrestrictedRemoteAccessEnabled: true
+    });
+
+    const me = await app.inject({ method: "GET", url: "/api/me", headers: remoteHeaders() });
+    expect(me.json()).toEqual({
+      accessGranted: true,
+      accessKeyRequired: false,
+      accessMode: "unrestricted",
+      sessionHostMode: "local"
+    });
+    expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders() })).statusCode).toBe(200);
+    await app.close();
+  });
+
   it("allows host-only routes from loopback and rejects proxied remote browsers", async () => {
     const access = createAccessControl(testConfig({ lanEnabled: true, host: "0.0.0.0" }));
     const app = Fastify();
@@ -113,6 +129,31 @@ describe("operator access routes", () => {
     await app.close();
   });
 
+  it("invalidates existing remote cookies when unrestricted remote access is disabled", async () => {
+    const config = testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" });
+    const access = createAccessControl(config);
+    const app = Fastify();
+    await app.register(cookie);
+    access.register(app);
+    app.get("/protected", { preHandler: access.requireAccess }, async () => ({ ok: true }));
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/access",
+      headers: remoteHeaders(),
+      payload: { accessKey: "correct-access-key" }
+    });
+    const remoteCookie = login.cookies[0]!;
+
+    access.setUnrestrictedRemoteAccessEnabled(true);
+    expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders() })).statusCode).toBe(200);
+
+    access.setUnrestrictedRemoteAccessEnabled(false);
+    expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders(), cookies: { [remoteCookie.name]: remoteCookie.value } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders() })).statusCode).toBe(401);
+    await app.close();
+  });
+
   it("rejects remote cookies signed before a backend restart", async () => {
     const firstApp = await buildProtectedApp(testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key", sessionSecret: "first-secret-at-least-16-chars" }));
     const login = await firstApp.inject({
@@ -138,10 +179,10 @@ async function buildApp(config: AppConfig) {
   return app;
 }
 
-async function buildProtectedApp(config: AppConfig) {
+async function buildProtectedApp(config: AppConfig, options?: Parameters<typeof createAccessControl>[1]) {
   const app = Fastify();
   await app.register(cookie);
-  const access = createAccessControl(config);
+  const access = createAccessControl(config, options);
   access.register(app);
   app.get("/protected", { preHandler: access.requireAccess }, async () => ({ ok: true }));
   return app;

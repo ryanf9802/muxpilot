@@ -498,6 +498,31 @@ describe("AppDatabase activity summary settings", () => {
   });
 });
 
+describe("AppDatabase remote access settings", () => {
+  it("defaults unrestricted remote access to disabled", async () => {
+    const db = await tempDb();
+
+    expect(await db.getUnrestrictedRemoteAccessEnabled()).toBe(false);
+    db.close();
+  });
+
+  it("persists unrestricted remote access enablement", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const db = new AppDatabase(path);
+
+    await db.setUnrestrictedRemoteAccessEnabled(true);
+    expect(await db.getUnrestrictedRemoteAccessEnabled()).toBe(true);
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.getUnrestrictedRemoteAccessEnabled()).toBe(true);
+    await restarted.setUnrestrictedRemoteAccessEnabled(false);
+    expect(await restarted.getUnrestrictedRemoteAccessEnabled()).toBe(false);
+    restarted.close();
+  });
+});
+
 async function tempDb(): Promise<AppDatabase> {
   const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
   return new AppDatabase(join(dir, "test.db"));

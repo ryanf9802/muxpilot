@@ -8,7 +8,8 @@ import type {
   ResolveApprovalRequest,
   SendInputRequest,
   SessionAction,
-  UpdateActivitySummarySettingsRequest
+  UpdateActivitySummarySettingsRequest,
+  UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
@@ -49,6 +50,7 @@ const questionAnswerSchema = z.object({
   )
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
+const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
 const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
@@ -71,13 +73,24 @@ export function registerRoutes(
   codexModels?: CodexModelsService,
   activitySummarizer?: ActivitySummarizer
 ): void {
-  app.get("/api/connectivity", { preHandler: access.requireAccess }, async () => buildConnectivity(config));
+  app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
+    buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
+  );
 
-  app.get("/api/remote-access", { preHandler: access.requireLocalAccess }, async () => buildRemoteAccess(config, access.currentAccessKey()));
+  app.get("/api/remote-access", { preHandler: access.requireLocalAccess }, async () =>
+    buildRemoteAccess(config, access.currentAccessKey(), undefined, access.isUnrestrictedRemoteAccessEnabled())
+  );
 
   app.post("/api/remote-access/revoke", { preHandler: access.requireLocalAccess }, async () => {
     const nextKey = access.revokeRemoteAccess();
-    return buildRemoteAccess(config, nextKey);
+    return buildRemoteAccess(config, nextKey, undefined, access.isUnrestrictedRemoteAccessEnabled());
+  });
+
+  app.patch("/api/remote-access/settings", { preHandler: access.requireLocalAccess }, async (request) => {
+    const parsed = remoteAccessSettingsSchema.parse(request.body) satisfies UpdateRemoteAccessSettingsRequest;
+    await db.setUnrestrictedRemoteAccessEnabled(parsed.unrestrictedRemoteAccess);
+    access.setUnrestrictedRemoteAccessEnabled(parsed.unrestrictedRemoteAccess);
+    return buildRemoteAccess(config, access.currentAccessKey(), undefined, access.isUnrestrictedRemoteAccessEnabled());
   });
 
   app.get("/api/codex/skills", { preHandler: access.requireAccess }, async (): Promise<CodexSkillsResponse> => ({

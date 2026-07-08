@@ -52,6 +52,21 @@ describe("buildConnectivity", () => {
     expect(response.pwaTrust.available).toBe(false);
   });
 
+  it("returns plain remote access URLs when unrestricted remote access is enabled", () => {
+    const response = buildRemoteAccess(
+      testConfig({ host: "0.0.0.0", lanEnabled: true }),
+      "river-slate-42-orbit-copper-17",
+      ["192.168.1.25"],
+      true
+    );
+
+    expect(response.accessMode).toBe("unrestricted");
+    expect(response.accessKeyRequired).toBe(false);
+    expect(response.unrestrictedRemoteAccess).toBe(true);
+    expect(response.primaryAccessUrl).toBe("http://192.168.1.25:5177");
+    expect(response.accessUrls).toEqual(["http://192.168.1.25:5177"]);
+  });
+
   it("returns PWA trust URLs when trust files are configured", () => {
     const response = buildRemoteAccess(
       testConfig({ host: "0.0.0.0", lanEnabled: true, pwaTrustDir: "/tmp/muxpilot-trust", pwaTrustPort: 12880 }),

@@ -3,10 +3,10 @@ import type { ConnectivityResponse, RemoteAccessResponse } from "@muxpilot/core"
 import type { AppConfig } from "../config/config.js";
 import { isLoopbackBindHost, requiresOperatorToken } from "../config/config.js";
 
-export function buildConnectivity(config: AppConfig, detectedLanAddresses = detectLanAddresses()): ConnectivityResponse {
+export function buildConnectivity(config: AppConfig, detectedLanAddresses = detectLanAddresses(), unrestrictedRemoteAccess = false): ConnectivityResponse {
   const lanAddresses = sortLanAddresses(Array.from(new Set(detectedLanAddresses)));
   const lanBound = !isLoopbackBindHost(config.host);
-  const accessMode = requiresOperatorToken(config) ? "token" : "local";
+  const accessMode = unrestrictedRemoteAccess ? "unrestricted" : requiresOperatorToken(config) ? "token" : "local";
   const candidateHosts = bindHosts(config.host, lanAddresses);
   const urls = lanBound ? candidateHosts.map((host) => `${config.webProtocol}://${host}:${config.webPort}`) : [];
   const warnings: string[] = [];
@@ -25,6 +25,7 @@ export function buildConnectivity(config: AppConfig, detectedLanAddresses = dete
     webPort: config.webPort,
     accessMode,
     accessKeyRequired: accessMode === "token",
+    unrestrictedRemoteAccess,
     phoneAccessAvailable: urls.length > 0,
     primaryUrl: urls[0] ?? null,
     urls,
@@ -33,13 +34,20 @@ export function buildConnectivity(config: AppConfig, detectedLanAddresses = dete
   };
 }
 
-export function buildRemoteAccess(config: AppConfig, accessKey: string, detectedLanAddresses = detectLanAddresses()): RemoteAccessResponse {
-  const connectivity = buildConnectivity(config, detectedLanAddresses);
-  const accessUrls = connectivity.urls.map((url) => {
-    const accessUrl = new URL("/access", url);
-    accessUrl.searchParams.set("accessKey", accessKey);
-    return accessUrl.toString();
-  });
+export function buildRemoteAccess(
+  config: AppConfig,
+  accessKey: string,
+  detectedLanAddresses = detectLanAddresses(),
+  unrestrictedRemoteAccess = false
+): RemoteAccessResponse {
+  const connectivity = buildConnectivity(config, detectedLanAddresses, unrestrictedRemoteAccess);
+  const accessUrls = unrestrictedRemoteAccess
+    ? connectivity.urls
+    : connectivity.urls.map((url) => {
+        const accessUrl = new URL("/access", url);
+        accessUrl.searchParams.set("accessKey", accessKey);
+        return accessUrl.toString();
+      });
 
   return {
     ...connectivity,

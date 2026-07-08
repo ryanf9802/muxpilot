@@ -99,6 +99,19 @@ describe("api client request headers", () => {
     expect(init.body).toBeUndefined();
   });
 
+  it("updates remote access settings", async () => {
+    const fetchMock = mockJsonResponse({ urls: [], accessUrls: [], accessKey: "river-slate-42-orbit-copper-17" });
+
+    await api.updateRemoteAccessSettings({ unrestrictedRemoteAccess: true });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/remote-access/settings",
+      expect.objectContaining({ method: "PATCH", credentials: "include" })
+    );
+    expect(init.body).toBe(JSON.stringify({ unrestrictedRemoteAccess: true }));
+  });
+
   it("requests message pages with cursor query parameters", async () => {
     const fetchMock = mockJsonResponse({ messages: [], hasMoreBefore: false, hasMoreAfter: false });
 

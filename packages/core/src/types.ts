@@ -226,7 +226,7 @@ export interface SessionEvent {
   timestamp: string;
 }
 
-export type AccessMode = "local" | "token";
+export type AccessMode = "local" | "token" | "unrestricted";
 export type SessionHostMode = "local";
 
 export interface AccessRequest {
@@ -251,11 +251,16 @@ export interface ConnectivityResponse {
   webPort: number;
   accessMode: AccessMode;
   accessKeyRequired: boolean;
+  unrestrictedRemoteAccess: boolean;
   phoneAccessAvailable: boolean;
   primaryUrl: string | null;
   urls: string[];
   lanAddresses: string[];
   warnings: string[];
+}
+
+export interface UpdateRemoteAccessSettingsRequest {
+  unrestrictedRemoteAccess: boolean;
 }
 
 export interface RemoteAccessResponse extends ConnectivityResponse {

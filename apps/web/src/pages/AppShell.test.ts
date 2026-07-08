@@ -45,6 +45,23 @@ describe("ConnectDeviceContent", () => {
     expect(html).toContain('value="river-slate-42-orbit-copper-17"');
     expect(html).toContain("Show QR code");
     expect(html).toContain("Revoke remote access");
+    expect(html).toContain("Allow unrestricted remote access");
+  });
+
+  it("renders unrestricted remote access without key controls", () => {
+    const remoteAccess = testRemoteAccess({
+      accessMode: "unrestricted",
+      accessKeyRequired: false,
+      unrestrictedRemoteAccess: true,
+      primaryAccessUrl: "http://192.168.1.174:12778"
+    });
+    const html = renderConnectDeviceContent(remoteAccess);
+
+    expect(remoteAccessQrValue(remoteAccess)).toBe("http://192.168.1.174:12778");
+    expect(html).toContain("Unrestricted remote");
+    expect(html).toContain("Remote devices will be able to connect without the access key.");
+    expect(html).not.toContain('type="password"');
+    expect(html).not.toContain("Copy key");
   });
 
   it("renders PWA trust controls when a trust URL is available", () => {
@@ -139,8 +156,10 @@ function renderConnectDeviceContent(remoteAccess: RemoteAccessResponse): string 
       remoteAccess,
       copiedValue: null,
       revokeBusy: false,
+      settingsBusy: false,
       onCopy: () => undefined,
-      onRevoke: () => undefined
+      onRevoke: () => undefined,
+      onUpdateUnrestrictedRemoteAccess: () => undefined
     })
   );
 }
@@ -157,6 +176,7 @@ function testRemoteAccess(input: Partial<RemoteAccessResponse> = {}): RemoteAcce
     webPort: 12778,
     accessMode: "token",
     accessKeyRequired: true,
+    unrestrictedRemoteAccess: false,
     phoneAccessAvailable: primaryUrl !== null,
     primaryUrl,
     primaryAccessUrl,

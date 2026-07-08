@@ -20,7 +20,8 @@ import type {
   SessionActionResponse,
   SessionAction,
   TranscriptPageResponse,
-  UpdateActivitySummarySettingsRequest
+  UpdateActivitySummarySettingsRequest,
+  UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
 
 export const AUTH_EXPIRED_EVENT = "muxpilot-auth-expired";
@@ -77,6 +78,8 @@ export const api = {
   connectivity: () => json<ConnectivityResponse>("/api/connectivity"),
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
+  updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
+    json<RemoteAccessResponse>("/api/remote-access/settings", { method: "PATCH", body: JSON.stringify(request) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
   codexModels: () => json<CodexModelsResponse>("/api/codex/models"),
   sessions: (q = "", status = "") =>

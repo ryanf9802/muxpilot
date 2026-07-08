@@ -291,6 +291,7 @@ function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [revokeBusy, setRevokeBusy] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
 
   useEffect(() => {
     api
@@ -325,6 +326,21 @@ function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {
     }
   }
 
+  async function updateUnrestrictedRemoteAccess(enabled: boolean) {
+    if (settingsBusy) return;
+    setSettingsBusy(true);
+    setError("");
+    try {
+      const response = await api.updateRemoteAccessSettings({ unrestrictedRemoteAccess: enabled });
+      setRemoteAccess(response);
+      setCopiedUrl(null);
+    } catch {
+      setError("Could not update remote access settings.");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   return (
     <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
       <section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-device-title">
@@ -343,8 +359,10 @@ function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {
             remoteAccess={remoteAccess}
             copiedValue={copiedUrl}
             revokeBusy={revokeBusy}
+            settingsBusy={settingsBusy}
             onCopy={copy}
             onRevoke={revokeRemoteAccess}
+            onUpdateUnrestrictedRemoteAccess={updateUnrestrictedRemoteAccess}
           />
         ) : null}
       </section>
@@ -356,14 +374,18 @@ export function ConnectDeviceContent({
   remoteAccess,
   copiedValue,
   revokeBusy,
+  settingsBusy,
   onCopy,
-  onRevoke
+  onRevoke,
+  onUpdateUnrestrictedRemoteAccess
 }: {
   remoteAccess: RemoteAccessResponse;
   copiedValue: string | null;
   revokeBusy: boolean;
+  settingsBusy: boolean;
   onCopy: (value: string) => void | Promise<void>;
   onRevoke: () => void | Promise<void>;
+  onUpdateUnrestrictedRemoteAccess: (enabled: boolean) => void | Promise<void>;
 }) {
   const [keyVisible, setKeyVisible] = useState(false);
   const [qrVisible, setQrVisible] = useState(false);
@@ -407,19 +429,21 @@ export function ConnectDeviceContent({
             </button>
           </div>
 
-          <label className="connect-access-key">
-            <span>Access key</span>
-            <div>
-              <input readOnly type={keyVisible ? "text" : "password"} value={remoteAccess.accessKey} />
-              <button type="button" className="icon-button" onClick={() => setKeyVisible((visible) => !visible)} aria-label={keyVisible ? "Hide access key" : "Show access key"}>
-                {keyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-              <button type="button" className="copy-button" onClick={() => void onCopy(remoteAccess.accessKey)}>
-                {copiedValue === remoteAccess.accessKey ? <Check size={16} /> : <Copy size={16} />}
-                {copiedValue === remoteAccess.accessKey ? "Copied" : "Copy key"}
-              </button>
-            </div>
-          </label>
+          {remoteAccess.accessKeyRequired ? (
+            <label className="connect-access-key">
+              <span>Access key</span>
+              <div>
+                <input readOnly type={keyVisible ? "text" : "password"} value={remoteAccess.accessKey} />
+                <button type="button" className="icon-button" onClick={() => setKeyVisible((visible) => !visible)} aria-label={keyVisible ? "Hide access key" : "Show access key"}>
+                  {keyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+                <button type="button" className="copy-button" onClick={() => void onCopy(remoteAccess.accessKey)}>
+                  {copiedValue === remoteAccess.accessKey ? <Check size={16} /> : <Copy size={16} />}
+                  {copiedValue === remoteAccess.accessKey ? "Copied" : "Copy key"}
+                </button>
+              </div>
+            </label>
+          ) : null}
 
           {qrUrl ? (
             <div className="connect-qr-section">
@@ -474,7 +498,7 @@ export function ConnectDeviceContent({
         </div>
         <div>
           <dt>Access</dt>
-          <dd>{remoteAccess.accessKeyRequired ? "Access key required" : "Trusted local"}</dd>
+          <dd>{remoteAccess.unrestrictedRemoteAccess ? "Unrestricted remote" : remoteAccess.accessKeyRequired ? "Access key required" : "Trusted local"}</dd>
         </div>
       </dl>
 
@@ -493,6 +517,19 @@ export function ConnectDeviceContent({
           ))}
         </ul>
       ) : null}
+
+      <label className="connect-unrestricted">
+        <input
+          type="checkbox"
+          checked={remoteAccess.unrestrictedRemoteAccess}
+          disabled={settingsBusy}
+          onChange={(event) => void onUpdateUnrestrictedRemoteAccess(event.currentTarget.checked)}
+        />
+        <span>
+          <strong>Allow unrestricted remote access</strong>
+          <small>Remote devices will be able to connect without the access key.</small>
+        </span>
+      </label>
     </div>
   );
 }

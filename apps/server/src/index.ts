@@ -69,7 +69,9 @@ const manager = new SessionManager(
   codexProcessResolver,
   codexModels
 );
-const access = createAccessControl(config);
+const access = createAccessControl(config, {
+  unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()
+});
 
 await app.register(cookie);
 await app.register(cors, {

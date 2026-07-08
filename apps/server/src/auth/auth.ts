@@ -5,9 +5,10 @@ import { isLoopbackBindHost, randomAccessKey } from "../config/config.js";
 
 const COOKIE_NAME = "muxpilot_operator";
 
-export function createAccessControl(config: AppConfig) {
+export function createAccessControl(config: AppConfig, options: { unrestrictedRemoteAccessEnabled?: boolean } = {}) {
   let remoteAccessKey = config.operatorToken;
   let remoteAccessGeneration = 1;
+  let unrestrictedRemoteAccessEnabled = options.unrestrictedRemoteAccessEnabled ?? false;
   const remoteSockets = new Set<{ close: () => void }>();
 
   function sign(): string {
@@ -44,7 +45,11 @@ export function createAccessControl(config: AppConfig) {
   }
 
   function hasAccess(request: FastifyRequest): boolean {
-    return isLocalRequest(request) || verify(request.cookies[COOKIE_NAME]);
+    return isLocalRequest(request) || unrestrictedRemoteAccessEnabled || hasRemoteCookieAccess(request);
+  }
+
+  function hasRemoteCookieAccess(request: FastifyRequest): boolean {
+    return verify(request.cookies[COOKIE_NAME]);
   }
 
   async function requireAccess(request: FastifyRequest, reply: FastifyReply): Promise<void> {
@@ -67,6 +72,16 @@ export function createAccessControl(config: AppConfig) {
     return remoteAccessKey;
   }
 
+  function isUnrestrictedRemoteAccessEnabled(): boolean {
+    return unrestrictedRemoteAccessEnabled;
+  }
+
+  function setUnrestrictedRemoteAccessEnabled(enabled: boolean): void {
+    const changed = unrestrictedRemoteAccessEnabled !== enabled;
+    unrestrictedRemoteAccessEnabled = enabled;
+    if (changed && !enabled) revokeRemoteAccess();
+  }
+
   function trackRemoteSocket(request: FastifyRequest, socket: { close: () => void }): void {
     if (isLocalRequest(request)) return;
     remoteSockets.add(socket);
@@ -78,7 +93,7 @@ export function createAccessControl(config: AppConfig) {
 
   function register(app: FastifyInstance): void {
     app.post("/api/access", async (request, reply) => {
-      if (isLocalRequest(request)) return { ok: true };
+      if (isLocalRequest(request) || unrestrictedRemoteAccessEnabled) return { ok: true };
 
       const { accessKey } = parseAccessRequest(request.body);
       if (!accessKey || !tokensEqual(accessKey, remoteAccessKey)) {
@@ -104,7 +119,7 @@ export function createAccessControl(config: AppConfig) {
       return {
         accessGranted,
         accessKeyRequired: !local && !accessGranted,
-        accessMode: local ? "local" : "token",
+        accessMode: local ? "local" : unrestrictedRemoteAccessEnabled ? "unrestricted" : "token",
         sessionHostMode: "local"
       };
     });
@@ -117,6 +132,8 @@ export function createAccessControl(config: AppConfig) {
     hasAccess,
     isLocalRequest,
     currentAccessKey,
+    isUnrestrictedRemoteAccessEnabled,
+    setUnrestrictedRemoteAccessEnabled,
     revokeRemoteAccess,
     trackRemoteSocket,
     untrackRemoteSocket,

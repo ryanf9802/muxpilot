@@ -18,6 +18,7 @@ import { buildExpandedTranscriptItems, buildTranscriptItems, hasCompleteProposed
 
 type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
 const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
+const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 
 interface SessionRow {
   id: string;
@@ -275,6 +276,14 @@ export class AppDatabase {
 
   setActivitySummariesEnabled(enabled: boolean): Promise<boolean> {
     return this.call("setActivitySummariesEnabled", enabled) as Promise<boolean>;
+  }
+
+  getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
+    return this.call("getUnrestrictedRemoteAccessEnabled") as Promise<boolean>;
+  }
+
+  setUnrestrictedRemoteAccessEnabled(enabled: boolean): Promise<boolean> {
+    return this.call("setUnrestrictedRemoteAccessEnabled", enabled) as Promise<boolean>;
   }
 
   latestApprovalMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -924,6 +933,26 @@ export class SyncAppDatabase {
   }
 
   setActivitySummariesEnabled(enabled: boolean): boolean {
+    this.setBooleanSetting(ACTIVITY_SUMMARIES_ENABLED_SETTING, enabled);
+    return enabled;
+  }
+
+  getUnrestrictedRemoteAccessEnabled(): boolean {
+    return this.getBooleanSetting(UNRESTRICTED_REMOTE_ACCESS_SETTING, false);
+  }
+
+  setUnrestrictedRemoteAccessEnabled(enabled: boolean): boolean {
+    this.setBooleanSetting(UNRESTRICTED_REMOTE_ACCESS_SETTING, enabled);
+    return enabled;
+  }
+
+  private getBooleanSetting(key: string, defaultValue: boolean): boolean {
+    const row = this.db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
+    if (!row) return defaultValue;
+    return row.value === "true";
+  }
+
+  private setBooleanSetting(key: string, enabled: boolean): void {
     this.db
       .prepare(
         `INSERT INTO app_settings (key, value, updated_at)
@@ -932,8 +961,7 @@ export class SyncAppDatabase {
           value=excluded.value,
           updated_at=excluded.updated_at`
       )
-      .run(ACTIVITY_SUMMARIES_ENABLED_SETTING, enabled ? "true" : "false", new Date().toISOString());
-    return enabled;
+      .run(key, enabled ? "true" : "false", new Date().toISOString());
   }
 
   latestApprovalMessage(sessionId: string): ChatMessage | null {

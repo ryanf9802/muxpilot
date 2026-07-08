@@ -929,6 +929,37 @@ select:disabled {
   color: var(--red);
 }
 
+.connect-unrestricted {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  padding-top: 2px;
+  color: var(--red);
+}
+
+.connect-unrestricted input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+  accent-color: var(--red);
+}
+
+.connect-unrestricted span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.connect-unrestricted strong,
+.connect-unrestricted small {
+  color: var(--red);
+}
+
+.connect-unrestricted small {
+  line-height: 1.35;
+}
+
 .connect-url-list {
   display: grid;
   gap: 8px;
