@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.turbo/
+.vite/
+.env
+.env.local
+.certs/*
+!.certs/pwa-ca/
+.certs/pwa-ca/*
+!.certs/pwa-ca/.gitkeep
+data/
+coverage/
+playwright-report/
+test-results/
+.playwright-mcp/
+*.log

@@ -1,0 +1,31 @@
+{
+  "name": "@muxpilot/web",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host ${MUXPILOT_WEB_HOST:-${MUXPILOT_HOST:-127.0.0.1}} --port ${MUXPILOT_WEB_PORT:-5177}",
+    "run:prod": "vite preview --host ${MUXPILOT_WEB_HOST:-${MUXPILOT_HOST:-127.0.0.1}} --port ${MUXPILOT_WEB_PORT:-12778} --strictPort",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@muxpilot/core": "workspace:*",
+    "@vitejs/plugin-react": "^4.6.0",
+    "lucide-react": "^0.525.0",
+    "qr-scanner": "1.4.2",
+    "qrcode.react": "4.2.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.6.3",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.2",
+    "vitest": "^3.2.4"
+  }
+}

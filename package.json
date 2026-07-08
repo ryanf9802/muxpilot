@@ -1,0 +1,31 @@
+{
+  "name": "muxpilot",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "node -e \"console.error('Use pnpm run:dev to start or reuse the dev server.'); process.exit(1)\"",
+    "run:dev": "node scripts/run-dev.mjs",
+    "run:prod": "node scripts/run-prod.mjs",
+    "stop": "pnpm dev:stop",
+    "dev:stop": "node scripts/stop-dev.mjs dev",
+    "prod:stop": "node scripts/stop-dev.mjs prod",
+    "icons:generate": "node scripts/generate-icons.mjs",
+    "pwa:setup": "node scripts/setup-pwa-certs.mjs setup",
+    "pwa:trust": "node scripts/setup-pwa-certs.mjs trust",
+    "pwa:certs:status": "node scripts/setup-pwa-certs.mjs status",
+    "db:reset": "node scripts/reset-dbs.mjs",
+    "db:reset:dev": "node scripts/reset-dbs.mjs --dev",
+    "db:reset:prod": "node scripts/reset-dbs.mjs --prod",
+    "dev:server": "pnpm --filter @muxpilot/server dev",
+    "dev:web": "pnpm --filter @muxpilot/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.10",
+    "typescript": "^5.8.3"
+  }
+}
