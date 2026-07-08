@@ -2,6 +2,8 @@
 
 `muxpilot` exists for a narrow local workflow: supervising Codex CLI agents that are already running in tmux in a WSL2 development environment. It gives one operator a browser console for seeing what those agents are doing, reading their structured Codex transcripts, sending input, answering prompts, and interacting with sessions from a phone on the same LAN.
 
+The desktop browser is the control surface, but the phone experience is a first-class reason for the app: muxpilot is meant to make it practical to check agent state, answer time-sensitive prompts, and send small follow-ups without sitting at the tmux host.
+
 It is not a hosted control plane, a general remote shell, or a replacement for tmux. The backend is the trusted local process. It talks to tmux, reads Codex JSONL files from `~/.codex/sessions`, stores local state in SQLite, and exposes constrained HTTP/WebSocket APIs to the React UI.
 
 ## What muxpilot is for
@@ -14,7 +16,7 @@ The main use case is running several Codex agents in tmux panes and needing a hi
 - Send follow-up input to Codex from the browser.
 - Answer Codex approval prompts, plan prompts, and questions.
 - Queue input while a session is busy.
-- Use a phone as a same-LAN status and response surface.
+- Use a phone as a same-LAN status and response surface for quick operator actions.
 
 The supported runtime model is local-first: tmux, Codex, the backend, SQLite, and the web UI all run on the same developer-controlled host. Phone access is same-LAN only (currently).
 
@@ -26,7 +28,7 @@ The supported runtime model is local-first: tmux, Codex, the backend, SQLite, an
 - Raw terminal view for cases where the structured transcript is not enough.
 - Session actions such as rename, detach notice, kill pane, and archive transcript.
 - Optional prompt-only activity summaries and OpenAI usage/cost tracking when `OPENAI_API_KEY` is configured.
-- Same-LAN phone connection flow with generated access key, QR/link sharing, and optional HTTPS/PWA certificate setup.
+- Same-LAN phone connection flow with generated access key, QR/link sharing, installable PWA support, and optional HTTPS certificate setup for camera-based QR scanning.
 - Windows 11 + WSL2 LAN helper scripts for exposing the web UI port to phones on the same network.
 
 ## First-time production preview setup
@@ -67,7 +69,7 @@ See [docs/setup.md](docs/setup.md) and [docs/deployment.md](docs/deployment.md) 
 
 ## Remote access setup
 
-Remote access means same-LAN access from another device, usually a phone. muxpilot is not designed to be exposed directly to the internet.
+Remote access means same-LAN access from another device, usually a phone. This is the intended mobile workflow: keep Codex and tmux on the WSL2 host, then use the phone UI for quick checks, prompt responses, and lightweight follow-up messages. muxpilot is not designed to be exposed directly to the internet.
 
 1. Enable LAN mode in `.env`:
 
