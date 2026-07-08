@@ -817,6 +817,71 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("keeps plan-mode sessions planning while the proposed plan is still being emitted", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "planning-plan-output.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", collaboration_mode_kind: "plan" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "user_message", message: "make a plan" }
+        }),
+        ""
+      ].join("\n")
+    );
+    await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
+    let capture = "working (1s)\nEsc to interrupt";
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => capture;
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+
+    capture = "› ";
+    await harness.manager.discover();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+
+    await appendFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:03.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "<proposed_plan>\nDo it.\n</proposed_plan>" }]
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    await harness.manager.ingest();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("plan_ready");
+    harness.db.close();
+  });
+
   it("marks complete proposed plans as plan ready until a plan action is chosen", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
