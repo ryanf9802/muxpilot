@@ -10,6 +10,14 @@ describe("StatusPill", () => {
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "plan_ready" }))).toContain(">plan ready<");
   });
 
+  it("keeps status text accessible when CSS renders it as a mobile dot", () => {
+    const html = renderToStaticMarkup(createElement(StatusPill, { status: "plan_ready" }));
+
+    expect(html).toContain('aria-label="plan ready"');
+    expect(html).toContain('title="plan ready"');
+    expect(html).toContain('class="status-text"');
+  });
+
   it("uses the shared red yellow green severity classes", () => {
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "approval" }))).toContain('class="status status-red"');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "working" }))).toContain('class="status status-yellow"');

@@ -4,12 +4,14 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   Check,
-  ChevronDown,
   ChevronLeft,
   HelpCircle,
+  ListChecks,
   LoaderCircle,
+  MessageSquare,
   Pause,
   Pencil,
+  Plus,
   Save,
   Send,
   ShieldCheck,
@@ -17,6 +19,21 @@ import {
   Trash2,
   X
 } from "lucide-react";
+import { minimalSetup } from "codemirror";
+import { vim } from "@replit/codemirror-vim";
+import { EditorState, Prec, type Extension } from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  GutterMarker,
+  MatchDecorator,
+  ViewPlugin,
+  type DecorationSet,
+  type ViewUpdate,
+  gutter,
+  keymap,
+  placeholder as codeMirrorPlaceholder
+} from "@codemirror/view";
 import { FormEvent, KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -65,6 +82,8 @@ export interface PendingUserMessage {
 }
 
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
+export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
+export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (hover: hover) and (pointer: fine)";
 
 export function composerDraftStorageKey(sessionId: string): string {
   return `${COMPOSER_DRAFT_STORAGE_PREFIX}${sessionId}`;
@@ -96,6 +115,44 @@ export function saveComposerDraft(sessionId: string, value: string): void {
   } catch {
     // Draft persistence is best effort; the composer must stay usable.
   }
+}
+
+export function loadVimModePreference(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(VIM_MODE_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function saveVimModePreference(enabled: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(VIM_MODE_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Preference persistence is best effort; the editor must stay usable.
+  }
+}
+
+export function isDesktopVimAvailable(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia(DESKTOP_VIM_MEDIA_QUERY).matches;
+}
+
+function useDesktopVimAvailable(): boolean {
+  const [available, setAvailable] = useState(isDesktopVimAvailable);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return undefined;
+    const media = window.matchMedia(DESKTOP_VIM_MEDIA_QUERY);
+    const update = () => setAvailable(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  return available;
 }
 
 export function shouldReconcileSessionForEvent(event: Pick<SessionEvent, "type"> | { type: string }): boolean {
@@ -220,7 +277,7 @@ export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
 export function SessionView() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const { refreshSessionStoplight, syncSessionStoplight, connectionEpoch } = useOutletContext<AppShellOutletContext>();
+  const { refreshSessionStoplight, syncSessionStoplight, openCreateSession, connectionEpoch } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
   const [initialTranscriptSessionId, setInitialTranscriptSessionId] = useState<string | null>(null);
@@ -243,6 +300,8 @@ export function SessionView() {
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
+  const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
+  const vimAvailable = useDesktopVimAvailable();
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [hasMoreAfter, setHasMoreAfter] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -268,6 +327,7 @@ export function SessionView() {
   const skillsLastRefreshRef = useRef(0);
   const activeIdRef = useRef(id);
   const previousEffectIdRef = useRef(id);
+  const composerFormRef = useRef<HTMLFormElement>(null);
   activeIdRef.current = id;
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
@@ -283,6 +343,7 @@ export function SessionView() {
   );
   const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan));
   const composerLocked = Boolean(composerLock);
+  const effectiveVimEnabled = vimAvailable && vimEnabled;
   const questionRenderedInline = Boolean(
     question &&
       (transcriptItems.some((item) => transcriptItemContainsMessageId(item, question.messageId)) ||
@@ -458,6 +519,11 @@ export function SessionView() {
   function updateComposerText(value: string) {
     setText(value);
     saveComposerDraft(id, value);
+  }
+
+  function updateVimMode(enabled: boolean) {
+    setVimEnabled(enabled);
+    saveVimModePreference(enabled);
   }
 
   useLayoutEffect(() => {
@@ -900,6 +966,15 @@ export function SessionView() {
       <div className="actions">
         <div className="actions-main">
           <button
+            className="session-new-session-button"
+            type="button"
+            onClick={() => openCreateSession(readySession.repo.root ?? readySession.tmux.cwd)}
+            aria-label="New session"
+            title="New session"
+          >
+            <Plus size={18} />
+          </button>
+          <button
             disabled={Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}
             data-busy={actionBusy === "interrupt" || undefined}
@@ -994,16 +1069,23 @@ export function SessionView() {
             <QueuedInputList
               inputs={queuedInputs}
               skills={codexSkills}
+              vimEnabled={effectiveVimEnabled}
               onSkillSearch={() => void refreshCodexSkills()}
               onUpdate={updateQueuedInput}
               onDelete={deleteQueuedInput}
             />
           ) : null}
-          <form className="composer" onSubmit={submit}>
+          <form className={`composer${vimAvailable ? " composer-vim-available" : ""}`} ref={composerFormRef} onSubmit={submit}>
+            {vimAvailable ? <VimModeToggle enabled={vimEnabled} onChange={updateVimMode} /> : null}
             <SkillTextArea
               value={text}
               onChange={updateComposerText}
               onKeyDown={handleComposerKeyDown}
+              vimEnabled={effectiveVimEnabled}
+              onSubmitShortcut={() => {
+                if (submitBusy || composerLocked) return;
+                composerFormRef.current?.requestSubmit();
+              }}
               onFocus={() => setComposerFocused(true)}
               onBlur={() => setComposerFocused(false)}
               skills={codexSkills}
@@ -1019,6 +1101,7 @@ export function SessionView() {
                     : "Message Codex")
               }
               rows={3}
+              focusRequestKey={readySession.id}
               disabled={submitBusy || composerLocked}
             />
             <button
@@ -1053,6 +1136,8 @@ export interface ActiveSkillToken {
   end: number;
   query: string;
 }
+
+type SkillSuggestionCommand = "next" | "previous" | "accept" | "dismiss";
 
 export function activeSkillToken(text: string, caret: number): ActiveSkillToken | null {
   const boundedCaret = Math.max(0, Math.min(caret, text.length));
@@ -1130,27 +1215,258 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement, mirror: HT
   mirror.scrollLeft = textarea.scrollLeft;
 }
 
+export function relativeLineNumber(lineNo: number, cursorLineNo: number): string {
+  return String(Math.abs(lineNo - cursorLineNo));
+}
+
+class RelativeLineNumberMarker extends GutterMarker {
+  elementClass = "";
+
+  constructor(private readonly label: string) {
+    super();
+  }
+
+  eq(other: GutterMarker): boolean {
+    return other instanceof RelativeLineNumberMarker && other.label === this.label;
+  }
+
+  toDOM(): Node {
+    const element = document.createElement("span");
+    element.textContent = this.label;
+    return element;
+  }
+}
+
+export function vimRelativeLineNumbers(): Extension {
+  const markerForLine = (view: EditorView, lineFrom: number): RelativeLineNumberMarker => {
+    const lineNo = view.state.doc.lineAt(lineFrom).number;
+    const cursorLineNo = view.state.doc.lineAt(view.state.selection.main.head).number;
+    return new RelativeLineNumberMarker(relativeLineNumber(lineNo, cursorLineNo));
+  };
+
+  return gutter({
+    class: "cm-lineNumbers cm-relativeLineNumbers",
+    lineMarker: (view, line) => markerForLine(view, line.from),
+    lineMarkerChange: (update) => update.selectionSet || update.docChanged || update.viewportChanged,
+    initialSpacer: (view) => new RelativeLineNumberMarker(String(view.state.doc.lines)),
+    updateSpacer: (_spacer, update) => new RelativeLineNumberMarker(String(update.state.doc.lines))
+  });
+}
+
+function codeMirrorSkillHighlightExtension(skillNames: Set<string>): Extension {
+  const matcher = new MatchDecorator({
+    regexp: /\$([A-Za-z0-9][A-Za-z0-9_:-]*)/g,
+    decoration: (match) => {
+      const skillName = match[1];
+      return skillName && skillNames.has(skillName) ? Decoration.mark({ class: "composer-skill-reference" }) : null;
+    }
+  });
+
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+
+      constructor(view: EditorView) {
+        this.decorations = matcher.createDeco(view);
+      }
+
+      update(update: ViewUpdate) {
+        this.decorations = matcher.updateDeco(update, this.decorations);
+      }
+    },
+    {
+      decorations: (value) => value.decorations
+    }
+  );
+}
+
+function VimPromptEditor({
+  value,
+  onChange,
+  onSubmitShortcut,
+  onSuggestionCommand,
+  onFocus,
+  onBlur,
+  skills,
+  placeholder,
+  disabled,
+  selectionRequest,
+  focusRequestKey,
+  onCaretChange
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  onSubmitShortcut?: () => void;
+  onSuggestionCommand?: (command: SkillSuggestionCommand) => boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  skills: CodexSkill[];
+  placeholder?: string;
+  disabled?: boolean;
+  selectionRequest: { caret: number; nonce: number } | null;
+  focusRequestKey?: string | null;
+  onCaretChange: (caret: number) => void;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const valueRef = useRef(value);
+  const onChangeRef = useRef(onChange);
+  const onSubmitShortcutRef = useRef(onSubmitShortcut);
+  const onSuggestionCommandRef = useRef(onSuggestionCommand);
+  const onFocusRef = useRef(onFocus);
+  const onBlurRef = useRef(onBlur);
+  const onCaretChangeRef = useRef(onCaretChange);
+  const rebuildCaretRef = useRef(0);
+  const rebuildFocusedRef = useRef(false);
+  const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
+  const skillNamesKey = useMemo(() => [...skillNames].sort().join("\0"), [skillNames]);
+
+  useEffect(() => {
+    onChangeRef.current = onChange;
+    onSubmitShortcutRef.current = onSubmitShortcut;
+    onSuggestionCommandRef.current = onSuggestionCommand;
+    onFocusRef.current = onFocus;
+    onBlurRef.current = onBlur;
+    onCaretChangeRef.current = onCaretChange;
+  }, [onBlur, onCaretChange, onChange, onFocus, onSubmitShortcut, onSuggestionCommand]);
+
+  useEffect(() => {
+    valueRef.current = value;
+    const view = viewRef.current;
+    if (!view || view.state.doc.toString() === value) return;
+    const head = Math.min(view.state.selection.main.head, value.length);
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: value },
+      selection: { anchor: head }
+    });
+  }, [value]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !selectionRequest) return;
+    const caret = Math.max(0, Math.min(selectionRequest.caret, view.state.doc.length));
+    view.focus();
+    view.dispatch({ selection: { anchor: caret } });
+  }, [selectionRequest]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !focusRequestKey || disabled) return;
+    view.focus();
+  }, [disabled, focusRequestKey]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return undefined;
+
+    const extensions: Extension[] = [
+      Prec.highest(
+        keymap.of([
+          {
+            key: "ArrowDown",
+            run: () => onSuggestionCommandRef.current?.("next") ?? false
+          },
+          {
+            key: "ArrowUp",
+            run: () => onSuggestionCommandRef.current?.("previous") ?? false
+          },
+          {
+            key: "Enter",
+            run: () => onSuggestionCommandRef.current?.("accept") ?? false
+          },
+          {
+            key: "Tab",
+            run: () => onSuggestionCommandRef.current?.("accept") ?? false
+          },
+          {
+            key: "Escape",
+            run: () => onSuggestionCommandRef.current?.("dismiss") ?? false
+          },
+          {
+            key: "Ctrl-Enter",
+            run: () => {
+              onSubmitShortcutRef.current?.();
+              return true;
+            }
+          }
+        ])
+      ),
+      vim({ status: true }),
+      vimRelativeLineNumbers(),
+      minimalSetup,
+      EditorView.lineWrapping,
+      codeMirrorSkillHighlightExtension(skillNames),
+      EditorState.readOnly.of(Boolean(disabled)),
+      EditorView.editable.of(!disabled),
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          const nextValue = update.state.doc.toString();
+          valueRef.current = nextValue;
+          onChangeRef.current(nextValue);
+        }
+        if (update.docChanged || update.selectionSet) {
+          onCaretChangeRef.current(update.state.selection.main.head);
+        }
+        if (update.focusChanged) {
+          if (update.view.hasFocus) onFocusRef.current?.();
+          else onBlurRef.current?.();
+        }
+      })
+    ];
+
+    if (placeholder) extensions.push(codeMirrorPlaceholder(placeholder));
+
+    const view = new EditorView({
+      parent: root,
+      state: EditorState.create({
+        doc: valueRef.current,
+        extensions
+      })
+    });
+    const rebuildCaret = Math.max(0, Math.min(rebuildCaretRef.current, view.state.doc.length));
+    if (rebuildCaret) view.dispatch({ selection: { anchor: rebuildCaret } });
+    if ((rebuildFocusedRef.current || focusRequestKey) && !disabled) view.focus();
+    viewRef.current = view;
+    onCaretChangeRef.current(view.state.selection.main.head);
+
+    return () => {
+      rebuildCaretRef.current = view.state.selection.main.head;
+      rebuildFocusedRef.current = view.hasFocus;
+      view.destroy();
+      if (viewRef.current === view) viewRef.current = null;
+    };
+  }, [disabled, focusRequestKey, placeholder, skillNamesKey]);
+
+  return <div className="vim-editor" ref={rootRef} />;
+}
+
 function SkillTextArea({
   value,
   onChange,
   onKeyDown,
+  vimEnabled,
+  onSubmitShortcut,
   onFocus,
   onBlur,
   skills,
   onSkillSearch,
   placeholder,
   rows,
+  focusRequestKey,
   disabled
 }: {
   value: string;
   onChange: (value: string) => void;
   onKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  vimEnabled?: boolean;
+  onSubmitShortcut?: () => void;
   onFocus?: () => void;
   onBlur?: () => void;
   skills: CodexSkill[];
   onSkillSearch?: () => void;
   placeholder?: string;
   rows?: number;
+  focusRequestKey?: string | null;
   disabled?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1159,6 +1475,8 @@ function SkillTextArea({
   const [focused, setFocused] = useState(false);
   const [dismissedTokenStart, setDismissedTokenStart] = useState<number | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [vimSelectionRequest, setVimSelectionRequest] = useState<{ caret: number; nonce: number } | null>(null);
+  const vimSelectionNonceRef = useRef(0);
   const token = activeSkillToken(value, caret);
   const suggestions = useMemo(() => (token && !disabled ? skillSuggestions(skills, token.query) : []), [disabled, skills, token?.query]);
   const open = focused && Boolean(token) && token?.start !== dismissedTokenStart && suggestions.length > 0;
@@ -1178,6 +1496,11 @@ function SkillTextArea({
     if (focused && token) onSkillSearch?.();
   }, [focused, onSkillSearch, token?.start, token?.query]);
 
+  useEffect(() => {
+    if (vimEnabled || !focusRequestKey || disabled) return;
+    textareaRef.current?.focus();
+  }, [disabled, focusRequestKey, vimEnabled]);
+
   function syncCaret(element: HTMLTextAreaElement) {
     setCaret(element.selectionStart ?? 0);
   }
@@ -1186,6 +1509,12 @@ function SkillTextArea({
     if (!token) return;
     const next = replaceSkillToken(value, token, skill.name);
     onChange(next.text);
+    if (vimEnabled) {
+      vimSelectionNonceRef.current += 1;
+      setVimSelectionRequest({ caret: next.caret, nonce: vimSelectionNonceRef.current });
+      setCaret(next.caret);
+      return;
+    }
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
       textareaRef.current?.setSelectionRange(next.caret, next.caret);
@@ -1193,31 +1522,54 @@ function SkillTextArea({
     });
   }
 
+  function handleSuggestionCommand(command: SkillSuggestionCommand): boolean {
+    if (!open || suggestions.length === 0) return false;
+    if (command === "next") {
+      setSelectedIndex((current) => (current + 1) % suggestions.length);
+      return true;
+    }
+    if (command === "previous") {
+      setSelectedIndex((current) => (current - 1 + suggestions.length) % suggestions.length);
+      return true;
+    }
+    if (command === "accept") {
+      const selectedSkill = suggestions[selectedIndex] ?? suggestions[0];
+      if (selectedSkill) acceptSkill(selectedSkill);
+      return true;
+    }
+    setDismissedTokenStart(token?.start ?? null);
+    return true;
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (shouldSubmitComposer(event)) {
+      if (!vimEnabled && onSubmitShortcut) {
+        event.preventDefault();
+        onSubmitShortcut();
+        return;
+      }
       onKeyDown?.(event);
       return;
     }
     if (open && suggestions.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setSelectedIndex((current) => (current + 1) % suggestions.length);
+        handleSuggestionCommand("next");
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setSelectedIndex((current) => (current - 1 + suggestions.length) % suggestions.length);
+        handleSuggestionCommand("previous");
         return;
       }
       if (event.key === "Enter" || event.key === "Tab") {
         event.preventDefault();
-        const selectedSkill = suggestions[selectedIndex] ?? suggestions[0];
-        if (selectedSkill) acceptSkill(selectedSkill);
+        handleSuggestionCommand("accept");
         return;
       }
       if (event.key === "Escape") {
         event.preventDefault();
-        setDismissedTokenStart(token?.start ?? null);
+        handleSuggestionCommand("dismiss");
         return;
       }
     }
@@ -1231,35 +1583,60 @@ function SkillTextArea({
   }
 
   return (
-    <div className="skill-textarea">
-      <div className="skill-textarea-mirror" ref={mirrorRef} aria-hidden="true">
-        {renderComposerHighlights(value, skillNames)}
-      </div>
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={(event) => {
-          onChange(event.target.value);
-          syncCaret(event.target);
-          syncMirrorScroll(event.target);
-        }}
-        onKeyDown={handleKeyDown}
-        onKeyUp={(event) => syncCaret(event.currentTarget)}
-        onClick={(event) => syncCaret(event.currentTarget)}
-        onSelect={(event) => syncCaret(event.currentTarget)}
-        onFocus={() => {
-          setFocused(true);
-          onFocus?.();
-        }}
-        onBlur={() => {
-          setFocused(false);
-          onBlur?.();
-        }}
-        onScroll={(event) => syncMirrorScroll(event.currentTarget)}
-        placeholder={placeholder}
-        rows={rows}
-        disabled={disabled}
-      />
+    <div className={`skill-textarea${vimEnabled ? " skill-textarea-vim" : ""}`}>
+      {vimEnabled ? (
+        <VimPromptEditor
+          value={value}
+          onChange={onChange}
+          onSubmitShortcut={onSubmitShortcut}
+          onSuggestionCommand={handleSuggestionCommand}
+          onFocus={() => {
+            setFocused(true);
+            onFocus?.();
+          }}
+          onBlur={() => {
+            setFocused(false);
+            onBlur?.();
+          }}
+          skills={skills}
+          placeholder={placeholder}
+          disabled={disabled}
+          selectionRequest={vimSelectionRequest}
+          focusRequestKey={focusRequestKey}
+          onCaretChange={setCaret}
+        />
+      ) : (
+        <>
+          <div className="skill-textarea-mirror" ref={mirrorRef} aria-hidden="true">
+            {renderComposerHighlights(value, skillNames)}
+          </div>
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={(event) => {
+              onChange(event.target.value);
+              syncCaret(event.target);
+              syncMirrorScroll(event.target);
+            }}
+            onKeyDown={handleKeyDown}
+            onKeyUp={(event) => syncCaret(event.currentTarget)}
+            onClick={(event) => syncCaret(event.currentTarget)}
+            onSelect={(event) => syncCaret(event.currentTarget)}
+            onFocus={() => {
+              setFocused(true);
+              onFocus?.();
+            }}
+            onBlur={() => {
+              setFocused(false);
+              onBlur?.();
+            }}
+            onScroll={(event) => syncMirrorScroll(event.currentTarget)}
+            placeholder={placeholder}
+            rows={rows}
+            disabled={disabled}
+          />
+        </>
+      )}
       {open ? (
         <div className="skill-suggestions" role="listbox" aria-label="Codex skills">
           {suggestions.map((skill, index) => (
@@ -1314,9 +1691,11 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
 
   return (
     <p className="session-header-meta" title={title}>
-      <span>{session.repo.name}</span>
-      <span aria-hidden="true">·</span>
-      <span>{branch}</span>
+      <span className="session-header-repo">{session.repo.name}</span>
+      <span className="session-header-branch-separator" aria-hidden="true">
+        ·
+      </span>
+      <span className="session-header-branch">{branch}</span>
     </p>
   );
 }
@@ -1370,7 +1749,7 @@ type TranscriptItem =
   | { type: "stack"; id: string; messages: ChatMessage[] }
   | { type: "activity"; id: string; messages: ChatMessage[] };
 
-function ModeToggle({
+export function ModeToggle({
   mode,
   busy,
   onChange
@@ -1383,21 +1762,52 @@ function ModeToggle({
     <div className="mode-toggle" role="group" aria-label="Input mode" aria-busy={busy}>
       <button
         type="button"
-        className={mode === "default" ? "selected" : ""}
+        className={`mode-toggle-normal${mode === "default" ? " selected" : ""}`}
         disabled={busy}
+        aria-label="Normal"
+        title="Normal"
         onClick={() => onChange("default")}
       >
-        Normal
+        <MessageSquare className="mode-toggle-icon" size={15} aria-hidden="true" />
+        <span className="mode-toggle-text">Normal</span>
       </button>
       <button
         type="button"
-        className={mode === "plan" ? "selected" : ""}
+        className={`mode-toggle-plan${mode === "plan" ? " selected" : ""}`}
         disabled={busy}
+        aria-label="Plan"
+        title="Plan"
         onClick={() => onChange("plan")}
       >
-        Plan
+        <ListChecks className="mode-toggle-icon" size={15} aria-hidden="true" />
+        <span className="mode-toggle-text">Plan</span>
       </button>
     </div>
+  );
+}
+
+export function VimModeToggle({ enabled, onChange }: { enabled: boolean; onChange: (enabled: boolean) => void }) {
+  return (
+    <button
+      className={`vim-toggle${enabled ? " selected" : ""}`}
+      type="button"
+      aria-label={enabled ? "Disable Vim mode" : "Enable Vim mode"}
+      aria-pressed={enabled}
+      title={enabled ? "Vim mode on" : "Vim mode off"}
+      onClick={() => onChange(!enabled)}
+    >
+      <VimLogoMark />
+    </button>
+  );
+}
+
+function VimLogoMark() {
+  return (
+    <svg className="vim-logo" viewBox="0 0 36 36" aria-hidden="true" focusable="false">
+      <path className="vim-logo-shape" d="M6 8.2 18 2l12 6.2v16.9L18 34 6 25.1Z" />
+      <path className="vim-logo-v" d="M10.5 10.5 17.7 27 25.5 10.5" />
+      <path className="vim-logo-cut" d="M14.3 10.5h7.8" />
+    </svg>
   );
 }
 
@@ -1424,6 +1834,7 @@ function ModelSelector({
   const selectedModel = options.find((model) => model.model === value.model) ?? null;
   const selectedLabel = selectedModel?.displayName || value.model || "Model";
   const selectedReasoning = value.reasoningEffort ?? selectedModel?.defaultReasoningEffort ?? null;
+  const triggerTitle = selectedReasoning ? `${label}: ${selectedLabel}, ${selectedReasoning}` : `${label}: ${selectedLabel}`;
 
   useEffect(() => {
     if (!open) return;
@@ -1477,15 +1888,14 @@ function ModelSelector({
         aria-label={label}
         aria-haspopup="dialog"
         aria-expanded={open}
+        title={triggerTitle}
         onClick={() => {
           setOpen((current) => !current);
           setReasoningModel(null);
         }}
       >
-        <span className="model-selector-label">{label}</span>
         <span className="model-selector-value">{selectedLabel}</span>
         {selectedReasoning ? <span className="model-selector-effort">{selectedReasoning}</span> : null}
-        <ChevronDown size={15} aria-hidden="true" />
       </button>
       {open ? (
         <div className="model-selector-popover" role="dialog" aria-label={label}>
@@ -1656,12 +2066,14 @@ function ApprovalBanner({
 function QueuedInputList({
   inputs,
   skills,
+  vimEnabled,
   onSkillSearch,
   onUpdate,
   onDelete
 }: {
   inputs: QueuedInput[];
   skills: CodexSkill[];
+  vimEnabled: boolean;
   onSkillSearch: () => void;
   onUpdate: (inputId: string, text: string, mode: CollaborationMode) => Promise<void>;
   onDelete: (inputId: string) => Promise<void>;
@@ -1711,35 +2123,28 @@ function QueuedInputList({
     <section className="queued-inputs" aria-live="polite">
       <div className="queued-inputs-title">
         <strong>Queued messages</strong>
-        <span>{inputs.length}</span>
       </div>
       <div className="queued-input-list">
         {inputs.map((input) => {
           const editable = queuedInputEditable(input);
           const busy = busyId === input.id;
           const editing = editingId === input.id;
+          const multiline = queuedInputHasLineBreaks(input.text);
           return (
             <article key={input.id} className={`queued-input queued-input-${input.status}`}>
-              <div className="queued-input-meta">
-                <span>{queuedInputStatusLabel(input)}</span>
-                <span>{input.mode === "plan" ? "Plan" : "Normal"}</span>
-              </div>
               {editing ? (
-                <SkillTextArea
-                  value={draft}
-                  onChange={setDraft}
-                  skills={skills}
-                  onSkillSearch={onSkillSearch}
-                  rows={3}
-                  disabled={busy}
-                />
-              ) : (
-                <p>{input.text}</p>
-              )}
-              {input.error ? <p className="queued-input-error">{input.error}</p> : null}
-              <div className="queued-input-actions">
-                {editing ? (
-                  <>
+                <>
+                  <SkillTextArea
+                    value={draft}
+                    onChange={setDraft}
+                    vimEnabled={vimEnabled}
+                    skills={skills}
+                    onSkillSearch={onSkillSearch}
+                    rows={3}
+                    disabled={busy}
+                  />
+                  {input.error ? <p className="queued-input-error">{input.error}</p> : null}
+                  <div className="queued-input-actions">
                     <button
                       type="button"
                       disabled={busy || !draft.trimEnd()}
@@ -1752,9 +2157,63 @@ function QueuedInputList({
                     <button type="button" disabled={busy} onClick={() => setEditingId(null)}>
                       <X size={16} /> Cancel
                     </button>
-                  </>
-                ) : (
-                  <>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className={`queued-input-read${multiline ? " queued-input-read-multiline" : ""}`}>
+                    <p>{input.text}</p>
+                    <div className="queued-input-actions">
+                      <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
+                        <Pencil size={16} /> Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={!editable || busy}
+                        aria-busy={busy}
+                        data-busy={busy || undefined}
+                        onClick={() => void remove(input)}
+                      >
+                        {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />} Remove
+                      </button>
+                    </div>
+                  </div>
+                  {input.error ? <p className="queued-input-error">{input.error}</p> : null}
+                </>
+              )}
+            </article>
+          );
+        })}
+      </div>
+      {error ? <p className="queued-input-error">{error}</p> : null}
+    </section>
+  );
+}
+
+export function queuedInputHasLineBreaks(text: string): boolean {
+  return /[\r\n]/.test(text);
+}
+
+function queuedInputEditable(input: QueuedInput): boolean {
+  return input.status === "queued" || input.status === "failed";
+}
+
+function QuestionBanner({
+  question,
+  busy,
+  error,
+  onAnswer
+}: {
+  question: QuestionRequest;
+  busy: boolean;
+  error: string;
+  onAnswer: (request: QuestionAnswerRequest) => void;
+}) {
+  const [answers, setAnswers] = useState<Record<string, QuestionAnswerDraft>>({});
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const remainingSeconds = questionRemainingSeconds(question, nowMs);
+  const complete = question.questions.every((prompt) => questionAnswerDraftComplete(answers[prompt.id]));
                     <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
                       <Pencil size={16} /> Edit
                     </button>
@@ -1782,13 +2241,6 @@ function QueuedInputList({
 
 function queuedInputEditable(input: QueuedInput): boolean {
   return input.status === "queued" || input.status === "failed";
-}
-
-function queuedInputStatusLabel(input: QueuedInput): string {
-  if (input.status === "queued") return "Queued";
-  if (input.status === "sending") return "Sending";
-  if (input.status === "sent") return "Sent";
-  return "Failed";
 }
 
 function QuestionBanner({

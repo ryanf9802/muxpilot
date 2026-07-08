@@ -14,11 +14,13 @@ import {
   formatElapsedSeconds,
   groupEventStacks,
   groupStackableMessages,
+  isDesktopVimAvailable,
   isPlanModeMessage,
   inputModeAction,
   latestUserPromptTimestamp,
   MarkdownBlock,
   MessageBubble,
+  ModeToggle,
   modelAction,
   modelSelectorOptions,
   pendingProposedPlanMessage,
@@ -27,10 +29,13 @@ import {
   planActionText,
   questionRemainingSeconds,
   parseProposedPlanSegments,
+  relativeLineNumber,
   replaceTranscriptTail,
   loadComposerDraft,
+  loadVimModePreference,
   sessionWithPendingInputMode,
   saveComposerDraft,
+  saveVimModePreference,
   restoreScrollTopForAnchor,
   secondsUntil,
   SessionHeaderMeta,
@@ -51,6 +56,8 @@ import {
   replaceSkillToken,
   resizeComposerTextarea,
   reasoningEffortLabel,
+  VimModeToggle,
+  VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
@@ -124,6 +131,76 @@ describe("composer draft storage", () => {
 
     expect(loadComposerDraft("session-a")).toBe("");
     expect(storage.getItem(composerDraftStorageKey("session-a"))).toBeNull();
+  });
+});
+
+describe("vim mode preference", () => {
+  it("defaults to disabled when storage is empty or unavailable", () => {
+    installLocalStorage();
+
+    expect(loadVimModePreference()).toBe(false);
+  });
+
+  it("round-trips the persisted vim mode preference", () => {
+    const storage = installLocalStorage();
+
+    saveVimModePreference(true);
+    expect(loadVimModePreference()).toBe(true);
+    expect(storage.getItem(VIM_MODE_STORAGE_KEY)).toBe("true");
+
+    saveVimModePreference(false);
+    expect(loadVimModePreference()).toBe(false);
+    expect(storage.getItem(VIM_MODE_STORAGE_KEY)).toBe("false");
+  });
+});
+
+describe("desktop vim availability", () => {
+  it("requires the desktop media query to match", () => {
+    vi.stubGlobal("window", {
+      matchMedia: vi.fn((query: string) => ({
+        matches: query.includes("min-width: 560px") && query.includes("pointer: fine"),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn()
+      }))
+    });
+
+    expect(isDesktopVimAvailable()).toBe(true);
+  });
+
+  it("returns false when media query support is unavailable", () => {
+    vi.stubGlobal("window", {});
+
+    expect(isDesktopVimAvailable()).toBe(false);
+  });
+});
+
+describe("vim line numbers", () => {
+  it("formats relative distance from the active cursor line", () => {
+    expect(relativeLineNumber(8, 8)).toBe("0");
+    expect(relativeLineNumber(3, 8)).toBe("5");
+    expect(relativeLineNumber(13, 8)).toBe("5");
+  });
+});
+
+describe("VimModeToggle", () => {
+  it("renders pressed state when enabled", () => {
+    const html = renderToStaticMarkup(createElement(VimModeToggle, { enabled: true, onChange: vi.fn() }));
+
+    expect(html).toContain("vim-toggle selected");
+    expect(html).toContain('aria-label="Disable Vim mode"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('class="vim-logo"');
+    expect(html).not.toContain(">Vim<");
+  });
+
+  it("renders unpressed state when disabled", () => {
+    const html = renderToStaticMarkup(createElement(VimModeToggle, { enabled: false, onChange: vi.fn() }));
+
+    expect(html).toContain("vim-toggle");
+    expect(html).not.toContain("vim-toggle selected");
+    expect(html).toContain('aria-label="Enable Vim mode"');
+    expect(html).toContain('aria-pressed="false"');
   });
 });
 
@@ -218,6 +295,9 @@ describe("SessionHeaderMeta", () => {
 
     expect(html).toContain("muxpilot");
     expect(html).toContain("feature/activity-summary");
+    expect(html).toContain('class="session-header-repo"');
+    expect(html).toContain('class="session-header-branch"');
+    expect(html).toContain('class="session-header-branch-separator"');
     expect(html).not.toContain("Header summary display");
     expect(html).not.toContain("session-header-summary");
   });
@@ -343,6 +423,17 @@ describe("input mode helpers", () => {
 
     expect(sessionWithPendingInputMode(staleSession, "plan")).toMatchObject({ id: "session-a", inputMode: "plan" });
     expect(sessionWithPendingInputMode(staleSession, null)).toBe(staleSession);
+  });
+});
+
+describe("ModeToggle", () => {
+  it("keeps accessible labels when rendered with compact icons", () => {
+    const html = renderToStaticMarkup(createElement(ModeToggle, { mode: "default", busy: false, onChange: () => undefined }));
+
+    expect(html).toContain('aria-label="Normal"');
+    expect(html).toContain('aria-label="Plan"');
+    expect(html).toContain("mode-toggle-icon");
+    expect(html).toContain('class="mode-toggle-text"');
   });
 });
 

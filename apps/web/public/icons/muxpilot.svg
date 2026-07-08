@@ -3,23 +3,23 @@
   <desc id="desc">A terminal prompt connected to two device status nodes.</desc>
   <defs>
     <linearGradient id="tile" x1="88" y1="48" x2="424" y2="464" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#18242f"/>
-      <stop offset="1" stop-color="#0d1218"/>
+      <stop stop-color="#303035"/>
+      <stop offset="1" stop-color="#1f1f21"/>
     </linearGradient>
     <linearGradient id="accent" x1="118" y1="144" x2="394" y2="368" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#66e3ff"/>
-      <stop offset="1" stop-color="#61f2a6"/>
+      <stop stop-color="#35d7ff"/>
+      <stop offset="1" stop-color="#1ff989"/>
     </linearGradient>
   </defs>
   <rect width="512" height="512" rx="112" fill="url(#tile)"/>
-  <path fill="#253344" d="M126 150c0-18 15-33 33-33h194c18 0 33 15 33 33v154c0 18-15 33-33 33H159c-18 0-33-15-33-33V150Z"/>
-  <path fill="#101820" d="M149 176c0-13 10-23 23-23h168c13 0 23 10 23 23v104c0 13-10 23-23 23H172c-13 0-23-10-23-23V176Z"/>
+  <path fill="#303035" d="M126 150c0-18 15-33 33-33h194c18 0 33 15 33 33v154c0 18-15 33-33 33H159c-18 0-33-15-33-33V150Z"/>
+  <path fill="#18191a" d="M149 176c0-13 10-23 23-23h168c13 0 23 10 23 23v104c0 13-10 23-23 23H172c-13 0-23-10-23-23V176Z"/>
   <path fill="url(#accent)" d="M188 199a17 17 0 0 1 24 0l45 45a17 17 0 0 1 0 24l-45 45a17 17 0 0 1-24-24l33-33-33-33a17 17 0 0 1 0-24Z"/>
-  <path fill="#f7fbff" d="M269 286c0-9 7-16 16-16h45c9 0 16 7 16 16s-7 16-16 16h-45c-9 0-16-7-16-16Z"/>
-  <path fill="#33465d" d="M256 337h28v36h-28z"/>
-  <path fill="#66e3ff" d="M158 382a18 18 0 0 1 18-18h188a18 18 0 1 1 0 36H176a18 18 0 0 1-18-18Z"/>
-  <circle cx="159" cy="382" r="37" fill="#101820" stroke="#66e3ff" stroke-width="18"/>
-  <circle cx="364" cy="382" r="37" fill="#101820" stroke="#61f2a6" stroke-width="18"/>
-  <circle cx="159" cy="382" r="11" fill="#66e3ff"/>
-  <circle cx="364" cy="382" r="11" fill="#61f2a6"/>
+  <path fill="#f3f6f4" d="M269 286c0-9 7-16 16-16h45c9 0 16 7 16 16s-7 16-16 16h-45c-9 0-16-7-16-16Z"/>
+  <path fill="#424349" d="M256 337h28v36h-28z"/>
+  <path fill="#35d7ff" d="M158 382a18 18 0 0 1 18-18h188a18 18 0 1 1 0 36H176a18 18 0 0 1-18-18Z"/>
+  <circle cx="159" cy="382" r="37" fill="#18191a" stroke="#35d7ff" stroke-width="18"/>
+  <circle cx="364" cy="382" r="37" fill="#18191a" stroke="#4ade80" stroke-width="18"/>
+  <circle cx="159" cy="382" r="11" fill="#35d7ff"/>
+  <circle cx="364" cy="382" r="11" fill="#4ade80"/>
 </svg>

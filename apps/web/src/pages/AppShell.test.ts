@@ -3,16 +3,28 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ManagedSession, RemoteAccessResponse } from "@muxpilot/core";
 import {
+  AppBrand,
+  AppRecoveryPage,
   ConnectDeviceContent,
   DisconnectedNotice,
   SHELL_RECONNECT_INTERVAL_MS,
   SessionStoplight,
   remoteAccessQrValue,
+  sessionNameValidationMessage,
   shouldShowConnectDeviceButton,
   syncSessionIntoStoplightSessions
 } from "./AppShell.js";
+import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 
 describe("shell connection state", () => {
+  it("renders the app logo next to the wordmark", () => {
+    const html = renderToStaticMarkup(createElement(AppBrand));
+
+    expect(html).toContain('class="brand-logo"');
+    expect(html).toContain('src="/favicon.svg"');
+    expect(html).toContain("<strong>muxpilot</strong>");
+  });
+
   it("uses a short reconnect interval for transient disconnects", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);
   });
@@ -24,15 +36,38 @@ describe("shell connection state", () => {
     expect(html).toContain("Disconnected from muxpilot. Reconnecting...");
     expect(html).toContain("spin");
   });
+
+  it("renders a full recovery page for app and backend failures", () => {
+    const html = renderToStaticMarkup(
+      createElement(AppRecoveryPage, {
+        title: "Cannot reach muxpilot",
+        message: "The app is open, but the backend is not responding.",
+        detail: "This can happen after the server restarts.",
+        actionLabel: "Retry now",
+        onAction: () => undefined
+      })
+    );
+
+    expect(html).toContain('class="recovery-page"');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Cannot reach muxpilot");
+    expect(html).toContain("The app is open, but the backend is not responding.");
+    expect(html).toContain("Retry now");
+  });
 });
 
 describe("shouldShowConnectDeviceButton", () => {
   it("shows the connect button for trusted local access", () => {
-    expect(shouldShowConnectDeviceButton({ accessMode: "local" })).toBe(true);
+    expect(shouldShowConnectDeviceButton({ accessGranted: true, accessKeyRequired: false, accessMode: "local" })).toBe(true);
   });
 
   it("hides the connect button for token access", () => {
-    expect(shouldShowConnectDeviceButton({ accessMode: "token" })).toBe(false);
+    expect(shouldShowConnectDeviceButton({ accessGranted: true, accessKeyRequired: false, accessMode: "token" })).toBe(false);
+  });
+
+  it("hides the connect button unless local access is already granted without an access key", () => {
+    expect(shouldShowConnectDeviceButton({ accessGranted: false, accessKeyRequired: true, accessMode: "token" })).toBe(false);
+    expect(shouldShowConnectDeviceButton({ accessGranted: true, accessKeyRequired: true, accessMode: "local" })).toBe(false);
   });
 });
 
@@ -100,6 +135,46 @@ describe("ConnectDeviceContent", () => {
     expect(html).not.toContain("<canvas");
     expect(html).not.toContain("QR code for");
     expect(html).toContain("Phone access is not available with the current bind settings.");
+  });
+});
+
+describe("directorySuggestionLabel", () => {
+  it("labels suggestions with branch and source when available", () => {
+    expect(
+      directorySuggestionLabel({
+        path: "/repo",
+        label: "muxpilot",
+        repoRoot: "/repo",
+        branch: "main",
+        source: "active",
+        lastActivityAt: "2026-07-08T00:00:00.000Z"
+      })
+    ).toBe("muxpilot · main · active");
+  });
+
+  it("omits the branch segment when no branch is known", () => {
+    expect(
+      directorySuggestionLabel({
+        path: "/repo",
+        label: "repo",
+        repoRoot: null,
+        branch: null,
+        source: "recent",
+        lastActivityAt: null
+      })
+    ).toBe("repo · recent");
+  });
+});
+
+describe("sessionNameValidationMessage", () => {
+  it("allows names that normalize to a valid session slug", () => {
+    expect(sessionNameValidationMessage("New Work")).toBeNull();
+    expect(sessionNameValidationMessage("ready-2")).toBeNull();
+  });
+
+  it("rejects names that normalize below the minimum length", () => {
+    expect(sessionNameValidationMessage("a")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
+    expect(sessionNameValidationMessage("!!!")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
   });
 });
 

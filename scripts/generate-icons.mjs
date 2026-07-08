@@ -41,20 +41,20 @@ function renderPng(size, maskable) {
 function pixelColor(x, y, radius) {
   if (!roundedRect(x, y, 0, 0, 512, 512, radius)) return [0, 0, 0, 0];
 
-  let color = lerpColor([24, 36, 47, 255], [13, 18, 24, 255], (x + y) / 1024);
+  let color = lerpColor([48, 48, 53, 255], [31, 31, 33, 255], (x + y) / 1024);
 
-  if (roundedRect(x, y, 126, 117, 260, 220, 33)) color = [37, 51, 68, 255];
-  if (roundedRect(x, y, 149, 153, 214, 150, 23)) color = [16, 24, 32, 255];
-  if (rect(x, y, 256, 337, 28, 36)) color = [51, 70, 93, 255];
-  if (roundedRect(x, y, 158, 364, 224, 36, 18)) color = [102, 227, 255, 255];
+  if (roundedRect(x, y, 126, 117, 260, 220, 33)) color = [48, 48, 53, 255];
+  if (roundedRect(x, y, 149, 153, 214, 150, 23)) color = [24, 25, 26, 255];
+  if (rect(x, y, 256, 337, 28, 36)) color = [66, 67, 73, 255];
+  if (roundedRect(x, y, 158, 364, 224, 36, 18)) color = [53, 215, 255, 255];
 
-  color = ring(color, x, y, 159, 382, 37, 18, [102, 227, 255, 255]);
-  color = ring(color, x, y, 364, 382, 37, 18, [97, 242, 166, 255]);
-  if (circle(x, y, 159, 382, 11)) color = [102, 227, 255, 255];
-  if (circle(x, y, 364, 382, 11)) color = [97, 242, 166, 255];
+  color = ring(color, x, y, 159, 382, 37, 18, [53, 215, 255, 255]);
+  color = ring(color, x, y, 364, 382, 37, 18, [74, 222, 128, 255]);
+  if (circle(x, y, 159, 382, 11)) color = [53, 215, 255, 255];
+  if (circle(x, y, 364, 382, 11)) color = [74, 222, 128, 255];
 
-  if (chevron(x, y)) color = lerpColor([102, 227, 255, 255], [97, 242, 166, 255], (x - 188) / 69);
-  if (roundedRect(x, y, 269, 270, 77, 32, 16)) color = [247, 251, 255, 255];
+  if (chevron(x, y)) color = lerpColor([53, 215, 255, 255], [31, 249, 137, 255], (x - 188) / 69);
+  if (roundedRect(x, y, 269, 270, 77, 32, 16)) color = [243, 246, 244, 255];
 
   return color;
 }
@@ -66,7 +66,7 @@ function chevron(x, y) {
 function ring(color, x, y, cx, cy, radius, width, ringColor) {
   const d = Math.hypot(x - cx, y - cy);
   if (d <= radius && d >= radius - width) return ringColor;
-  if (d < radius - width) return [16, 24, 32, 255];
+  if (d < radius - width) return [24, 25, 26, 255];
   return color;
 }
 

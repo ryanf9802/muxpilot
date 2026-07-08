@@ -1,10 +1,12 @@
 import { Outlet, useNavigate } from "react-router-dom";
-import { Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError } from "../api/client.js";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ManagedSession, MeResponse, RemoteAccessResponse, SessionEvent } from "@muxpilot/core";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import type { ManagedSession, MeResponse, RemoteAccessResponse, SessionDirectorySuggestion, SessionEvent } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
+import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
@@ -16,6 +18,7 @@ import {
 
 export type ShellConnectionState = "checking" | "connected" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
+export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 
 export function AppShell() {
   const navigate = useNavigate();
@@ -23,6 +26,13 @@ export function AppShell() {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [showConnectButton, setShowConnectButton] = useState(false);
+  const [retryBusy, setRetryBusy] = useState(false);
+  const [createSessionOpen, setCreateSessionOpen] = useState(false);
+  const [createSessionCwd, setCreateSessionCwd] = useState("");
+  const [createSessionName, setCreateSessionName] = useState("");
+  const [createSessionBusy, setCreateSessionBusy] = useState(false);
+  const [createSessionError, setCreateSessionError] = useState<string | null>(null);
+  const [directorySuggestions, setDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
@@ -158,10 +168,88 @@ export function AppShell() {
     };
   }, [applyMe, connectionState, markDisconnected]);
 
-  const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
+  useEffect(() => {
+    if (!createSessionOpen) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || createSessionBusy) return;
+      closeCreateSession();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [createSessionBusy, createSessionOpen]);
 
-  if (connectionState === "checking") return <div className="center-screen">Loading</div>;
+  useEffect(() => {
+    if (!createSessionOpen) return;
+    let cancelled = false;
+    api
+      .sessionDirectories()
+      .then((response) => {
+        if (!cancelled) setDirectorySuggestions(response.directories);
+      })
+      .catch(() => {
+        if (!cancelled) setDirectorySuggestions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [createSessionOpen]);
+
+  const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
+  const createSessionNameError = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
+
+  const openCreateSession = useCallback((cwd = "") => {
+    setCreateSessionOpen(true);
+    setCreateSessionCwd(cwd);
+    setCreateSessionName("");
+    setCreateSessionError(null);
+  }, []);
+
+  const retryConnection = useCallback(async () => {
+    if (retryBusy) return;
+    setRetryBusy(true);
+    try {
+      const me = await api.me();
+      applyMe(me);
+    } catch (error) {
+      markDisconnected(error);
+    } finally {
+      setRetryBusy(false);
+    }
+  }, [applyMe, markDisconnected, retryBusy]);
+
+  if (connectionState === "checking") {
+    return (
+      <AppRecoveryPage
+        role="status"
+        busy
+        title="Opening muxpilot"
+        message="Checking the local backend connection."
+      />
+    );
+  }
   if (connectionState === "unauthorized") return null;
+  if (connectionState === "disconnected") {
+    return (
+      <div className="app">
+        <header className="topbar">
+          <AppBrand />
+          <div />
+          <div className="topbar-actions" />
+        </header>
+        <main className="content recovery-content">
+          <AppRecoveryPage
+            role="status"
+            title="Cannot reach muxpilot"
+            message="The app is open, but the backend is not responding. Keep this page open while muxpilot reconnects."
+            detail="This can happen after the server restarts or when an installed PWA wakes before the backend is ready."
+            actionLabel={retryBusy ? "Retrying" : "Retry now"}
+            busy={retryBusy}
+            onAction={() => void retryConnection()}
+          />
+        </main>
+      </div>
+    );
+  }
 
   async function logout() {
     if (logoutBusy) return;
@@ -174,12 +262,50 @@ export function AppShell() {
     }
   }
 
+  function closeCreateSession() {
+    if (createSessionBusy) return;
+    setCreateSessionOpen(false);
+    setCreateSessionError(null);
+  }
+
+  function updateCreateSessionName(value: string) {
+    setCreateSessionName(normalizeSessionNameInput(value));
+    setCreateSessionError(null);
+  }
+
+  async function submitCreateSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (createSessionBusy) return;
+
+    const cwd = createSessionCwd.trim();
+    const name = normalizeSessionName(createSessionName);
+    if (!cwd) {
+      setCreateSessionError("Directory is required.");
+      return;
+    }
+    if (!isValidSessionName(name)) {
+      setCreateSessionError(SESSION_NAME_VALIDATION_MESSAGE);
+      return;
+    }
+
+    setCreateSessionBusy(true);
+    setCreateSessionError(null);
+    try {
+      const response = await api.createSession({ cwd, name });
+      setCreateSessionOpen(false);
+      await loadSessions();
+      navigate(`/sessions/${response.session.id}`);
+    } catch (error) {
+      setCreateSessionError(error instanceof Error ? error.message : "Could not create session.");
+    } finally {
+      setCreateSessionBusy(false);
+    }
+  }
+
   return (
     <div className="app">
       <header className="topbar">
-        <div className="brand">
-          <strong>muxpilot</strong>
-        </div>
+        <AppBrand />
         <SessionStoplight counts={stoplightCounts} onSelect={(severity) => navigate(`/?statusSeverity=${severity}`)} />
         <div className="topbar-actions">
           {showConnectButton ? (
@@ -200,10 +326,88 @@ export function AppShell() {
         </div>
       </header>
       <main className="content">
-        {connectionState === "disconnected" ? <DisconnectedNotice /> : null}
-        <Outlet context={{ refreshSessionStoplight: loadSessions, syncSessionStoplight, connectionEpoch } satisfies AppShellOutletContext} />
+        <Outlet
+          context={
+            { refreshSessionStoplight: loadSessions, syncSessionStoplight, openCreateSession, connectionEpoch } satisfies AppShellOutletContext
+          }
+        />
       </main>
+      {createSessionOpen ? (
+        <div
+          className="dialog-backdrop"
+          role="presentation"
+          onPointerDown={(event) => event.currentTarget === event.target && closeCreateSession()}
+        >
+          <form className="session-name-dialog" onSubmit={submitCreateSession} role="dialog" aria-modal="true" aria-labelledby="create-session-title">
+            <div className="dialog-head">
+              <h2 id="create-session-title">New session</h2>
+              <button type="button" className="icon-button" onClick={closeCreateSession} aria-label="Close" disabled={createSessionBusy}>
+                <X size={18} />
+              </button>
+            </div>
+            <label className="rename-field">
+              <span>Directory</span>
+              <input
+                autoFocus
+                value={createSessionCwd}
+                onChange={(event) => setCreateSessionCwd(event.target.value)}
+                maxLength={4096}
+                disabled={createSessionBusy}
+                list="session-directory-suggestions"
+              />
+            </label>
+            <datalist id="session-directory-suggestions">
+              {directorySuggestions.map((suggestion) => (
+                <option key={suggestion.path} value={suggestion.path} label={directorySuggestionLabel(suggestion)} />
+              ))}
+            </datalist>
+            <label className="rename-field">
+              <span>Name</span>
+              <input
+                value={createSessionName}
+                onChange={(event) => updateCreateSessionName(event.target.value)}
+                maxLength={SESSION_NAME_MAX_LENGTH}
+                aria-invalid={Boolean(createSessionNameError)}
+                disabled={createSessionBusy}
+              />
+            </label>
+            {createSessionNameError ? (
+              <p className="dialog-error" role="alert">
+                {createSessionNameError}
+              </p>
+            ) : null}
+            {createSessionError ? (
+              <p className="dialog-error" role="alert">
+                {createSessionError}
+              </p>
+            ) : null}
+            <div className="dialog-actions">
+              <button type="button" onClick={closeCreateSession} disabled={createSessionBusy}>
+                Cancel
+              </button>
+              <button
+                className="primary"
+                type="submit"
+                disabled={createSessionBusy || Boolean(createSessionNameError)}
+                aria-busy={createSessionBusy}
+                data-busy={createSessionBusy || undefined}
+              >
+                {createSessionBusy ? "Creating" : "Create"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {connectOpen ? <ConnectDeviceDialog onClose={() => setConnectOpen(false)} /> : null}
+    </div>
+  );
+}
+
+export function AppBrand() {
+  return (
+    <div className="brand">
+      <img className="brand-logo" src="/favicon.svg" alt="" aria-hidden="true" />
+      <strong>muxpilot</strong>
     </div>
   );
 }
@@ -211,6 +415,7 @@ export function AppShell() {
 export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
   syncSessionStoplight: (session: ManagedSession) => void;
+  openCreateSession: (cwd?: string) => void;
   connectionEpoch: number;
 }
 
@@ -221,6 +426,47 @@ export function DisconnectedNotice() {
       <span>Disconnected from muxpilot. Reconnecting...</span>
     </div>
   );
+}
+
+export function AppRecoveryPage({
+  role = "alert",
+  title,
+  message,
+  detail,
+  actionLabel,
+  busy = false,
+  onAction
+}: {
+  role?: "alert" | "status";
+  title: string;
+  message: string;
+  detail?: string;
+  actionLabel?: string;
+  busy?: boolean;
+  onAction?: () => void;
+}) {
+  return (
+    <section className="recovery-page" role={role} aria-live={role === "status" ? "polite" : "assertive"}>
+      <div className="recovery-mark" aria-hidden="true">
+        {busy ? <LoaderCircle className="spin" size={28} /> : <AlertTriangle size={28} />}
+      </div>
+      <div className="recovery-copy">
+        <h1>{title}</h1>
+        <p>{message}</p>
+        {detail ? <p className="recovery-detail">{detail}</p> : null}
+      </div>
+      {actionLabel && onAction ? (
+        <button className="primary-button recovery-action" type="button" onClick={onAction} disabled={busy} aria-busy={busy} data-busy={busy || undefined}>
+          {busy ? <LoaderCircle className="spin" size={18} /> : null}
+          {actionLabel}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+export function sessionNameValidationMessage(value: string): string | null {
+  return isValidSessionName(normalizeSessionName(value)) ? null : SESSION_NAME_VALIDATION_MESSAGE;
 }
 
 export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession[], session: ManagedSession): ManagedSession[] {
@@ -282,8 +528,8 @@ function sessionCountNoun(count: number): string {
   return count === 1 ? "session" : "sessions";
 }
 
-export function shouldShowConnectDeviceButton(me: Pick<MeResponse, "accessMode">): boolean {
-  return me.accessMode === "local";
+export function shouldShowConnectDeviceButton(me: Pick<MeResponse, "accessGranted" | "accessKeyRequired" | "accessMode">): boolean {
+  return me.accessGranted && me.accessMode === "local" && !me.accessKeyRequired;
 }
 
 function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {

@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent
 } from "react";
@@ -19,6 +20,7 @@ import type {
   SessionEvent,
   SessionStatus
 } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
@@ -46,6 +48,7 @@ export const DASHBOARD_STATUS_FILTER_OPTIONS = [
   { value: "severity:yellow", label: "working / pending" },
   { value: "severity:green", label: "ready" }
 ];
+export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 
 export type DashboardStatusFilter =
   | { kind: "all"; selectValue: "" }
@@ -55,7 +58,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch } = useOutletContext<AppShellOutletContext>();
+  const { connectionEpoch, openCreateSession } = useOutletContext<AppShellOutletContext>();
   const [searchParams, setSearchParams] = useSearchParams();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
@@ -64,9 +67,7 @@ export function Dashboard() {
   const [menu, setMenu] = useState<{ session: ManagedSession; x: number; y: number } | null>(null);
   const [renameSession, setRenameSession] = useState<ManagedSession | null>(null);
   const [renameName, setRenameName] = useState("");
-  const [createSessionSource, setCreateSessionSource] = useState<ManagedSession | null>(null);
-  const [createSessionName, setCreateSessionName] = useState("");
-  const [busyAction, setBusyAction] = useState<{ sessionId: string; type: "rename" | "kill" | "create" } | null>(null);
+  const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "kill" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [activitySummaryToggleBusy, setActivitySummaryToggleBusy] = useState(false);
   const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
@@ -160,20 +161,20 @@ export function Dashboard() {
   }, [menu]);
 
   useEffect(() => {
-    if (!renameSession && !createSessionSource) return undefined;
+    if (!renameSession) return undefined;
 
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || busyAction) return;
       setRenameSession(null);
-      setCreateSessionSource(null);
       setActionError(null);
     };
 
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [renameSession, createSessionSource, busyAction]);
+  }, [renameSession, busyAction]);
 
   const sessionGroups = useMemo(() => groupSessionsByRepo(sessions), [sessions]);
+  const renameNameError = renameSession ? sessionNameValidationMessage(renameName) : null;
 
   function openMenu(session: ManagedSession, x: number, y: number) {
     setActionError(null);
@@ -190,7 +191,7 @@ export function Dashboard() {
     setMenu(null);
     setActionError(null);
     setRenameSession(session);
-    setRenameName(sessionBaseName(session));
+    setRenameName(normalizeSessionNameInput(sessionBaseName(session)));
   }
 
   function closeRename() {
@@ -199,15 +200,8 @@ export function Dashboard() {
     setActionError(null);
   }
 
-  function openCreateSession(source: ManagedSession) {
-    setActionError(null);
-    setCreateSessionSource(source);
-    setCreateSessionName("");
-  }
-
-  function closeCreateSession() {
-    if (busyAction) return;
-    setCreateSessionSource(null);
+  function updateRenameName(value: string) {
+    setRenameName(normalizeSessionNameInput(value));
     setActionError(null);
   }
 
@@ -215,9 +209,9 @@ export function Dashboard() {
     event.preventDefault();
     if (!renameSession || busyAction) return;
 
-    const name = renameName.trim();
-    if (!name) {
-      setActionError("Name is required.");
+    const name = normalizeSessionName(renameName);
+    if (!isValidSessionName(name)) {
+      setActionError(SESSION_NAME_VALIDATION_MESSAGE);
       return;
     }
 
@@ -248,30 +242,6 @@ export function Dashboard() {
       optimisticallyRemovedSessionIdsRef.current.delete(session.id);
       await loadSessions();
       setActionError(error instanceof Error ? error.message : "Could not kill pane.");
-    } finally {
-      setBusyAction(null);
-    }
-  }
-
-  async function submitCreateSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!createSessionSource || busyAction) return;
-
-    const name = createSessionName.trim();
-    if (!name) {
-      setActionError("Name is required.");
-      return;
-    }
-
-    setBusyAction({ sessionId: createSessionSource.id, type: "create" });
-    setActionError(null);
-    try {
-      const response = await api.createSession({ sourceSessionId: createSessionSource.id, name });
-      setCreateSessionSource(null);
-      await loadSessions();
-      navigate(`/sessions/${response.session.id}`);
-    } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Could not create session.");
     } finally {
       setBusyAction(null);
     }
@@ -333,6 +303,10 @@ export function Dashboard() {
             </option>
           ))}
         </select>
+        <button className="dashboard-new-session-button" type="button" onClick={() => openCreateSession()}>
+          <Plus size={16} />
+          New session
+        </button>
       </div>
 
       {actionError && !renameSession ? (
@@ -350,11 +324,9 @@ export function Dashboard() {
             <section className="repo-session-group" key={group.key}>
               <RepoSessionGroupHeader
                 group={group}
-                createDisabled={Boolean(busyAction)}
                 isCollapsed={isCollapsed}
                 sessionGridId={sessionGridId}
                 onToggleCollapsed={toggleRepoCollapsed}
-                onCreateSession={openCreateSession}
               />
 
               {isCollapsed ? null : (
@@ -422,11 +394,17 @@ export function Dashboard() {
               <input
                 autoFocus
                 value={renameName}
-                onChange={(event) => setRenameName(event.target.value)}
-                maxLength={80}
+                onChange={(event) => updateRenameName(event.target.value)}
+                maxLength={SESSION_NAME_MAX_LENGTH}
+                aria-invalid={Boolean(renameNameError)}
                 disabled={Boolean(busyAction)}
               />
             </label>
+            {renameNameError ? (
+              <p className="dialog-error" role="alert">
+                {renameNameError}
+              </p>
+            ) : null}
             {actionError ? (
               <p className="dialog-error" role="alert">
                 {actionError}
@@ -439,7 +417,7 @@ export function Dashboard() {
               <button
                 className="primary"
                 type="submit"
-                disabled={Boolean(busyAction)}
+                disabled={Boolean(busyAction) || Boolean(renameNameError)}
                 aria-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename"}
                 data-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? true : undefined}
               >
@@ -450,52 +428,7 @@ export function Dashboard() {
         </div>
       ) : null}
 
-      {createSessionSource ? (
-        <div
-          className="dialog-backdrop"
-          role="presentation"
-          onPointerDown={(event) => event.currentTarget === event.target && closeCreateSession()}
-        >
-          <form className="session-name-dialog" onSubmit={submitCreateSession} role="dialog" aria-modal="true" aria-labelledby="create-session-title">
-            <div className="dialog-head">
-              <h2 id="create-session-title">New session</h2>
-              <button type="button" className="icon-button" onClick={closeCreateSession} aria-label="Close" disabled={Boolean(busyAction)}>
-                <X size={18} />
-              </button>
-            </div>
-            <label className="rename-field">
-              <span>Name</span>
-              <input
-                autoFocus
-                value={createSessionName}
-                onChange={(event) => setCreateSessionName(event.target.value)}
-                maxLength={80}
-                disabled={Boolean(busyAction)}
-              />
-            </label>
-            {actionError ? (
-              <p className="dialog-error" role="alert">
-                {actionError}
-              </p>
-            ) : null}
-            <div className="dialog-actions">
-              <button type="button" onClick={closeCreateSession} disabled={Boolean(busyAction)}>
-                Cancel
-              </button>
-              <button
-                className="primary"
-                type="submit"
-                disabled={Boolean(busyAction)}
-                aria-busy={busyAction?.sessionId === createSessionSource.id && busyAction.type === "create"}
-                data-busy={busyAction?.sessionId === createSessionSource.id && busyAction.type === "create" ? true : undefined}
-              >
-                {busyAction?.sessionId === createSessionSource.id && busyAction.type === "create" ? "Creating" : "Create"}
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : null}
-
+      <div className="dashboard-usage-separator" aria-hidden="true" />
       <CodexUsagePanel summary={codexUsageSummary} />
       <OpenAIUsagePanel
         summary={usageSummary}
@@ -539,6 +472,10 @@ export function removeSessionFromDashboard(sessions: ManagedSession[], sessionId
 
 export function removeSessionsFromDashboard(sessions: ManagedSession[], sessionIds: ReadonlySet<string>): ManagedSession[] {
   return sessions.filter((session) => !sessionIds.has(session.id));
+}
+
+export function sessionNameValidationMessage(value: string): string | null {
+  return isValidSessionName(normalizeSessionName(value)) ? null : SESSION_NAME_VALIDATION_MESSAGE;
 }
 
 export function parseStoredCollapsedRepoKeys(value: string | null): string[] {
@@ -676,57 +613,57 @@ export function SessionCard({
 
 export function RepoSessionGroupHeader({
   group,
-  createDisabled,
   isCollapsed,
   sessionGridId,
-  onToggleCollapsed,
-  onCreateSession
+  onToggleCollapsed
 }: {
   group: RepoSessionGroup;
-  createDisabled?: boolean;
   isCollapsed?: boolean;
   sessionGridId?: string;
   onToggleCollapsed?: (repoKey: string) => void;
-  onCreateSession: (source: ManagedSession) => void;
 }) {
+  function toggleCollapsed() {
+    onToggleCollapsed?.(group.key);
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    toggleCollapsed();
+  }
+
   return (
-    <div className="repo-session-group-head">
+    <div
+      className="repo-session-group-head"
+      role="button"
+      tabIndex={0}
+      aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${group.repoName}`}
+      aria-expanded={!isCollapsed}
+      aria-controls={sessionGridId}
+      title={isCollapsed ? "Expand repo" : "Collapse repo"}
+      onClick={toggleCollapsed}
+      onKeyDown={handleKeyDown}
+    >
       <div className="repo-session-group-title-row">
-        <button
+        <span
           className="repo-collapse-button"
-          type="button"
-          aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${group.repoName}`}
-          aria-expanded={!isCollapsed}
-          aria-controls={sessionGridId}
-          title={isCollapsed ? "Expand repo" : "Collapse repo"}
-          onClick={() => onToggleCollapsed?.(group.key)}
+          aria-hidden="true"
         >
           {isCollapsed ? <ChevronRight size={17} /> : <ChevronDown size={17} />}
-        </button>
+        </span>
         <div>
           <h2>
             <span>{group.repoName}</span>
-            <span className="repo-session-group-meta">
-              <GitBranch size={14} />
-              <span>{group.branch ?? "no branch"}</span>
-              {group.dirty ? <span className="dirty">dirty</span> : null}
-            </span>
           </h2>
-          {group.repoRoot ? <p>{group.repoRoot}</p> : null}
+          <p className="repo-session-group-meta">
+            <GitBranch size={14} />
+            <span>{group.branch ?? "no branch"}</span>
+            {group.dirty ? <span className="dirty">dirty</span> : null}
+          </p>
         </div>
       </div>
       <div className="repo-session-group-actions">
         <span>{formatSessionCount(group.sessions.length)}</span>
-        <button
-          className="icon-button repo-new-session-button"
-          type="button"
-          onClick={() => onCreateSession(group.sessions[0]!)}
-          aria-label={`New session for ${group.repoName}`}
-          title="New session"
-          disabled={createDisabled}
-        >
-          <Plus size={17} />
-        </button>
       </div>
     </div>
   );
@@ -897,7 +834,9 @@ function CodexLimitRow({ label, limit, loading }: { label: string; limit: CodexU
     <div className="codex-limit-row">
       <div className="codex-limit-meta">
         <span>{label}</span>
-        <span>{loading ? "loading" : limit?.usedPercent === null || !limit ? "unavailable" : `${Math.round(limit.usedPercent)}% used`}</span>
+        <span>
+          {loading ? "loading" : limit?.remainingPercent === null || !limit ? "unavailable" : `${Math.round(limit.remainingPercent)}% remaining`}
+        </span>
       </div>
       <div className="codex-limit-track" aria-label={`${label} usage`}>
         <div className="codex-limit-fill" style={{ width: `${Math.max(0, Math.min(100, remainingPercent))}%` }} />

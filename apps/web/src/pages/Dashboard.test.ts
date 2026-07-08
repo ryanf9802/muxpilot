@@ -19,6 +19,7 @@ import {
   removeSessionFromDashboard,
   removeSessionsFromDashboard,
   SessionCard,
+  sessionNameValidationMessage,
   shouldRefreshDashboardForEvent
 } from "./Dashboard.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
@@ -65,6 +66,18 @@ describe("sessionDisplayName", () => {
     const session = testSession({ id: "a", paneId: "%111", windowName: "plan-actions" });
 
     expect(sessionDisplayName(session, [session])).toBe("plan-actions");
+  });
+});
+
+describe("sessionNameValidationMessage", () => {
+  it("allows names that normalize to a valid session slug", () => {
+    expect(sessionNameValidationMessage("My Session")).toBeNull();
+    expect(sessionNameValidationMessage("ready-2")).toBeNull();
+  });
+
+  it("rejects names that normalize below the minimum length", () => {
+    expect(sessionNameValidationMessage("a")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
+    expect(sessionNameValidationMessage("!!!")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
   });
 });
 
@@ -147,7 +160,7 @@ describe("OpenAIUsagePanel", () => {
 });
 
 describe("RepoSessionGroupHeader", () => {
-  it("surfaces a new session button for each repo group", () => {
+  it("renders repo metadata without a per-repo new session button", () => {
     const session = testSession({ id: "a", paneId: "%111", windowName: "muxpilot" });
     const html = renderToStaticMarkup(
       createElement(RepoSessionGroupHeader, {
@@ -161,19 +174,21 @@ describe("RepoSessionGroupHeader", () => {
         },
         isCollapsed: false,
         sessionGridId: "repo-session-grid-repo",
-        onToggleCollapsed: () => undefined,
-        onCreateSession: () => undefined
+        onToggleCollapsed: () => undefined
       })
     );
 
     expect(html).toContain("muxpilot");
     expect(html).toContain("main");
     expect(html).toContain("dirty");
+    expect(html).not.toContain("/repo");
+    expect(html).toContain('role="button"');
+    expect(html).toContain('tabindex="0"');
     expect(html).toContain('aria-label="Collapse muxpilot"');
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain('aria-controls="repo-session-grid-repo"');
-    expect(html).toContain('aria-label="New session for muxpilot"');
-    expect(html).toContain('title="New session"');
+    expect(html).not.toContain('aria-label="New session for muxpilot"');
+    expect(html).not.toContain('title="New session"');
   });
 
   it("labels collapsed repo groups as expandable", () => {
@@ -190,8 +205,7 @@ describe("RepoSessionGroupHeader", () => {
         },
         isCollapsed: true,
         sessionGridId: "repo-session-grid-repo",
-        onToggleCollapsed: () => undefined,
-        onCreateSession: () => undefined
+        onToggleCollapsed: () => undefined
       })
     );
 
@@ -235,7 +249,8 @@ describe("CodexUsagePanel", () => {
     expect(html).toContain("Codex usage");
     expect(html).toContain("engineer@example.com");
     expect(html).toContain("plus");
-    expect(html).toContain("40% used");
+    expect(html).not.toContain("40% used");
+    expect(html).toContain("60% remaining");
     expect(html).toContain("width:60%");
     expect(html).toContain("30% remaining");
   });
