@@ -93,4 +93,6 @@ pnpm run:prod
 
 Production preview uses `127.0.0.1:12777` and `127.0.0.1:12778`, with a separate SQLite database under `./data/prod`, so it can run at the same time as the development server. If both production-preview endpoints are already healthy, `pnpm run:prod` reuses them instead of starting a duplicate.
 
+Stop production preview with `pnpm prod:stop` or `pnpm stop:prod`. `pnpm stop` stops both development and production-preview listeners.
+
 Production preview is for manual operator checks. Automated agent work should use `pnpm run:dev`.

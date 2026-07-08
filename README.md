@@ -49,9 +49,13 @@ pnpm build
 pnpm typecheck
 pnpm test
 pnpm run:dev
+pnpm stop
 pnpm dev:stop
+pnpm prod:stop
 pnpm db:reset:dev
 ```
+
+`pnpm stop` stops local muxpilot listeners for both development and production-preview defaults. Use `pnpm dev:stop` or `pnpm prod:stop` when you only want one mode.
 
 `pnpm run:prod` is a local production-preview flow for manual operator use. Automated agents should use the development server only.
 

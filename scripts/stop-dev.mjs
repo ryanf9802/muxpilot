@@ -1,12 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_DEV_PORTS = ["4177", "5177"];
 const DEFAULT_PROD_PORTS = ["12777", "12778"];
-const mode = process.argv[2] === "prod" ? "prod" : "dev";
+const mode = process.argv[2] ?? "all";
 
-const ports = uniquePorts(mode === "prod" ? DEFAULT_PROD_PORTS : DEFAULT_DEV_PORTS);
+if (!["all", "dev", "prod"].includes(mode)) {
+  console.error("Usage: node scripts/stop-dev.mjs [all|dev|prod]");
+  process.exit(1);
+}
+
+loadDotenv();
+
+const ports = mode === "all" ? allLocalPorts() : modePorts(mode);
 const pidsByPort = new Map();
 
 for (const port of ports) {
@@ -19,7 +26,7 @@ for (const port of ports) {
 const allPids = [...new Set([...pidsByPort.values()].flat())].filter((pid) => pid !== process.pid);
 
 if (allPids.length === 0) {
-  console.log(`No local ${mode} servers found on ports ${ports.join(", ")}.`);
+  console.log(`No ${modeLabel()} servers found on ports ${ports.join(", ")}.`);
   process.exit(0);
 }
 
@@ -52,7 +59,7 @@ if (remaining.length > 0) {
   }
 }
 
-console.log(`Local ${mode} server stop complete.`);
+console.log(`${capitalize(modeLabel())} server stop complete.`);
 
 function findListeningPids(port) {
   return uniqueNumbers([
@@ -156,4 +163,81 @@ function safeReadLink(path) {
   } catch {
     return "";
   }
+}
+
+function allLocalPorts() {
+  return uniquePorts([...DEFAULT_DEV_PORTS, ...DEFAULT_PROD_PORTS, ...configuredPorts()]);
+}
+
+function modePorts(stopMode) {
+  const [defaultBackendPort, defaultWebPort] =
+    stopMode === "prod" ? DEFAULT_PROD_PORTS : DEFAULT_DEV_PORTS;
+  return uniquePorts([
+    process.env.MUXPILOT_PORT ?? defaultBackendPort,
+    process.env.MUXPILOT_WEB_PORT ?? defaultWebPort
+  ]);
+}
+
+function configuredPorts() {
+  return [process.env.MUXPILOT_PORT, process.env.MUXPILOT_WEB_PORT].filter(Boolean);
+}
+
+function modeLabel() {
+  if (mode === "all") return "local";
+  return `local ${mode}`;
+}
+
+function capitalize(value) {
+  return `${value[0].toUpperCase()}${value.slice(1)}`;
+}
+
+function loadDotenv() {
+  loadDotenvFile(findDotenv(process.cwd(), ".env"), false);
+  loadDotenvFile(findDotenv(process.cwd(), ".env.local"), true);
+}
+
+function loadDotenvFile(path, override) {
+  if (!path) return;
+
+  const content = readFileSync(path, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const parsed = parseDotenvLine(line);
+    if (!parsed) continue;
+    if (!override && process.env[parsed.key] !== undefined) continue;
+    process.env[parsed.key] = parsed.value;
+  }
+}
+
+function findDotenv(startDir, filename) {
+  let current = resolve(startDir);
+  while (true) {
+    const candidate = join(current, filename);
+    if (existsSync(candidate)) return candidate;
+
+    const parent = dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function parseDotenvLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+
+  const match = trimmed.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+  if (!match) return null;
+
+  const [, key, rawValue] = match;
+  return { key, value: unquoteDotenvValue(rawValue.trim()) };
+}
+
+function unquoteDotenvValue(value) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+
+  return value.replace(/\s+#.*$/, "");
 }

@@ -4,7 +4,7 @@ muxpilot can run inside WSL2 and still be opened from a phone on the same LAN, b
 
 In WSL mirrored networking, the app may work from Windows at `http://127.0.0.1:12778` or `http://127.0.0.1:5177` while a phone cannot open `http://<windows-lan-ip>:<port>`. That usually means Windows or the Hyper-V firewall is blocking inbound LAN traffic to WSL.
 
-## Start muxpilot In LAN Mode
+## Start muxpilot in LAN mode
 
 From WSL:
 
