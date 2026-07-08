@@ -195,7 +195,8 @@ export function Dashboard() {
 
   useEffect(
     () =>
-      registerPrimaryInputFocus(() => {
+      registerPrimaryInputFocus((command) => {
+        if (command !== "focus") return false;
         if (!searchInputRef.current) return false;
         searchInputRef.current.focus();
         searchInputRef.current.select();

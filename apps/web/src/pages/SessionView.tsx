@@ -40,7 +40,7 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { useNavigate, useOutletContext, useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
-import type { AppShellOutletContext } from "./AppShell.js";
+import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -376,7 +376,7 @@ export function SessionView() {
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
-  const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
+  const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
   const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
   const vimAvailable = useDesktopVimAvailable();
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
@@ -475,9 +475,9 @@ export function SessionView() {
 
   useEffect(
     () =>
-      registerPrimaryInputFocus(() => {
+      registerPrimaryInputFocus((command) => {
         if (!sessionRef.current || approval || submitBusy || composerLocked) return false;
-        setComposerFocusRequestKey((key) => key + 1);
+        setComposerFocusRequest((current) => ({ nonce: (current?.nonce ?? 0) + 1, command }));
         return true;
       }),
     [approval, composerLocked, registerPrimaryInputFocus, submitBusy]
@@ -1255,11 +1255,12 @@ export function SessionView() {
               rows={3}
               focusRequestKey={
                 shouldAutofocusComposer(vimAvailable)
-                  ? `${readySession.id}:${composerFocusRequestKey}`
-                  : composerFocusRequestKey > 0
-                    ? String(composerFocusRequestKey)
+                  ? `${readySession.id}:${composerFocusRequest?.nonce ?? 0}`
+                  : composerFocusRequest
+                    ? String(composerFocusRequest.nonce)
                     : null
               }
+              focusCommand={composerFocusRequest?.command ?? "focus"}
               disabled={submitBusy || composerLocked}
             />
             <button
@@ -1457,6 +1458,30 @@ export function runVimEscapeCommand(view: EditorView): boolean {
   return true;
 }
 
+export function runVimFocusCommand(view: EditorView, command: PrimaryInputFocusCommand): boolean {
+  view.focus();
+  const cm = getCM(view);
+  if (!cm) return command === "focus";
+  const vimState = cm.state.vim ?? null;
+  const enterInsertMode = () => {
+    if (!vimState?.insertMode) Vim.handleKey(cm, "i", "user");
+  };
+  if (command === "focus") return true;
+  if (command === "insertStart") {
+    view.dispatch({ selection: { anchor: 0 } });
+    enterInsertMode();
+    return true;
+  }
+  if (command === "appendEnd") {
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    enterInsertMode();
+    return true;
+  }
+  if (vimState?.insertMode) return true;
+  Vim.handleKey(cm, command === "append" ? "a" : "i", "user");
+  return true;
+}
+
 function VimPromptEditor({
   value,
   onChange,
@@ -1469,6 +1494,7 @@ function VimPromptEditor({
   disabled,
   selectionRequest,
   focusRequestKey,
+  focusCommand = "focus",
   onCaretChange
 }: {
   value: string;
@@ -1482,6 +1508,7 @@ function VimPromptEditor({
   disabled?: boolean;
   selectionRequest: { caret: number; nonce: number } | null;
   focusRequestKey?: string | null;
+  focusCommand?: PrimaryInputFocusCommand;
   onCaretChange: (caret: number) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -1529,8 +1556,8 @@ function VimPromptEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view || !focusRequestKey || disabled) return;
-    view.focus();
-  }, [disabled, focusRequestKey]);
+    runVimFocusCommand(view, focusCommand);
+  }, [disabled, focusCommand, focusRequestKey]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -1641,6 +1668,7 @@ export function SkillTextArea({
   placeholder,
   rows,
   focusRequestKey,
+  focusCommand = "focus",
   disabled
 }: {
   value: string;
@@ -1655,6 +1683,7 @@ export function SkillTextArea({
   placeholder?: string;
   rows?: number;
   focusRequestKey?: string | null;
+  focusCommand?: PrimaryInputFocusCommand;
   disabled?: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1686,8 +1715,22 @@ export function SkillTextArea({
 
   useEffect(() => {
     if (vimEnabled || !focusRequestKey || disabled) return;
-    textareaRef.current?.focus();
-  }, [disabled, focusRequestKey, vimEnabled]);
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    if (focusCommand === "insertStart") {
+      textarea.setSelectionRange(0, 0);
+      setCaret(0);
+      return;
+    }
+    if (focusCommand === "appendEnd") {
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+      setCaret(end);
+      return;
+    }
+    syncCaret(textarea);
+  }, [disabled, focusCommand, focusRequestKey, vimEnabled]);
 
   function syncCaret(element: HTMLTextAreaElement) {
     setCaret(element.selectionStart ?? 0);
@@ -1791,6 +1834,7 @@ export function SkillTextArea({
           disabled={disabled}
           selectionRequest={vimSelectionRequest}
           focusRequestKey={focusRequestKey}
+          focusCommand={focusCommand}
           onCaretChange={setCaret}
         />
       ) : (

@@ -2637,6 +2637,12 @@ select:focus-visible {
   border-left-color: var(--color-text) !important;
 }
 
+.vim-editor .cm-editor:not(.cm-focused) .cm-cursor,
+.vim-editor .cm-editor:not(.cm-focused) .cm-dropCursor,
+.vim-editor .cm-editor:not(.cm-focused) .cm-fat-cursor {
+  visibility: hidden !important;
+}
+
 .vim-editor .cm-fat-cursor {
   color: var(--color-input) !important;
   background: var(--color-text) !important;

@@ -41,7 +41,8 @@ export type ShellConnectionState = "checking" | "connected" | "disconnected" | "
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
-type PrimaryInputFocusHandler = () => boolean | void;
+export type PrimaryInputFocusCommand = "focus" | "insert" | "insertStart" | "append" | "appendEnd";
+type PrimaryInputFocusHandler = (command: PrimaryInputFocusCommand) => boolean | void;
 
 export function AppShell() {
   const location = useLocation();
@@ -355,8 +356,9 @@ export function AppShell() {
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
     const handlePrimaryInputFocusShortcut = (event: globalThis.KeyboardEvent) => {
-      if (!shouldHandlePrimaryInputFocusShortcut(event, document)) return;
-      const handled = primaryInputFocusRef.current();
+      const command = primaryInputFocusCommandForShortcut(event);
+      if (!command || !shouldHandlePrimaryInputFocusShortcut(event, document)) return;
+      const handled = primaryInputFocusRef.current(command);
       if (handled === false) return;
       event.preventDefault();
     };
@@ -1026,15 +1028,27 @@ export function isNewSessionShortcut(event: Pick<globalThis.KeyboardEvent, "ctrl
   return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n";
 }
 
+export function primaryInputFocusCommandForShortcut(
+  event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">
+): PrimaryInputFocusCommand | null {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null;
+  if (event.key === "r" || event.key === "R") return "focus";
+  if (event.key === "i") return "insert";
+  if (event.key === "I") return "insertStart";
+  if (event.key === "a") return "append";
+  if (event.key === "A") return "appendEnd";
+  return null;
+}
+
 export function isPrimaryInputFocusShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
-  return !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r";
+  return primaryInputFocusCommandForShortcut(event) !== null;
 }
 
 export function shouldHandlePrimaryInputFocusShortcut(
   event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key" | "target">,
   ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document
 ): boolean {
-  return isPrimaryInputFocusShortcut(event) && !isEditableShortcutTarget(event.target) && !hasShortcutBlockingOverlay(ownerDocument);
+  return primaryInputFocusCommandForShortcut(event) !== null && !isEditableShortcutTarget(event.target) && !hasShortcutBlockingOverlay(ownerDocument);
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {

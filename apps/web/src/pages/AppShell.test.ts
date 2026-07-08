@@ -19,6 +19,7 @@ import {
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSearch,
+  primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
   sessionDirectorySuggestionsFromSessions,
@@ -128,16 +129,31 @@ describe("new session shortcut helpers", () => {
 });
 
 describe("primary input focus shortcut helpers", () => {
-  it("recognizes plain r without browser shortcut modifiers", () => {
+  it("maps primary input shortcuts without browser shortcut modifiers", () => {
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe("focus");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBe("focus");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "i" })).toBe("insert");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "I" })).toBe(
+      "insertStart"
+    );
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "a" })).toBe("append");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "A" })).toBe("appendEnd");
+  });
+
+  it("recognizes only unmodified primary input shortcut keys", () => {
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(true);
-    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "i" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "I" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "a" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "A" })).toBe(true);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: true, altKey: false, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: true, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "r" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "x" })).toBe(false);
   });
 
-  it("does not handle r while typing in editable targets", () => {
+  it("does not handle primary input shortcuts while typing in editable targets", () => {
     const input = shortcutTarget("input");
     const textarea = shortcutTarget("textarea");
     const codeMirrorContent = shortcutTarget(".cm-content");
@@ -147,13 +163,13 @@ describe("primary input focus shortcut helpers", () => {
     expect(isEditableShortcutTarget(codeMirrorContent)).toBe(true);
     expect(
       shouldHandlePrimaryInputFocusShortcut(
-        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: input },
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "i", target: input },
         null
       )
     ).toBe(false);
   });
 
-  it("does not handle r while dialogs or menus are open", () => {
+  it("does not handle primary input shortcuts while dialogs or menus are open", () => {
     const ownerDocument = {
       querySelector: (selector: string) => (selector === "[role='dialog'], [role='menu']" ? {} : null)
     } as Pick<Document, "querySelector">;
@@ -161,18 +177,18 @@ describe("primary input focus shortcut helpers", () => {
     expect(hasShortcutBlockingOverlay(ownerDocument)).toBe(true);
     expect(
       shouldHandlePrimaryInputFocusShortcut(
-        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: null },
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "A", target: null },
         ownerDocument
       )
     ).toBe(false);
   });
 
-  it("handles plain r when focus is outside editable targets and overlays", () => {
+  it("handles primary input shortcuts when focus is outside editable targets and overlays", () => {
     const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
 
     expect(
       shouldHandlePrimaryInputFocusShortcut(
-        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: shortcutTarget(null) },
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "a", target: shortcutTarget(null) },
         ownerDocument
       )
     ).toBe(true);
