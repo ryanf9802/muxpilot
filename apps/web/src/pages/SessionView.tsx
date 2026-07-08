@@ -2214,50 +2214,6 @@ function QuestionBanner({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const remainingSeconds = questionRemainingSeconds(question, nowMs);
   const complete = question.questions.every((prompt) => questionAnswerDraftComplete(answers[prompt.id]));
-                    <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
-                      <Pencil size={16} /> Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      disabled={!editable || busy}
-                      aria-busy={busy}
-                      data-busy={busy || undefined}
-                      onClick={() => void remove(input)}
-                    >
-                      {busy ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />} Remove
-                    </button>
-                  </>
-                )}
-              </div>
-            </article>
-          );
-        })}
-      </div>
-      {error ? <p className="queued-input-error">{error}</p> : null}
-    </section>
-  );
-}
-
-function queuedInputEditable(input: QueuedInput): boolean {
-  return input.status === "queued" || input.status === "failed";
-}
-
-function QuestionBanner({
-  question,
-  busy,
-  error,
-  onAnswer
-}: {
-  question: QuestionRequest;
-  busy: boolean;
-  error: string;
-  onAnswer: (request: QuestionAnswerRequest) => void;
-}) {
-  const [answers, setAnswers] = useState<Record<string, QuestionAnswerDraft>>({});
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const remainingSeconds = questionRemainingSeconds(question, nowMs);
-  const complete = question.questions.every((prompt) => questionAnswerDraftComplete(answers[prompt.id]));
 
   useEffect(() => {
     setAnswers({});

@@ -2654,6 +2654,26 @@ select:focus-visible {
   white-space: pre-wrap;
 }
 
+.queued-input-read {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.queued-input-read > p {
+  flex: 1 1 auto;
+}
+
+.queued-input-read > .queued-input-actions {
+  flex: 0 0 auto;
+}
+
+.queued-input-read-multiline {
+  display: grid;
+  gap: 6px;
+}
+
 .queued-input textarea {
   min-height: 70px;
   resize: vertical;
