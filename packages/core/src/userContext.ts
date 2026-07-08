@@ -32,6 +32,9 @@ export function normalizeUserContextText(text: string): NormalizedUserContext {
     return { kind: "action", text: "Turn aborted", skillNames: [] };
   }
 
+  const subagentNotification = normalizeSubagentNotificationText(withoutEnvironment);
+  if (subagentNotification) return { kind: "action", text: subagentNotification.text, skillNames: [] };
+
   const instructionsAction = instructionsActionText(withoutEnvironment);
   if (instructionsAction) return { kind: "action", text: instructionsAction, skillNames: [] };
 

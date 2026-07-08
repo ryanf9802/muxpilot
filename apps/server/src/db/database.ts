@@ -20,7 +20,14 @@ import type {
   TranscriptRangeKind,
   TranscriptPageResponse
 } from "@muxpilot/core";
-import { buildExpandedTranscriptItems, buildTranscriptItems, hasCompleteProposedPlan, isDisplayableUserPromptText } from "@muxpilot/core";
+import {
+  buildExpandedTranscriptItems,
+  buildTranscriptItems,
+  hasCompleteProposedPlan,
+  isDisplayableUserPromptText,
+  normalizeSubagentNotificationText,
+  normalizeUserContextText
+} from "@muxpilot/core";
 
 type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
 const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
@@ -724,13 +731,15 @@ export class SyncAppDatabase {
 
     const previousOutput = this.latestAssistantOutputBefore(sessionId, prompt.sequence);
     const activeItems = this.compactActiveTailItems(sessionId, prompt, previousOutput);
-    const pageItems = activeTailPageItems(activeItems, fallbackLimit);
+    const activePageItems = activeTailPageItems(activeItems, fallbackLimit);
+    const remaining = Math.max(0, fallbackLimit - topLevelTranscriptItemCount(activePageItems));
+    const olderItems =
+      remaining > 0 ? this.listTranscriptItemsBefore(sessionId, activePageItems[0]?.firstSequence ?? prompt.sequence, remaining) : [];
+    const pageItems = [...olderItems, ...activePageItems];
     const firstLoadedSequence = pageItems[0]?.firstSequence ?? prompt.sequence;
-    const loadedTopLevelCount = topLevelTranscriptItemCount(pageItems);
-    const olderTopLevelCount = this.topLevelMessageCountBefore(sessionId, firstLoadedSequence);
 
     return transcriptItemsPage(sessionId, pageItems, {
-      hasMoreBefore: olderTopLevelCount + loadedTopLevelCount > fallbackLimit,
+      hasMoreBefore: this.topLevelMessageCountBefore(sessionId, firstLoadedSequence) > 0,
       hasMoreAfter: false
     });
   }
@@ -825,7 +834,7 @@ export class SyncAppDatabase {
   }
 
   private activeTailBoundaryRowsAfterPrompt(sessionId: string, promptSequence: number): MessageRow[] {
-    return this.db
+    const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ?
@@ -851,6 +860,19 @@ export class SyncAppDatabase {
          ORDER BY sequence ASC`
       )
       .all(sessionId, promptSequence, sessionId, promptSequence) as unknown as MessageRow[];
+    return rows.filter(isActiveTailBoundaryRow);
+  }
+
+  private listTranscriptItemsBefore(sessionId: string, beforeSequence: number, limit: number): TranscriptItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND sequence < ?
+         ORDER BY sequence ASC`
+      )
+      .all(sessionId, beforeSequence) as unknown as MessageRow[];
+    const pageItems = activeTailPageItems(buildTranscriptItems(rows.map(hydrateMessage)), limit);
+    return topLevelTranscriptItemCount(pageItems) > 0 ? pageItems : [];
   }
 
   private collapsedRangeItem(
@@ -859,27 +881,27 @@ export class SyncAppDatabase {
     toSequence: number,
     rangeKind: TranscriptRangeKind
   ): Extract<TranscriptItem, { type: "range" }> | null {
-    const row = this.db
+    const rows = this.db
       .prepare(
-        `SELECT
-           COUNT(*) AS message_count,
-           MIN(sequence) AS first_sequence,
-           MAX(sequence) AS last_sequence
-         FROM messages
+        `SELECT * FROM messages
          WHERE session_id = ?
            AND sequence >= ?
-           AND sequence <= ?`
+           AND sequence <= ?
+         ORDER BY sequence ASC`
       )
-      .get(sessionId, fromSequence, toSequence) as { message_count: number; first_sequence: number | null; last_sequence: number | null };
-    if (!row.message_count || row.first_sequence === null || row.last_sequence === null) return null;
+      .all(sessionId, fromSequence, toSequence) as unknown as MessageRow[];
+    const rangeRows = rows.filter((row) => !isHiddenUserContextRow(row));
+    const first = rangeRows[0];
+    const last = rangeRows.at(-1) ?? first;
+    if (!first || !last) return null;
     return {
       type: "range",
-      id: `${rangeKind}-${sessionId}-${row.first_sequence}-${row.last_sequence}-${row.message_count}`,
+      id: `${rangeKind}-${sessionId}-${first.sequence}-${last.sequence}-${rangeRows.length}`,
       rangeKind,
-      label: collapsedRangeLabel(rangeKind, row.message_count),
-      firstSequence: row.first_sequence,
-      lastSequence: row.last_sequence,
-      messageCount: row.message_count
+      label: collapsedRangeLabel(rangeKind, rangeRows.length),
+      firstSequence: first.sequence,
+      lastSequence: last.sequence,
+      messageCount: rangeRows.length
     };
   }
 
@@ -1805,6 +1827,17 @@ function topLevelTranscriptItemCount(items: TranscriptItem[]): number {
 
 function isTopLevelTranscriptItem(item: TranscriptItem): boolean {
   return item.type !== "range";
+}
+
+function isActiveTailBoundaryRow(row: MessageRow): boolean {
+  if (row.role !== "user") return true;
+  const normalized = normalizeUserContextText(row.text);
+  if (normalized.kind === "message") return true;
+  return normalized.kind === "action" && !normalizeSubagentNotificationText(row.text);
+}
+
+function isHiddenUserContextRow(row: MessageRow): boolean {
+  return row.role === "user" && normalizeUserContextText(row.text).kind === "hidden";
 }
 
 function collapsedRangeLabel(kind: TranscriptRangeKind, count: number): string {

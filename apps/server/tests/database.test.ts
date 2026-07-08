@@ -78,12 +78,13 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("excludes hidden user context from prompt history", async () => {
+  it("excludes hidden and action user context from prompt history", async () => {
     const db = await tempDb();
     const session = testSession("session-history-context");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     db.appendMessage(testMessage(session.id, 1, "user", initialInstructionContext(), "2026-07-07T00:00:01.000Z"));
-    db.appendMessage(testMessage(session.id, 2, "user", "Actual searchable prompt", "2026-07-07T00:00:02.000Z"));
+    db.appendMessage(testMessage(session.id, 2, "user", subagentNotificationContext(), "2026-07-07T00:00:02.000Z"));
+    db.appendMessage(testMessage(session.id, 3, "user", "Actual searchable prompt", "2026-07-07T00:00:03.000Z"));
 
     const history = await db.listPromptHistory("", 10);
 
@@ -221,17 +222,25 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 4);
 
-    expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "range:stack"], [6, 6, "message"], [7, 16, "range:activity"]]);
+    expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [3, 3, "range:stack"],
+      [4, 4, "message"],
+      [5, 5, "range:stack"],
+      [6, 6, "message"],
+      [7, 16, "range:activity"]
+    ]);
     expect(tail.hasMoreBefore).toBe(false);
     expect(tail.hasMoreAfter).toBe(false);
 
     const older = db.listMessagesBefore(session.id, tail.items[0]?.firstSequence ?? 0, 3);
-    expect(itemSpans(older)).toEqual([[1, 1, "message"], [2, 2, "message"], [3, 3, "range:stack"]]);
+    expect(itemSpans(older)).toEqual([]);
     expect(older.hasMoreBefore).toBe(false);
     db.close();
   });
 
-  it("does not backfill the active transcript tail with older turns when current noise collapses", async () => {
+  it("backfills older visible turns when current noise collapses under the page size", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-visible-page");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -251,6 +260,12 @@ describe("AppDatabase activity summaries", () => {
     const tail = db.listActiveTailMessages(session.id, 8);
 
     expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [3, 3, "range:stack"],
+      [4, 4, "message"],
+      [5, 5, "message"],
+      [6, 6, "range:stack"],
       [7, 7, "message"],
       [8, 8, "range:stack"],
       [9, 9, "message"],
@@ -274,7 +289,14 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 80);
 
-    expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "message"], [6, 6, "message"]]);
+    expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [3, 3, "message"],
+      [4, 4, "message"],
+      [5, 5, "message"],
+      [6, 6, "message"]
+    ]);
     expect(tail.hasMoreBefore).toBe(false);
     expect(tail.hasMoreAfter).toBe(false);
     db.close();
@@ -293,15 +315,16 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 80);
 
-    expect(itemSpans(tail)).toEqual([[91, 91, "message"], [92, 92, "message"], [93, 93, "message"]]);
+    expect(itemSpans(tail)[0]).toEqual([14, 14, "message"]);
+    expect(itemSpans(tail).slice(-3)).toEqual([[91, 91, "message"], [92, 92, "message"], [93, 93, "message"]]);
     expect(tail.hasMoreBefore).toBe(true);
     expect(tail.hasMoreAfter).toBe(false);
 
     const older = db.listMessagesBefore(session.id, tail.items[0]?.firstSequence ?? 0, 80);
-    expect(older.items).toHaveLength(80);
-    expect(older.items[0]?.firstSequence).toBe(11);
-    expect(older.items.at(-1)?.lastSequence).toBe(90);
-    expect(older.hasMoreBefore).toBe(true);
+    expect(older.items).toHaveLength(13);
+    expect(older.items[0]?.firstSequence).toBe(1);
+    expect(older.items.at(-1)?.lastSequence).toBe(13);
+    expect(older.hasMoreBefore).toBe(false);
     db.close();
   });
 
@@ -348,6 +371,8 @@ describe("AppDatabase activity summaries", () => {
       activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
 
     expect(itemSpans(tail)).toEqual([
+      [5, 5, "message"],
+      [6, 6, "range:stack"],
       [7, 7, "message"],
       [8, 8, "range:stack"],
       [9, 9, "message"],
@@ -359,9 +384,7 @@ describe("AppDatabase activity summaries", () => {
       [1, 1, "message"],
       [2, 2, "message"],
       [3, 3, "range:stack"],
-      [4, 4, "message"],
-      [5, 5, "message"],
-      [6, 6, "range:stack"]
+      [4, 4, "message"]
     ]);
     expect(expandedRange?.items[0]).toMatchObject({ type: "message", message: { text: "Collapsed row 10" } });
     db.close();
@@ -389,6 +412,7 @@ describe("AppDatabase activity summaries", () => {
       activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
 
     expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
       [2, 2, "message"],
       [3, 3, "message"],
       [4, 8, "range:activity"],
@@ -406,6 +430,32 @@ describe("AppDatabase activity summaries", () => {
       "Assistant update 2",
       "Tool batch 3"
     ]);
+    db.close();
+  });
+
+  it("keeps subagent notifications inside the collapsed active turn range", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-subagents");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "Older prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "Previous answer"));
+    db.appendMessage(testMessage(session.id, 3, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 4, "tool", "Tool batch 1", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 5, "user", subagentNotificationContext()));
+    db.appendMessage(testMessage(session.id, 6, "tool", "Tool batch 2", undefined, "tool_output"));
+    db.appendMessage(testMessage(session.id, 7, "user", subagentNotificationContext()));
+    db.appendMessage(testMessage(session.id, 8, "assistant", "Current answer"));
+
+    const tail = db.listActiveTailMessages(session.id, 10);
+
+    expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [3, 3, "message"],
+      [4, 7, "range:activity"],
+      [8, 8, "message"]
+    ]);
+    expect(tail.items.find((item) => item.type === "range" && item.label.includes("subagent"))).toBeUndefined();
     db.close();
   });
 
@@ -471,7 +521,13 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 3);
 
-    expect(itemSpans(tail)).toEqual([[2, 2, "range:stack"], [3, 3, "message"], [4, 4, "message"], [5, 5, "range:activity"]]);
+    expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "range:stack"],
+      [3, 3, "message"],
+      [4, 4, "message"],
+      [5, 5, "range:activity"]
+    ]);
     expect(tail.hasMoreBefore).toBe(false);
     db.close();
   });
@@ -883,5 +939,18 @@ function initialInstructionContext(): string {
     "  <cwd>/home/dev/workspace/teamweave</cwd>",
     "  <shell>bash</shell>",
     "</environment_context>"
+  ].join("\n");
+}
+
+function subagentNotificationContext(): string {
+  return [
+    "<subagent_notification>",
+    JSON.stringify({
+      agent_path: "019f428a-0df4-7ef3-acd5-ec042babc237",
+      status: {
+        completed: "Regression pass found no blocking issues in the staged diff."
+      }
+    }),
+    "</subagent_notification>"
   ].join("\n");
 }
