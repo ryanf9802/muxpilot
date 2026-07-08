@@ -29,6 +29,7 @@ import {
   planActionText,
   questionRemainingSeconds,
   parseProposedPlanSegments,
+  queuedInputHasLineBreaks,
   relativeLineNumber,
   replaceTranscriptTail,
   loadComposerDraft,
@@ -456,6 +457,14 @@ describe("model selector helpers", () => {
   it("formats reasoning effort labels", () => {
     expect(reasoningEffortLabel("xhigh")).toBe("X-high");
     expect(reasoningEffortLabel("medium")).toBe("Medium");
+  });
+});
+
+describe("queuedInputHasLineBreaks", () => {
+  it("distinguishes single-line and multi-line queued input text", () => {
+    expect(queuedInputHasLineBreaks("single line")).toBe(false);
+    expect(queuedInputHasLineBreaks("first line\nsecond line")).toBe(true);
+    expect(queuedInputHasLineBreaks("first line\r\nsecond line")).toBe(true);
   });
 });
 
