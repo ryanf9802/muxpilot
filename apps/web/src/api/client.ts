@@ -1,9 +1,11 @@
 import type {
   ApprovalResponse,
   ActivitySummarySettingsResponse,
+  AttachmentUploadResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
+  ComposerPart,
   AccessResponse,
   ConnectivityResponse,
   CreateSessionRequest,
@@ -47,7 +49,7 @@ export function isUnauthorizedError(error: unknown): boolean {
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
-  if (init?.body !== undefined && !headers.has("Content-Type")) {
+  if (init?.body !== undefined && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
@@ -119,17 +121,23 @@ export const api = {
   answerQuestion: (id: string, request: QuestionAnswerRequest) =>
     json<{ ok: true }>(`/api/sessions/${id}/question`, { method: "POST", body: JSON.stringify(request) }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
-  enqueueInput: (id: string, text: string, mode?: CollaborationMode) =>
-    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode }) }),
-  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode) =>
+  uploadAttachment: (id: string, file: File) => {
+    const body = new FormData();
+    body.set("file", file, file.name || "image");
+    return json<AttachmentUploadResponse>(`/api/sessions/${id}/attachments`, { method: "POST", body });
+  },
+  attachmentUrl: (id: string, attachmentId: string) => `/api/sessions/${id}/attachments/${encodeURIComponent(attachmentId)}`,
+  enqueueInput: (id: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
+    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode, parts }) }),
+  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, {
       method: "PATCH",
-      body: JSON.stringify({ text, mode })
+      body: JSON.stringify({ text, mode, parts })
     }),
   deleteQueuedInput: (id: string, queuedId: string) =>
     json<{ ok: true }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, { method: "DELETE" }),
-  send: (id: string, text: string, mode?: CollaborationMode) =>
-    json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode }) }),
+  send: (id: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]) =>
+    json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode, parts }) }),
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) })
 };

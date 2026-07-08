@@ -1,8 +1,10 @@
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  ChatAttachment,
   ChatMessage,
   CollaborationMode,
+  ComposerPart,
   ManagedSession,
   NotificationRuleScope,
   NotificationRuleType,
@@ -86,6 +88,7 @@ interface QueuedInputRow {
   id: string;
   session_id: string;
   text: string;
+  parts_json: string | null;
   mode: string;
   status: string;
   error: string | null;
@@ -94,6 +97,16 @@ interface QueuedInputRow {
   created_at: string;
   updated_at: string;
   sent_at: string | null;
+}
+
+interface AttachmentRow {
+  id: string;
+  session_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  storage_path: string;
+  created_at: string;
 }
 
 interface NotificationRuleRow {
@@ -121,6 +134,10 @@ export type TouchedSessionRepository = Omit<SessionDirectorySuggestion, "source"
 export interface PushVapidKeys {
   publicKey: string;
   privateKey: string;
+}
+
+export interface StoredAttachment extends ChatAttachment {
+  storagePath: string;
 }
 
 export interface OpenAIUsageEventInput {
@@ -412,6 +429,18 @@ export class AppDatabase {
 
   deleteEchoedSentQueuedInputs(sessionId: string): Promise<number> {
     return this.call("deleteEchoedSentQueuedInputs", sessionId) as Promise<number>;
+  }
+
+  upsertAttachment(attachment: StoredAttachment): Promise<void> {
+    return this.call("upsertAttachment", attachment) as Promise<void>;
+  }
+
+  getAttachment(sessionId: string, attachmentId: string): Promise<StoredAttachment | null> {
+    return this.call("getAttachment", sessionId, attachmentId) as Promise<StoredAttachment | null>;
+  }
+
+  listAttachments(sessionId: string, attachmentIds: string[]): Promise<StoredAttachment[]> {
+    return this.call("listAttachments", sessionId, attachmentIds) as Promise<StoredAttachment[]>;
   }
 
   nextSequence(sessionId: string): Promise<number> {
@@ -1383,13 +1412,14 @@ export class SyncAppDatabase {
     this.db
       .prepare(
         `INSERT INTO queued_inputs
-          (id, session_id, text, mode, status, error, codex_session_id, codex_jsonl_path, created_at, updated_at, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, session_id, text, parts_json, mode, status, error, codex_session_id, codex_jsonl_path, created_at, updated_at, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.id,
         input.sessionId,
         input.text,
+        JSON.stringify(normalizeComposerParts(input.parts, input.text)),
         input.mode,
         input.status,
         input.error,
@@ -1406,6 +1436,7 @@ export class SyncAppDatabase {
       .prepare(
         `UPDATE queued_inputs
          SET text = ?,
+             parts_json = ?,
              mode = ?,
              status = ?,
              error = ?,
@@ -1417,6 +1448,7 @@ export class SyncAppDatabase {
       )
       .run(
         input.text,
+        JSON.stringify(normalizeComposerParts(input.parts, input.text)),
         input.mode,
         input.status,
         input.error,
@@ -1440,9 +1472,10 @@ export class SyncAppDatabase {
     let deleted = 0;
 
     for (const row of rows) {
+      const rowParts = parseComposerParts(row.parts_json, row.text);
       const match = this.db
         .prepare(
-          `SELECT 1 AS found
+          `SELECT payload_json
            FROM messages
            WHERE session_id = ?
              AND role = 'user'
@@ -1450,13 +1483,60 @@ export class SyncAppDatabase {
              AND timestamp >= ?
            LIMIT 1`
         )
-        .get(sessionId, row.text, row.sent_at ?? row.updated_at) as { found: number } | undefined;
+        .get(sessionId, row.text, row.sent_at ?? row.updated_at) as { payload_json: string } | undefined;
       if (!match) continue;
+      const payload = parseJsonObject(match.payload_json);
+      const messageParts = normalizeComposerParts(payload?.composerParts, row.text);
+      if (!composerPartsEqual(rowParts, messageParts)) continue;
       this.deleteQueuedInput(sessionId, row.id);
       deleted += 1;
     }
 
     return deleted;
+  }
+
+  upsertAttachment(attachment: StoredAttachment): void {
+    this.db
+      .prepare(
+        `INSERT INTO attachments
+          (id, session_id, filename, mime_type, size_bytes, storage_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+          filename=excluded.filename,
+          mime_type=excluded.mime_type,
+          size_bytes=excluded.size_bytes,
+          storage_path=excluded.storage_path`
+      )
+      .run(
+        attachment.id,
+        attachment.sessionId,
+        attachment.filename,
+        attachment.mimeType,
+        attachment.sizeBytes,
+        attachment.storagePath,
+        attachment.createdAt
+      );
+  }
+
+  getAttachment(sessionId: string, attachmentId: string): StoredAttachment | null {
+    const row = this.db
+      .prepare("SELECT * FROM attachments WHERE session_id = ? AND id = ?")
+      .get(sessionId, attachmentId) as AttachmentRow | undefined;
+    return row ? hydrateAttachment(row) : null;
+  }
+
+  listAttachments(sessionId: string, attachmentIds: string[]): StoredAttachment[] {
+    const uniqueIds = [...new Set(attachmentIds.filter(Boolean))];
+    if (uniqueIds.length === 0) return [];
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM attachments WHERE session_id = ? AND id IN (${placeholders})`)
+      .all(sessionId, ...uniqueIds) as unknown as AttachmentRow[];
+    const byId = new Map(rows.map((row) => [row.id, hydrateAttachment(row)]));
+    return uniqueIds.flatMap((id) => {
+      const attachment = byId.get(id);
+      return attachment ? [attachment] : [];
+    });
   }
 
   nextSequence(sessionId: string): number {
@@ -1655,6 +1735,7 @@ export class SyncAppDatabase {
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
         text TEXT NOT NULL,
+        parts_json TEXT,
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
         error TEXT,
@@ -1663,6 +1744,17 @@ export class SyncAppDatabase {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         sent_at TEXT,
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS attachments (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        storage_path TEXT NOT NULL,
+        created_at TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
@@ -1695,10 +1787,12 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id, created_at);
       CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
       CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
+    this.addColumnIfMissing("queued_inputs", "parts_json", "TEXT");
     this.backfillSessionRepositories();
   }
 
@@ -1849,6 +1943,7 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     id: row.id,
     sessionId: row.session_id,
     text: row.text,
+    parts: parseComposerParts(row.parts_json, row.text),
     mode: collaborationMode(row.mode) ?? "default",
     status: queuedInputStatus(row.status),
     error: row.error,
@@ -1858,6 +1953,60 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     updatedAt: row.updated_at,
     sentAt: row.sent_at
   };
+}
+
+function hydrateAttachment(row: AttachmentRow): StoredAttachment {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    filename: row.filename,
+    mimeType: row.mime_type,
+    sizeBytes: row.size_bytes,
+    storagePath: row.storage_path,
+    createdAt: row.created_at
+  };
+}
+
+function parseComposerParts(value: string | null, fallbackText: string): ComposerPart[] {
+  if (!value) return fallbackText ? [{ type: "text", text: fallbackText }] : [];
+  try {
+    return normalizeComposerParts(JSON.parse(value) as unknown, fallbackText);
+  } catch {
+    return fallbackText ? [{ type: "text", text: fallbackText }] : [];
+  }
+}
+
+function normalizeComposerParts(value: unknown, fallbackText: string): ComposerPart[] {
+  if (!Array.isArray(value)) return fallbackText ? [{ type: "text", text: fallbackText }] : [];
+  const parts: ComposerPart[] = [];
+  for (const item of value) {
+    const record = recordValue(item);
+    if (!record) continue;
+    if (record.type === "text" && typeof record.text === "string" && record.text) {
+      appendTextPart(parts, record.text);
+      continue;
+    }
+    if (record.type === "image" && typeof record.attachmentId === "string" && record.attachmentId) {
+      parts.push({ type: "image", attachmentId: record.attachmentId });
+    }
+  }
+  if (!parts.length && fallbackText) return [{ type: "text", text: fallbackText }];
+  return parts;
+}
+
+function appendTextPart(parts: ComposerPart[], text: string): void {
+  const previous = parts.at(-1);
+  if (previous?.type === "text") previous.text += text;
+  else parts.push({ type: "text", text });
+}
+
+function composerPartsEqual(first: ComposerPart[], second: ComposerPart[]): boolean {
+  if (first.length !== second.length) return false;
+  return first.every((part, index) => {
+    const other = second[index];
+    if (!other || part.type !== other.type) return false;
+    return part.type === "text" ? other.type === "text" && part.text === other.text : other.type === "image" && part.attachmentId === other.attachmentId;
+  });
 }
 
 function queuedInputStatus(value: unknown): QueuedInput["status"] {

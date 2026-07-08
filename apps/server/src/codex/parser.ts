@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
+import { basename, extname } from "node:path";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
-import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
+import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, ComposerPart, MessageType, QuestionRequest } from "@muxpilot/core";
 
 export const PARSER_VERSION = "codex-jsonl-v1";
 
@@ -145,9 +146,14 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
   if (topType === "response_item" && payloadType === "message") {
     const role = event.payload?.role;
     if (role === "assistant" || role === "user") {
-      const text = contentToText(event.payload?.content);
-      if (!text) return null;
-      if (role === "user") return userMessageFromText(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+      const composerParts = contentToComposerParts(event.payload?.content);
+      const text = composerParts.length ? composerParts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") : contentToText(event.payload?.content);
+      if (!text && !composerParts.some((part) => part.type === "image")) return null;
+      const payload =
+        composerParts.length > 0
+          ? { ...(event as unknown as Record<string, unknown>), composerParts }
+          : (event as unknown as Record<string, unknown>);
+      if (role === "user") return userMessageFromText(text, timestamp, payload, collaborationMode);
       return message(role, role, timestamp, text, event as unknown as Record<string, unknown>, collaborationMode);
     }
   }
@@ -425,6 +431,39 @@ function contentToText(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function contentToComposerParts(content: unknown): ComposerPart[] {
+  if (!Array.isArray(content)) return [];
+  const parts: ComposerPart[] = [];
+  for (const item of content) {
+    const record = recordValue(item);
+    if (!record) continue;
+    if ((record.type === "input_text" || record.type === "text") && typeof record.text === "string" && record.text) {
+      appendComposerTextPart(parts, record.text);
+      continue;
+    }
+    if (record.type === "input_image" && typeof record.image_url === "string") {
+      parts.push({ type: "image", attachmentId: attachmentIdFromImageReference(record.image_url) });
+      continue;
+    }
+    if (record.type === "localImage" && typeof record.path === "string") {
+      parts.push({ type: "image", attachmentId: attachmentIdFromImageReference(record.path) });
+    }
+  }
+  return parts;
+}
+
+function attachmentIdFromImageReference(value: string): string {
+  const filename = basename(value);
+  const extension = extname(filename);
+  return extension ? filename.slice(0, -extension.length) : value;
+}
+
+function appendComposerTextPart(parts: ComposerPart[], text: string): void {
+  const previous = parts.at(-1);
+  if (previous?.type === "text") previous.text += text;
+  else parts.push({ type: "text", text });
 }
 
 function standaloneSkillContextNames(line: string): string[] {

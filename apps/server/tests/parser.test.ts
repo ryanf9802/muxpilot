@@ -62,6 +62,38 @@ describe("parseCodexJsonl", () => {
     expect(result.messages.map((message) => message.payload.type)).toEqual(["event_msg", "event_msg"]);
   });
 
+  it("keeps local image parts on Codex user response items", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "Inspect this " },
+              { type: "localImage", path: "/tmp/muxpilot-data/attachments/session-a/att_123.png", detail: "auto" }
+            ]
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.text).toBe("Inspect this");
+    expect(result.messages[0]?.payload.composerParts).toEqual([
+      { type: "text", text: "Inspect this " },
+      { type: "image", attachmentId: "att_123" }
+    ]);
+  });
+
   it("maps escalated function calls into approval requests", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");

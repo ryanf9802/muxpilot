@@ -186,10 +186,26 @@ export interface QuestionResponse {
 
 export type QueuedInputStatus = "queued" | "sending" | "sent" | "failed";
 
+export type ComposerPart = { type: "text"; text: string } | { type: "image"; attachmentId: string };
+
+export interface ChatAttachment {
+  id: string;
+  sessionId: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export interface AttachmentUploadResponse {
+  attachment: ChatAttachment;
+}
+
 export interface QueuedInput {
   id: string;
   sessionId: string;
   text: string;
+  parts: ComposerPart[];
   mode: CollaborationMode;
   status: QueuedInputStatus;
   error: string | null;
@@ -206,11 +222,13 @@ export interface QueuedInputResponse {
 
 export interface CreateQueuedInputRequest {
   text: string;
+  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 
 export interface UpdateQueuedInputRequest {
   text: string;
+  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 
@@ -318,6 +336,7 @@ export interface PwaTrustInfo {
 
 export interface SendInputRequest {
   text: string;
+  parts?: ComposerPart[];
   mode?: CollaborationMode;
 }
 

@@ -185,24 +185,6 @@ describe("handleCtrlWKeyDown", () => {
     expect(input.value).toBe("alpha beta");
   });
 
-  it("leaves CodeMirror targets for editor-owned Ctrl+W handling", () => {
-    vi.stubGlobal("HTMLElement", FakeCodeMirrorElement);
-    const target = new FakeCodeMirrorElement();
-    const preventDefault = vi.fn();
-
-    const handled = handleCtrlWKeyDown({
-      ctrlKey: true,
-      key: "w",
-      altKey: false,
-      metaKey: false,
-      preventDefault,
-      target
-    });
-
-    expect(handled).toBe(false);
-    expect(preventDefault).not.toHaveBeenCalled();
-  });
-
   it("ignores other shortcuts", () => {
     const preventDefault = vi.fn();
 

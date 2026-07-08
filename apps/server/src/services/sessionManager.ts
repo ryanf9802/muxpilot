@@ -5,6 +5,7 @@ import type {
   ApprovalRequest,
   ChatMessage,
   CollaborationMode,
+  ComposerPart,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -29,6 +30,7 @@ import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
+import type { CodexAppServerClient } from "./codexUsage.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -37,6 +39,10 @@ interface ActivitySummaryScheduler {
 interface CodexProcessLookup {
   resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
 }
+
+type CodexAppServerInputPart =
+  | { type: "text"; text: string; text_elements: [] }
+  | { type: "localImage"; path: string; detail: "auto" };
 
 interface ApprovalKeyMap {
   approveOnce: string[];
@@ -63,7 +69,8 @@ export class SessionManager {
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null
+    private readonly codexProcessLookup: CodexProcessLookup | null = null,
+    private readonly codexAppServer: CodexAppServerClient | null = null
   ) {}
 
   start(): void {
@@ -286,13 +293,16 @@ export class SessionManager {
     return this.db.listQueuedInputs(sessionId);
   }
 
-  async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
+  async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<QueuedInput> {
     const session = requireSession(await this.db.getSession(sessionId));
+    const normalizedParts = normalizeComposerParts(parts, text);
+    await this.requireComposerAttachments(sessionId, normalizedParts);
     const now = nowIso();
     const input: QueuedInput = {
       id: eventId(),
       sessionId,
       text,
+      parts: normalizedParts,
       mode: mode ?? session.inputMode,
       status: "queued",
       error: null,
@@ -309,14 +319,17 @@ export class SessionManager {
     return input;
   }
 
-  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
+  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<QueuedInput> {
     const current = await this.db.getQueuedInput(sessionId, queuedInputId);
     if (!current) throw new QueuedInputError("Queued input not found", 404);
     if (current.status === "sending") throw new QueuedInputError("Queued input is already sending");
     if (current.status === "sent") throw new QueuedInputError("Queued input has already been sent");
+    const normalizedParts = normalizeComposerParts(parts, text);
+    await this.requireComposerAttachments(sessionId, normalizedParts);
     const updated: QueuedInput = {
       ...current,
       text,
+      parts: normalizedParts,
       mode: mode ?? current.mode,
       status: "queued",
       error: null,
@@ -390,15 +403,17 @@ export class SessionManager {
     return materializeQuestion(message);
   }
 
-  async sendInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<void> {
+  async sendInput(sessionId: string, text: string, mode?: CollaborationMode, parts?: ComposerPart[]): Promise<void> {
     const session = requireSession(await this.db.getSession(sessionId));
+    const normalizedParts = normalizeComposerParts(parts, text);
+    await this.requireComposerAttachments(sessionId, normalizedParts);
     if (await this.shouldQueueInput(session, text)) {
-      await this.enqueueInput(sessionId, text, mode);
+      await this.enqueueInput(sessionId, text, mode, normalizedParts);
       return;
     }
     const targetMode = mode ?? session.inputMode;
     const liveSession = await this.ensureInputMode(session, targetMode);
-    await this.sendRawInput(liveSession, text);
+    await this.sendRawInput(liveSession, text, normalizedParts);
     const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
     if (latestPlanMessage && isPlanActionInput(text)) {
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
@@ -418,9 +433,39 @@ export class SessionManager {
     return !isInputReadyStatus(session.status);
   }
 
-  private async sendRawInput(session: ManagedSession, text: string): Promise<void> {
+  private async sendRawInput(session: ManagedSession, text: string, parts?: ComposerPart[]): Promise<void> {
+    const normalizedParts = normalizeComposerParts(parts, text);
+    if (composerPartsHaveImages(normalizedParts)) {
+      await this.sendAppServerInput(session, normalizedParts);
+      return;
+    }
     const pane = await this.livePane(session);
     await this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
+  }
+
+  private async sendAppServerInput(session: ManagedSession, parts: ComposerPart[]): Promise<void> {
+    if (!this.codexAppServer) throw new Error("Codex app-server is not configured for image input.");
+    if (!session.codexSessionId) throw new Error("This session is not linked to a Codex thread for image input.");
+    const attachments = await this.requireComposerAttachments(session.id, parts);
+    const attachmentById = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+    const input: CodexAppServerInputPart[] = parts.flatMap((part): CodexAppServerInputPart[] => {
+      if (part.type === "text") return part.text ? [{ type: "text", text: part.text, text_elements: [] }] : [];
+      const attachment = attachmentById.get(part.attachmentId);
+      if (!attachment) throw new Error("Image attachment is no longer available.");
+      return [{ type: "localImage", path: attachment.storagePath, detail: "auto" }];
+    });
+    if (!input.length) throw new Error("Input is empty.");
+    await this.codexAppServer.request("thread/resume", { threadId: session.codexSessionId, cwd: session.tmux.cwd });
+    await this.codexAppServer.request("turn/start", { threadId: session.codexSessionId, input });
+  }
+
+  private async requireComposerAttachments(sessionId: string, parts: ComposerPart[]) {
+    const attachmentIds = parts.flatMap((part) => (part.type === "image" ? [part.attachmentId] : []));
+    const attachments = await this.db.listAttachments(sessionId, attachmentIds);
+    if (attachments.length !== new Set(attachmentIds).size) {
+      throw new Error("One or more image attachments are unavailable.");
+    }
+    return attachments;
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
@@ -631,7 +676,7 @@ export class SessionManager {
 
       try {
         const liveSession = await this.ensureInputMode(readySession, sending.mode);
-        await this.sendRawInput(liveSession, sending.text);
+        await this.sendRawInput(liveSession, sending.text, sending.parts);
         const now = nowIso();
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });
         await this.db.setSessionInputMode(sessionId, sending.mode, now);
@@ -921,6 +966,32 @@ function isInputReadyStatus(status: SessionStatus): boolean {
 
 function queuedInputMatchesSession(input: QueuedInput, session: ManagedSession): boolean {
   return input.codexSessionId === session.codexSessionId && input.codexJsonlPath === session.codexJsonlPath;
+}
+
+function normalizeComposerParts(parts: ComposerPart[] | undefined, fallbackText: string): ComposerPart[] {
+  const normalized: ComposerPart[] = [];
+  const source = parts?.length ? parts : fallbackText ? [{ type: "text" as const, text: fallbackText }] : [];
+  for (const part of source) {
+    if (part.type === "text") {
+      if (part.text) appendTextPart(normalized, part.text);
+      continue;
+    }
+    if (part.attachmentId) normalized.push({ type: "image", attachmentId: part.attachmentId });
+  }
+  if (!normalized.some((part) => part.type === "image" || part.text.trim())) {
+    throw new Error("Input is empty.");
+  }
+  return normalized;
+}
+
+function appendTextPart(parts: ComposerPart[], text: string): void {
+  const previous = parts.at(-1);
+  if (previous?.type === "text") previous.text += text;
+  else parts.push({ type: "text", text });
+}
+
+function composerPartsHaveImages(parts: ComposerPart[]): boolean {
+  return parts.some((part) => part.type === "image");
 }
 
 function isPlanModeUserMessage(message: ChatMessage | null): boolean {

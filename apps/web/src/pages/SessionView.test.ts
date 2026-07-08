@@ -10,6 +10,11 @@ import {
   buildQuestionAnswerRequest,
   composerLockReason,
   composerDraftStorageKey,
+  composerHasContent,
+  composerHasPendingImageTokens,
+  composerPartsFromText,
+  composerTextFromParts,
+  composerValueFromParts,
   copyableMessageText,
   createPendingUserMessage,
   elapsedSince,
@@ -166,6 +171,30 @@ describe("composer draft storage", () => {
   });
 });
 
+describe("composer image parts", () => {
+  it("round-trips inline image tokens as composer parts", () => {
+    const value = "before {{muxpilot-image:att_123}} after";
+
+    const parts = composerPartsFromText(value);
+
+    expect(parts).toEqual([
+      { type: "text", text: "before " },
+      { type: "image", attachmentId: "att_123" },
+      { type: "text", text: " after" }
+    ]);
+    expect(composerTextFromParts(parts)).toBe("before  after");
+    expect(composerValueFromParts(parts, "")).toBe(value);
+    expect(composerHasContent(value)).toBe(true);
+  });
+
+  it("treats uploading and failed image chips as pending composer state", () => {
+    expect(composerHasPendingImageTokens("{{muxpilot-upload:upload_1}}")).toBe(true);
+    expect(composerHasPendingImageTokens("{{muxpilot-error:upload_1}}")).toBe(true);
+    expect(composerHasPendingImageTokens("{{muxpilot-image:att_123}}")).toBe(false);
+    expect(composerHasContent("{{muxpilot-upload:upload_1}}")).toBe(false);
+  });
+});
+
 describe("sessionCreateSessionCwd", () => {
   it("prefers the repo root for new sessions", () => {
     expect(
@@ -254,19 +283,16 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("g"), false)).toEqual({
       command: null,
       pendingG: true,
-      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("g"), true)).toEqual({
       command: "jumpTop",
       pendingG: false,
-      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("G", { shiftKey: true }), false)).toEqual({
       command: "jumpBottom",
       pendingG: false,
-      pendingCtrlW: false,
       preventDefault: true
     });
   });
@@ -282,35 +308,12 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("/"), false)).toEqual({
       command: "find",
       pendingG: false,
-      pendingCtrlW: false,
       preventDefault: true
     });
     expect(transcriptVimNavigationCommand(keyEvent("f", { metaKey: true }), false)).toEqual({
       command: null,
       pendingG: false,
-      pendingCtrlW: false,
       preventDefault: false
-    });
-  });
-
-  it("maps ctrl-w j to normal-mode composer focus", () => {
-    expect(transcriptVimNavigationCommand(keyEvent("w", { ctrlKey: true }), false)).toEqual({
-      command: null,
-      pendingG: false,
-      pendingCtrlW: true,
-      preventDefault: true
-    });
-    expect(transcriptVimNavigationCommand(keyEvent("j"), false, true)).toEqual({
-      command: "focusInput",
-      pendingG: false,
-      pendingCtrlW: false,
-      preventDefault: true
-    });
-    expect(transcriptVimNavigationCommand(keyEvent("j", { ctrlKey: true }), false, true)).toEqual({
-      command: "focusInput",
-      pendingG: false,
-      pendingCtrlW: false,
-      preventDefault: true
     });
   });
 
@@ -400,8 +403,7 @@ describe("skill composer helpers", () => {
         value: "",
         onChange: () => undefined,
         skills: [],
-        placeholder: "Send a message",
-        rows: 1
+        placeholder: "Send a message"
       })
     );
 
@@ -1343,6 +1345,22 @@ describe("UserText", () => {
     expect(html).toContain("$teamweave-browser");
     expect(html).not.toContain('class="user-skill-reference"');
   });
+
+  it("renders user image parts as inline chips", () => {
+    const html = renderToStaticMarkup(
+      createElement(UserText, {
+        text: "see this",
+        sessionId: "session-a",
+        parts: [
+          { type: "text", text: "see this " },
+          { type: "image", attachmentId: "att_123" }
+        ]
+      })
+    );
+
+    expect(html).toContain('class="inline-image-chip inline-image-chip-readonly"');
+    expect(html).toContain("/api/sessions/session-a/attachments/att_123");
+  });
 });
 
 describe("MessageBubble", () => {
@@ -1404,6 +1422,23 @@ describe("pending user messages", () => {
       false
     );
     expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(message("session-a", 3, "Different text"))], pending)).toBe(false);
+  });
+
+  it("reconciles image prompts by composer parts", () => {
+    const parts = [
+      { type: "text" as const, text: "Review " },
+      { type: "image" as const, attachmentId: "att_123" }
+    ];
+    const pending = createPendingUserMessage("session-a", "Review ", "default", parts, "2026-07-07T00:00:00.000Z");
+    const parsed = message("session-a", 3, "Review ", "user", "user", { composerParts: parts });
+
+    expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(parsed)], pending)).toBe(true);
+    expect(
+      transcriptItemsContainPendingUserMessage(
+        [transcriptMessageItem(message("session-a", 4, "Review ", "user", "user", { composerParts: [{ type: "text", text: "Review " }] }))],
+        pending
+      )
+    ).toBe(false);
   });
 
   it("reconciles skill prompts that gain display metadata after parsing", () => {

@@ -1811,16 +1811,15 @@ select:focus-visible {
 }
 
 .transcript-find-bar {
-  z-index: 3;
-  grid-row: 3;
-  justify-self: end;
-  align-self: start;
+  position: absolute;
+  top: 10px;
+  right: 20px;
+  z-index: 4;
   display: grid;
   grid-template-columns: minmax(140px, 220px) auto auto auto auto;
   align-items: center;
   gap: 6px;
   max-width: calc(100% - 20px);
-  margin: 10px 20px 0 10px;
   padding: 7px;
   background: color-mix(in srgb, var(--color-surface-raised) 94%, transparent);
   border: 1px solid var(--color-border);
@@ -2114,14 +2113,21 @@ select:focus-visible {
   color: var(--color-error);
 }
 
-.message-list {
+.transcript-pane {
   grid-row: 3;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+.message-list {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 12px;
   min-width: 0;
   max-width: 100%;
+  height: 100%;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -2649,11 +2655,13 @@ select:focus-visible {
   font-weight: inherit;
 }
 
-.vim-editor {
+.vim-editor,
+.prompt-editor {
   min-width: 0;
 }
 
-.vim-editor .cm-editor {
+.vim-editor .cm-editor,
+.prompt-editor .cm-editor {
   min-height: 52px;
   max-height: min(51dvh, 330px);
   overflow: hidden;
@@ -2665,23 +2673,30 @@ select:focus-visible {
   font-size: inherit;
 }
 
-.vim-editor .cm-editor.cm-focused {
+.vim-editor .cm-editor.cm-focused,
+.prompt-editor .cm-editor.cm-focused {
   border-color: var(--color-tertiary);
   outline: 2px solid var(--color-tertiary);
   outline-offset: 2px;
 }
 
-.vim-editor .cm-scroller {
+.vim-editor .cm-scroller,
+.prompt-editor .cm-scroller {
   max-height: min(51dvh, 330px);
   overflow: auto;
   font-family: inherit;
   line-height: 1.45;
 }
 
-.vim-editor .cm-content {
+.vim-editor .cm-content,
+.prompt-editor .cm-content {
   min-height: 50px;
   padding: 10px 12px 10px 0;
   caret-color: var(--color-text);
+}
+
+.prompt-editor .cm-content {
+  padding-left: 12px;
 }
 
 .vim-editor .cm-vimMode .cm-line {
@@ -2689,13 +2704,17 @@ select:focus-visible {
 }
 
 .vim-editor .cm-cursor,
-.vim-editor .cm-dropCursor {
+.vim-editor .cm-dropCursor,
+.prompt-editor .cm-cursor,
+.prompt-editor .cm-dropCursor {
   border-left-color: var(--color-text) !important;
 }
 
 .vim-editor .cm-editor:not(.cm-focused) .cm-cursor,
 .vim-editor .cm-editor:not(.cm-focused) .cm-dropCursor,
-.vim-editor .cm-editor:not(.cm-focused) .cm-fat-cursor {
+.vim-editor .cm-editor:not(.cm-focused) .cm-fat-cursor,
+.prompt-editor .cm-editor:not(.cm-focused) .cm-cursor,
+.prompt-editor .cm-editor:not(.cm-focused) .cm-dropCursor {
   visibility: hidden !important;
 }
 
@@ -2713,7 +2732,8 @@ select:focus-visible {
   padding: 0 0 0 4px;
 }
 
-.vim-editor .cm-placeholder {
+.vim-editor .cm-placeholder,
+.prompt-editor .cm-placeholder {
   color: var(--color-text-muted);
 }
 
@@ -2727,6 +2747,60 @@ select:focus-visible {
   min-width: 2.4ch;
   padding: 0 8px 0 10px;
   text-align: right;
+}
+
+.inline-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(220px, 100%);
+  min-height: 30px;
+  margin: 0 3px;
+  padding: 3px 8px 3px 4px;
+  vertical-align: middle;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-surface-raised) 90%, var(--color-tertiary));
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+.inline-image-chip img {
+  width: 26px;
+  height: 26px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.inline-image-chip-upload {
+  color: var(--color-text-muted);
+}
+
+.inline-image-chip-error {
+  color: var(--color-error);
+  border-color: color-mix(in srgb, var(--color-error) 45%, var(--color-border));
+}
+
+.inline-image-chip-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 5px;
+  background: var(--color-surface);
+  font-weight: 700;
+}
+
+.inline-composer-parts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+.inline-composer-parts > .rendered {
+  display: contents;
 }
 
 .vim-editor .cm-activeLineGutter,
