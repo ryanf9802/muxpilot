@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type {
   ApprovalDecision,
@@ -13,13 +13,14 @@ import type {
   QueuedInput,
   ResolveApprovalRequest,
   SessionAction,
+  SessionDirectorySuggestion,
   SessionModelSettings,
   SessionModelSelections,
   SessionStatus,
   TranscriptPageResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, hasIncompleteProposedPlan } from "@muxpilot/core";
+import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -464,22 +465,35 @@ export class SessionManager {
     this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
   }
 
-  async createSessionFromSession(sourceSessionId: string, name: string): Promise<ManagedSession> {
-    const source = await this.db.getSession(sourceSessionId);
-    if (!source) throw new CreateSessionError("Source session not found");
-    if (source.status === "missing") throw new CreateSessionError("Source session is no longer available in tmux");
+  async listSessionDirectories(): Promise<SessionDirectorySuggestion[]> {
+    const suggestions = new Map<string, SessionDirectorySuggestion>();
 
-    let liveSource: ManagedSession;
-    try {
-      liveSource = await this.liveSession(source);
-    } catch (error) {
-      throw new CreateSessionError(error instanceof Error ? error.message : "Source session is no longer available in tmux");
+    for (const session of await this.db.listSessions(true)) {
+      const candidate = session.repo.root ?? session.tmux.cwd;
+      if (!candidate) continue;
+      const path = await existingDirectoryPath(candidate);
+      if (!path) continue;
+      const repo = await loadRepoMetadata(path);
+      const source = session.status === "missing" ? "recent" : "active";
+      const next: SessionDirectorySuggestion = {
+        path,
+        label: repo.name || basename(path),
+        repoRoot: repo.root,
+        branch: repo.branch,
+        source,
+        lastActivityAt: session.lastActivityAt
+      };
+      const current = suggestions.get(path);
+      suggestions.set(path, mergeDirectorySuggestion(current, next));
     }
 
-    const repoDir = liveSource.repo.root ?? liveSource.tmux.cwd;
-    if (!repoDir) throw new CreateSessionError("Source session does not have a repo directory");
+    return [...suggestions.values()].sort(compareDirectorySuggestions);
+  }
 
-    const pane = await this.tmux.createCodexWindow(liveSource.tmux.sessionId, repoDir, name);
+  async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
+    const directory = await requireExistingDirectory(cwd);
+    const sessionName = requireSessionName(name);
+    const pane = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName);
     await this.discover();
 
     const sessionId = tmuxPaneSessionId(pane);
@@ -533,7 +547,7 @@ export class SessionManager {
       this.publish("status.changed", sessionId, { status: "waiting" });
     }
     if (action.type === "rename") {
-      await this.tmux.renameWindow(session.tmux.paneId, action.name);
+      await this.tmux.renameWindow(session.tmux.paneId, requireSessionName(action.name));
       await this.refreshRenamedSession(session);
     }
     if (action.type === "kill") await this.tmux.killPane(session.tmux.paneId);
@@ -818,8 +832,14 @@ export class InputModeSwitchError extends Error {
   readonly statusCode = 409;
 }
 
+export class SessionNameError extends Error {
+  readonly statusCode = 400;
+}
+
 export class CreateSessionError extends Error {
-  readonly statusCode = 409;
+  constructor(message: string, readonly statusCode = 409) {
+    super(message);
+  }
 }
 
 export class QueuedInputError extends Error {
@@ -854,6 +874,12 @@ function resolveSessionStatus(
   if (isWorkingStatus(pendingStatus) && isPlanModeUserMessage(latestUserMessage)) return "planning";
   if (isInputReadyStatus(pendingStatus) && hasPendingProposedPlan(latestAssistantMessage, latestUserMessage)) return "planning";
   return pendingStatus;
+}
+
+function requireSessionName(input: string): string {
+  const name = normalizeSessionName(input);
+  if (!isValidSessionName(name)) throw new SessionNameError("Session name must be 2-32 lowercase letters, numbers, or hyphens");
+  return name;
 }
 
 function preservePendingStatus(
@@ -1363,6 +1389,46 @@ function requireSession(session: ManagedSession | null): ManagedSession {
   if (!session) throw new Error("Session not found");
   if (session.status === "missing") throw new Error("Session is no longer available in tmux");
   return session;
+}
+
+async function requireExistingDirectory(cwd: string): Promise<string> {
+  const path = await existingDirectoryPath(cwd);
+  if (!path) throw new CreateSessionError("Directory does not exist or is not accessible", 400);
+  return path;
+}
+
+async function existingDirectoryPath(cwd: string): Promise<string | null> {
+  try {
+    const path = await realpath(cwd);
+    const info = await stat(path);
+    return info.isDirectory() ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+function mergeDirectorySuggestion(
+  current: SessionDirectorySuggestion | undefined,
+  next: SessionDirectorySuggestion
+): SessionDirectorySuggestion {
+  if (!current) return next;
+  const source = current.source === "active" || next.source === "active" ? "active" : "recent";
+  const currentTime = current.lastActivityAt ? Date.parse(current.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const nextTime = next.lastActivityAt ? Date.parse(next.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const fresher = nextTime > currentTime ? next : current;
+  return {
+    ...fresher,
+    source,
+    lastActivityAt: fresher.lastActivityAt ?? current.lastActivityAt ?? next.lastActivityAt
+  };
+}
+
+function compareDirectorySuggestions(first: SessionDirectorySuggestion, second: SessionDirectorySuggestion): number {
+  if (first.source !== second.source) return first.source === "active" ? -1 : 1;
+  const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  if (firstTime !== secondTime) return secondTime - firstTime;
+  return first.label.localeCompare(second.label) || first.path.localeCompare(second.path);
 }
 
 function materializeApproval(message: ChatMessage): ApprovalRequest | null {

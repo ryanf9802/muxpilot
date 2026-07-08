@@ -17,6 +17,7 @@ import type {
   RemoteAccessResponse,
   QuestionResponse,
   ResolveApprovalRequest,
+  SessionDirectoriesResponse,
   SessionActionResponse,
   SessionAction,
   TranscriptPageResponse,
@@ -84,6 +85,7 @@ export const api = {
   codexModels: () => json<CodexModelsResponse>("/api/codex/models"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
+  sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),

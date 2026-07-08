@@ -212,17 +212,25 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/skills", expect.objectContaining({ credentials: "include" }));
   });
 
-  it("creates sessions from a source session id and name", async () => {
+  it("fetches session directory suggestions", async () => {
+    const fetchMock = mockJsonResponse({ directories: [] });
+
+    await api.sessionDirectories();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/session-directories", expect.objectContaining({ credentials: "include" }));
+  });
+
+  it("creates sessions from a cwd and name", async () => {
     const fetchMock = mockJsonResponse({ session: { id: "created-session" } });
 
-    await api.createSession({ sourceSessionId: "source-session", name: "new-work" });
+    await api.createSession({ cwd: "/repo", name: "new-work" });
 
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/sessions",
       expect.objectContaining({ method: "POST", credentials: "include" })
     );
-    expect(init.body).toBe(JSON.stringify({ sourceSessionId: "source-session", name: "new-work" }));
+    expect(init.body).toBe(JSON.stringify({ cwd: "/repo", name: "new-work" }));
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 

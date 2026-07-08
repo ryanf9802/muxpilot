@@ -34,7 +34,12 @@ export class TmuxAdapter {
       .map(parsePaneLine);
   }
 
-  async createCodexWindow(targetSessionId: string, cwd: string, name: string): Promise<TmuxPane> {
+  async createCodexWindowInMuxpilotSession(cwd: string, name: string): Promise<TmuxPane> {
+    if (await this.hasSession("muxpilot")) return this.createCodexWindow("muxpilot", cwd, name);
+    return this.createMuxpilotSession(cwd, name);
+  }
+
+  private async createCodexWindow(targetSessionId: string, cwd: string, name: string): Promise<TmuxPane> {
     const { stdout } = await execFileAsync("tmux", [
       "new-window",
       "-P",
@@ -51,6 +56,35 @@ export class TmuxAdapter {
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
     return parsePaneLine(line);
+  }
+
+  private async createMuxpilotSession(cwd: string, name: string): Promise<TmuxPane> {
+    const { stdout } = await execFileAsync("tmux", [
+      "new-session",
+      "-d",
+      "-P",
+      "-F",
+      PANE_FORMAT,
+      "-s",
+      "muxpilot",
+      "-n",
+      name,
+      "-c",
+      cwd,
+      "codex"
+    ]);
+    const line = stdout.trim().split("\n").find(Boolean);
+    if (!line) throw new Error("tmux did not return a pane for the new Codex session");
+    return parsePaneLine(line);
+  }
+
+  private async hasSession(sessionName: string): Promise<boolean> {
+    try {
+      await execFileAsync("tmux", ["has-session", "-t", sessionName]);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async capturePane(paneId: string, lines = 160, includeAnsi = false): Promise<string> {

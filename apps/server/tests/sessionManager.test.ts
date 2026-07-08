@@ -2131,52 +2131,177 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("creates a new Codex tmux window from the latest repo group source session", async () => {
+  it("normalizes renamed session names before applying tmux window names", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
-    let panes = [testPane({ cwd: repo, paneId: "%1", windowId: "@1" })];
-    const createCalls: Array<{ targetSessionId: string; cwd: string; name: string }> = [];
+    const panes = [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.listPanes = async () => panes;
-    harness.tmux.createCodexWindow = async (targetSessionId, cwd, name) => {
-      createCalls.push({ targetSessionId, cwd, name });
-      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456 });
+    harness.tmux.renameWindow = async (_paneId, name) => {
+      panes[0] = { ...panes[0], windowName: name };
+    };
+
+    await harness.manager.discover();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session).toBeDefined();
+
+    await harness.manager.act(session.id, { type: "rename", name: "My Session!" });
+
+    expect((await harness.manager.getSession(session.id))?.tmux.windowName).toBe("my-session");
+    harness.db.close();
+  });
+
+  it("rejects renamed session names that cannot normalize to a valid slug", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+
+    await harness.manager.discover();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session).toBeDefined();
+
+    await expect(harness.manager.act(session.id, { type: "rename", name: "!" })).rejects.toThrow(
+      "Session name must be 2-32 lowercase letters, numbers, or hyphens"
+    );
+    harness.db.close();
+  });
+
+  it("creates a new Codex tmux window in the shared muxpilot session from an explicit directory", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const otherRepo = join(harness.dir, "other-repo");
+    await mkdir(otherRepo);
+    let panes = [testPane({ cwd: otherRepo, paneId: "%1", windowId: "@1" })];
+    const createCalls: Array<{ cwd: string; name: string }> = [];
+    harness.tmux.listPanes = async () => panes;
+    harness.tmux.createCodexWindowInMuxpilotSession = async (cwd, name) => {
+      createCalls.push({ cwd, name });
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
       panes = [...panes, pane];
       return pane;
     };
 
-    await harness.manager.discover();
-    const source = harness.manager.listSessions(true)[0];
-    expect(source).toBeDefined();
+    const created = await harness.manager.createSessionInDirectory(repo, "new-work");
 
-    const created = await harness.manager.createSessionFromSession(source.id, "new-work");
-
-    expect(createCalls).toEqual([{ targetSessionId: "tmux-session", cwd: repo, name: "new-work" }]);
-    expect(created.id).not.toBe(source.id);
+    expect(createCalls).toEqual([{ cwd: repo, name: "new-work" }]);
+    expect(created.tmux.sessionName).toBe("muxpilot");
     expect(created.tmux.paneId).toBe("%2");
     expect(created.tmux.windowName).toBe("new-work");
     expect(harness.manager.listSessions(true).map((session) => session.tmux.paneId).sort()).toEqual(["%1", "%2"]);
     harness.db.close();
   });
 
-  it("rejects new session creation when the source session is no longer live", async () => {
+  it("normalizes created session names before creating tmux windows", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
+    let panes = [testPane({ cwd: repo, paneId: "%1", windowId: "@1" })];
+    const createCalls: Array<{ cwd: string; name: string }> = [];
+    harness.tmux.listPanes = async () => panes;
+    harness.tmux.createCodexWindowInMuxpilotSession = async (cwd, name) => {
+      createCalls.push({ cwd, name });
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
+      panes = [...panes, pane];
+      return pane;
+    };
+
+    const created = await harness.manager.createSessionInDirectory(repo, "My Session!");
+
+    expect(createCalls).toEqual([{ cwd: repo, name: "my-session" }]);
+    expect(created.tmux.windowName).toBe("my-session");
+    harness.db.close();
+  });
+
+  it("rejects created session names that cannot normalize to a valid slug", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+
+    await expect(harness.manager.createSessionInDirectory(repo, "!")).rejects.toThrow(
+      "Session name must be 2-32 lowercase letters, numbers, or hyphens"
+    );
+    harness.db.close();
+  });
+
+  it("rejects new session creation when the directory does not exist", async () => {
+    const harness = await createHarness();
     let createCalled = false;
-    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
-    harness.tmux.createCodexWindow = async () => {
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => {
       createCalled = true;
       throw new Error("should not create");
     };
 
-    await harness.manager.discover();
-    const source = harness.manager.listSessions(true)[0];
-    expect(source).toBeDefined();
-
-    harness.tmux.listPanes = async () => [];
-    await expect(harness.manager.createSessionFromSession(source.id, "new-work")).rejects.toThrow("Session pane is no longer available");
+    await expect(harness.manager.createSessionInDirectory(join(harness.dir, "missing"), "new-work")).rejects.toThrow(
+      "Directory does not exist or is not accessible"
+    );
     expect(createCalled).toBe(false);
+    harness.db.close();
+  });
+
+  it("creates in the shared muxpilot session when no live panes exist", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let panes: TmuxPane[] = [];
+    const createCalls: Array<{ cwd: string; name: string }> = [];
+    harness.tmux.listPanes = async () => panes;
+    harness.tmux.createCodexWindowInMuxpilotSession = async (cwd, name) => {
+      createCalls.push({ cwd, name });
+      const pane = testPane({ cwd, paneId: "%1", windowId: "@1", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
+      panes = [pane];
+      return pane;
+    };
+
+    const created = await harness.manager.createSessionInDirectory(repo, "new-work");
+
+    expect(createCalls).toEqual([{ cwd: repo, name: "new-work" }]);
+    expect(created.tmux.sessionName).toBe("muxpilot");
+    expect(created.tmux.paneId).toBe("%1");
+    expect(created.tmux.windowName).toBe("new-work");
+    harness.db.close();
+  });
+
+  it("lists active and recent existing directories for new session suggestions", async () => {
+    const harness = await createHarness();
+    const activeRepo = join(harness.dir, "active");
+    const recentRepo = join(harness.dir, "recent");
+    const missingRepo = join(harness.dir, "missing");
+    await mkdir(activeRepo);
+    await mkdir(recentRepo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: activeRepo, paneId: "%1" })];
+
+    await harness.manager.discover();
+    const active = harness.manager.listSessions(true).find((session) => session.tmux.cwd === activeRepo);
+    expect(active).toBeDefined();
+    await harness.db.upsertSession(
+      {
+        ...active!,
+        id: "missing-recent",
+        status: "missing",
+        tmux: { ...active!.tmux, cwd: recentRepo, paneId: "%3", windowId: "@3" },
+        repo: { ...active!.repo, root: recentRepo, name: "recent" },
+        lastActivityAt: "2026-07-08T00:00:00.000Z"
+      },
+      "2026-07-08T00:00:00.000Z"
+    );
+    await harness.db.upsertSession(
+      {
+        ...active!,
+        id: "missing-gone",
+        status: "missing",
+        tmux: { ...active!.tmux, cwd: missingRepo, paneId: "%4", windowId: "@4" },
+        repo: { ...active!.repo, root: missingRepo, name: "missing" }
+      },
+      "2026-07-08T00:00:00.000Z"
+    );
+
+    const suggestions = await harness.manager.listSessionDirectories();
+
+    expect(suggestions.map((suggestion) => [suggestion.path, suggestion.source])).toContainEqual([activeRepo, "active"]);
+    expect(suggestions.map((suggestion) => [suggestion.path, suggestion.source])).toContainEqual([recentRepo, "recent"]);
+    expect(suggestions.map((suggestion) => suggestion.path)).not.toContain(missingRepo);
     harness.db.close();
   });
 
@@ -2371,10 +2496,18 @@ async function writeCodexResponseSession(
   await utimes(path, input.mtime, input.mtime);
 }
 
-function testPane(input: { cwd: string; paneId: string; windowId?: string; pid?: number; windowName?: string; title?: string }): TmuxPane {
+function testPane(input: {
+  cwd: string;
+  paneId: string;
+  windowId?: string;
+  pid?: number;
+  windowName?: string;
+  title?: string;
+  sessionName?: string;
+}): TmuxPane {
   return {
     sessionId: "tmux-session",
-    sessionName: "work",
+    sessionName: input.sessionName ?? "work",
     windowId: input.windowId ?? `@${input.paneId.slice(1)}`,
     windowIndex: Number(input.paneId.slice(1)),
     windowName: input.windowName ?? "codex",

@@ -7,16 +7,19 @@ import type {
   QuestionAnswerRequest,
   ResolveApprovalRequest,
   SendInputRequest,
+  SessionDirectoriesResponse,
   SessionAction,
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
+import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
   CreateSessionError,
   InputModeSwitchError,
   QuestionResolutionError,
   QueuedInputError,
+  SessionNameError,
   type SessionManager
 } from "../services/sessionManager.js";
 import type { EventBus } from "../services/eventBus.js";
@@ -32,9 +35,14 @@ const collaborationModeSchema = z.enum(["default", "plan"]);
 const modelSchema = z.string().trim().min(1).max(120);
 const reasoningEffortSchema = z.string().trim().min(1).max(40).nullable().optional();
 const sendInputSchema = z.object({ text: z.string().min(1).max(200_000), mode: collaborationModeSchema.optional() });
+const sessionNameSchema = z
+  .string()
+  .max(4096)
+  .transform((value) => normalizeSessionName(value))
+  .refine((value) => isValidSessionName(value), { message: "Session name must be 2-32 lowercase letters, numbers, or hyphens" });
 const createSessionSchema = z.object({
-  sourceSessionId: z.string().min(1),
-  name: z.string().trim().min(1).max(80)
+  cwd: z.string().trim().min(1).max(4096),
+  name: sessionNameSchema
 });
 const queuedInputSchema = z.object({ text: z.string().min(1).max(200_000), mode: collaborationModeSchema.optional() });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
@@ -57,7 +65,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
   z.object({ type: z.literal("setModelSettings"), mode: collaborationModeSchema, model: modelSchema, reasoningEffort: reasoningEffortSchema }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
-  z.object({ type: z.literal("rename"), name: z.string().min(1).max(80) }),
+  z.object({ type: z.literal("rename"), name: sessionNameSchema }),
   z.object({ type: z.literal("detach") }),
   z.object({ type: z.literal("kill") })
 ]);
@@ -141,12 +149,17 @@ export function registerRoutes(
     return { sessions };
   });
 
+  app.get("/api/session-directories", { preHandler: access.requireAccess }, async (): Promise<SessionDirectoriesResponse> => ({
+    directories: await manager.listSessionDirectories()
+  }));
+
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {
     const body: CreateSessionRequest = createSessionSchema.parse(request.body);
     try {
-      const session = await manager.createSessionFromSession(body.sourceSessionId, body.name);
+      const session = await manager.createSessionInDirectory(body.cwd, body.name);
       return reply.code(201).send({ session });
     } catch (error) {
+      if (error instanceof SessionNameError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof CreateSessionError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
@@ -282,6 +295,9 @@ export function registerRoutes(
       const session = await manager.act(id, action);
       return reply.code(202).send({ ok: true, session });
     } catch (error) {
+      if (error instanceof SessionNameError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       if (error instanceof InputModeSwitchError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }

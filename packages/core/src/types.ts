@@ -284,8 +284,21 @@ export interface SendInputRequest {
 }
 
 export interface CreateSessionRequest {
-  sourceSessionId: string;
+  cwd: string;
   name: string;
+}
+
+export interface SessionDirectorySuggestion {
+  path: string;
+  label: string;
+  repoRoot: string | null;
+  branch: string | null;
+  source: "active" | "recent";
+  lastActivityAt: string | null;
+}
+
+export interface SessionDirectoriesResponse {
+  directories: SessionDirectorySuggestion[];
 }
 
 export type PlanActionChoice = "implement" | "clear_context_implement" | "stay_in_plan";
