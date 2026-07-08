@@ -1748,18 +1748,18 @@ export function runVimEscapeCommand(view: EditorView): boolean {
 }
 
 export function runVimTranscriptFocusCommand(view: EditorView, onTranscriptFocus?: () => void): boolean {
-  if (!canRunVimWindowCommand(view)) return false;
+  const cm = getCM(view);
+  if (!cm?.state.vim) return false;
+  resetVimToNormalMode(view);
   view.contentDOM.blur();
   view.dom.blur();
   onTranscriptFocus?.();
   return true;
 }
 
-function canRunVimWindowCommand(view: EditorView): boolean {
+function hasVimState(view: EditorView): boolean {
   const cm = getCM(view);
-  const vimState = cm?.state.vim ?? null;
-  if (!cm || !vimState || vimState.insertMode || vimState.visualMode) return false;
-  return true;
+  return Boolean(cm?.state.vim);
 }
 
 export function resetVimToNormalMode(view: EditorView): boolean {
@@ -1955,7 +1955,7 @@ function VimPromptEditor({
           {
             key: "Ctrl-w",
             run: (view) => {
-              if (!canRunVimWindowCommand(view)) return false;
+              if (!hasVimState(view)) return false;
               armPendingCtrlW();
               return true;
             }

@@ -33,6 +33,7 @@ export function previousWordDeletionRange(value: string, selectionStart: number,
 
 export function handleCtrlWKeyDown(event: CtrlWKeyboardEvent): boolean {
   if (!shouldHandleCtrlW(event)) return false;
+  if (isCodeMirrorTarget(event.target)) return false;
 
   event.preventDefault();
   if (isEditableValueElement(event.target)) {
