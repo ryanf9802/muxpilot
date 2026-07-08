@@ -38,6 +38,7 @@ import {
   saveVimModePreference,
   restoreScrollTopForAnchor,
   secondsUntil,
+  sessionCreateSessionCwd,
   SessionHeaderMeta,
   isNearMessageListBottom,
   isCodexPastedContentPlaceholder,
@@ -140,6 +141,26 @@ describe("composer draft storage", () => {
 
     expect(loadComposerDraft("session-a")).toBe("");
     expect(storage.getItem(composerDraftStorageKey("session-a"))).toBeNull();
+  });
+});
+
+describe("sessionCreateSessionCwd", () => {
+  it("prefers the repo root for new sessions", () => {
+    expect(
+      sessionCreateSessionCwd({
+        repo: { root: "/home/dev/muxpilot" },
+        tmux: { cwd: "/home/dev/muxpilot/apps/web" }
+      })
+    ).toBe("/home/dev/muxpilot");
+  });
+
+  it("falls back to the tmux cwd when the repo root is unavailable", () => {
+    expect(
+      sessionCreateSessionCwd({
+        repo: { root: null },
+        tmux: { cwd: "/tmp/scratch" }
+      })
+    ).toBe("/tmp/scratch");
   });
 });
 

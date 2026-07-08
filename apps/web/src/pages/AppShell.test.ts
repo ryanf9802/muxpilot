@@ -11,6 +11,10 @@ import {
   SHELL_RECONNECT_INTERVAL_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
+  hasShortcutBlockingOverlay,
+  isEditableShortcutTarget,
+  isNewSessionShortcut,
+  isPrimaryInputFocusShortcut,
   isPromptHistoryShortcut,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
@@ -19,6 +23,7 @@ import {
   remoteAccessQrValue,
   sessionDirectorySuggestionsFromSessions,
   sessionNameValidationMessage,
+  shouldHandlePrimaryInputFocusShortcut,
   shouldShowConnectDeviceButton,
   shouldShowLogoutButton,
   syncSessionIntoStoplightSessions
@@ -110,6 +115,75 @@ describe("prompt history helpers", () => {
     expect(meta).toContain("muxpilot · main · codex");
   });
 });
+
+describe("new session shortcut helpers", () => {
+  it("recognizes Ctrl+N without browser shortcut modifiers", () => {
+    expect(isNewSessionShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "n" })).toBe(true);
+    expect(isNewSessionShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "N" })).toBe(true);
+    expect(isNewSessionShortcut({ ctrlKey: false, metaKey: true, altKey: false, shiftKey: false, key: "n" })).toBe(false);
+    expect(isNewSessionShortcut({ ctrlKey: true, metaKey: false, altKey: true, shiftKey: false, key: "n" })).toBe(false);
+    expect(isNewSessionShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: true, key: "n" })).toBe(false);
+    expect(isNewSessionShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(false);
+  });
+});
+
+describe("primary input focus shortcut helpers", () => {
+  it("recognizes plain r without browser shortcut modifiers", () => {
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: true, altKey: false, shiftKey: false, key: "r" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: true, shiftKey: false, key: "r" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "r" })).toBe(false);
+  });
+
+  it("does not handle r while typing in editable targets", () => {
+    const input = shortcutTarget("input");
+    const textarea = shortcutTarget("textarea");
+    const codeMirrorContent = shortcutTarget(".cm-content");
+
+    expect(isEditableShortcutTarget(input)).toBe(true);
+    expect(isEditableShortcutTarget(textarea)).toBe(true);
+    expect(isEditableShortcutTarget(codeMirrorContent)).toBe(true);
+    expect(
+      shouldHandlePrimaryInputFocusShortcut(
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: input },
+        null
+      )
+    ).toBe(false);
+  });
+
+  it("does not handle r while dialogs or menus are open", () => {
+    const ownerDocument = {
+      querySelector: (selector: string) => (selector === "[role='dialog'], [role='menu']" ? {} : null)
+    } as Pick<Document, "querySelector">;
+
+    expect(hasShortcutBlockingOverlay(ownerDocument)).toBe(true);
+    expect(
+      shouldHandlePrimaryInputFocusShortcut(
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: null },
+        ownerDocument
+      )
+    ).toBe(false);
+  });
+
+  it("handles plain r when focus is outside editable targets and overlays", () => {
+    const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
+
+    expect(
+      shouldHandlePrimaryInputFocusShortcut(
+        { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r", target: shortcutTarget(null) },
+        ownerDocument
+      )
+    ).toBe(true);
+  });
+});
+
+function shortcutTarget(match: string | null): EventTarget {
+  return {
+    closest: (selector: string) => (match && selector.includes(match) ? {} : null)
+  } as unknown as EventTarget;
+}
 
 describe("ConnectDeviceContent", () => {
   it("renders the primary remote URL and protected access key controls", () => {

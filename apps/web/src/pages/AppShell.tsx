@@ -41,6 +41,7 @@ export type ShellConnectionState = "checking" | "connected" | "disconnected" | "
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
+type PrimaryInputFocusHandler = () => boolean | void;
 
 export function AppShell() {
   const location = useLocation();
@@ -76,6 +77,8 @@ export function AppShell() {
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
   const directorySuggestionRefs = useRef(new Map<string, HTMLButtonElement>());
   const promptHistoryPrefillRef = useRef<() => string>(() => "");
+  const createSessionCwdPrefillRef = useRef<() => string>(() => "");
+  const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
 
   useEffect(() => installCtrlWGuard(), []);
 
@@ -310,12 +313,56 @@ export function AppShell() {
     setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
+  useEffect(() => {
+    if (connectionState !== "connected") return undefined;
+    const handleNewSessionShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!isNewSessionShortcut(event)) return;
+      event.preventDefault();
+      if (createSessionOpen || connectOpen || promptHistoryOpen) return;
+      let cwd = "";
+      try {
+        cwd = createSessionCwdPrefillRef.current();
+      } catch {
+        cwd = "";
+      }
+      openCreateSession(cwd);
+    };
+    document.addEventListener("keydown", handleNewSessionShortcut);
+    return () => document.removeEventListener("keydown", handleNewSessionShortcut);
+  }, [connectionState, connectOpen, createSessionOpen, openCreateSession, promptHistoryOpen]);
+
+  const registerCreateSessionCwdPrefill = useCallback((provider: () => string) => {
+    createSessionCwdPrefillRef.current = provider;
+    return () => {
+      if (createSessionCwdPrefillRef.current === provider) createSessionCwdPrefillRef.current = () => "";
+    };
+  }, []);
+
   const registerPromptHistoryPrefill = useCallback((provider: () => string) => {
     promptHistoryPrefillRef.current = provider;
     return () => {
       if (promptHistoryPrefillRef.current === provider) promptHistoryPrefillRef.current = () => "";
     };
   }, []);
+
+  const registerPrimaryInputFocus = useCallback((provider: PrimaryInputFocusHandler) => {
+    primaryInputFocusRef.current = provider;
+    return () => {
+      if (primaryInputFocusRef.current === provider) primaryInputFocusRef.current = () => false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (connectionState !== "connected") return undefined;
+    const handlePrimaryInputFocusShortcut = (event: globalThis.KeyboardEvent) => {
+      if (!shouldHandlePrimaryInputFocusShortcut(event, document)) return;
+      const handled = primaryInputFocusRef.current();
+      if (handled === false) return;
+      event.preventDefault();
+    };
+    document.addEventListener("keydown", handlePrimaryInputFocusShortcut);
+    return () => document.removeEventListener("keydown", handlePrimaryInputFocusShortcut);
+  }, [connectionState]);
 
   const openPromptHistory = useCallback(() => {
     let initialQuery = "";
@@ -560,7 +607,9 @@ export function AppShell() {
               refreshSessionStoplight: loadSessions,
               syncSessionStoplight,
               openCreateSession,
+              registerCreateSessionCwdPrefill,
               registerPromptHistoryPrefill,
+              registerPrimaryInputFocus,
               connectionEpoch,
               accessMode,
               notificationSettings,
@@ -689,7 +738,9 @@ export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
   syncSessionStoplight: (session: ManagedSession) => void;
   openCreateSession: (cwd?: string) => void;
+  registerCreateSessionCwdPrefill: (provider: () => string) => () => void;
   registerPromptHistoryPrefill: (provider: () => string) => () => void;
+  registerPrimaryInputFocus: (provider: PrimaryInputFocusHandler) => () => void;
   connectionEpoch: number;
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
@@ -969,6 +1020,36 @@ export function shouldShowLogoutButton(me: Pick<MeResponse, "accessMode">): bool
 
 export function isPromptHistoryShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
   return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r";
+}
+
+export function isNewSessionShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
+  return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n";
+}
+
+export function isPrimaryInputFocusShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
+  return !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "r";
+}
+
+export function shouldHandlePrimaryInputFocusShortcut(
+  event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key" | "target">,
+  ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document
+): boolean {
+  return isPrimaryInputFocusShortcut(event) && !isEditableShortcutTarget(event.target) && !hasShortcutBlockingOverlay(ownerDocument);
+}
+
+export function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  const element = eventTargetElement(target);
+  return Boolean(element?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false']), .cm-content"));
+}
+
+export function hasShortcutBlockingOverlay(ownerDocument: Pick<Document, "querySelector"> | null): boolean {
+  return Boolean(ownerDocument?.querySelector("[role='dialog'], [role='menu']"));
+}
+
+function eventTargetElement(target: EventTarget | null): Pick<Element, "closest"> | null {
+  const candidate = target as { closest?: unknown } | null;
+  if (typeof candidate?.closest !== "function") return null;
+  return candidate as Pick<Element, "closest">;
 }
 
 function PromptHistoryDialog({

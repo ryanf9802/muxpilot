@@ -63,7 +63,8 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings } = useOutletContext<AppShellOutletContext>();
+  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus } =
+    useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
@@ -81,6 +82,7 @@ export function Dashboard() {
   const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const sessionRequestIdRef = useRef(0);
   const usageRequestIdRef = useRef(0);
   const codexUsageRequestIdRef = useRef(0);
@@ -190,6 +192,17 @@ export function Dashboard() {
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [renameSession, busyAction]);
+
+  useEffect(
+    () =>
+      registerPrimaryInputFocus(() => {
+        if (!searchInputRef.current) return false;
+        searchInputRef.current.focus();
+        searchInputRef.current.select();
+        return true;
+      }),
+    [registerPrimaryInputFocus]
+  );
 
   const sessionGroups = useMemo(() => groupSessionsByRepo(sessions), [sessions]);
   const renameNameWarning = renameSession ? sessionNameValidationMessage(renameName) : null;
@@ -313,7 +326,13 @@ export function Dashboard() {
       <div className="filters">
         <label className="search-box">
           <Search size={18} />
-          <input {...searchField} value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search sessions" />
+          <input
+            {...searchField}
+            ref={searchInputRef}
+            value={q}
+            onChange={(event) => setQ(event.target.value)}
+            placeholder="Search sessions"
+          />
         </label>
         <button className="dashboard-new-session-button" type="button" onClick={() => openCreateSession()}>
           <Plus size={16} />

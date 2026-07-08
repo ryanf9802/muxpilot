@@ -328,6 +328,10 @@ export function sessionTranscriptSource(session: ManagedSession): TranscriptSour
   };
 }
 
+export function sessionCreateSessionCwd(session: { repo: Pick<ManagedSession["repo"], "root">; tmux: Pick<ManagedSession["tmux"], "cwd"> }): string {
+  return session.repo.root ?? session.tmux.cwd;
+}
+
 export function shouldReplaceTranscriptForSource(currentSourceKey: string | null, nextSourceKey: string): boolean {
   return currentSourceKey !== null && currentSourceKey !== nextSourceKey;
 }
@@ -345,7 +349,9 @@ export function SessionView() {
     refreshSessionStoplight,
     syncSessionStoplight,
     openCreateSession,
+    registerCreateSessionCwdPrefill,
     registerPromptHistoryPrefill,
+    registerPrimaryInputFocus,
     connectionEpoch,
     accessMode
   } = useOutletContext<AppShellOutletContext>();
@@ -370,6 +376,7 @@ export function SessionView() {
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
+  const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
   const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
   const vimAvailable = useDesktopVimAvailable();
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
@@ -382,6 +389,7 @@ export function SessionView() {
   const [expandedRangeItems, setExpandedRangeItems] = useState<Record<string, CoreTranscriptItem[]>>({});
   const [loadingRanges, setLoadingRanges] = useState<Set<string>>(() => new Set());
   const messageListRef = useRef<HTMLDivElement>(null);
+  const sessionRef = useRef<ManagedSession | null>(null);
   const requestTokenRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
@@ -455,6 +463,25 @@ export function SessionView() {
   }, [refreshCodexSkills]);
 
   useEffect(() => registerPromptHistoryPrefill(() => promptHistoryPrefillTextRef.current), [registerPromptHistoryPrefill]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(
+    () => registerCreateSessionCwdPrefill(() => (sessionRef.current ? sessionCreateSessionCwd(sessionRef.current) : "")),
+    [registerCreateSessionCwdPrefill]
+  );
+
+  useEffect(
+    () =>
+      registerPrimaryInputFocus(() => {
+        if (!sessionRef.current || approval || submitBusy || composerLocked) return false;
+        setComposerFocusRequestKey((key) => key + 1);
+        return true;
+      }),
+    [approval, composerLocked, registerPrimaryInputFocus, submitBusy]
+  );
 
   async function toggleExpandedItem(item: CoreTranscriptItem) {
     if (item.type !== "range") return;
@@ -1092,7 +1119,7 @@ export function SessionView() {
           <button
             className="session-new-session-button"
             type="button"
-            onClick={() => openCreateSession(readySession.repo.root ?? readySession.tmux.cwd)}
+            onClick={() => openCreateSession(sessionCreateSessionCwd(readySession))}
             aria-label="New session"
             title="New session"
           >
@@ -1226,7 +1253,13 @@ export function SessionView() {
                     : "Message Codex")
               }
               rows={3}
-              focusRequestKey={shouldAutofocusComposer(vimAvailable) ? readySession.id : null}
+              focusRequestKey={
+                shouldAutofocusComposer(vimAvailable)
+                  ? `${readySession.id}:${composerFocusRequestKey}`
+                  : composerFocusRequestKey > 0
+                    ? String(composerFocusRequestKey)
+                    : null
+              }
               disabled={submitBusy || composerLocked}
             />
             <button
@@ -1415,6 +1448,15 @@ export function runVimCtrlJCommand(view: EditorView): boolean {
   return insertNewlineAndIndent(view);
 }
 
+export function runVimEscapeCommand(view: EditorView): boolean {
+  const cm = getCM(view);
+  const vimState = cm?.state.vim ?? null;
+  if (!cm || !vimState || vimState.insertMode) return false;
+  view.contentDOM.blur();
+  view.dom.blur();
+  return true;
+}
+
 function VimPromptEditor({
   value,
   onChange,
@@ -1515,7 +1557,10 @@ function VimPromptEditor({
           },
           {
             key: "Escape",
-            run: () => onSuggestionCommandRef.current?.("dismiss") ?? false
+            run: (view) => {
+              if (onSuggestionCommandRef.current?.("dismiss")) return true;
+              return runVimEscapeCommand(view);
+            }
           },
           {
             key: "Ctrl-Enter",
