@@ -560,7 +560,6 @@ export function SessionCard({
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(session, onOpenMenu);
-  const reserveSecondPromptSlot = !session.activitySummary && previewLines.length > 1;
   const cardClassName = `session-card${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function handleClick() {
@@ -582,7 +581,7 @@ export function SessionCard({
           </div>
           <StatusPill status={session.status} />
         </div>
-        <div className={`preview${reserveSecondPromptSlot ? " preview-two-lines" : ""}`}>
+        <div className="preview">
           {previewLines.length > 0 ? (
             previewLines.map((line, index) => (
               <p className={`preview-line${session.activitySummary ? " preview-summary" : ""}`} key={`${session.id}-preview-${index}`}>

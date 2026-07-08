@@ -73,7 +73,7 @@ describe("sessionNameValidationMessage", () => {
 });
 
 describe("SessionCard", () => {
-  it("reserves preview height only when a second user prompt is displayed", () => {
+  it("lets prompt preview height follow the rendered prompt lines", () => {
     const twoPrompts = testSession({
       id: "a",
       paneId: "%111",
@@ -94,7 +94,8 @@ describe("SessionCard", () => {
       activitySummary: "OpenAI summary"
     });
 
-    expect(renderSessionCard(twoPrompts)).toContain('class="preview preview-two-lines"');
+    expect(renderSessionCard(twoPrompts)).toContain('class="preview"');
+    expect(renderSessionCard(twoPrompts)).not.toContain("preview-two-lines");
     expect(renderSessionCard(onePrompt)).toContain('class="preview"');
     expect(renderSessionCard(summarized)).toContain('class="preview"');
   });

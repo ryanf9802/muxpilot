@@ -1566,10 +1566,6 @@ select:focus-visible {
   gap: 6px;
 }
 
-.preview-two-lines {
-  min-height: 76px;
-}
-
 .preview-line {
   margin: 0;
   overflow: hidden;
