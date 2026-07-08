@@ -1104,10 +1104,12 @@ select:focus-visible {
 .prompt-history-result {
   appearance: none;
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   grid-template-rows: auto auto;
-  gap: 5px;
+  column-gap: 10px;
+  row-gap: 5px;
   min-height: 62px;
-  align-items: start;
+  align-items: center;
   justify-items: stretch;
   padding: 10px 10px 11px;
   text-align: left;
@@ -1126,6 +1128,7 @@ select:focus-visible {
 
 .prompt-history-result-text {
   display: block;
+  grid-column: 1;
   overflow: hidden;
   line-height: 1.42;
   text-overflow: ellipsis;
@@ -1141,6 +1144,30 @@ select:focus-visible {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.prompt-history-result-meta {
+  grid-column: 1;
+}
+
+.prompt-history-result-copy {
+  display: grid;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  align-self: center;
+  color: var(--color-brand);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 140ms ease;
+}
+
+.prompt-history-result:hover .prompt-history-result-copy,
+.prompt-history-result:focus-visible .prompt-history-result-copy,
+.prompt-history-result-selected .prompt-history-result-copy {
+  opacity: 1;
 }
 
 .prompt-history-muted {

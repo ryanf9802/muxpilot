@@ -1184,6 +1184,9 @@ function PromptHistoryDialog({
                 >
                   <span className="prompt-history-result-text">{result.text}</span>
                   <span className="prompt-history-result-meta">{promptHistoryResultMeta(result)}</span>
+                  <span className="prompt-history-result-copy" aria-hidden="true">
+                    <Copy size={16} />
+                  </span>
                 </button>
               ))
             : null}
