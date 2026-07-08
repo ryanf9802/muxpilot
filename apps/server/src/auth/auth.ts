@@ -39,6 +39,8 @@ export function createAccessControl(config: AppConfig, options: { unrestrictedRe
 
   function isLocalRequest(request: FastifyRequest): boolean {
     if (!isLoopbackAddress(request.ip)) return false;
+    const forwardedAddress = headerValue(request.headers["x-muxpilot-client-address"]);
+    if (forwardedAddress && !isLoopbackAddress(forwardedAddress)) return false;
     const forwardedHost = headerValue(request.headers["x-muxpilot-client-host"]);
     const host = forwardedHost ?? request.hostname;
     return isLoopbackBindHost(hostWithoutPort(host));
@@ -108,7 +110,8 @@ export function createAccessControl(config: AppConfig, options: { unrestrictedRe
       return { ok: true };
     });
 
-    app.post("/api/logout", async (_request, reply) => {
+    app.post("/api/logout", async (request, reply) => {
+      if (!isLocalRequest(request) && hasRemoteCookieAccess(request)) revokeRemoteAccess();
       reply.clearCookie(COOKIE_NAME, { path: "/" });
       return { ok: true };
     });

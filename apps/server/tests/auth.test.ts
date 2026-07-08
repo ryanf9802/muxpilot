@@ -77,6 +77,20 @@ describe("operator access routes", () => {
     await app.close();
   });
 
+  it("reports token mode for Vite-proxied remote browsers even when the forwarded host is loopback", async () => {
+    const app = await buildApp(testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" }));
+
+    const response = await app.inject({ method: "GET", url: "/api/me", headers: proxiedRemoteLoopbackHostHeaders() });
+
+    expect(response.json()).toEqual({
+      accessGranted: false,
+      accessKeyRequired: true,
+      accessMode: "token",
+      sessionHostMode: "local"
+    });
+    await app.close();
+  });
+
   it("grants remote access without a key when unrestricted remote access is enabled", async () => {
     const app = await buildProtectedApp(testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" }), {
       unrestrictedRemoteAccessEnabled: true
@@ -101,6 +115,7 @@ describe("operator access routes", () => {
 
     expect((await app.inject({ method: "GET", url: "/host-only" })).statusCode).toBe(200);
     expect((await app.inject({ method: "GET", url: "/host-only", headers: remoteHeaders() })).statusCode).toBe(403);
+    expect((await app.inject({ method: "GET", url: "/host-only", headers: proxiedRemoteLoopbackHostHeaders() })).statusCode).toBe(403);
     await app.close();
   });
 
@@ -151,6 +166,70 @@ describe("operator access routes", () => {
     access.setUnrestrictedRemoteAccessEnabled(false);
     expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders(), cookies: { [remoteCookie.name]: remoteCookie.value } })).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders() })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("revokes remote access when an authenticated remote browser logs out", async () => {
+    const config = testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" });
+    const access = createAccessControl(config);
+    const app = Fastify();
+    await app.register(cookie);
+    access.register(app);
+    app.get("/protected", { preHandler: access.requireAccess }, async () => ({ ok: true }));
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/access",
+      headers: remoteHeaders(),
+      payload: { accessKey: "correct-access-key" }
+    });
+    const remoteCookie = login.cookies[0]!;
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/logout",
+      headers: remoteHeaders(),
+      cookies: { [remoteCookie.name]: remoteCookie.value }
+    });
+
+    expect(logout.statusCode).toBe(200);
+    expect(access.currentAccessKey()).not.toBe("correct-access-key");
+    expect((await app.inject({ method: "GET", url: "/protected", headers: remoteHeaders(), cookies: { [remoteCookie.name]: remoteCookie.value } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url: "/api/access", headers: remoteHeaders(), payload: { accessKey: "correct-access-key" } })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("does not revoke remote access for unauthenticated remote logout requests", async () => {
+    const config = testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" });
+    const access = createAccessControl(config);
+    const app = Fastify();
+    await app.register(cookie);
+    access.register(app);
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/logout",
+      headers: remoteHeaders()
+    });
+
+    expect(logout.statusCode).toBe(200);
+    expect(access.currentAccessKey()).toBe("correct-access-key");
+    expect((await app.inject({ method: "POST", url: "/api/access", headers: remoteHeaders(), payload: { accessKey: "correct-access-key" } })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("does not revoke remote access when the trusted local browser logs out", async () => {
+    const config = testConfig({ lanEnabled: true, host: "0.0.0.0", operatorToken: "correct-access-key" });
+    const access = createAccessControl(config);
+    const app = Fastify();
+    await app.register(cookie);
+    access.register(app);
+
+    const logout = await app.inject({ method: "POST", url: "/api/logout" });
+
+    expect(logout.statusCode).toBe(200);
+    expect(access.currentAccessKey()).toBe("correct-access-key");
+    expect((await app.inject({ method: "POST", url: "/api/access", headers: remoteHeaders(), payload: { accessKey: "correct-access-key" } })).statusCode).toBe(200);
     await app.close();
   });
 
@@ -225,6 +304,13 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 function remoteHeaders() {
   return {
     "x-muxpilot-client-host": "192.168.1.25:5177",
+    "x-muxpilot-client-address": "192.168.1.25"
+  };
+}
+
+function proxiedRemoteLoopbackHostHeaders() {
+  return {
+    "x-muxpilot-client-host": "127.0.0.1:5177",
     "x-muxpilot-client-address": "192.168.1.25"
   };
 }
