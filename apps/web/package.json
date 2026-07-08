@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host ${MUXPILOT_WEB_HOST:-${MUXPILOT_HOST:-127.0.0.1}} --port ${MUXPILOT_WEB_PORT:-5177}",
-    "run:prod": "vite preview --host ${MUXPILOT_WEB_HOST:-${MUXPILOT_HOST:-127.0.0.1}} --port ${MUXPILOT_WEB_PORT:-12778} --strictPort",
+    "start": "vite preview --host ${MUXPILOT_WEB_HOST:-${MUXPILOT_HOST:-127.0.0.1}} --port ${MUXPILOT_WEB_PORT:-12778} --strictPort",
     "build": "tsc -p tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests"

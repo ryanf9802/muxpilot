@@ -9,16 +9,16 @@ In WSL mirrored networking, the app may work from Windows at `http://127.0.0.1:1
 From WSL:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm run:prod
+MUXPILOT_LAN_ENABLED=1 pnpm start:prod
 ```
 
 Production preview uses Web UI port `12778`. Development uses Web UI port `5177`:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm run:dev
+MUXPILOT_LAN_ENABLED=1 pnpm start:dev
 ```
 
-Keep this server running while you install and verify the Windows firewall rules.
+Leave the background server active while you install and verify the Windows firewall rules.
 
 ## Find The Windows Path
 
@@ -91,7 +91,7 @@ Phone camera APIs require HTTPS for LAN IP URLs. If you need QR-code login from 
 
 ```bash
 pnpm pwa:setup
-pnpm run:prod
+pnpm start:prod
 ```
 
 Open the Install phone certificate URL or QR code from the Connect device modal on the phone and install the public root CA/profile. The phone must trust the certificate authority. After that, the Connect device modal will publish `https://` app URLs and the QR scanner can use the camera API.

@@ -22,12 +22,12 @@ When started directly this way, the backend defaults to `127.0.0.1:4177` and `./
 ## LAN Run
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm run:prod
+MUXPILOT_LAN_ENABLED=1 pnpm start:prod
 ```
 
 Open the desktop app and use Connect device to get the phone URL.
 
-Stop production preview with `pnpm prod:stop` or `pnpm stop:prod`. `pnpm stop` stops both development and production-preview listeners.
+Stop production preview with `pnpm stop:prod`. Restart it with `pnpm restart:prod`. `pnpm stop` stops both development and production-preview listeners.
 
 ## LAN HTTPS For Phone Camera Access
 
@@ -37,7 +37,7 @@ Use the repo-local setup helper:
 
 ```bash
 pnpm pwa:setup
-pnpm run:prod
+pnpm start:prod
 ```
 
 `pnpm pwa:setup` creates or reuses a muxpilot local root CA in `.certs/pwa-ca/`, issues a host certificate for the current LAN addresses, writes `.env.local` with `MUXPILOT_LAN_ENABLED=1`, `MUXPILOT_HTTPS_CERT`, `MUXPILOT_HTTPS_KEY`, and the public trust-file settings. When the backend starts in LAN mode, it also starts a small HTTP trust server that serves only public root CA/profile files for phones. The Connect device modal shows that install URL and QR code.
@@ -48,8 +48,8 @@ For multiple host machines, copy the shared CA files into `.certs/pwa-ca/` on th
 
 Keep `rootCA-key.pem` private. Anyone with that private CA key can issue certificates trusted by devices where the muxpilot root CA is installed.
 
-When HTTPS certificate variables are set, `pnpm run:prod` serves the Vite preview over HTTPS, keeps the backend behind the same-origin `/api` proxy, publishes `https://` Connect device URLs, and publishes `http://` certificate install URLs. If the phone does not trust the certificate authority, the app may load after a browser warning, but camera APIs can still remain unavailable.
+When HTTPS certificate variables are set, `pnpm start:prod` serves the Vite preview over HTTPS, keeps the backend behind the same-origin `/api` proxy, publishes `https://` Connect device URLs, and publishes `http://` certificate install URLs. If the phone does not trust the certificate authority, the app may load after a browser warning, but camera APIs can still remain unavailable.
 
-This production-preview flow is for manual operator use only. Codex and other automated agents must not run `pnpm run:prod` or stop production-preview servers with `pnpm prod:stop`, `pnpm stop:prod`, or `pnpm stop`; agents should use only the development server commands from the development guide.
+This production-preview flow is for manual operator use only. Codex and other automated agents must not run `pnpm start:prod` or stop production-preview servers with `pnpm stop:prod`, `pnpm restart:prod`, or `pnpm stop`; agents should use only the development server commands from the development guide.
 
 Do not expose this directly to the internet. Cross-network access through VPNs, tunnels, reverse proxies, or static-hosted frontends is future work.

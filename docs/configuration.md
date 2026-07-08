@@ -7,12 +7,12 @@ muxpilot is a single-operator developer console. The Web UI runs in a browser, a
 - `MUXPILOT_LAN_ENABLED`: set to `1`, `true`, `yes`, or `on` to expose the backend and Web UI on the local network for phone access. Defaults to loopback-only local access.
 - `OPENAI_API_KEY`: optional. Enables prompt-only activity summaries and OpenAI usage/cost tracking for dashboard cards.
 
-The run scripts load `.env` first and `.env.local` second. Local setup helpers such as `pnpm pwa:setup` write machine-specific settings to `.env.local`, which is ignored by git.
+The start scripts load `.env` first and `.env.local` second. Local setup helpers such as `pnpm pwa:setup` write machine-specific settings to `.env.local`, which is ignored by git.
 
 ## LAN Example
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm run:dev
+MUXPILOT_LAN_ENABLED=1 pnpm start:dev
 ```
 
 Open the desktop web UI, press the Connect device button, and use the generated access key or QR code from the modal on your phone.
@@ -40,15 +40,15 @@ These are available for unusual local setups but are not needed for normal deskt
 
 - `MUXPILOT_HOST`: override backend bind host. Defaults to `127.0.0.1`, or `0.0.0.0` when LAN is enabled.
 - `MUXPILOT_PORT`: backend port, default `4177` in development and `12777` in production preview.
-- `MUXPILOT_WEB_PROTOCOL`: published Web UI protocol, `http` or `https`. The run scripts set this to `https` automatically when both local HTTPS certificate variables are configured.
+- `MUXPILOT_WEB_PROTOCOL`: published Web UI protocol, `http` or `https`. The start scripts set this to `https` automatically when both local HTTPS certificate variables are configured.
 - `MUXPILOT_WEB_PORT`: Web UI port, default `5177` in development and `12778` in production preview.
 - `MUXPILOT_HTTPS_CERT`: optional certificate path for Vite dev/preview HTTPS.
 - `MUXPILOT_HTTPS_KEY`: optional private key path for Vite dev/preview HTTPS. Must be set with `MUXPILOT_HTTPS_CERT`.
 - `MUXPILOT_PWA_CA_DIR`: optional override for the shared local root CA directory used by `pnpm pwa:setup`. Normal use should put shared CA files in `.certs/pwa-ca/` instead.
 - `MUXPILOT_PWA_TRUST_PORT`: optional port for `pnpm pwa:trust`, default `12880`.
-- `MUXPILOT_API_TARGET`: Vite proxy target for `/api`, defaulting to the local backend port selected by the run script.
-- `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm run:dev`, `./data/prod` under `pnpm run:prod`, and `./data` when the server is started directly.
-- `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm run:dev`, `./data/prod/muxpilot.db` under `pnpm run:prod`, and `./data/muxpilot.db` when the server is started directly.
+- `MUXPILOT_API_TARGET`: Vite proxy target for `/api`, defaulting to the local backend port selected by the start script.
+- `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm start:dev`, `./data/prod` under `pnpm start:prod`, and `./data` when the server is started directly.
+- `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm start:dev`, `./data/prod/muxpilot.db` under `pnpm start:prod`, and `./data/muxpilot.db` when the server is started directly.
 - `MUXPILOT_CODEX_HOME`: Codex home on the host machine, default `$HOME/.codex`.
 - `MUXPILOT_SESSION_SECRET`: optional HMAC secret for persistent operator cookies across restarts.
 - `MUXPILOT_OPERATOR_TOKEN`: optional override for the generated remote access key. Normal LAN use should leave this unset.

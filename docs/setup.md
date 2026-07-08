@@ -25,10 +25,10 @@ Loopback local use does not require an access key. Before exposing the app to yo
 Run development servers:
 
 ```bash
-pnpm run:dev
+pnpm start:dev
 ```
 
-`pnpm run:dev` checks the default/configured local ports first. If the backend and frontend are already active, it reuses the existing server instead of starting a second copy. It uses `./data/dev/muxpilot.db` for local development state.
+`pnpm start:dev` checks the default/configured local ports first. If the backend and frontend are already active, it reuses the existing server instead of starting a second copy. When it starts a missing server, it runs it in the background with PID and log files under `data/runtime/dev/`. It uses `./data/dev/muxpilot.db` for local development state.
 
 The backend binds to `127.0.0.1:4177` by default. The frontend runs on `127.0.0.1:5177`.
 
@@ -51,7 +51,7 @@ By default, the shared root CA lives in `.certs/pwa-ca/`. The directory exists i
 Start the app bound to the LAN:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm run:dev
+MUXPILOT_LAN_ENABLED=1 pnpm start:dev
 ```
 
 Open the app on your desktop, press the Connect device button in the top bar, and open the shown URL on your phone. The URL usually looks like:
@@ -88,11 +88,11 @@ Troubleshooting:
 Run production preview:
 
 ```bash
-pnpm run:prod
+pnpm start:prod
 ```
 
-Production preview uses `127.0.0.1:12777` and `127.0.0.1:12778`, with a separate SQLite database under `./data/prod`, so it can run at the same time as the development server. If both production-preview endpoints are already healthy, `pnpm run:prod` reuses them instead of starting a duplicate.
+Production preview uses `127.0.0.1:12777` and `127.0.0.1:12778`, with a separate SQLite database under `./data/prod`, so it can run at the same time as the development server. If both production-preview endpoints are already healthy, `pnpm start:prod` reuses them instead of starting a duplicate. Started processes run in the background with PID and log files under `data/runtime/prod/`.
 
-Stop production preview with `pnpm prod:stop` or `pnpm stop:prod`. `pnpm stop` stops both development and production-preview listeners.
+Stop production preview with `pnpm stop:prod`. Restart it with `pnpm restart:prod`. `pnpm stop` stops both development and production-preview listeners.
 
-Production preview is for manual operator checks. Automated agent work should use `pnpm run:dev`.
+Production preview is for manual operator checks. Automated agent work should use `pnpm start:dev`.

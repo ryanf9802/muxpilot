@@ -53,7 +53,7 @@ Cookie signing uses an in-memory random secret by default. Restarting the backen
 
 SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, usage, cost estimates, summaries, and audit events must live outside `dist/`.
 
-Development uses `./data/dev/muxpilot.db` through `pnpm run:dev`. Production preview uses `./data/prod/muxpilot.db` through `pnpm run:prod`.
+Development uses `./data/dev/muxpilot.db` through `pnpm start:dev`. Production preview uses `./data/prod/muxpilot.db` through `pnpm start:prod`.
 
 ## Future Work
 
