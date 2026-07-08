@@ -14,6 +14,16 @@ export type SessionStatus =
 
 export type CollaborationMode = "default" | "plan";
 
+export interface SessionModelSettings {
+  model: string | null;
+  reasoningEffort: string | null;
+}
+
+export interface SessionModelSelections {
+  default: SessionModelSettings;
+  plan: SessionModelSettings;
+}
+
 export type CodexSkillSource = "user" | "system" | "plugin" | "workspace";
 
 export interface CodexSkill {
@@ -25,6 +35,26 @@ export interface CodexSkill {
 
 export interface CodexSkillsResponse {
   skills: CodexSkill[];
+}
+
+export interface CodexModel {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+  supportedReasoningEfforts: CodexReasoningEffortOption[];
+  defaultReasoningEffort: string | null;
+}
+
+export interface CodexReasoningEffortOption {
+  reasoningEffort: string;
+  description: string;
+}
+
+export interface CodexModelsResponse {
+  models: CodexModel[];
 }
 
 export type MessageType =
@@ -79,6 +109,7 @@ export interface ManagedSession {
   activitySummaryGeneratedAt: string | null;
   activitySummarySourceSequence: number | null;
   inputMode: CollaborationMode;
+  models: SessionModelSelections;
   transcriptSize: number;
   unreadCount: number;
   archived: boolean;
@@ -258,6 +289,7 @@ export type SessionAction =
   | { type: "interrupt" }
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
+  | { type: "setModelSettings"; mode: CollaborationMode; model: string; reasoningEffort?: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }
   | { type: "rename"; name: string }
   | { type: "detach" }

@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { TmuxPane } from "@muxpilot/core";
+import type { CodexModel, TmuxPane } from "@muxpilot/core";
 import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
@@ -984,10 +984,14 @@ describe("SessionManager transcript isolation", () => {
     });
     const pane = testPane({ cwd: repo, paneId: "%1" });
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [pane];
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      if (keys.includes("BTab")) pane.title = "plan-mode";
+    };
     harness.tmux.sendInput = async (_paneId, text) => {
       sentInputs.push(text);
-      if (text === "/plan") pane.title = "plan-mode";
     };
 
     await harness.manager.discover();
@@ -999,7 +1003,116 @@ describe("SessionManager transcript isolation", () => {
 
     expect(actionSession?.inputMode).toBe("plan");
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
-    expect(sentInputs).toEqual(["/plan", "next prompt "]);
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(sentInputs).toEqual(["next prompt "]);
+    harness.db.close();
+  });
+
+  it("persists model selections per mode and switches Codex before changing a plan model", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+    const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      if (keys.includes("BTab")) pane.title = "plan-mode";
+    };
+    harness.tmux.sendInput = async (_paneId, text) => {
+      sentInputs.push(text);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+
+    await harness.manager.act(session.id, { type: "setModelSettings", mode: "default", model: "gpt-5.4", reasoningEffort: "medium" });
+    const updated = await harness.manager.act(session.id, {
+      type: "setModelSettings",
+      mode: "plan",
+      model: "gpt-5.5",
+      reasoningEffort: "high"
+    });
+
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(sentInputs).toEqual(["/model gpt-5.4 medium", "/model gpt-5.5 high"]);
+    expect(updated?.models).toEqual({
+      default: { model: "gpt-5.4", reasoningEffort: "medium" },
+      plan: { model: "gpt-5.5", reasoningEffort: "high" }
+    });
+    expect(harness.manager.getSession(session.id)?.models).toEqual({
+      default: { model: "gpt-5.4", reasoningEffort: "medium" },
+      plan: { model: "gpt-5.5", reasoningEffort: "high" }
+    });
+    harness.db.close();
+  });
+
+  it("rejects unknown model selections when a model catalog is available", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.sendInput = async (_paneId, text) => {
+      sentInputs.push(text);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+
+    await expect(harness.manager.act(session.id, { type: "setModelSettings", mode: "default", model: "not-a-model" })).rejects.toThrow(
+      "Unknown Codex model"
+    );
+    expect(sentInputs).toEqual([]);
+    expect(harness.manager.getSession(session.id)?.models).toEqual({
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    });
+    harness.db.close();
+  });
+
+  it("rejects unsupported model reasoning efforts when catalog metadata is available", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.sendInput = async (_paneId, text) => {
+      sentInputs.push(text);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+
+    await expect(
+      harness.manager.act(session.id, { type: "setModelSettings", mode: "default", model: "gpt-5.4", reasoningEffort: "ultra" })
+    ).rejects.toThrow("Supported reasoning efforts");
+    expect(sentInputs).toEqual([]);
     harness.db.close();
   });
 
@@ -1031,7 +1144,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("returns the updated session and sends default command for normal mode", async () => {
+  it("returns the updated session and sends cycle keys for normal mode", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -1042,13 +1155,13 @@ describe("SessionManager transcript isolation", () => {
       assistant: "first answer",
       mtime: new Date("2026-07-07T00:00:00.000Z")
     });
-    const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     const pane = testPane({ cwd: repo, paneId: "%1", title: "plan-mode" });
     harness.tmux.listPanes = async () => [pane];
     harness.tmux.capturePane = async () => "Plan mode prompt:\n› Plan {feature}";
-    harness.tmux.sendInput = async (_paneId, text) => {
-      sentInputs.push(text);
-      if (text === "/default") {
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      if (keys.includes("BTab")) {
         pane.title = "codex";
         harness.tmux.capturePane = async () => "› ";
       }
@@ -1061,7 +1174,7 @@ describe("SessionManager transcript isolation", () => {
 
     const actionSession = await harness.manager.act(session.id, { type: "setInputMode", mode: "default" });
 
-    expect(sentInputs).toEqual(["/default"]);
+    expect(sentKeys).toEqual([["BTab"]]);
     expect(actionSession?.inputMode).toBe("default");
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("default");
     harness.db.close();
@@ -1078,11 +1191,11 @@ describe("SessionManager transcript isolation", () => {
       assistant: "first answer",
       mtime: new Date("2026-07-07T00:00:00.000Z")
     });
-    const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => "› ";
-    harness.tmux.sendInput = async (_paneId, text) => {
-      sentInputs.push(text);
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
     };
 
     await harness.manager.discover();
@@ -1091,7 +1204,7 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.act(session.id, { type: "setInputMode", mode: "plan" });
 
-    expect(sentInputs).toEqual(["/plan"]);
+    expect(sentKeys).toEqual([["BTab"]]);
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
 
     await harness.manager.discover();
@@ -1111,11 +1224,11 @@ describe("SessionManager transcript isolation", () => {
       assistant: "first answer",
       mtime: new Date("2026-07-07T00:00:00.000Z")
     });
-    const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => "Implement this plan?\n3. No, stay in Plan mode\n› Implement {feature}";
-    harness.tmux.sendInput = async (_paneId, text) => {
-      sentInputs.push(text);
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
     };
 
     await harness.manager.discover();
@@ -1125,7 +1238,7 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.act(session.id, { type: "setInputMode", mode: "plan" });
 
-    expect(sentInputs).toEqual(["/plan"]);
+    expect(sentKeys).toEqual([["BTab"]]);
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
     harness.db.close();
   });
@@ -1184,11 +1297,15 @@ describe("SessionManager transcript isolation", () => {
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     let capture = "Working (esc to interrupt)";
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => capture;
     harness.tmux.sendInput = async (_paneId, text) => {
       sentInputs.push(text);
+    };
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
     };
 
     await harness.manager.discover();
@@ -1214,7 +1331,8 @@ describe("SessionManager transcript isolation", () => {
     capture = "› ";
     await harness.manager.act(session.id, { type: "setInputMode", mode: "plan" });
 
-    expect(sentInputs).toEqual(["/plan"]);
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(sentInputs).toEqual([]);
     expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ text: "queued prompt", status: "queued" }]);
     harness.db.close();
   });
@@ -1340,10 +1458,14 @@ describe("SessionManager transcript isolation", () => {
     });
     const pane = testPane({ cwd: repo, paneId: "%1" });
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [pane];
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      if (keys.includes("BTab")) pane.title = "plan-mode";
+    };
     harness.tmux.sendInput = async (_paneId, text) => {
       sentInputs.push(text);
-      if (text === "/plan") pane.title = "plan-mode";
     };
 
     await harness.manager.discover();
@@ -1352,7 +1474,8 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.sendInput(session.id, "next prompt", "plan");
 
-    expect(sentInputs).toEqual(["/plan", "next prompt "]);
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(sentInputs).toEqual(["next prompt "]);
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
     harness.db.close();
   });
@@ -1369,8 +1492,12 @@ describe("SessionManager transcript isolation", () => {
       mtime: new Date("2026-07-07T00:00:00.000Z")
     });
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+    };
     harness.tmux.sendInput = async (_paneId, text) => {
       sentInputs.push(text);
     };
@@ -1381,7 +1508,8 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.sendInput(session.id, "next prompt", "plan");
 
-    expect(sentInputs).toEqual(["/plan", "next prompt "]);
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(sentInputs).toEqual(["next prompt "]);
     expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
     harness.db.close();
   });
@@ -2083,6 +2211,7 @@ async function createHarness(): Promise<{
   manager: SessionManager;
   activitySummarizer: FakeActivitySummarizer;
   processLookup: FakeCodexProcessLookup;
+  modelCatalog: FakeCodexModelCatalog;
 }> {
   const dir = await mkdtemp(join(tmpdir(), "muxpilot-session-manager-"));
   const codexHome = join(dir, "codex-home");
@@ -2091,6 +2220,7 @@ async function createHarness(): Promise<{
   const tmux = new TmuxAdapter();
   const activitySummarizer = new FakeActivitySummarizer();
   const processLookup = new FakeCodexProcessLookup();
+  const modelCatalog = new FakeCodexModelCatalog();
   tmux.listPanes = async () => [];
   tmux.capturePane = async () => "› ";
   const codexStore = new CodexSessionStore(codexHome);
@@ -2104,9 +2234,10 @@ async function createHarness(): Promise<{
     { approveOnce: [], approveForPrefix: [], deny: [] },
     ["BTab"],
     activitySummarizer,
-    processLookup
+    processLookup,
+    modelCatalog
   );
-  return { dir, codexHome, db, tmux, codexStore, manager, activitySummarizer, processLookup };
+  return { dir, codexHome, db, tmux, codexStore, manager, activitySummarizer, processLookup, modelCatalog };
 }
 
 class FakeActivitySummarizer {
@@ -2137,6 +2268,41 @@ class FakeCodexProcessLookup {
 
   async resolveForPane(panePid: number): Promise<CodexProcessInfo | null> {
     return this.processes.get(panePid) ?? null;
+  }
+}
+
+class FakeCodexModelCatalog {
+  models: CodexModel[] = [
+    {
+      id: "gpt-5.4",
+      model: "gpt-5.4",
+      displayName: "GPT-5.4",
+      description: "",
+      hidden: false,
+      isDefault: false,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "medium", description: "" },
+        { reasoningEffort: "high", description: "" }
+      ],
+      defaultReasoningEffort: "medium"
+    },
+    {
+      id: "gpt-5.5",
+      model: "gpt-5.5",
+      displayName: "GPT-5.5",
+      description: "",
+      hidden: false,
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "medium", description: "" },
+        { reasoningEffort: "high", description: "" }
+      ],
+      defaultReasoningEffort: "medium"
+    }
+  ];
+
+  async listModels(): Promise<CodexModel[]> {
+    return this.models;
   }
 }
 

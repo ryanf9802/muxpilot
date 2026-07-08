@@ -443,6 +443,7 @@ function testSession(
     activitySummaryGeneratedAt: null,
     activitySummarySourceSequence: null,
     inputMode: "default",
+    models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
     archived: false

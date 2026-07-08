@@ -57,7 +57,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
 - `MUXPILOT_INPUT_SUBMIT_KEYS`: tmux keys sent after pasting a chat message, default `Enter`.
-- `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: legacy setting for older Codex builds; current muxpilot switches modes with Codex slash commands (`/plan` and `/default`).
+- `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: tmux key sequence used to cycle Codex between Normal and Plan input modes, default `BTab` for Shift+Tab.
 - Plan-action and question-option buttons use Codex menu selection keys directly; they do not use `MUXPILOT_INPUT_SUBMIT_KEYS`.
 - `MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS`: tmux keys for approving once, default `Enter`.
 - `MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS`: tmux keys for persistent prefix approval, default `Down Enter`.

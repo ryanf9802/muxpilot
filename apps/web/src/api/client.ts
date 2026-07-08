@@ -1,6 +1,7 @@
 import type {
   ApprovalResponse,
   ActivitySummarySettingsResponse,
+  CodexModelsResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
@@ -77,6 +78,7 @@ export const api = {
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
+  codexModels: () => json<CodexModelsResponse>("/api/codex/models"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   createSession: (request: CreateSessionRequest) =>

@@ -81,6 +81,42 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("hydrates missing legacy session model selections", async () => {
+    const db = await tempDb();
+    const legacySession = { ...testSession("session-legacy-models") };
+    delete (legacySession as Partial<ManagedSession>).models;
+    db.upsertSession(legacySession as ManagedSession, "2026-07-07T00:00:00.000Z");
+
+    expect(db.getSession(legacySession.id)?.models).toEqual({
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    });
+    db.close();
+  });
+
+  it("persists session model settings per collaboration mode", async () => {
+    const db = await tempDb();
+    const session = testSession("session-models");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+
+    const normal = db.setSessionModelSettings(session.id, "default", "gpt-5.4", "medium", "2026-07-07T00:00:01.000Z");
+    const plan = db.setSessionModelSettings(session.id, "plan", "gpt-5.5", "high", "2026-07-07T00:00:02.000Z");
+
+    expect(normal?.models).toEqual({
+      default: { model: "gpt-5.4", reasoningEffort: "medium" },
+      plan: { model: null, reasoningEffort: null }
+    });
+    expect(plan?.models).toEqual({
+      default: { model: "gpt-5.4", reasoningEffort: "medium" },
+      plan: { model: "gpt-5.5", reasoningEffort: "high" }
+    });
+    expect(db.getSession(session.id)?.models).toEqual({
+      default: { model: "gpt-5.4", reasoningEffort: "medium" },
+      plan: { model: "gpt-5.5", reasoningEffort: "high" }
+    });
+    db.close();
+  });
+
   it("pages recent and older transcript messages without loading the full chat", async () => {
     const db = await tempDb();
     const session = testSession("session-pages");
@@ -511,6 +547,7 @@ function testSession(id: string): ManagedSession {
     activitySummaryGeneratedAt: null,
     activitySummarySourceSequence: null,
     inputMode: "default",
+    models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
     archived: false

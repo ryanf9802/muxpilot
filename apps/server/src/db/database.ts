@@ -7,6 +7,8 @@ import type {
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
   QueuedInput,
+  SessionModelSettings,
+  SessionModelSelections,
   SessionEvent,
   SessionStatus,
   TranscriptItem,
@@ -161,6 +163,16 @@ export class AppDatabase {
 
   setSessionInputMode(sessionId: string, inputMode: CollaborationMode, updatedAt: string): Promise<ManagedSession | null> {
     return this.call("setSessionInputMode", sessionId, inputMode, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionModelSettings(
+    sessionId: string,
+    mode: CollaborationMode,
+    model: string,
+    reasoningEffort: string | null,
+    updatedAt: string
+  ): Promise<ManagedSession | null> {
+    return this.call("setSessionModelSettings", sessionId, mode, model, reasoningEffort, updatedAt) as Promise<ManagedSession | null>;
   }
 
   listSessions(includeArchived = false): Promise<ManagedSession[]> {
@@ -406,6 +418,22 @@ export class SyncAppDatabase {
     const existing = this.getSession(sessionId);
     if (!existing) return null;
     const next = { ...existing, inputMode };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  setSessionModelSettings(
+    sessionId: string,
+    mode: CollaborationMode,
+    model: string,
+    reasoningEffort: string | null,
+    updatedAt: string
+  ): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, models: withSessionModelSettings(existing.models, mode, model, reasoningEffort) };
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
@@ -1124,6 +1152,7 @@ export class SyncAppDatabase {
       activitySummaryGeneratedAt: activitySummary?.generated_at ?? null,
       activitySummarySourceSequence: activitySummary?.source_sequence ?? null,
       inputMode: collaborationMode(session.inputMode) ?? "default",
+      models: sessionModels(session.models),
       transcriptSize: this.messageCount(row.id),
       unreadCount: row.unread_count,
       archived: row.archived === 1
@@ -1296,6 +1325,45 @@ function compareSessionsByActivity(first: ManagedSession, second: ManagedSession
 function collaborationMode(value: unknown): CollaborationMode | null {
   if (value === "default" || value === "plan") return value;
   return null;
+}
+
+function sessionModels(value: unknown): SessionModelSelections {
+  if (!value || typeof value !== "object") return emptySessionModels();
+  const record = value as Partial<Record<CollaborationMode, unknown>>;
+  return {
+    default: sessionModelSettings(record.default),
+    plan: sessionModelSettings(record.plan)
+  };
+}
+
+function emptySessionModels(): SessionModelSelections {
+  return { default: emptySessionModelSettings(), plan: emptySessionModelSettings() };
+}
+
+function emptySessionModelSettings(): SessionModelSettings {
+  return { model: null, reasoningEffort: null };
+}
+
+function sessionModelSettings(value: unknown): SessionModelSettings {
+  if (typeof value === "string") return { model: value.trim() ? value : null, reasoningEffort: null };
+  if (!value || typeof value !== "object") return emptySessionModelSettings();
+  const record = value as { model?: unknown; reasoningEffort?: unknown };
+  return {
+    model: typeof record.model === "string" && record.model.trim() ? record.model : null,
+    reasoningEffort: typeof record.reasoningEffort === "string" && record.reasoningEffort.trim() ? record.reasoningEffort : null
+  };
+}
+
+function withSessionModelSettings(
+  current: SessionModelSelections,
+  mode: CollaborationMode,
+  model: string,
+  reasoningEffort: string | null
+): SessionModelSelections {
+  return {
+    ...sessionModels(current),
+    [mode]: { model, reasoningEffort }
+  };
 }
 
 function hydrateMessage(row: MessageRow): ChatMessage {

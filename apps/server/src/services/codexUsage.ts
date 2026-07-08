@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Logger } from "pino";
 import type {
+  CodexModel,
   CodexUsageAccount,
   CodexUsageLimit,
   CodexUsageSummaryResponse
@@ -10,6 +11,8 @@ import { nowIso } from "../utils/time.js";
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const FIVE_HOUR_WINDOW_MINS = 5 * 60;
 const WEEKLY_WINDOW_MINS = 7 * 24 * 60;
+const MODEL_CACHE_TTL_MS = 60_000;
+const MODEL_FAILURE_CACHE_TTL_MS = 10_000;
 
 interface JsonRpcSuccess {
   id: string | number;
@@ -85,6 +88,40 @@ export class CodexUsageService {
       return normalized;
     } catch (error) {
       return unavailable(error instanceof Error ? error.message : "Codex usage is unavailable.", refreshedAt);
+    }
+  }
+
+  stop(): void {
+    this.client.stop();
+  }
+}
+
+export class CodexModelsService {
+  private readonly client: CodexAppServerClient;
+  private cache: { models: CodexModel[]; expiresAt: number } | null = null;
+
+  constructor(options: CodexAppServerClientOptions) {
+    this.client = new CodexAppServerClient(options);
+  }
+
+  async listModels(): Promise<CodexModel[]> {
+    const now = Date.now();
+    if (this.cache && this.cache.expiresAt > now) return this.cache.models;
+
+    try {
+      const models: CodexModel[] = [];
+      let cursor: string | null = null;
+      do {
+        const response: RawModelListResponse = await this.client.request<RawModelListResponse>("model/list", { cursor, includeHidden: false });
+        models.push(...normalizeCodexModels(response));
+        cursor = typeof response.nextCursor === "string" && response.nextCursor ? response.nextCursor : null;
+      } while (cursor);
+
+      this.cache = { models, expiresAt: now + MODEL_CACHE_TTL_MS };
+      return models;
+    } catch {
+      this.cache = { models: [], expiresAt: now + MODEL_FAILURE_CACHE_TTL_MS };
+      return [];
     }
   }
 
@@ -230,6 +267,33 @@ export class CodexAppServerClient {
   }
 }
 
+interface RawModelListResponse {
+  data?: unknown;
+  nextCursor?: unknown;
+}
+
+export function normalizeCodexModels(response: RawModelListResponse): CodexModel[] {
+  if (!Array.isArray(response.data)) return [];
+  return response.data
+    .map((value) => {
+      const model = recordValue(value);
+      const slug = stringValue(model?.model) ?? stringValue(model?.id);
+      if (!slug) return null;
+      return {
+        id: stringValue(model?.id) ?? slug,
+        model: slug,
+        displayName: stringValue(model?.displayName) ?? slug,
+        description: stringValue(model?.description) ?? "",
+        hidden: Boolean(model?.hidden),
+        isDefault: Boolean(model?.isDefault),
+        supportedReasoningEfforts: reasoningEffortOptions(model?.supportedReasoningEfforts),
+        defaultReasoningEffort: stringValue(model?.defaultReasoningEffort)
+      } satisfies CodexModel;
+    })
+    .filter((model): model is CodexModel => Boolean(model))
+    .filter((model) => !model.hidden);
+}
+
 export function normalizeCodexUsage(
   accountResponse: AccountReadResponse,
   rateLimitsResponse: RateLimitsReadResponse,
@@ -308,4 +372,27 @@ function clampPercent(value: number): number | null {
 function isResponse(value: unknown): value is JsonRpcSuccess | JsonRpcFailure {
   if (!value || typeof value !== "object" || !("id" in value)) return false;
   return "result" in value || "error" in value;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function reasoningEffortOptions(value: unknown): CodexModel["supportedReasoningEfforts"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((option) => {
+      const record = recordValue(option);
+      const reasoningEffort = stringValue(record?.reasoningEffort);
+      if (!reasoningEffort) return null;
+      return {
+        reasoningEffort,
+        description: stringValue(record?.description) ?? ""
+      };
+    })
+    .filter((option): option is CodexModel["supportedReasoningEfforts"][number] => Boolean(option));
 }

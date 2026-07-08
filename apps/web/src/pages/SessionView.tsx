@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   Check,
+  ChevronDown,
+  ChevronLeft,
   HelpCircle,
   LoaderCircle,
   Pause,
@@ -25,6 +27,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
+  CodexModel,
   CodexSkill,
   CollaborationMode,
   ManagedSession,
@@ -34,6 +37,7 @@ import type {
   QueuedInput,
   SessionAction,
   SessionEvent,
+  SessionModelSettings,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
 import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcriptMessages } from "@muxpilot/core";
@@ -100,6 +104,10 @@ export function shouldReconcileSessionForEvent(event: Pick<SessionEvent, "type">
 
 export function inputModeAction(mode: CollaborationMode): SessionAction {
   return { type: "setInputMode", mode };
+}
+
+export function modelAction(mode: CollaborationMode, model: string, reasoningEffort?: string | null): SessionAction {
+  return { type: "setModelSettings", mode, model, reasoningEffort };
 }
 
 export function sessionWithPendingInputMode(session: ManagedSession, pendingMode: CollaborationMode | null): ManagedSession {
@@ -231,7 +239,9 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputModeError, setInputModeError] = useState("");
+  const [modelError, setModelError] = useState("");
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [hasMoreAfter, setHasMoreAfter] = useState(false);
@@ -302,11 +312,22 @@ export function SessionView() {
 
   useEffect(() => {
     setCodexSkills([]);
+    setCodexModels([]);
     skillsLastRefreshRef.current = 0;
     void refreshCodexSkills({ force: true });
+    void loadCodexModels();
     const interval = window.setInterval(() => void refreshCodexSkills(), SKILL_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [refreshCodexSkills]);
+
+  async function loadCodexModels() {
+    try {
+      const response = await api.codexModels();
+      if (activeIdRef.current === id) setCodexModels(response.models);
+    } catch {
+      if (activeIdRef.current === id) setCodexModels([]);
+    }
+  }
 
   async function toggleExpandedItem(item: CoreTranscriptItem) {
     if (item.type !== "range") return;
@@ -390,6 +411,7 @@ export function SessionView() {
       setSubmitBusy(false);
       setActionBusy(null);
       setInputModeError("");
+      setModelError("");
       setComposerFocused(false);
       setPagination(false, false);
       setLoadingOlder(false);
@@ -756,6 +778,28 @@ export function SessionView() {
     }
   }
 
+  async function setModelSettings(model: string, reasoningEffort: string | null) {
+    const currentSettings = session?.models[session.inputMode];
+    if (!session || actionBusy || !model) return;
+    if (currentSettings?.model === model && (currentSettings.reasoningEffort ?? null) === reasoningEffort) return;
+    const targetId = id;
+    const token = requestTokenRef.current;
+    const mode = session.inputMode;
+    setActionBusy("setModelSettings");
+    setModelError("");
+    try {
+      const response = await api.action(targetId, modelAction(mode, model, reasoningEffort));
+      if (!isCurrentRequest(targetId, token)) return;
+      if (response.session) setSession(response.session);
+    } catch (error) {
+      if (!isCurrentRequest(targetId, token)) return;
+      setModelError(error instanceof Error ? error.message : String(error));
+      await loadSession(targetId, token);
+    } finally {
+      if (isCurrentRequest(targetId, token)) setActionBusy(null);
+    }
+  }
+
   async function resolveApproval(decision: ApprovalDecision) {
     const targetId = id;
     const token = requestTokenRef.current;
@@ -840,8 +884,17 @@ export function SessionView() {
           <SessionHeaderMeta session={readySession} />
         </div>
         <StatusPill status={readySession.status} />
+        <ModelSelector
+          mode={readySession.inputMode}
+          value={readySession.models[readySession.inputMode]}
+          models={codexModels}
+          busy={actionBusy === "setModelSettings"}
+          disabled={Boolean(actionBusy) || readySession.status === "missing"}
+          onChange={setModelSettings}
+        />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
+        {modelError ? <p className="mode-toggle-error">{modelError}</p> : null}
       </div>
 
       <div className="actions">
@@ -1255,22 +1308,15 @@ function renderComposerHighlights(text: string, skillNames: Set<string>): ReactN
   return nodes;
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "activitySummary"> }) {
+export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo"> }) {
   const branch = session.repo.branch ?? "no branch";
-  const summary = session.activitySummary?.trim();
-  const title = summary ? `${session.repo.name} · ${branch} · ${summary}` : `${session.repo.name} · ${branch}`;
+  const title = `${session.repo.name} · ${branch}`;
 
   return (
     <p className="session-header-meta" title={title}>
       <span>{session.repo.name}</span>
       <span aria-hidden="true">·</span>
       <span>{branch}</span>
-      {summary ? (
-        <>
-          <span aria-hidden="true">·</span>
-          <span className="session-header-summary">{summary}</span>
-        </>
-      ) : null}
     </p>
   );
 }
@@ -1353,6 +1399,183 @@ function ModeToggle({
       </button>
     </div>
   );
+}
+
+function ModelSelector({
+  mode,
+  value,
+  models,
+  busy,
+  disabled,
+  onChange
+}: {
+  mode: CollaborationMode;
+  value: SessionModelSettings;
+  models: CodexModel[];
+  busy: boolean;
+  disabled: boolean;
+  onChange: (model: string, reasoningEffort: string | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reasoningModel, setReasoningModel] = useState<CodexModel | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const options = modelSelectorOptions(models, value.model);
+  const label = mode === "plan" ? "Plan model" : "Normal model";
+  const selectedModel = options.find((model) => model.model === value.model) ?? null;
+  const selectedLabel = selectedModel?.displayName || value.model || "Model";
+  const selectedReasoning = value.reasoningEffort ?? selectedModel?.defaultReasoningEffort ?? null;
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+      setReasoningModel(null);
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      setReasoningModel(null);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled || busy) {
+      setOpen(false);
+      setReasoningModel(null);
+    }
+  }, [busy, disabled]);
+
+  function chooseModel(model: CodexModel) {
+    if (model.supportedReasoningEfforts.length === 0) {
+      onChange(model.model, null);
+      setOpen(false);
+      setReasoningModel(null);
+      return;
+    }
+    setReasoningModel(model);
+  }
+
+  function chooseReasoning(model: CodexModel, reasoningEffort: string) {
+    onChange(model.model, reasoningEffort);
+    setOpen(false);
+    setReasoningModel(null);
+  }
+
+  return (
+    <div className="model-selector" aria-busy={busy} ref={rootRef}>
+      <button
+        type="button"
+        className="model-selector-trigger"
+        disabled={disabled || options.length === 0}
+        aria-label={label}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => {
+          setOpen((current) => !current);
+          setReasoningModel(null);
+        }}
+      >
+        <span className="model-selector-label">{label}</span>
+        <span className="model-selector-value">{selectedLabel}</span>
+        {selectedReasoning ? <span className="model-selector-effort">{selectedReasoning}</span> : null}
+        <ChevronDown size={15} aria-hidden="true" />
+      </button>
+      {open ? (
+        <div className="model-selector-popover" role="dialog" aria-label={label}>
+          {reasoningModel ? (
+            <div className="model-selector-panel">
+              <div className="model-selector-panel-head">
+                <button type="button" className="model-selector-back" onClick={() => setReasoningModel(null)} aria-label="Back to models">
+                  <ChevronLeft size={16} aria-hidden="true" />
+                </button>
+                <div>
+                  <span>Reasoning</span>
+                  <strong>{reasoningModel.displayName || reasoningModel.model}</strong>
+                </div>
+              </div>
+              <div className="model-selector-options" role="listbox" aria-label={`${reasoningModel.model} reasoning`}>
+                {reasoningModel.supportedReasoningEfforts.map((option) => {
+                  const selected = value.model === reasoningModel.model && value.reasoningEffort === option.reasoningEffort;
+                  return (
+                    <button
+                      type="button"
+                      key={option.reasoningEffort}
+                      className={selected ? "model-selector-option selected" : "model-selector-option"}
+                      role="option"
+                      aria-selected={selected}
+                      onClick={() => chooseReasoning(reasoningModel, option.reasoningEffort)}
+                    >
+                      <span>
+                        <strong>{reasoningEffortLabel(option.reasoningEffort)}</strong>
+                        {option.description ? <small>{option.description}</small> : null}
+                      </span>
+                      {selected ? <Check size={16} aria-hidden="true" /> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="model-selector-panel">
+              <div className="model-selector-options" role="listbox" aria-label={label}>
+                {options.map((model) => {
+                  const selected = model.model === value.model;
+                  return (
+                    <button
+                      type="button"
+                      key={model.model}
+                      className={selected ? "model-selector-option selected" : "model-selector-option"}
+                      role="option"
+                      aria-selected={selected}
+                      onClick={() => chooseModel(model)}
+                    >
+                      <span>
+                        <strong>{model.displayName || model.model}</strong>
+                        {model.description ? <small>{model.description}</small> : null}
+                      </span>
+                      <span className="model-selector-option-meta">
+                        {model.isDefault ? <em>Default</em> : null}
+                        {selected ? <Check size={16} aria-hidden="true" /> : null}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function modelSelectorOptions(models: CodexModel[], value: string | null): CodexModel[] {
+  if (!value || models.some((model) => model.model === value)) return models;
+  return [
+    {
+      id: value,
+      model: value,
+      displayName: value,
+      description: "",
+      hidden: false,
+      isDefault: false,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: null
+    },
+    ...models
+  ];
+}
+
+export function reasoningEffortLabel(value: string): string {
+  if (value === "xhigh") return "X-high";
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 function ApprovalBanner({

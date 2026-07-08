@@ -19,6 +19,8 @@ import {
   latestUserPromptTimestamp,
   MarkdownBlock,
   MessageBubble,
+  modelAction,
+  modelSelectorOptions,
   pendingProposedPlanMessage,
   pendingUserMessageToChatMessage,
   planActionRequest,
@@ -48,6 +50,7 @@ import {
   transcriptItemsContainPendingUserMessage,
   replaceSkillToken,
   resizeComposerTextarea,
+  reasoningEffortLabel,
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
@@ -201,28 +204,29 @@ describe("shouldQueueComposerInput", () => {
 });
 
 describe("SessionHeaderMeta", () => {
-  it("shows the activity summary after the branch name", () => {
+  it("shows the repo and branch without the activity summary", () => {
+    const session = {
+      repo: repo("muxpilot", "feature/activity-summary"),
+      activitySummary: "Header summary display"
+    } satisfies Pick<ManagedSession, "repo" | "activitySummary">;
+
     const html = renderToStaticMarkup(
       createElement(SessionHeaderMeta, {
-        session: {
-          repo: repo("muxpilot", "feature/activity-summary"),
-          activitySummary: "Header summary display"
-        }
+        session
       })
     );
 
     expect(html).toContain("muxpilot");
     expect(html).toContain("feature/activity-summary");
-    expect(html).toContain("Header summary display");
-    expect(html.indexOf("feature/activity-summary")).toBeLessThan(html.indexOf("Header summary display"));
+    expect(html).not.toContain("Header summary display");
+    expect(html).not.toContain("session-header-summary");
   });
 
   it("omits blank activity summaries", () => {
     const html = renderToStaticMarkup(
       createElement(SessionHeaderMeta, {
         session: {
-          repo: repo("muxpilot", "main"),
-          activitySummary: "  "
+          repo: repo("muxpilot", "main")
         }
       })
     );
@@ -319,11 +323,48 @@ describe("input mode helpers", () => {
     expect(inputModeAction("default")).toEqual({ type: "setInputMode", mode: "default" });
   });
 
+  it("builds model setting actions for the selected mode", () => {
+    expect(modelAction("plan", "gpt-5.5", "high")).toEqual({
+      type: "setModelSettings",
+      mode: "plan",
+      model: "gpt-5.5",
+      reasoningEffort: "high"
+    });
+    expect(modelAction("default", "gpt-5.4", null)).toEqual({
+      type: "setModelSettings",
+      mode: "default",
+      model: "gpt-5.4",
+      reasoningEffort: null
+    });
+  });
+
   it("preserves a pending input mode over stale session refreshes", () => {
     const staleSession = managedSession({ inputMode: "default" });
 
     expect(sessionWithPendingInputMode(staleSession, "plan")).toMatchObject({ id: "session-a", inputMode: "plan" });
     expect(sessionWithPendingInputMode(staleSession, null)).toBe(staleSession);
+  });
+});
+
+describe("model selector helpers", () => {
+  it("keeps the current model visible when the catalog does not include it", () => {
+    expect(modelSelectorOptions([], "gpt-local")).toEqual([
+      {
+        id: "gpt-local",
+        model: "gpt-local",
+        displayName: "gpt-local",
+        description: "",
+        hidden: false,
+        isDefault: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null
+      }
+    ]);
+  });
+
+  it("formats reasoning effort labels", () => {
+    expect(reasoningEffortLabel("xhigh")).toBe("X-high");
+    expect(reasoningEffortLabel("medium")).toBe("Medium");
   });
 });
 
@@ -1250,6 +1291,7 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
     activitySummaryGeneratedAt: null,
     activitySummarySourceSequence: null,
     inputMode: "default",
+    models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
     archived: false,

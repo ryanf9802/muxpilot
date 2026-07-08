@@ -78,7 +78,7 @@ Input:
 ```text
 React composer -> POST /api/sessions/:id/input -> tmux load-buffer -> paste-buffer -> short delay -> send submit keys
 Busy session -> queued input stored in SQLite -> sent when the session becomes input-ready
-Mode toggle -> POST /api/sessions/:id/actions -> tmux paste /plan or /default -> send Enter
+Mode toggle -> POST /api/sessions/:id/actions -> tmux send configured mode-cycle keys
 Interactive buttons -> POST /api/sessions/:id/actions or /question -> tmux menu keys
 ```
 

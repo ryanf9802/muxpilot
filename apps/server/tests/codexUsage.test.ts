@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  normalizeCodexModels,
   normalizeCodexUsage,
   selectCodexRateLimitSnapshot,
   type AccountReadResponse,
@@ -64,6 +65,51 @@ describe("normalizeCodexUsage", () => {
     expect(summary.limits.fiveHour?.usedPercent).toBe(100);
     expect(summary.limits.fiveHour?.remainingPercent).toBe(0);
     expect(summary.limits.weekly).toBeNull();
+  });
+});
+
+describe("normalizeCodexModels", () => {
+  it("maps visible app-server model records to UI model options", () => {
+    expect(
+      normalizeCodexModels({
+        data: [
+          {
+            id: "gpt-5.5",
+            model: "gpt-5.5",
+            displayName: "GPT-5.5",
+            description: "Frontier coding model",
+            hidden: false,
+            isDefault: true,
+            supportedReasoningEfforts: [
+              { reasoningEffort: "medium", description: "Balanced" },
+              { reasoningEffort: "high", description: "Deeper" }
+            ],
+            defaultReasoningEffort: "medium"
+          },
+          {
+            id: "hidden",
+            model: "hidden",
+            displayName: "Hidden",
+            hidden: true
+          }
+        ],
+        nextCursor: null
+      })
+    ).toEqual([
+      {
+        id: "gpt-5.5",
+        model: "gpt-5.5",
+        displayName: "GPT-5.5",
+        description: "Frontier coding model",
+        hidden: false,
+        isDefault: true,
+        supportedReasoningEfforts: [
+          { reasoningEffort: "medium", description: "Balanced" },
+          { reasoningEffort: "high", description: "Deeper" }
+        ],
+        defaultReasoningEffort: "medium"
+      }
+    ]);
   });
 });
 

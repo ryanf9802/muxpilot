@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
+  CodexModel,
   CollaborationMode,
   ManagedSession,
   PlanActionChoice,
@@ -12,6 +13,8 @@ import type {
   QueuedInput,
   ResolveApprovalRequest,
   SessionAction,
+  SessionModelSettings,
+  SessionModelSelections,
   SessionStatus,
   TranscriptPageResponse,
   TmuxPane
@@ -34,6 +37,12 @@ interface ActivitySummaryScheduler {
 interface CodexProcessLookup {
   resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
 }
+
+interface CodexModelCatalog {
+  listModels(): Promise<CodexModel[]>;
+}
+
+const FALLBACK_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
 
 interface ApprovalKeyMap {
   approveOnce: string[];
@@ -60,7 +69,8 @@ export class SessionManager {
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null
+    private readonly codexProcessLookup: CodexProcessLookup | null = null,
+    private readonly modelCatalog: CodexModelCatalog | null = null
   ) {}
 
   start(): void {
@@ -83,6 +93,7 @@ export class SessionManager {
     const now = nowIso();
     const seen = new Set<string>();
     const paneIds = panes.map(tmuxPaneSessionId);
+    const modelOptions = await this.safeListModels();
 
     for (const [index, pane] of panes.entries()) {
       const existingId = paneIds[index] ?? tmuxPaneSessionId(pane);
@@ -133,6 +144,7 @@ export class SessionManager {
         (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
         existing?.inputMode ??
         "default";
+      const liveModel = await detectLiveModel(pane, modelOptions, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
       const session: ManagedSession = {
         id: existingId,
         tmux: pane,
@@ -148,6 +160,7 @@ export class SessionManager {
         activitySummaryGeneratedAt: sourceChanged ? null : existing?.activitySummaryGeneratedAt ?? null,
         activitySummarySourceSequence: sourceChanged ? null : existing?.activitySummarySourceSequence ?? null,
         inputMode,
+        models: mergeSessionModels(existing?.models, inputMode, liveModel),
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         archived: existing?.archived ?? false
@@ -494,6 +507,7 @@ export class SessionManager {
       activitySummaryGeneratedAt: null,
       activitySummarySourceSequence: null,
       inputMode: "default",
+      models: emptySessionModels(),
       transcriptSize: 0,
       unreadCount: 0,
       archived: false
@@ -525,7 +539,6 @@ export class SessionManager {
     if (action.type === "kill") await this.tmux.killPane(session.tmux.paneId);
     if (action.type === "archiveTranscript") await this.db.markSessionArchived(sessionId, true, nowIso());
     if (action.type === "setInputMode") {
-      const slashCommand = slashCommandForInputMode(action.mode);
       await this.ensureInputMode(session, action.mode);
       const updatedAt = nowIso();
       const updatedSession = await this.db.setSessionInputMode(sessionId, action.mode, updatedAt);
@@ -536,8 +549,29 @@ export class SessionManager {
         JSON.stringify({
           previousMode: session.inputMode,
           requestedMode: action.mode,
-          slashCommand,
+          switchMethod: "cycle_keys",
+          cycleKeys: this.inputModeCycleKeys,
           resultingMode: updatedSession?.inputMode ?? null
+        }),
+        updatedAt
+      );
+    }
+    if (action.type === "setModelSettings") {
+      const model = await this.requireKnownModel(action.model);
+      const reasoningEffort = requireSupportedReasoningEffort(model, action.reasoningEffort ?? null);
+      const liveSession = await this.ensureInputMode(session, action.mode);
+      await this.tmux.sendInput(liveSession.tmux.paneId, slashCommandForModel(model.model, reasoningEffort));
+      const updatedAt = nowIso();
+      const updatedSession = await this.db.setSessionModelSettings(sessionId, action.mode, model.model, reasoningEffort, updatedAt);
+      await this.db.addAudit(
+        "local",
+        "set_model_settings",
+        sessionId,
+        JSON.stringify({
+          mode: action.mode,
+          requestedModel: action.model,
+          requestedReasoningEffort: action.reasoningEffort ?? null,
+          resultingSettings: updatedSession?.models[action.mode] ?? null
         }),
         updatedAt
       );
@@ -670,7 +704,7 @@ export class SessionManager {
     const currentMode = detectCollaborationModeFromPane(liveSession.tmux);
     if (currentMode === mode || (currentMode === null && session.inputMode === mode)) return liveSession;
 
-    await this.tmux.sendInput(liveSession.tmux.paneId, slashCommandForInputMode(mode));
+    await this.tmux.sendKeys(liveSession.tmux.paneId, this.inputModeCycleKeys);
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await delay(120);
       liveSession = await this.liveSession(liveSession);
@@ -739,6 +773,36 @@ export class SessionManager {
     const question = materializeQuestion(questionMessage);
     if (!question) return null;
     return this.db.latestQuestionAnswerMessage(sessionId, question.id, questionMessage.sequence);
+  }
+
+  private async safeListModels(): Promise<CodexModel[]> {
+    if (!this.modelCatalog) return [];
+    try {
+      return await this.modelCatalog.listModels();
+    } catch {
+      return [];
+    }
+  }
+
+  private async requireKnownModel(model: string): Promise<CodexModel> {
+    const normalized = model.trim();
+    if (!normalized) throw new InputModeSwitchError("Model is required");
+    const models = await this.safeListModels();
+    if (models.length === 0) {
+      return {
+        id: normalized,
+        model: normalized,
+        displayName: normalized,
+        description: "",
+        hidden: false,
+        isDefault: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null
+      };
+    }
+    const match = models.find((candidate) => candidate.model === normalized || candidate.id === normalized);
+    if (!match) throw new InputModeSwitchError(`Unknown Codex model: ${normalized}`);
+    return match;
   }
 }
 
@@ -885,6 +949,10 @@ function isPlanActionInput(text: string): boolean {
 
 function codexTerminalUserText(text: string): string {
   return text.endsWith(" ") ? text : `${text} `;
+}
+
+function slashCommandForModel(model: string, reasoningEffort: string | null): string {
+  return reasoningEffort ? `/model ${model} ${reasoningEffort}` : `/model ${model}`;
 }
 
 function keysForPlanAction(action: PlanActionChoice): string[] {
@@ -1101,8 +1169,43 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     status: session.status,
     lastActivityAt: session.lastActivityAt,
     inputMode: session.inputMode,
+    models: session.models,
     archived: session.archived
   };
+}
+
+function emptySessionModels(): SessionModelSelections {
+  return { default: emptySessionModelSettings(), plan: emptySessionModelSettings() };
+}
+
+function emptySessionModelSettings(): SessionModelSettings {
+  return { model: null, reasoningEffort: null };
+}
+
+function mergeSessionModels(
+  existing: SessionModelSelections | undefined,
+  mode: CollaborationMode,
+  liveModel: string | null
+): SessionModelSelections {
+  const models = existing ?? emptySessionModels();
+  if (!liveModel) return models;
+  return { ...models, [mode]: { ...models[mode], model: liveModel } };
+}
+
+function requireSupportedReasoningEffort(model: CodexModel, reasoningEffort: string | null): string | null {
+  const normalized = reasoningEffort?.trim() ?? "";
+  if (!normalized) return null;
+  const supported = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
+  if (supported.length === 0) {
+    if (FALLBACK_REASONING_EFFORTS.has(normalized)) return normalized;
+    throw new InputModeSwitchError(`Unknown Codex reasoning effort: ${normalized}`);
+  }
+  if (!supported.includes(normalized)) {
+    throw new InputModeSwitchError(
+      `Reasoning effort ${normalized} is not supported for ${model.model}. Supported reasoning efforts: ${supported.join(", ")}`
+    );
+  }
+  return normalized;
 }
 
 function detectCollaborationModeFromPane(pane: TmuxPane): CollaborationMode | null {
@@ -1122,6 +1225,46 @@ async function detectLiveCollaborationMode(
   }
 }
 
+async function detectLiveModel(
+  pane: TmuxPane,
+  models: CodexModel[],
+  capturePane: (paneId: string, lines: number) => Promise<string>
+): Promise<string | null> {
+  if (models.length === 0) return null;
+  const paneModel = detectModelFromText(`${pane.title}\n${pane.windowName}`, models);
+  if (paneModel) return paneModel;
+  try {
+    return detectModelFromText(await capturePane(pane.paneId, 30), models);
+  } catch {
+    return null;
+  }
+}
+
+function detectModelFromText(text: string, models: CodexModel[]): string | null {
+  const normalized = normalizeModelSearchText(text);
+  if (!normalized) return null;
+  const bySlug = models.find((model) => model.model && modelTokenPattern(model.model).test(normalized));
+  if (bySlug) return bySlug.model;
+  const byName = models.find((model) => model.displayName && modelTokenPattern(model.displayName).test(normalized));
+  return byName?.model ?? null;
+}
+
+function normalizeModelSearchText(text: string): string {
+  return text
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function modelTokenPattern(value: string): RegExp {
+  return new RegExp(`(^|[^a-z0-9._-])${escapeRegExp(value.toLowerCase())}([^a-z0-9._-]|$)`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function detectCollaborationModeFromText(text: string): CollaborationMode | null {
   const lines = text
     .split("\n")
@@ -1134,10 +1277,6 @@ function detectCollaborationModeFromText(text: string): CollaborationMode | null
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function slashCommandForInputMode(mode: CollaborationMode): string {
-  return mode === "plan" ? "/plan" : "/default";
 }
 
 function looksLikeCodexPane(pane: TmuxPane): boolean {
