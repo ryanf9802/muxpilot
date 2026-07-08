@@ -1637,6 +1637,10 @@ select:focus-visible {
   border-color: var(--color-action-hover);
 }
 
+.session-new-session-button-label {
+  display: none;
+}
+
 .approval-banner {
   grid-row: 4;
   display: grid;
@@ -2722,6 +2726,15 @@ select:focus-visible {
     border: 1px solid var(--color-border);
     border-radius: 8px;
     padding: 10px;
+  }
+
+  .actions .session-new-session-button {
+    width: auto;
+    padding: 0 10px;
+  }
+
+  .session-new-session-button-label {
+    display: inline;
   }
 }
 

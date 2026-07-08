@@ -973,6 +973,7 @@ export function SessionView() {
             title="New session"
           >
             <Plus size={18} />
+            <span className="session-new-session-button-label">New session</span>
           </button>
           <button
             disabled={Boolean(actionBusy)}
