@@ -281,7 +281,7 @@ describe("transcript vim navigation keys", () => {
     expect(transcriptVimNavigationCommand(keyEvent("u", { ctrlKey: true }), false).command).toBe("halfUp");
     expect(transcriptVimNavigationCommand(keyEvent("d", { ctrlKey: true }), false).command).toBe("halfDown");
     expect(transcriptVimNavigationCommand(keyEvent("b", { ctrlKey: true }), false).command).toBe("pageUp");
-    expect(transcriptVimNavigationCommand(keyEvent("f", { ctrlKey: true }), false).command).toBe("find");
+    expect(transcriptVimNavigationCommand(keyEvent("f", { ctrlKey: true }), false).command).toBe("pageDown");
   });
 
   it("maps slash to transcript find and ignores meta shortcuts", () => {

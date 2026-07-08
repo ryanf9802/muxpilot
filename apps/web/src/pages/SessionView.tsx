@@ -272,7 +272,7 @@ export function transcriptVimNavigationCommand(
     if (key === "u") return { command: "halfUp", pendingG: false, preventDefault: true };
     if (key === "d") return { command: "halfDown", pendingG: false, preventDefault: true };
     if (key === "b") return { command: "pageUp", pendingG: false, preventDefault: true };
-    if (key === "f") return { command: "find", pendingG: false, preventDefault: true };
+    if (key === "f") return { command: "pageDown", pendingG: false, preventDefault: true };
     return { command: null, pendingG: false, preventDefault: false };
   }
   if (event.key === "g" && !event.shiftKey) {
@@ -691,6 +691,7 @@ export function SessionView() {
   useEffect(() => {
     const handleFindKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.altKey || event.shiftKey || (!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== "f") return;
+      if (effectiveVimEnabled && !shouldIgnoreTranscriptVimKeyTarget(event.target)) return;
       event.preventDefault();
       setTranscriptFindOpen(true);
       window.requestAnimationFrame(() => {
@@ -700,7 +701,7 @@ export function SessionView() {
     };
     window.addEventListener("keydown", handleFindKeyDown);
     return () => window.removeEventListener("keydown", handleFindKeyDown);
-  }, []);
+  }, [effectiveVimEnabled]);
 
   useEffect(() => {
     if (!effectiveVimEnabled) {
