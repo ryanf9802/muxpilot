@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleCtrlWKeyDown, previousWordDeletionRange, shouldHandleCtrlW } from "./ctrlW.js";
+import { handleCtrlJKeyDown, handleCtrlWKeyDown, previousWordDeletionRange, shouldHandleCtrlJ, shouldHandleCtrlW } from "./ctrlW.js";
 
 class FakeInputElement extends EventTarget {
   disabled = false;
@@ -18,6 +18,16 @@ class FakeInputElement extends EventTarget {
   setSelectionRange(start: number, end: number) {
     this.selectionStart = start;
     this.selectionEnd = end;
+  }
+}
+
+class FakeTextAreaElement extends FakeInputElement {}
+
+class FakeCodeMirrorElement extends EventTarget {
+  isContentEditable = false;
+
+  closest(selector: string) {
+    return selector === ".cm-editor" ? this : null;
   }
 }
 
@@ -69,6 +79,16 @@ describe("shouldHandleCtrlW", () => {
     expect(shouldHandleCtrlW({ ctrlKey: true, key: "Enter", altKey: false, metaKey: false })).toBe(false);
     expect(shouldHandleCtrlW({ ctrlKey: true, key: "w", altKey: true, metaKey: false })).toBe(false);
     expect(shouldHandleCtrlW({ ctrlKey: true, key: "w", altKey: false, metaKey: true })).toBe(false);
+  });
+});
+
+describe("shouldHandleCtrlJ", () => {
+  it("matches plain Ctrl+J only", () => {
+    expect(shouldHandleCtrlJ({ ctrlKey: true, key: "j", altKey: false, metaKey: false })).toBe(true);
+    expect(shouldHandleCtrlJ({ ctrlKey: true, key: "J", altKey: false, metaKey: false })).toBe(true);
+    expect(shouldHandleCtrlJ({ ctrlKey: true, key: "Enter", altKey: false, metaKey: false })).toBe(false);
+    expect(shouldHandleCtrlJ({ ctrlKey: true, key: "j", altKey: true, metaKey: false })).toBe(false);
+    expect(shouldHandleCtrlJ({ ctrlKey: true, key: "j", altKey: false, metaKey: true })).toBe(false);
   });
 });
 
@@ -169,6 +189,126 @@ describe("handleCtrlWKeyDown", () => {
     const preventDefault = vi.fn();
 
     const handled = handleCtrlWKeyDown({
+      ctrlKey: true,
+      key: "Enter",
+      altKey: false,
+      metaKey: false,
+      preventDefault,
+      target: null
+    });
+
+    expect(handled).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+});
+
+describe("handleCtrlJKeyDown", () => {
+  it("inserts a newline in editable textarea targets", () => {
+    vi.stubGlobal("HTMLTextAreaElement", FakeTextAreaElement);
+    const textarea = new FakeTextAreaElement("alpha beta", 5);
+    const onInput = vi.fn();
+    textarea.addEventListener("input", onInput);
+    const preventDefault = vi.fn();
+
+    const handled = handleCtrlJKeyDown({
+      ctrlKey: true,
+      key: "j",
+      altKey: false,
+      metaKey: false,
+      preventDefault,
+      target: textarea
+    });
+
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(textarea.value).toBe("alpha\n beta");
+    expect(textarea.selectionStart).toBe(6);
+    expect(textarea.selectionEnd).toBe(6);
+    expect(onInput).toHaveBeenCalledOnce();
+  });
+
+  it("replaces selected textarea text with a newline", () => {
+    vi.stubGlobal("HTMLTextAreaElement", FakeTextAreaElement);
+    const textarea = new FakeTextAreaElement("alpha beta", 5, 6);
+
+    handleCtrlJKeyDown({
+      ctrlKey: true,
+      key: "j",
+      altKey: false,
+      metaKey: false,
+      preventDefault: vi.fn(),
+      target: textarea
+    });
+
+    expect(textarea.value).toBe("alpha\nbeta");
+    expect(textarea.selectionStart).toBe(6);
+    expect(textarea.selectionEnd).toBe(6);
+  });
+
+  it("swallows Ctrl+J without editing single-line input targets", () => {
+    vi.stubGlobal("HTMLInputElement", FakeInputElement);
+    const input = new FakeInputElement("alpha beta", 5);
+    const onInput = vi.fn();
+    input.addEventListener("input", onInput);
+    const preventDefault = vi.fn();
+
+    const handled = handleCtrlJKeyDown({
+      ctrlKey: true,
+      key: "j",
+      altKey: false,
+      metaKey: false,
+      preventDefault,
+      target: input
+    });
+
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(input.value).toBe("alpha beta");
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  it("swallows Ctrl+J without editing read-only textarea targets", () => {
+    vi.stubGlobal("HTMLTextAreaElement", FakeTextAreaElement);
+    const textarea = new FakeTextAreaElement("alpha beta", 5);
+    textarea.readOnly = true;
+    const preventDefault = vi.fn();
+
+    const handled = handleCtrlJKeyDown({
+      ctrlKey: true,
+      key: "j",
+      altKey: false,
+      metaKey: false,
+      preventDefault,
+      target: textarea
+    });
+
+    expect(handled).toBe(true);
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(textarea.value).toBe("alpha beta");
+  });
+
+  it("lets CodeMirror targets handle Ctrl+J locally", () => {
+    vi.stubGlobal("HTMLElement", FakeCodeMirrorElement);
+    const target = new FakeCodeMirrorElement();
+    const preventDefault = vi.fn();
+
+    const handled = handleCtrlJKeyDown({
+      ctrlKey: true,
+      key: "j",
+      altKey: false,
+      metaKey: false,
+      preventDefault,
+      target
+    });
+
+    expect(handled).toBe(false);
+    expect(preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("ignores other shortcuts", () => {
+    const preventDefault = vi.fn();
+
+    const handled = handleCtrlJKeyDown({
       ctrlKey: true,
       key: "Enter",
       altKey: false,

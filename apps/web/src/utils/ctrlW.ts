@@ -16,6 +16,10 @@ export function shouldHandleCtrlW(event: Pick<CtrlWKeyboardEvent, "altKey" | "ct
   return event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "w";
 }
 
+export function shouldHandleCtrlJ(event: Pick<CtrlWKeyboardEvent, "altKey" | "ctrlKey" | "key" | "metaKey">): boolean {
+  return event.ctrlKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "j";
+}
+
 export function previousWordDeletionRange(value: string, selectionStart: number, selectionEnd: number): TextDeletionRange {
   const start = clampOffset(Math.min(selectionStart, selectionEnd), value.length);
   const end = clampOffset(Math.max(selectionStart, selectionEnd), value.length);
@@ -42,9 +46,25 @@ export function handleCtrlWKeyDown(event: CtrlWKeyboardEvent): boolean {
   return true;
 }
 
+export function handleCtrlJKeyDown(event: CtrlWKeyboardEvent): boolean {
+  if (!shouldHandleCtrlJ(event)) return false;
+  if (isCodeMirrorTarget(event.target)) return false;
+
+  event.preventDefault();
+  if (isEditableTextareaElement(event.target)) {
+    insertNewlineInTextarea(event.target);
+    return true;
+  }
+  return true;
+}
+
+export function handleBrowserShortcutKeyDown(event: CtrlWKeyboardEvent): boolean {
+  return handleCtrlWKeyDown(event) || handleCtrlJKeyDown(event);
+}
+
 export function installCtrlWGuard(target: Document = document): () => void {
   const listener = (event: KeyboardEvent) => {
-    handleCtrlWKeyDown(event);
+    handleBrowserShortcutKeyDown(event);
   };
   target.addEventListener("keydown", listener, { capture: true });
   return () => target.removeEventListener("keydown", listener, { capture: true });
@@ -61,6 +81,23 @@ function deletePreviousWordInValueElement(element: HTMLInputElement | HTMLTextAr
     element.setSelectionRange(range.start, range.start);
   } catch {
     // Some input types do not support text selection.
+  }
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function insertNewlineInTextarea(element: HTMLTextAreaElement): void {
+  const selectionStart = element.selectionStart ?? element.value.length;
+  const selectionEnd = element.selectionEnd ?? selectionStart;
+  const start = clampOffset(Math.min(selectionStart, selectionEnd), element.value.length);
+  const end = clampOffset(Math.max(selectionStart, selectionEnd), element.value.length);
+  const nextCaret = start + 1;
+  const nextValue = `${element.value.slice(0, start)}\n${element.value.slice(end)}`;
+
+  setElementValue(element, nextValue);
+  try {
+    element.setSelectionRange(nextCaret, nextCaret);
+  } catch {
+    // Some textarea-like targets may reject selection updates.
   }
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
@@ -121,8 +158,16 @@ function isEditableValueElement(target: EventTarget | null): target is HTMLInput
   return !target.disabled && !target.readOnly;
 }
 
+function isEditableTextareaElement(target: EventTarget | null): target is HTMLTextAreaElement {
+  return typeof HTMLTextAreaElement !== "undefined" && target instanceof HTMLTextAreaElement && !target.disabled && !target.readOnly;
+}
+
 function isEditableTextElement(target: EventTarget | null): target is HTMLElement {
   return typeof HTMLElement !== "undefined" && target instanceof HTMLElement && target.isContentEditable;
+}
+
+function isCodeMirrorTarget(target: EventTarget | null): boolean {
+  return typeof HTMLElement !== "undefined" && target instanceof HTMLElement && Boolean(target.closest(".cm-editor"));
 }
 
 function clampOffset(value: number, length: number): number {
