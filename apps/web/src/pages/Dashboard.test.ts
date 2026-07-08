@@ -75,9 +75,10 @@ describe("sessionNameValidationMessage", () => {
     expect(sessionNameValidationMessage("ready-2")).toBeNull();
   });
 
-  it("rejects names that normalize below the minimum length", () => {
-    expect(sessionNameValidationMessage("a")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
-    expect(sessionNameValidationMessage("!!!")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
+  it("does not warn for empty or too-short normalized names", () => {
+    expect(sessionNameValidationMessage("")).toBeNull();
+    expect(sessionNameValidationMessage("a")).toBeNull();
+    expect(sessionNameValidationMessage("!!!")).toBeNull();
   });
 });
 

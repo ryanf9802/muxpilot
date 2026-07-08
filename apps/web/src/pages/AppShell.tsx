@@ -1,16 +1,17 @@
-import { Outlet, useNavigate } from "react-router-dom";
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { AlertTriangle, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError } from "../api/client.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { ManagedSession, MeResponse, RemoteAccessResponse, SessionDirectorySuggestion, SessionEvent } from "@muxpilot/core";
-import { SESSION_NAME_MAX_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
   countSessionStatuses,
+  isSessionStatusSeverity,
   shouldRefreshSessionsForEvent,
   type SessionStoplightCounts,
   type SessionStatusSeverity
@@ -21,18 +22,22 @@ export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 
 export function AppShell() {
+  const location = useLocation();
   const navigate = useNavigate();
   const [connectionState, setConnectionState] = useState<ShellConnectionState>("checking");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [showConnectButton, setShowConnectButton] = useState(false);
+  const [showLogoutButton, setShowLogoutButton] = useState(true);
   const [retryBusy, setRetryBusy] = useState(false);
   const [createSessionOpen, setCreateSessionOpen] = useState(false);
   const [createSessionCwd, setCreateSessionCwd] = useState("");
   const [createSessionName, setCreateSessionName] = useState("");
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
-  const [directorySuggestions, setDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
+  const [createSessionDirectoryFocused, setCreateSessionDirectoryFocused] = useState(false);
+  const [createSessionNameAutofocus, setCreateSessionNameAutofocus] = useState(false);
+  const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
@@ -66,6 +71,7 @@ export function AppShell() {
     const wasDisconnected = connectionStateRef.current === "disconnected";
     setConnectionState("connected");
     setShowConnectButton(shouldShowConnectDeviceButton(me));
+    setShowLogoutButton(shouldShowLogoutButton(me));
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
   }, [markUnauthorized]);
 
@@ -184,10 +190,10 @@ export function AppShell() {
     api
       .sessionDirectories()
       .then((response) => {
-        if (!cancelled) setDirectorySuggestions(response.directories);
+        if (!cancelled) setServerDirectorySuggestions(response.directories);
       })
       .catch(() => {
-        if (!cancelled) setDirectorySuggestions([]);
+        if (!cancelled) setServerDirectorySuggestions([]);
       });
     return () => {
       cancelled = true;
@@ -195,13 +201,28 @@ export function AppShell() {
   }, [createSessionOpen]);
 
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
-  const createSessionNameError = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
+  const clientDirectorySuggestions = useMemo(() => sessionDirectorySuggestionsFromSessions(sessions), [sessions]);
+  const directorySuggestions = useMemo(
+    () => mergeSessionDirectorySuggestions(clientDirectorySuggestions, serverDirectorySuggestions),
+    [clientDirectorySuggestions, serverDirectorySuggestions]
+  );
+  const createSessionNameWarning = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
+  const createSessionNameInvalid = createSessionOpen && !isValidSessionName(normalizeSessionName(createSessionName));
+  const visibleDirectorySuggestions = useMemo(
+    () => filterSessionDirectorySuggestions(directorySuggestions, createSessionCwd),
+    [createSessionCwd, directorySuggestions]
+  );
+  const showDirectorySuggestions = createSessionOpen && createSessionDirectoryFocused && visibleDirectorySuggestions.length > 0;
+  const contentClassName = location.pathname.startsWith("/sessions/") ? "content content-session" : "content";
 
   const openCreateSession = useCallback((cwd = "") => {
+    const hasPrefilledCwd = cwd.trim().length > 0;
     setCreateSessionOpen(true);
     setCreateSessionCwd(cwd);
     setCreateSessionName("");
     setCreateSessionError(null);
+    setCreateSessionDirectoryFocused(!hasPrefilledCwd);
+    setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
   const retryConnection = useCallback(async () => {
@@ -266,6 +287,19 @@ export function AppShell() {
     if (createSessionBusy) return;
     setCreateSessionOpen(false);
     setCreateSessionError(null);
+    setCreateSessionDirectoryFocused(false);
+    setCreateSessionNameAutofocus(false);
+  }
+
+  function updateCreateSessionCwd(value: string) {
+    setCreateSessionCwd(value);
+    setCreateSessionError(null);
+  }
+
+  function chooseCreateSessionDirectory(path: string) {
+    setCreateSessionCwd(path);
+    setCreateSessionDirectoryFocused(false);
+    setCreateSessionError(null);
   }
 
   function updateCreateSessionName(value: string) {
@@ -284,7 +318,6 @@ export function AppShell() {
       return;
     }
     if (!isValidSessionName(name)) {
-      setCreateSessionError(SESSION_NAME_VALIDATION_MESSAGE);
       return;
     }
 
@@ -302,30 +335,36 @@ export function AppShell() {
     }
   }
 
+  function selectSessionStoplightSeverity(severity: SessionStatusSeverity) {
+    navigate({ pathname: "/", search: nextSessionStoplightSearch(location.search, severity) });
+  }
+
   return (
     <div className="app">
       <header className="topbar">
         <AppBrand />
-        <SessionStoplight counts={stoplightCounts} onSelect={(severity) => navigate(`/?statusSeverity=${severity}`)} />
+        <SessionStoplight counts={stoplightCounts} onSelect={selectSessionStoplightSeverity} />
         <div className="topbar-actions">
           {showConnectButton ? (
             <button className="icon-button" onClick={() => setConnectOpen(true)} aria-label="Connect device">
               <Smartphone size={18} />
             </button>
           ) : null}
-          <button
-            className="icon-button"
-            onClick={logout}
-            disabled={logoutBusy}
-            aria-busy={logoutBusy}
-            aria-label={logoutBusy ? "Clearing access" : "Clear access"}
-            data-busy={logoutBusy || undefined}
-          >
-            <LogOut size={18} />
-          </button>
+          {showLogoutButton ? (
+            <button
+              className="icon-button"
+              onClick={logout}
+              disabled={logoutBusy}
+              aria-busy={logoutBusy}
+              aria-label={logoutBusy ? "Clearing access" : "Clear access"}
+              data-busy={logoutBusy || undefined}
+            >
+              <LogOut size={18} />
+            </button>
+          ) : null}
         </div>
       </header>
-      <main className="content">
+      <main className={contentClassName}>
         <Outlet
           context={
             { refreshSessionStoplight: loadSessions, syncSessionStoplight, openCreateSession, connectionEpoch } satisfies AppShellOutletContext
@@ -347,33 +386,52 @@ export function AppShell() {
             </div>
             <label className="rename-field">
               <span>Directory</span>
-              <input
-                autoFocus
-                value={createSessionCwd}
-                onChange={(event) => setCreateSessionCwd(event.target.value)}
-                maxLength={4096}
-                disabled={createSessionBusy}
-                list="session-directory-suggestions"
-              />
+              <div className="session-directory-combobox">
+                <input
+                  autoFocus={!createSessionNameAutofocus}
+                  value={createSessionCwd}
+                  onChange={(event) => updateCreateSessionCwd(event.target.value)}
+                  onFocus={() => setCreateSessionDirectoryFocused(true)}
+                  onBlur={() => window.setTimeout(() => setCreateSessionDirectoryFocused(false), 120)}
+                  maxLength={4096}
+                  disabled={createSessionBusy}
+                  role="combobox"
+                  aria-expanded={showDirectorySuggestions}
+                  aria-controls="session-directory-suggestions"
+                  aria-autocomplete="list"
+                />
+                {showDirectorySuggestions ? (
+                  <div className="session-directory-suggestions" id="session-directory-suggestions" role="listbox" aria-label="Session directories">
+                    {visibleDirectorySuggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.path}
+                        type="button"
+                        role="option"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => chooseCreateSessionDirectory(suggestion.path)}
+                      >
+                        <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
+                        <span className="session-directory-suggestion-path">{suggestion.path}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </label>
-            <datalist id="session-directory-suggestions">
-              {directorySuggestions.map((suggestion) => (
-                <option key={suggestion.path} value={suggestion.path} label={directorySuggestionLabel(suggestion)} />
-              ))}
-            </datalist>
             <label className="rename-field">
               <span>Name</span>
               <input
+                autoFocus={createSessionNameAutofocus}
                 value={createSessionName}
                 onChange={(event) => updateCreateSessionName(event.target.value)}
                 maxLength={SESSION_NAME_MAX_LENGTH}
-                aria-invalid={Boolean(createSessionNameError)}
+                aria-invalid={createSessionNameInvalid}
                 disabled={createSessionBusy}
               />
             </label>
-            {createSessionNameError ? (
+            {createSessionNameWarning ? (
               <p className="dialog-error" role="alert">
-                {createSessionNameError}
+                {createSessionNameWarning}
               </p>
             ) : null}
             {createSessionError ? (
@@ -388,7 +446,7 @@ export function AppShell() {
               <button
                 className="primary"
                 type="submit"
-                disabled={createSessionBusy || Boolean(createSessionNameError)}
+                disabled={createSessionBusy || createSessionNameInvalid}
                 aria-busy={createSessionBusy}
                 data-busy={createSessionBusy || undefined}
               >
@@ -466,7 +524,89 @@ export function AppRecoveryPage({
 }
 
 export function sessionNameValidationMessage(value: string): string | null {
-  return isValidSessionName(normalizeSessionName(value)) ? null : SESSION_NAME_VALIDATION_MESSAGE;
+  const name = normalizeSessionName(value);
+  if (isValidSessionName(name) || name.length < SESSION_NAME_MIN_LENGTH) return null;
+  return SESSION_NAME_VALIDATION_MESSAGE;
+}
+
+export function filterSessionDirectorySuggestions(
+  suggestions: SessionDirectorySuggestion[],
+  query: string,
+  limit = 8
+): SessionDirectorySuggestion[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  const sortedSuggestions = [...suggestions].sort(compareSessionDirectorySuggestionsByRecency);
+  const matches = normalizedQuery
+    ? sortedSuggestions.filter((suggestion) =>
+        [suggestion.path, suggestion.label, suggestion.branch, suggestion.repoRoot]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(normalizedQuery))
+      )
+    : sortedSuggestions;
+  return matches.slice(0, limit);
+}
+
+export function sessionDirectorySuggestionsFromSessions(sessions: ManagedSession[]): SessionDirectorySuggestion[] {
+  return mergeSessionDirectorySuggestions(
+    sessions
+      .filter((session) => !session.archived && session.status !== "missing")
+      .map((session) => {
+        const path = session.repo.root ?? session.tmux.cwd;
+        return {
+          path,
+          label: session.repo.name || directoryBaseName(path),
+          repoRoot: session.repo.root,
+          branch: session.repo.branch,
+          source: "active" as const,
+          lastActivityAt: session.lastActivityAt
+        };
+      })
+      .filter((suggestion) => suggestion.path.trim().length > 0)
+  );
+}
+
+export function mergeSessionDirectorySuggestions(...suggestionGroups: SessionDirectorySuggestion[][]): SessionDirectorySuggestion[] {
+  const suggestionsByPath = new Map<string, SessionDirectorySuggestion>();
+  for (const suggestion of suggestionGroups.flat()) {
+    const existing = suggestionsByPath.get(suggestion.path);
+    if (!existing) {
+      suggestionsByPath.set(suggestion.path, suggestion);
+      continue;
+    }
+
+    suggestionsByPath.set(suggestion.path, mergeSessionDirectorySuggestion(existing, suggestion));
+  }
+  return [...suggestionsByPath.values()].sort(compareSessionDirectorySuggestionsByRecency);
+}
+
+function mergeSessionDirectorySuggestion(first: SessionDirectorySuggestion, second: SessionDirectorySuggestion): SessionDirectorySuggestion {
+  const latest = compareSessionDirectorySuggestionsByRecency(first, second) <= 0 ? first : second;
+  const sourceComparison = compareSessionDirectorySuggestionsBySource(first, second);
+  const preferred = sourceComparison === 0 ? latest : sourceComparison < 0 ? first : second;
+  return {
+    ...preferred,
+    label: preferred.label || latest.label,
+    repoRoot: preferred.repoRoot ?? latest.repoRoot,
+    branch: preferred.branch ?? latest.branch,
+    lastActivityAt: latest.lastActivityAt
+  };
+}
+
+function compareSessionDirectorySuggestionsBySource(first: SessionDirectorySuggestion, second: SessionDirectorySuggestion): number {
+  if (first.source === second.source) return 0;
+  return first.source === "active" ? -1 : 1;
+}
+
+function compareSessionDirectorySuggestionsByRecency(first: SessionDirectorySuggestion, second: SessionDirectorySuggestion): number {
+  const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  if (firstTime !== secondTime) return secondTime - firstTime;
+  return first.label.localeCompare(second.label) || first.path.localeCompare(second.path);
+}
+
+function directoryBaseName(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed.split("/").filter(Boolean).pop() ?? path;
 }
 
 export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession[], session: ManagedSession): ManagedSession[] {
@@ -476,6 +616,18 @@ export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession
   const nextSessions = [...currentSessions];
   nextSessions[index] = session;
   return nextSessions;
+}
+
+export function nextSessionStoplightSearch(currentSearch: string, severity: SessionStatusSeverity): string {
+  const params = new URLSearchParams(currentSearch);
+  const currentSeverity = params.get("statusSeverity");
+  params.delete("status");
+  params.delete("statusSeverity");
+  if (!isSessionStatusSeverity(currentSeverity) || currentSeverity !== severity) {
+    params.set("statusSeverity", severity);
+  }
+  const nextSearch = params.toString();
+  return nextSearch ? `?${nextSearch}` : "";
 }
 
 export function SessionStoplight({ counts, onSelect }: { counts: SessionStoplightCounts; onSelect?: (severity: SessionStatusSeverity) => void }) {
@@ -530,6 +682,10 @@ function sessionCountNoun(count: number): string {
 
 export function shouldShowConnectDeviceButton(me: Pick<MeResponse, "accessGranted" | "accessKeyRequired" | "accessMode">): boolean {
   return me.accessGranted && me.accessMode === "local" && !me.accessKeyRequired;
+}
+
+export function shouldShowLogoutButton(me: Pick<MeResponse, "accessMode">): boolean {
+  return me.accessMode !== "unrestricted";
 }
 
 function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {

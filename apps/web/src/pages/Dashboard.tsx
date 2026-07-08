@@ -20,7 +20,7 @@ import type {
   SessionEvent,
   SessionStatus
 } from "@muxpilot/core";
-import { SESSION_NAME_MAX_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
@@ -174,7 +174,8 @@ export function Dashboard() {
   }, [renameSession, busyAction]);
 
   const sessionGroups = useMemo(() => groupSessionsByRepo(sessions), [sessions]);
-  const renameNameError = renameSession ? sessionNameValidationMessage(renameName) : null;
+  const renameNameWarning = renameSession ? sessionNameValidationMessage(renameName) : null;
+  const renameNameInvalid = Boolean(renameSession) && !isValidSessionName(normalizeSessionName(renameName));
 
   function openMenu(session: ManagedSession, x: number, y: number) {
     setActionError(null);
@@ -211,7 +212,6 @@ export function Dashboard() {
 
     const name = normalizeSessionName(renameName);
     if (!isValidSessionName(name)) {
-      setActionError(SESSION_NAME_VALIDATION_MESSAGE);
       return;
     }
 
@@ -396,13 +396,13 @@ export function Dashboard() {
                 value={renameName}
                 onChange={(event) => updateRenameName(event.target.value)}
                 maxLength={SESSION_NAME_MAX_LENGTH}
-                aria-invalid={Boolean(renameNameError)}
+                aria-invalid={renameNameInvalid}
                 disabled={Boolean(busyAction)}
               />
             </label>
-            {renameNameError ? (
+            {renameNameWarning ? (
               <p className="dialog-error" role="alert">
-                {renameNameError}
+                {renameNameWarning}
               </p>
             ) : null}
             {actionError ? (
@@ -417,7 +417,7 @@ export function Dashboard() {
               <button
                 className="primary"
                 type="submit"
-                disabled={Boolean(busyAction) || Boolean(renameNameError)}
+                disabled={Boolean(busyAction) || renameNameInvalid}
                 aria-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename"}
                 data-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? true : undefined}
               >
@@ -475,7 +475,9 @@ export function removeSessionsFromDashboard(sessions: ManagedSession[], sessionI
 }
 
 export function sessionNameValidationMessage(value: string): string | null {
-  return isValidSessionName(normalizeSessionName(value)) ? null : SESSION_NAME_VALIDATION_MESSAGE;
+  const name = normalizeSessionName(value);
+  if (isValidSessionName(name) || name.length < SESSION_NAME_MIN_LENGTH) return null;
+  return SESSION_NAME_VALIDATION_MESSAGE;
 }
 
 export function parseStoredCollapsedRepoKeys(value: string | null): string[] {

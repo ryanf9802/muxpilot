@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ManagedSession, RemoteAccessResponse } from "@muxpilot/core";
+import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
@@ -9,9 +9,14 @@ import {
   DisconnectedNotice,
   SHELL_RECONNECT_INTERVAL_MS,
   SessionStoplight,
+  filterSessionDirectorySuggestions,
+  mergeSessionDirectorySuggestions,
+  nextSessionStoplightSearch,
   remoteAccessQrValue,
+  sessionDirectorySuggestionsFromSessions,
   sessionNameValidationMessage,
   shouldShowConnectDeviceButton,
+  shouldShowLogoutButton,
   syncSessionIntoStoplightSessions
 } from "./AppShell.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
@@ -68,6 +73,17 @@ describe("shouldShowConnectDeviceButton", () => {
   it("hides the connect button unless local access is already granted without an access key", () => {
     expect(shouldShowConnectDeviceButton({ accessGranted: false, accessKeyRequired: true, accessMode: "token" })).toBe(false);
     expect(shouldShowConnectDeviceButton({ accessGranted: true, accessKeyRequired: true, accessMode: "local" })).toBe(false);
+  });
+});
+
+describe("shouldShowLogoutButton", () => {
+  it("shows logout for local and keyed remote access", () => {
+    expect(shouldShowLogoutButton({ accessMode: "local" })).toBe(true);
+    expect(shouldShowLogoutButton({ accessMode: "token" })).toBe(true);
+  });
+
+  it("hides logout for unrestricted remote access", () => {
+    expect(shouldShowLogoutButton({ accessMode: "unrestricted" })).toBe(false);
   });
 });
 
@@ -166,15 +182,108 @@ describe("directorySuggestionLabel", () => {
   });
 });
 
+describe("filterSessionDirectorySuggestions", () => {
+  const suggestions = [
+    directorySuggestion({ path: "/home/dev/muxpilot", label: "muxpilot", branch: "main", source: "active", lastActivityAt: "2026-07-08T09:00:00.000Z" }),
+    directorySuggestion({ path: "/home/dev/teamweave", label: "teamweave", branch: "stage", source: "recent", lastActivityAt: "2026-07-08T10:00:00.000Z" }),
+    directorySuggestion({ path: "/tmp/scratch", label: "scratch", branch: null, source: "recent", lastActivityAt: null })
+  ];
+
+  it("returns newest suggestions when the directory input is empty", () => {
+    expect(filterSessionDirectorySuggestions(suggestions, "", 2).map((suggestion) => suggestion.path)).toEqual([
+      "/home/dev/teamweave",
+      "/home/dev/muxpilot"
+    ]);
+  });
+
+  it("filters suggestions by label, branch, repo root, or path", () => {
+    expect(filterSessionDirectorySuggestions(suggestions, "team").map((suggestion) => suggestion.path)).toEqual(["/home/dev/teamweave"]);
+    expect(filterSessionDirectorySuggestions(suggestions, "main").map((suggestion) => suggestion.path)).toEqual(["/home/dev/muxpilot"]);
+    expect(filterSessionDirectorySuggestions(suggestions, "/tmp").map((suggestion) => suggestion.path)).toEqual(["/tmp/scratch"]);
+  });
+});
+
+describe("sessionDirectorySuggestionsFromSessions", () => {
+  it("returns active directory suggestions from the already loaded sessions", () => {
+    const suggestions = sessionDirectorySuggestionsFromSessions([
+      testSession({
+        id: "a",
+        repoRoot: "/home/dev/muxpilot",
+        repoName: "muxpilot",
+        branch: "main",
+        cwd: "/home/dev/muxpilot/apps/web",
+        lastActivityAt: "2026-07-08T11:00:00.000Z"
+      }),
+      testSession({
+        id: "b",
+        repoRoot: null,
+        repoName: "scratch",
+        branch: null,
+        cwd: "/tmp/scratch",
+        lastActivityAt: "2026-07-08T10:00:00.000Z"
+      })
+    ]);
+
+    expect(suggestions).toEqual([
+      {
+        path: "/home/dev/muxpilot",
+        label: "muxpilot",
+        repoRoot: "/home/dev/muxpilot",
+        branch: "main",
+        source: "active",
+        lastActivityAt: "2026-07-08T11:00:00.000Z"
+      },
+      {
+        path: "/tmp/scratch",
+        label: "scratch",
+        repoRoot: null,
+        branch: null,
+        source: "active",
+        lastActivityAt: "2026-07-08T10:00:00.000Z"
+      }
+    ]);
+  });
+
+  it("ignores archived or missing sessions", () => {
+    expect(
+      sessionDirectorySuggestionsFromSessions([
+        testSession({ id: "archived", archived: true, repoRoot: "/repo/a" }),
+        testSession({ id: "missing", status: "missing", repoRoot: "/repo/b" })
+      ])
+    ).toEqual([]);
+  });
+});
+
+describe("mergeSessionDirectorySuggestions", () => {
+  it("keeps active suggestions ahead of duplicate recent suggestions while preserving the latest activity time", () => {
+    expect(
+      mergeSessionDirectorySuggestions(
+        [directorySuggestion({ path: "/repo", label: "repo", branch: "main", source: "active", lastActivityAt: "2026-07-08T09:00:00.000Z" })],
+        [directorySuggestion({ path: "/repo", label: "repo", branch: "dev", source: "recent", lastActivityAt: "2026-07-08T12:00:00.000Z" })]
+      )
+    ).toEqual([
+      {
+        path: "/repo",
+        label: "repo",
+        repoRoot: "/repo",
+        branch: "main",
+        source: "active",
+        lastActivityAt: "2026-07-08T12:00:00.000Z"
+      }
+    ]);
+  });
+});
+
 describe("sessionNameValidationMessage", () => {
   it("allows names that normalize to a valid session slug", () => {
     expect(sessionNameValidationMessage("New Work")).toBeNull();
     expect(sessionNameValidationMessage("ready-2")).toBeNull();
   });
 
-  it("rejects names that normalize below the minimum length", () => {
-    expect(sessionNameValidationMessage("a")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
-    expect(sessionNameValidationMessage("!!!")).toBe("Name must be 2-32 lowercase letters, numbers, or hyphens.");
+  it("does not warn for empty or too-short normalized names", () => {
+    expect(sessionNameValidationMessage("")).toBeNull();
+    expect(sessionNameValidationMessage("a")).toBeNull();
+    expect(sessionNameValidationMessage("!!!")).toBeNull();
   });
 });
 
@@ -202,6 +311,29 @@ describe("SessionStoplight", () => {
     expect(html).not.toContain("session-stoplight-dot-green");
     expect(html).not.toContain(">0</button>");
     expect(html).toContain(">2</button>");
+  });
+});
+
+describe("nextSessionStoplightSearch", () => {
+  it("applies a stoplight severity when none is active", () => {
+    expect(nextSessionStoplightSearch("", "yellow")).toBe("?statusSeverity=yellow");
+  });
+
+  it("clears the stoplight severity when the active severity is selected again", () => {
+    expect(nextSessionStoplightSearch("?statusSeverity=yellow", "yellow")).toBe("");
+  });
+
+  it("switches from the active severity to a different severity", () => {
+    expect(nextSessionStoplightSearch("?statusSeverity=yellow", "red")).toBe("?statusSeverity=red");
+  });
+
+  it("replaces individual status filters with the selected stoplight severity", () => {
+    expect(nextSessionStoplightSearch("?status=waiting", "red")).toBe("?statusSeverity=red");
+  });
+
+  it("preserves unrelated query params while toggling severity filters", () => {
+    expect(nextSessionStoplightSearch("?q=session&statusSeverity=yellow", "yellow")).toBe("?q=session");
+    expect(nextSessionStoplightSearch("?q=session", "green")).toBe("?q=session&statusSeverity=green");
   });
 });
 
@@ -271,7 +403,31 @@ function testRemoteAccess(input: Partial<RemoteAccessResponse> = {}): RemoteAcce
   };
 }
 
-function testSession(input: { id: string } & Partial<Pick<ManagedSession, "status" | "archived">>): ManagedSession {
+function directorySuggestion(input: {
+  path: string;
+  label: string;
+  branch: string | null;
+  source: SessionDirectorySuggestion["source"];
+  lastActivityAt?: string | null;
+}): SessionDirectorySuggestion {
+  return {
+    path: input.path,
+    label: input.label,
+    repoRoot: input.path,
+    branch: input.branch,
+    source: input.source,
+    lastActivityAt: input.lastActivityAt ?? null
+  };
+}
+
+function testSession(
+  input: { id: string } & Partial<Pick<ManagedSession, "status" | "archived" | "lastActivityAt">> & {
+      cwd?: string;
+      repoRoot?: string | null;
+      repoName?: string;
+      branch?: string | null;
+    }
+): ManagedSession {
   return {
     id: input.id,
     tmux: {
@@ -283,18 +439,24 @@ function testSession(input: { id: string } & Partial<Pick<ManagedSession, "statu
       paneId: "%1",
       paneIndex: 0,
       paneActive: true,
-      cwd: "/repo",
+      cwd: input.cwd ?? "/repo",
       currentCommand: "node",
       title: "muxpilot",
       pid: 123,
       size: "120x40"
     },
-    repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
+    repo: {
+      root: input.repoRoot === undefined ? "/repo" : input.repoRoot,
+      name: input.repoName ?? "repo",
+      branch: input.branch === undefined ? "main" : input.branch,
+      dirty: false,
+      worktree: null
+    },
     codexSessionId: null,
     codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
-    lastActivityAt: null,
+    lastActivityAt: input.lastActivityAt ?? null,
     preview: "",
     recentUserPrompts: [],
     activitySummary: null,
