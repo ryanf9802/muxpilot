@@ -829,7 +829,12 @@ function resolveSessionStatus(
     answeredQuestionMessageIds
   );
   if (isWorkingStatus(pendingStatus) && isPlanModeUserMessage(latestUserMessage)) return "planning";
-  if (isInputReadyStatus(pendingStatus) && hasPendingProposedPlan(latestAssistantMessage, latestUserMessage)) return "planning";
+  if (
+    isInputReadyStatus(pendingStatus) &&
+    hasPendingPlanTurn(latestAssistantMessage, latestUserMessage, latestPlanReadyMessage, answeredPlanMessageIds)
+  ) {
+    return "planning";
+  }
   return pendingStatus;
 }
 
@@ -910,10 +915,22 @@ function collaborationModeFromMessage(message: ChatMessage): CollaborationMode |
   return mode === "default" || mode === "plan" ? mode : null;
 }
 
-function hasPendingProposedPlan(latestAssistantMessage: ChatMessage | null, latestUserMessage: ChatMessage | null): boolean {
+function hasPendingPlanTurn(
+  latestAssistantMessage: ChatMessage | null,
+  latestUserMessage: ChatMessage | null,
+  latestPlanReadyMessage: ChatMessage | null,
+  answeredPlanMessageIds: Set<string>
+): boolean {
   if (!latestUserMessage) return false;
   if (!isPlanModeUserMessage(latestUserMessage)) return false;
-  if (!latestAssistantMessage || latestAssistantMessage.sequence <= latestUserMessage.sequence) return false;
+  if (
+    latestPlanReadyMessage &&
+    latestPlanReadyMessage.sequence > latestUserMessage.sequence &&
+    !answeredPlanMessageIds.has(latestPlanReadyMessage.id)
+  ) {
+    return false;
+  }
+  if (!latestAssistantMessage || latestAssistantMessage.sequence <= latestUserMessage.sequence) return true;
   if (latestAssistantMessage.type !== "assistant" && latestAssistantMessage.type !== "assistant_update") return false;
   return hasIncompleteProposedPlan(latestAssistantMessage.text);
 }

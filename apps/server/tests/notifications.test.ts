@@ -8,6 +8,8 @@ describe("matchingNotificationRules", () => {
     const settings = { globalRules: [], sessionRules: { a: ["done_task" as const] } };
 
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task"]);
+    expect(matchingNotificationRules(settings, "a", "generating", "idle")).toEqual(["done_task"]);
+    expect(matchingNotificationRules(settings, "a", "planning", "waiting")).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "waiting", "waiting")).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "approval", "waiting")).toEqual([]);
   });

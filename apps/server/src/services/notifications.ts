@@ -128,7 +128,11 @@ export function matchingNotificationRules(
 function notificationRuleMatches(type: NotificationRuleType, previousStatus: SessionStatus, status: SessionStatus): boolean {
   if (type === "status_change") return previousStatus !== status;
   if (type === "approval_gate") return statusSeverity(status) === "red";
-  return statusSeverity(previousStatus) === "yellow" && (status === "waiting" || status === "idle");
+  return isTaskRunningStatus(previousStatus) && (status === "waiting" || status === "idle");
+}
+
+function isTaskRunningStatus(status: SessionStatus): boolean {
+  return status === "working" || status === "generating" || status === "executing";
 }
 
 function notificationPayload(
