@@ -14,6 +14,7 @@ import type {
   QueuedInput,
   SessionModelSettings,
   SessionModelSelections,
+  SessionDirectorySuggestion,
   SessionEvent,
   SessionStatus,
   TranscriptItem,
@@ -105,6 +106,17 @@ interface PushSubscriptionRow {
   endpoint: string;
   subscription_json: string;
 }
+
+interface SessionRepositoryRow {
+  path: string;
+  label: string;
+  repo_root: string | null;
+  branch: string | null;
+  last_activity_at: string | null;
+  updated_at: string;
+}
+
+export type TouchedSessionRepository = Omit<SessionDirectorySuggestion, "source">;
 
 export interface PushVapidKeys {
   publicKey: string;
@@ -216,6 +228,14 @@ export class AppDatabase {
 
   getSession(sessionId: string): Promise<ManagedSession | null> {
     return this.call("getSession", sessionId) as Promise<ManagedSession | null>;
+  }
+
+  upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): Promise<void> {
+    return this.call("upsertTouchedRepository", repository, updatedAt) as Promise<void>;
+  }
+
+  listTouchedRepositories(limit = 100): Promise<SessionDirectorySuggestion[]> {
+    return this.call("listTouchedRepositories", limit) as Promise<SessionDirectorySuggestion[]>;
   }
 
   appendMessage(message: ChatMessage): Promise<boolean> {
@@ -540,6 +560,54 @@ export class SyncAppDatabase {
     const row = this.db.prepare("SELECT * FROM managed_sessions WHERE id = ?").get(sessionId) as SessionRow | undefined;
     if (!row) return null;
     return this.hydrateSession(row);
+  }
+
+  upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_repositories
+          (path, label, repo_root, branch, last_activity_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+          label=excluded.label,
+          repo_root=excluded.repo_root,
+          branch=excluded.branch,
+          last_activity_at=CASE
+            WHEN excluded.last_activity_at IS NULL THEN session_repositories.last_activity_at
+            WHEN session_repositories.last_activity_at IS NULL THEN excluded.last_activity_at
+            WHEN excluded.last_activity_at > session_repositories.last_activity_at THEN excluded.last_activity_at
+            ELSE session_repositories.last_activity_at
+          END,
+          updated_at=excluded.updated_at`
+      )
+      .run(
+        repository.path,
+        repository.label,
+        repository.repoRoot,
+        repository.branch,
+        repository.lastActivityAt,
+        updatedAt
+      );
+  }
+
+  listTouchedRepositories(limit = 100): SessionDirectorySuggestion[] {
+    const rows = this.db
+      .prepare(
+        `SELECT path, label, repo_root, branch, last_activity_at, updated_at
+         FROM session_repositories
+         ORDER BY COALESCE(last_activity_at, updated_at) DESC, label ASC, path ASC
+         LIMIT ?`
+      )
+      .all(limit) as unknown as SessionRepositoryRow[];
+
+    return rows.map((row) => ({
+      path: row.path,
+      label: row.label,
+      repoRoot: row.repo_root,
+      branch: row.branch,
+      source: "recent",
+      lastActivityAt: row.last_activity_at
+    }));
   }
 
   appendMessage(message: ChatMessage): boolean {
@@ -1612,6 +1680,15 @@ export class SyncAppDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS session_repositories (
+        path TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        repo_root TEXT,
+        branch TEXT,
+        last_activity_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_messages_role_timestamp ON messages(role, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_activity ON managed_sessions(last_activity_at);
@@ -1619,8 +1696,35 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
+      CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
+    this.backfillSessionRepositories();
+  }
+
+  private backfillSessionRepositories(): void {
+    const rows = this.db.prepare("SELECT data_json, updated_at FROM managed_sessions").all() as unknown as Array<{
+      data_json: string;
+      updated_at: string;
+    }>;
+    const insert = this.db.prepare(
+      `INSERT OR IGNORE INTO session_repositories
+        (path, label, repo_root, branch, last_activity_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    for (const row of rows) {
+      const session = JSON.parse(row.data_json) as ManagedSession;
+      const path = session.repo.root ?? session.tmux.cwd;
+      if (!path) continue;
+      insert.run(
+        path,
+        session.repo.name || path,
+        session.repo.root,
+        session.repo.branch,
+        session.lastActivityAt,
+        row.updated_at
+      );
+    }
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {

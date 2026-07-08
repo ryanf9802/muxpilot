@@ -848,6 +848,123 @@ describe("AppDatabase notifications", () => {
   });
 });
 
+describe("AppDatabase touched repositories", () => {
+  it("persists touched repositories in recency order", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const db = new AppDatabase(path);
+
+    await db.upsertTouchedRepository(
+      {
+        path: "/repo/older",
+        label: "older",
+        repoRoot: "/repo/older",
+        branch: "main",
+        lastActivityAt: "2026-07-08T00:00:00.000Z"
+      },
+      "2026-07-08T00:00:00.000Z"
+    );
+    await db.upsertTouchedRepository(
+      {
+        path: "/repo/newer",
+        label: "newer",
+        repoRoot: "/repo/newer",
+        branch: "dev",
+        lastActivityAt: "2026-07-08T01:00:00.000Z"
+      },
+      "2026-07-08T01:00:00.000Z"
+    );
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listTouchedRepositories()).toEqual([
+      {
+        path: "/repo/newer",
+        label: "newer",
+        repoRoot: "/repo/newer",
+        branch: "dev",
+        source: "recent",
+        lastActivityAt: "2026-07-08T01:00:00.000Z"
+      },
+      {
+        path: "/repo/older",
+        label: "older",
+        repoRoot: "/repo/older",
+        branch: "main",
+        source: "recent",
+        lastActivityAt: "2026-07-08T00:00:00.000Z"
+      }
+    ]);
+    restarted.close();
+  });
+
+  it("keeps the latest repository activity when an older touch is upserted", async () => {
+    const db = await tempDb();
+
+    await db.upsertTouchedRepository(
+      {
+        path: "/repo",
+        label: "repo",
+        repoRoot: "/repo",
+        branch: "main",
+        lastActivityAt: "2026-07-08T02:00:00.000Z"
+      },
+      "2026-07-08T02:00:00.000Z"
+    );
+    await db.upsertTouchedRepository(
+      {
+        path: "/repo",
+        label: "repo-renamed",
+        repoRoot: "/repo",
+        branch: "stage",
+        lastActivityAt: "2026-07-08T01:00:00.000Z"
+      },
+      "2026-07-08T03:00:00.000Z"
+    );
+
+    expect(await db.listTouchedRepositories()).toEqual([
+      {
+        path: "/repo",
+        label: "repo-renamed",
+        repoRoot: "/repo",
+        branch: "stage",
+        source: "recent",
+        lastActivityAt: "2026-07-08T02:00:00.000Z"
+      }
+    ]);
+    db.close();
+  });
+
+  it("backfills touched repositories from existing managed sessions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const db = new AppDatabase(path);
+    await db.upsertSession(
+      {
+        ...testSession("session-1"),
+        repo: { root: "/repo/backfilled", name: "backfilled", branch: "main", dirty: false, worktree: null },
+        tmux: { ...testSession("session-1").tmux, cwd: "/repo/backfilled" },
+        lastActivityAt: "2026-07-08T04:00:00.000Z"
+      },
+      "2026-07-08T04:00:01.000Z"
+    );
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listTouchedRepositories()).toEqual([
+      {
+        path: "/repo/backfilled",
+        label: "backfilled",
+        repoRoot: "/repo/backfilled",
+        branch: "main",
+        source: "recent",
+        lastActivityAt: "2026-07-08T04:00:00.000Z"
+      }
+    ]);
+    restarted.close();
+  });
+});
+
 async function tempDb(): Promise<AppDatabase> {
   const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
   return new AppDatabase(join(dir, "test.db"));

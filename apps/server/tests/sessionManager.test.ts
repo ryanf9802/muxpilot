@@ -2382,7 +2382,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("lists active and recent existing directories for new session suggestions", async () => {
+  it("lists active and touched existing directories for new session suggestions", async () => {
     const harness = await createHarness();
     const activeRepo = join(harness.dir, "active");
     const recentRepo = join(harness.dir, "recent");
@@ -2394,24 +2394,23 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     const active = harness.manager.listSessions(true).find((session) => session.tmux.cwd === activeRepo);
     expect(active).toBeDefined();
-    await harness.db.upsertSession(
+    await harness.db.upsertTouchedRepository(
       {
-        ...active!,
-        id: "missing-recent",
-        status: "missing",
-        tmux: { ...active!.tmux, cwd: recentRepo, paneId: "%3", windowId: "@3" },
-        repo: { ...active!.repo, root: recentRepo, name: "recent" },
+        path: recentRepo,
+        label: "recent",
+        repoRoot: recentRepo,
+        branch: null,
         lastActivityAt: "2026-07-08T00:00:00.000Z"
       },
       "2026-07-08T00:00:00.000Z"
     );
-    await harness.db.upsertSession(
+    await harness.db.upsertTouchedRepository(
       {
-        ...active!,
-        id: "missing-gone",
-        status: "missing",
-        tmux: { ...active!.tmux, cwd: missingRepo, paneId: "%4", windowId: "@4" },
-        repo: { ...active!.repo, root: missingRepo, name: "missing" }
+        path: missingRepo,
+        label: "missing",
+        repoRoot: missingRepo,
+        branch: null,
+        lastActivityAt: "2026-07-08T00:00:01.000Z"
       },
       "2026-07-08T00:00:00.000Z"
     );

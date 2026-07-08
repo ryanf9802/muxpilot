@@ -161,6 +161,7 @@ export class SessionManager {
 
       const changed = !existing || sessionChanged(existing, session);
       await this.db.upsertSession(session, now);
+      await this.recordTouchedRepository(session, now);
       if (changed) this.publish("session.updated", session.id, session);
       await this.processQueuedInputs(session.id);
     }
@@ -460,23 +461,20 @@ export class SessionManager {
   async listSessionDirectories(): Promise<SessionDirectorySuggestion[]> {
     const suggestions = new Map<string, SessionDirectorySuggestion>();
 
-    for (const session of await this.db.listSessions(true)) {
+    for (const session of await this.db.listSessions(false)) {
+      if (session.status === "missing") continue;
       const candidate = session.repo.root ?? session.tmux.cwd;
-      if (!candidate) continue;
-      const path = await existingDirectoryPath(candidate);
-      if (!path) continue;
-      const repo = await loadRepoMetadata(path);
-      const source = session.status === "missing" ? "recent" : "active";
-      const next: SessionDirectorySuggestion = {
-        path,
-        label: repo.name || basename(path),
-        repoRoot: repo.root,
-        branch: repo.branch,
-        source,
-        lastActivityAt: session.lastActivityAt
-      };
-      const current = suggestions.get(path);
-      suggestions.set(path, mergeDirectorySuggestion(current, next));
+      const next = await directorySuggestionFromPath(candidate, "active", session.lastActivityAt, {
+        label: session.repo.name,
+        repoRoot: session.repo.root,
+        branch: session.repo.branch
+      });
+      if (next) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
+    }
+
+    for (const repository of await this.db.listTouchedRepositories()) {
+      const next = await directorySuggestionFromPath(repository.path, "recent", repository.lastActivityAt, repository);
+      if (next) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
     }
 
     return [...suggestions.values()].sort(compareDirectorySuggestions);
@@ -519,6 +517,7 @@ export class SessionManager {
       archived: false
     };
     await this.db.upsertSession(session, now);
+    await this.recordTouchedRepository(session, now);
     await this.db.addAudit("local", "create_session", session.id, "ok", now);
     this.publish("session.updated", session.id, session);
     return session;
@@ -723,7 +722,25 @@ export class SessionManager {
 
   private async refreshRenamedSession(session: ManagedSession): Promise<void> {
     const liveSession = await this.liveSession(session);
-    await this.db.upsertSession(liveSession, nowIso());
+    const now = nowIso();
+    await this.db.upsertSession(liveSession, now);
+    await this.recordTouchedRepository(liveSession, now);
+  }
+
+  private async recordTouchedRepository(session: ManagedSession, updatedAt: string): Promise<void> {
+    const candidate = session.repo.root ?? session.tmux.cwd;
+    const path = await existingDirectoryPath(candidate);
+    if (!path) return;
+    await this.db.upsertTouchedRepository(
+      {
+        path,
+        label: session.repo.name || basename(path),
+        repoRoot: session.repo.root,
+        branch: session.repo.branch,
+        lastActivityAt: session.lastActivityAt
+      },
+      updatedAt
+    );
   }
 
   private publish(
@@ -1392,6 +1409,25 @@ async function existingDirectoryPath(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function directorySuggestionFromPath(
+  candidate: string,
+  source: SessionDirectorySuggestion["source"],
+  lastActivityAt: string | null,
+  fallback: Partial<Pick<SessionDirectorySuggestion, "label" | "repoRoot" | "branch">> = {}
+): Promise<SessionDirectorySuggestion | null> {
+  const path = await existingDirectoryPath(candidate);
+  if (!path) return null;
+  const repo = await loadRepoMetadata(path);
+  return {
+    path,
+    label: repo.name || fallback.label || basename(path),
+    repoRoot: repo.root ?? fallback.repoRoot ?? null,
+    branch: repo.branch ?? fallback.branch ?? null,
+    source,
+    lastActivityAt
+  };
 }
 
 function mergeDirectorySuggestion(
