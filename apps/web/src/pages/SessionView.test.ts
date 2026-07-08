@@ -9,6 +9,7 @@ import {
   buildQuestionAnswerRequest,
   composerLockReason,
   composerDraftStorageKey,
+  copyableMessageText,
   createPendingUserMessage,
   elapsedSince,
   formatElapsedSeconds,
@@ -42,14 +43,15 @@ import {
   SessionHeaderMeta,
   isNearMessageListBottom,
   isCodexPastedContentPlaceholder,
+  scrollMessageListByRatio,
   scrollMessageListToBottom,
   scrollBehaviorForTranscriptUpdate,
   shouldQueueComposerInput,
   shouldHideInitialMessageList,
+  shouldIgnoreTranscriptVimKeyTarget,
   shouldResetInitialTranscriptForLiveTail,
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
-  shouldAutofocusComposer,
   shouldReconcileSessionForEvent,
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
@@ -59,7 +61,10 @@ import {
   skillSuggestions,
   stripAssistantSideChannelBlocks,
   transcriptItemsContainPendingUserMessage,
+  transcriptFindMatches,
+  transcriptVimNavigationCommand,
   transcriptSourceKey,
+  visibleTranscriptFindEntries,
   replaceSkillToken,
   resizeComposerTextarea,
   sessionTranscriptSource,
@@ -205,18 +210,83 @@ describe("desktop vim availability", () => {
   });
 });
 
-describe("composer autofocus", () => {
-  it("only autofocuses for desktop-class input", () => {
-    expect(shouldAutofocusComposer(true)).toBe(true);
-    expect(shouldAutofocusComposer(false)).toBe(false);
-  });
-});
-
 describe("vim line numbers", () => {
   it("formats relative distance from the active cursor line", () => {
     expect(relativeLineNumber(8, 8)).toBe("0");
     expect(relativeLineNumber(3, 8)).toBe("5");
     expect(relativeLineNumber(13, 8)).toBe("5");
+  });
+});
+
+describe("transcript vim navigation keys", () => {
+  function keyEvent(
+    key: string,
+    modifiers: Partial<Pick<KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey">> = {}
+  ): Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey"> {
+    return {
+      key,
+      ctrlKey: false,
+      metaKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...modifiers
+    };
+  }
+
+  it("maps gg and G to transcript jump commands", () => {
+    expect(transcriptVimNavigationCommand(keyEvent("g"), false)).toEqual({
+      command: null,
+      pendingG: true,
+      preventDefault: true
+    });
+    expect(transcriptVimNavigationCommand(keyEvent("g"), true)).toEqual({
+      command: "jumpTop",
+      pendingG: false,
+      preventDefault: true
+    });
+    expect(transcriptVimNavigationCommand(keyEvent("G", { shiftKey: true }), false)).toEqual({
+      command: "jumpBottom",
+      pendingG: false,
+      preventDefault: true
+    });
+  });
+
+  it("maps ctrl keys to half and full page scrolling", () => {
+    expect(transcriptVimNavigationCommand(keyEvent("u", { ctrlKey: true }), false).command).toBe("halfUp");
+    expect(transcriptVimNavigationCommand(keyEvent("d", { ctrlKey: true }), false).command).toBe("halfDown");
+    expect(transcriptVimNavigationCommand(keyEvent("b", { ctrlKey: true }), false).command).toBe("pageUp");
+    expect(transcriptVimNavigationCommand(keyEvent("f", { ctrlKey: true }), false).command).toBe("pageDown");
+  });
+
+  it("maps slash to transcript find and ignores meta shortcuts", () => {
+    expect(transcriptVimNavigationCommand(keyEvent("/"), false)).toEqual({
+      command: "find",
+      pendingG: false,
+      preventDefault: true
+    });
+    expect(transcriptVimNavigationCommand(keyEvent("f", { metaKey: true }), false)).toEqual({
+      command: null,
+      pendingG: false,
+      preventDefault: false
+    });
+  });
+
+  it("ignores events from editable targets", () => {
+    class FakeElement {
+      constructor(private readonly match: boolean) {}
+
+      closest() {
+        return this.match ? this : null;
+      }
+    }
+    vi.stubGlobal("Element", FakeElement);
+    const input = new FakeElement(true) as unknown as EventTarget;
+    const button = new FakeElement(true) as unknown as EventTarget;
+    const plain = new FakeElement(false) as unknown as EventTarget;
+
+    expect(shouldIgnoreTranscriptVimKeyTarget(input)).toBe(true);
+    expect(shouldIgnoreTranscriptVimKeyTarget(button)).toBe(true);
+    expect(shouldIgnoreTranscriptVimKeyTarget(plain)).toBe(false);
   });
 });
 
@@ -369,6 +439,22 @@ describe("SessionHeaderMeta", () => {
     expect(html).toContain("muxpilot");
     expect(html).toContain("main");
     expect(html).not.toContain("session-header-summary");
+  });
+
+  it("shows the dirty indicator after the branch", () => {
+    const dirtyRepo = repo("muxpilot", "main");
+    dirtyRepo.dirty = true;
+
+    const html = renderToStaticMarkup(
+      createElement(SessionHeaderMeta, {
+        session: {
+          repo: dirtyRepo
+        }
+      })
+    );
+
+    expect(html).toContain('title="muxpilot · main · dirty"');
+    expect(html).toContain('<span class="session-header-branch">main</span><span class="session-header-branch-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
   });
 });
 
@@ -745,6 +831,49 @@ describe("session scroll behavior", () => {
     scrollMessageListToBottom(container);
 
     expect(container.scrollTop).toBe(1280);
+  });
+
+  it("scrolls by viewport ratios and clamps to the transcript bounds", () => {
+    const container = { scrollHeight: 1200, scrollTop: 400, clientHeight: 300 };
+
+    scrollMessageListByRatio(container, -0.5);
+    expect(container.scrollTop).toBe(250);
+
+    scrollMessageListByRatio(container, 1);
+    expect(container.scrollTop).toBe(550);
+
+    scrollMessageListByRatio(container, -10);
+    expect(container.scrollTop).toBe(0);
+
+    scrollMessageListByRatio(container, 10);
+    expect(container.scrollTop).toBe(900);
+  });
+});
+
+describe("transcript find helpers", () => {
+  it("builds find entries for visible transcript items and expanded ranges", () => {
+    const prompt = transcriptMessageItem(message("session-a", 1, "Find the prompt"));
+    const range = transcriptRangeItem("range-1", "activity", 2, 3, "2 intermediate events");
+    const tool = transcriptMessageItem(message("session-a", 2, "hidden tool output", "tool", "command_output"));
+    const expandedStacks = new Set<string>(["range-1"]);
+
+    expect(visibleTranscriptFindEntries([prompt, range], expandedStacks, { "range-1": [tool] })).toEqual([
+      { id: prompt.id, text: "Find the prompt" },
+      { id: range.id, text: "2 intermediate events" },
+      { id: tool.id, text: "hidden tool output" }
+    ]);
+  });
+
+  it("matches transcript find entries case-insensitively", () => {
+    const entries = [
+      { id: "one", text: "First prompt" },
+      { id: "two", text: "Assistant reply" },
+      { id: "three", text: "second PROMPT" }
+    ];
+
+    expect(transcriptFindMatches(entries, "prompt")).toEqual([0, 2]);
+    expect(transcriptFindMatches(entries, "missing")).toEqual([]);
+    expect(transcriptFindMatches(entries, "   ")).toEqual([]);
   });
 });
 
@@ -1199,6 +1328,12 @@ describe("MessageBubble", () => {
     expect(isPlanModeMessage(normalMessage)).toBe(false);
     expect(html).not.toContain("message-mode-badge");
   });
+
+  it("marks messages copyable when a menu opener is provided", () => {
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: message("session-a", 1, "copy me"), onOpenMenu: () => undefined }));
+
+    expect(html).toContain("message-copyable");
+  });
 });
 
 describe("pending user messages", () => {
@@ -1479,6 +1614,32 @@ describe("MarkdownBlock", () => {
     expect(html).toContain('href="https://example.com"');
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
+  });
+});
+
+describe("copyableMessageText", () => {
+  it("copies assistant text without side-channel or proposed-plan tags", () => {
+    const assistant = message(
+      "session-a",
+      1,
+      `Before\n\n${proposedPlanText("Do it.")}\n\nAfter\n<oai-mem-citation>\ninternal\n</oai-mem-citation>`,
+      "assistant",
+      "assistant"
+    );
+
+    expect(copyableMessageText(assistant)).toBe("Before\n\nDo it.\n\nAfter");
+  });
+
+  it("copies visible user text without compacted skill metadata", () => {
+    const user = message("session-a", 1, "use $teamweave-browser\n\nSkills: teamweave-browser");
+
+    expect(copyableMessageText(user)).toBe("use $teamweave-browser");
+  });
+
+  it("copies raw tool output", () => {
+    const tool = message("session-a", 1, "line 1\nline 2", "tool", "command_output");
+
+    expect(copyableMessageText(tool)).toBe("line 1\nline 2");
   });
 });
 

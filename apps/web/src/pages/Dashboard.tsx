@@ -7,8 +7,7 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent
+  type MouseEvent as ReactMouseEvent
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
@@ -26,6 +25,7 @@ import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, n
 import { api, eventSocket } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
+import { ContextMenu, ContextMenuItem, clampContextMenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
@@ -161,24 +161,7 @@ export function Dashboard() {
     return () => clearInterval(interval);
   }, [loadCodexUsageSummary, loadUsageSummary]);
 
-  useEffect(() => {
-    if (!menu) return undefined;
-
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (menuRef.current?.contains(event.target as Node)) return;
-      setMenu(null);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenu(null);
-    };
-
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [menu]);
+  useDismissableContextMenu(Boolean(menu), menuRef, () => setMenu(null));
 
   useEffect(() => {
     if (!renameSession) return undefined;
@@ -388,20 +371,17 @@ export function Dashboard() {
       </div>
 
       {menu ? (
-        <div
+        <ContextMenu
           className="session-action-menu"
           ref={menuRef}
-          style={{ left: menu.x, top: menu.y }}
-          role="menu"
-          aria-label={`Actions for ${sessionDisplayName(menu.session, sessions)}`}
+          position={menu}
+          label={`Actions for ${sessionDisplayName(menu.session, sessions)}`}
         >
-          <button type="button" role="menuitem" onClick={() => openRename(menu.session)} disabled={Boolean(busyAction)}>
-            <Pencil size={16} />
+          <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction)}>
             Rename
-          </button>
-          <button
-            type="button"
-            role="menuitem"
+          </ContextMenuItem>
+          <ContextMenuItem
+            icon={<Bell size={16} />}
             aria-haspopup="menu"
             aria-expanded={notifySubmenuOpen}
             onMouseEnter={() => setNotifySubmenuOpen(true)}
@@ -409,37 +389,33 @@ export function Dashboard() {
             onClick={() => setNotifySubmenuOpen((open) => !open)}
             disabled={Boolean(busyAction)}
           >
-            <Bell size={16} />
             Notify
             <ChevronRight className="menu-chevron" size={16} />
-          </button>
-          <button
+          </ContextMenuItem>
+          <ContextMenuItem
             className="danger"
-            type="button"
-            role="menuitem"
+            icon={<Skull size={16} />}
             onClick={() => void killPane(menu.session)}
             disabled={Boolean(busyAction)}
             aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill"}
             data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? true : undefined}
           >
-            <Skull size={16} />
             {busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? "Killing" : "Kill pane"}
-          </button>
+          </ContextMenuItem>
           {notifySubmenuOpen ? (
-            <div
+            <ContextMenu
               className="session-action-menu notification-rule-menu session-notify-submenu"
-              style={notificationSubmenuStyle(menu.x, menu.y)}
-              role="menu"
-              aria-label={`Notification settings for ${sessionDisplayName(menu.session, sessions)}`}
+              position={notificationSubmenuPosition(menu.x, menu.y)}
+              label={`Notification settings for ${sessionDisplayName(menu.session, sessions)}`}
             >
               <NotificationRuleMenu
                 enabledRules={sessionNotificationRules(notificationSettings, menu.session.id)}
                 onToggle={(type, enabled) => void toggleSessionNotification(menu.session.id, type, enabled)}
                 disabled={notificationToggleBusy}
               />
-            </div>
+            </ContextMenu>
           ) : null}
-        </div>
+        </ContextMenu>
       ) : null}
 
       {renameSession ? (
@@ -583,52 +559,12 @@ export function SessionCard({
   onOpenMenu: (session: ManagedSession, x: number, y: number) => void;
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
-  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
-  const suppressClickRef = useRef(false);
+  const menuTrigger = useContextMenuTrigger(session, onOpenMenu);
   const reserveSecondPromptSlot = !session.activitySummary && previewLines.length > 1;
   const cardClassName = `session-card${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
-  function clearLongPress() {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-    pointerStartRef.current = null;
-  }
-
-  useEffect(() => clearLongPress, []);
-
-  function openLongPressMenu(x: number, y: number) {
-    suppressClickRef.current = true;
-    clearLongPress();
-    onOpenMenu(session, x, y);
-  }
-
-  function handlePointerDown(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (event.pointerType === "mouse" || event.button !== 0) return;
-    pointerStartRef.current = { x: event.clientX, y: event.clientY };
-    longPressTimerRef.current = setTimeout(() => openLongPressMenu(event.clientX, event.clientY), 600);
-  }
-
-  function handlePointerMove(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!pointerStartRef.current) return;
-    const deltaX = Math.abs(event.clientX - pointerStartRef.current.x);
-    const deltaY = Math.abs(event.clientY - pointerStartRef.current.y);
-    if (deltaX > 10 || deltaY > 10) clearLongPress();
-  }
-
-  function handleContextMenu(event: ReactMouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    clearLongPress();
-    onOpenMenu(session, event.clientX, event.clientY);
-  }
-
   function handleClick() {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
-      return;
-    }
+    if (menuTrigger.consumeSuppressedClick()) return;
     onOpen();
   }
 
@@ -638,12 +574,7 @@ export function SessionCard({
         className={cardClassName}
         type="button"
         onClick={handleClick}
-        onContextMenu={handleContextMenu}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={clearLongPress}
-        onPointerCancel={clearLongPress}
-        onPointerLeave={clearLongPress}
+        {...menuTrigger.triggerProps}
       >
         <div className="card-head">
           <div>
@@ -805,18 +736,15 @@ function formatTranscriptSize(count: number): string {
 }
 
 function clampMenuPosition(x: number, y: number): { x: number; y: number } {
-  return {
-    x: Math.max(ACTION_MENU_EDGE, Math.min(x, window.innerWidth - ACTION_MENU_WIDTH - ACTION_MENU_EDGE)),
-    y: Math.max(ACTION_MENU_EDGE, Math.min(y, window.innerHeight - ACTION_MENU_HEIGHT - ACTION_MENU_EDGE))
-  };
+  return clampContextMenuPosition(x, y, { width: ACTION_MENU_WIDTH, height: ACTION_MENU_HEIGHT, edge: ACTION_MENU_EDGE });
 }
 
-function notificationSubmenuStyle(x: number, y: number): { left: number; top: number } {
+function notificationSubmenuPosition(x: number, y: number): { x: number; y: number } {
   const rightX = x + ACTION_MENU_WIDTH + 4;
   const leftX = x - NOTIFICATION_MENU_WIDTH - 4;
   return {
-    left: rightX + NOTIFICATION_MENU_WIDTH + ACTION_MENU_EDGE <= window.innerWidth ? rightX : Math.max(ACTION_MENU_EDGE, leftX),
-    top: Math.max(ACTION_MENU_EDGE, Math.min(y + 48, window.innerHeight - 144 - ACTION_MENU_EDGE))
+    x: rightX + NOTIFICATION_MENU_WIDTH + ACTION_MENU_EDGE <= window.innerWidth ? rightX : Math.max(ACTION_MENU_EDGE, leftX),
+    y: Math.max(ACTION_MENU_EDGE, Math.min(y + 48, window.innerHeight - 144 - ACTION_MENU_EDGE))
   };
 }
 

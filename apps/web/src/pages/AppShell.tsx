@@ -1031,11 +1031,11 @@ export function isNewSessionShortcut(event: Pick<globalThis.KeyboardEvent, "ctrl
 export function primaryInputFocusCommandForShortcut(
   event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">
 ): PrimaryInputFocusCommand | null {
-  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null;
-  if (event.key === "r" || event.key === "R") return "focus";
-  if (event.key === "i") return "insert";
+  if (event.ctrlKey || event.metaKey || event.altKey) return null;
+  if (event.shiftKey && event.key !== "I" && event.key !== "A") return null;
+  if (!event.shiftKey && event.key === "i") return "insert";
   if (event.key === "I") return "insertStart";
-  if (event.key === "a") return "append";
+  if (!event.shiftKey && event.key === "a") return "append";
   if (event.key === "A") return "appendEnd";
   return null;
 }
@@ -1161,7 +1161,7 @@ function PromptHistoryDialog({
 
   return (
     <div className="dialog-backdrop prompt-history-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className="prompt-history-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-history-title">
+      <section className="prompt-history-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-history-title" data-loading={loading || undefined}>
         <div className="dialog-head">
           <h2 id="prompt-history-title">Prompt history</h2>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close">

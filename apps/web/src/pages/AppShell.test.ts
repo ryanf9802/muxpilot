@@ -130,26 +130,33 @@ describe("new session shortcut helpers", () => {
 
 describe("primary input focus shortcut helpers", () => {
   it("maps primary input shortcuts without browser shortcut modifiers", () => {
-    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe("focus");
-    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBe("focus");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBeNull();
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "R" })).toBeNull();
     expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "i" })).toBe("insert");
     expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "I" })).toBe(
       "insertStart"
     );
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "I" })).toBe(
+      "insertStart"
+    );
     expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "a" })).toBe("append");
     expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "A" })).toBe("appendEnd");
+    expect(primaryInputFocusCommandForShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "A" })).toBe("appendEnd");
   });
 
   it("recognizes only unmodified primary input shortcut keys", () => {
-    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "i" })).toBe(true);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "I" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "I" })).toBe(true);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "a" })).toBe(true);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "A" })).toBe(true);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "A" })).toBe(true);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: true, metaKey: false, altKey: false, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: true, altKey: false, shiftKey: false, key: "r" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: true, shiftKey: false, key: "r" })).toBe(false);
-    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "r" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "i" })).toBe(false);
+    expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, key: "a" })).toBe(false);
     expect(isPrimaryInputFocusShortcut({ ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, key: "x" })).toBe(false);
   });
 

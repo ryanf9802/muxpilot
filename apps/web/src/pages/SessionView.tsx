@@ -35,7 +35,17 @@ import {
   keymap,
   placeholder as codeMirrorPlaceholder
 } from "@codemirror/view";
-import { FormEvent, KeyboardEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  KeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { useNavigate, useOutletContext, useParams } from "react-router-dom";
@@ -61,6 +71,7 @@ import type {
 import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcriptMessages } from "@muxpilot/core";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
+import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { StatusPill } from "../components/StatusPill.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
@@ -76,6 +87,7 @@ export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live"
 export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
+export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
 export interface PendingUserMessage {
   id: string;
   sessionId: string;
@@ -143,10 +155,6 @@ export function isDesktopVimAvailable(): boolean {
   return window.matchMedia(DESKTOP_VIM_MEDIA_QUERY).matches;
 }
 
-export function shouldAutofocusComposer(desktopInputAvailable: boolean): boolean {
-  return desktopInputAvailable;
-}
-
 function useDesktopVimAvailable(): boolean {
   const [available, setAvailable] = useState(isDesktopVimAvailable);
 
@@ -207,6 +215,76 @@ export function restoreScrollTopForAnchor(
 
 export function scrollMessageListToBottom(container: Pick<HTMLElement, "scrollHeight" | "scrollTop">): void {
   container.scrollTop = container.scrollHeight;
+}
+
+export function scrollMessageListByRatio(
+  container: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  ratio: number
+): void {
+  const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+  container.scrollTop = Math.min(maxScrollTop, Math.max(0, container.scrollTop + container.clientHeight * ratio));
+}
+
+export function shouldIgnoreTranscriptVimKeyTarget(target: EventTarget | null): boolean {
+  if (typeof Element === "undefined") return false;
+  if (!(target instanceof Element)) return false;
+  return Boolean(target.closest("input, textarea, select, button, [contenteditable='true'], .cm-editor, .transcript-find-bar"));
+}
+
+export function transcriptVimNavigationCommand(
+  event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
+  pendingG: boolean
+): { command: TranscriptVimNavigationCommand | null; pendingG: boolean; preventDefault: boolean } {
+  if (event.metaKey || event.altKey) return { command: null, pendingG: false, preventDefault: false };
+  if (event.ctrlKey) {
+    const key = event.key.toLowerCase();
+    if (key === "u") return { command: "halfUp", pendingG: false, preventDefault: true };
+    if (key === "d") return { command: "halfDown", pendingG: false, preventDefault: true };
+    if (key === "b") return { command: "pageUp", pendingG: false, preventDefault: true };
+    if (key === "f") return { command: "pageDown", pendingG: false, preventDefault: true };
+    return { command: null, pendingG: false, preventDefault: false };
+  }
+  if (event.key === "g" && !event.shiftKey) {
+    return pendingG
+      ? { command: "jumpTop", pendingG: false, preventDefault: true }
+      : { command: null, pendingG: true, preventDefault: true };
+  }
+  if (event.key === "G" || (event.key === "g" && event.shiftKey)) {
+    return { command: "jumpBottom", pendingG: false, preventDefault: true };
+  }
+  if (event.key === "/") return { command: "find", pendingG: false, preventDefault: true };
+  return { command: null, pendingG: false, preventDefault: false };
+}
+
+export interface TranscriptFindEntry {
+  id: string;
+  text: string;
+}
+
+export function visibleTranscriptFindEntries(
+  items: CoreTranscriptItem[],
+  expandedStacks: ReadonlySet<string>,
+  expandedRangeItems: Record<string, CoreTranscriptItem[]>
+): TranscriptFindEntry[] {
+  const entries: TranscriptFindEntry[] = [];
+  for (const item of items) {
+    entries.push(transcriptFindEntry(item));
+    if (item.type === "range" && expandedStacks.has(item.id)) {
+      entries.push(...visibleTranscriptFindEntries(expandedRangeItems[item.id] ?? [], expandedStacks, expandedRangeItems));
+    }
+  }
+  return entries.filter((entry) => entry.text.trim());
+}
+
+export function transcriptFindMatches(entries: TranscriptFindEntry[], query: string): number[] {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return [];
+  return entries.flatMap((entry, index) => (entry.text.toLowerCase().includes(normalizedQuery) ? [index] : []));
+}
+
+function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
+  if (item.type === "range") return { id: item.id, text: item.label };
+  return { id: item.id, text: copyableMessageText(item.message) };
 }
 
 export function messageListAutoPageAction(
@@ -374,10 +452,14 @@ export function SessionView() {
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputModeError, setInputModeError] = useState("");
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
+  const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
   const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
+  const [transcriptFindOpen, setTranscriptFindOpen] = useState(false);
+  const [transcriptFindQuery, setTranscriptFindQuery] = useState("");
+  const [transcriptFindMatchIndex, setTranscriptFindMatchIndex] = useState(0);
   const vimAvailable = useDesktopVimAvailable();
   const [hasMoreBefore, setHasMoreBefore] = useState(false);
   const [hasMoreAfter, setHasMoreAfter] = useState(false);
@@ -409,6 +491,10 @@ export function SessionView() {
   const activeIdRef = useRef(id);
   const previousEffectIdRef = useRef(id);
   const composerFormRef = useRef<HTMLFormElement>(null);
+  const messageMenuRef = useRef<HTMLDivElement>(null);
+  const transcriptFindInputRef = useRef<HTMLInputElement>(null);
+  const vimPendingGRef = useRef(false);
+  const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
   activeIdRef.current = id;
   promptHistoryPrefillTextRef.current = text;
@@ -427,6 +513,15 @@ export function SessionView() {
   const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan));
   const composerLocked = Boolean(composerLock);
   const effectiveVimEnabled = vimAvailable && vimEnabled;
+  const transcriptFindEntries = useMemo(
+    () => visibleTranscriptFindEntries(transcriptItems, expandedStacks, expandedRangeItems),
+    [expandedRangeItems, expandedStacks, transcriptItems]
+  );
+  const transcriptFindMatchEntryIndexes = useMemo(
+    () => transcriptFindMatches(transcriptFindEntries, transcriptFindQuery),
+    [transcriptFindEntries, transcriptFindQuery]
+  );
+  const currentTranscriptFindEntryIndex = transcriptFindMatchEntryIndexes[transcriptFindMatchIndex] ?? -1;
   const questionRenderedInline = Boolean(
     question &&
       (transcriptItems.some((item) => transcriptItemContainsMessageId(item, question.messageId)) ||
@@ -483,6 +578,67 @@ export function SessionView() {
     [approval, composerLocked, registerPrimaryInputFocus, submitBusy]
   );
 
+  useEffect(() => {
+    if (!transcriptFindOpen) return undefined;
+    const animationFrame = window.requestAnimationFrame(() => transcriptFindInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [transcriptFindOpen]);
+
+  useEffect(() => {
+    if (!transcriptFindOpen) return;
+    setTranscriptFindMatchIndex(0);
+  }, [transcriptFindOpen, transcriptFindQuery]);
+
+  useEffect(() => {
+    if (!transcriptFindMatchEntryIndexes.length) {
+      if (transcriptFindMatchIndex !== 0) setTranscriptFindMatchIndex(0);
+      return;
+    }
+    if (transcriptFindMatchIndex >= transcriptFindMatchEntryIndexes.length) {
+      setTranscriptFindMatchIndex(0);
+    }
+  }, [transcriptFindMatchEntryIndexes.length, transcriptFindMatchIndex]);
+
+  useEffect(() => {
+    if (!transcriptFindOpen || currentTranscriptFindEntryIndex < 0) return;
+    const entry = transcriptFindEntries[currentTranscriptFindEntryIndex];
+    if (!entry) return;
+    scrollToTranscriptItem(entry.id);
+  }, [currentTranscriptFindEntryIndex, transcriptFindEntries, transcriptFindOpen]);
+
+  useEffect(() => {
+    if (!effectiveVimEnabled) {
+      clearPendingTranscriptGKey();
+      return undefined;
+    }
+
+    const handleTranscriptVimKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (shouldIgnoreTranscriptVimKeyTarget(event.target)) return;
+      const result = transcriptVimNavigationCommand(event, vimPendingGRef.current);
+      clearPendingTranscriptGKey();
+      if (result.pendingG) {
+        vimPendingGRef.current = true;
+        vimPendingGTimerRef.current = window.setTimeout(clearPendingTranscriptGKey, 800);
+      }
+      if (result.preventDefault) event.preventDefault();
+      if (!result.command) return;
+      runTranscriptVimCommand(result.command);
+    };
+
+    window.addEventListener("keydown", handleTranscriptVimKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleTranscriptVimKeyDown);
+      clearPendingTranscriptGKey();
+    };
+  }, [effectiveVimEnabled, id, jumpBusy]);
+
+  useDismissableContextMenu(Boolean(messageMenu), messageMenuRef, () => setMessageMenu(null));
+
+  function openMessageMenu(message: ChatMessage, x: number, y: number) {
+    if (!copyableMessageText(message).trim()) return;
+    setMessageMenu({ message, x, y });
+  }
+
   async function toggleExpandedItem(item: CoreTranscriptItem) {
     if (item.type !== "range") return;
     if (!expandedStacks.has(item.id) && !expandedRangeItems[item.id]) {
@@ -516,6 +672,7 @@ export function SessionView() {
           key={item.message.id}
           itemId={item.id}
           message={item.message}
+          onOpenMenu={openMessageMenu}
           planAction={
             pendingPlan?.id === item.message.id ? (
               <PlanActionBanner busy={planActionBusy} error={planActionError} onAction={submitPlanAction} />
@@ -529,7 +686,7 @@ export function SessionView() {
         />
       );
     }
-    if (item.type === "user_action") return <UserAction key={item.message.id} itemId={item.id} message={item.message} />;
+    if (item.type === "user_action") return <UserAction key={item.message.id} itemId={item.id} message={item.message} onOpenMenu={openMessageMenu} />;
     return (
       <TranscriptRange
         key={item.id}
@@ -902,6 +1059,56 @@ export function SessionView() {
     if (action === "newer") void loadNewerMessages();
   }
 
+  function clearPendingTranscriptGKey() {
+    vimPendingGRef.current = false;
+    if (vimPendingGTimerRef.current !== null) {
+      window.clearTimeout(vimPendingGTimerRef.current);
+      vimPendingGTimerRef.current = null;
+    }
+  }
+
+  function runTranscriptVimCommand(command: TranscriptVimNavigationCommand) {
+    if (command === "jumpTop") {
+      void jumpToTop();
+      return;
+    }
+    if (command === "jumpBottom") {
+      void jumpToBottom();
+      return;
+    }
+    if (command === "find") {
+      setTranscriptFindOpen(true);
+      return;
+    }
+    const container = messageListRef.current;
+    if (!container) return;
+    if (command === "halfUp") scrollMessageListByRatio(container, -0.5);
+    if (command === "halfDown") scrollMessageListByRatio(container, 0.5);
+    if (command === "pageUp") scrollMessageListByRatio(container, -1);
+    if (command === "pageDown") scrollMessageListByRatio(container, 1);
+    updateMessageListScrollState(container);
+  }
+
+  function scrollToTranscriptItem(itemId: string) {
+    const container = messageListRef.current;
+    if (!container) return;
+    const element = transcriptItemElement(container, itemId);
+    if (!element) return;
+    container.scrollTop = Math.max(0, element.offsetTop - 12);
+    updateMessageListScrollState(container);
+  }
+
+  function closeTranscriptFind() {
+    setTranscriptFindOpen(false);
+    messageListRef.current?.focus();
+  }
+
+  function moveTranscriptFindMatch(direction: 1 | -1) {
+    const count = transcriptFindMatchEntryIndexes.length;
+    if (!count) return;
+    setTranscriptFindMatchIndex((current) => (current + direction + count) % count);
+  }
+
   async function jumpToTop() {
     if (jumpBusy) return;
     const targetId = id;
@@ -1022,6 +1229,17 @@ export function SessionView() {
       window.setTimeout(() => setCopiedTmuxCommand(false), 1600);
     } catch {
       setCopiedTmuxCommand(false);
+    }
+  }
+
+  async function copyMessageFromMenu() {
+    if (!messageMenu) return;
+    const text = copyableMessageText(messageMenu.message);
+    setMessageMenu(null);
+    try {
+      await copyText(text);
+    } catch (error) {
+      console.error(error);
     }
   }
 
@@ -1167,6 +1385,59 @@ export function SessionView() {
         </div>
       </div>
 
+      {messageMenu ? (
+        <ContextMenu
+          className="message-action-menu"
+          ref={messageMenuRef}
+          position={messageMenu}
+          label={`Actions for ${label(messageMenu.message)} message`}
+        >
+          <ContextMenuItem icon={<Copy size={16} />} onClick={() => void copyMessageFromMenu()}>
+            Copy
+          </ContextMenuItem>
+        </ContextMenu>
+      ) : null}
+
+      {transcriptFindOpen ? (
+        <form className="transcript-find-bar" role="search" onSubmit={(event) => event.preventDefault()}>
+          <input
+            ref={transcriptFindInputRef}
+            type="search"
+            value={transcriptFindQuery}
+            onChange={(event) => setTranscriptFindQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeTranscriptFind();
+                return;
+              }
+              if (event.key === "Enter") {
+                event.preventDefault();
+                moveTranscriptFindMatch(event.shiftKey ? -1 : 1);
+              }
+            }}
+            placeholder="Find transcript"
+            aria-label="Find transcript"
+          />
+          <span className="transcript-find-count" aria-live="polite">
+            {transcriptFindQuery.trim()
+              ? transcriptFindMatchEntryIndexes.length
+                ? `${transcriptFindMatchIndex + 1} / ${transcriptFindMatchEntryIndexes.length}`
+                : "No matches"
+              : "0 / 0"}
+          </span>
+          <button type="button" onClick={() => moveTranscriptFindMatch(-1)} disabled={!transcriptFindMatchEntryIndexes.length} aria-label="Previous match">
+            <ArrowUpToLine size={15} />
+          </button>
+          <button type="button" onClick={() => moveTranscriptFindMatch(1)} disabled={!transcriptFindMatchEntryIndexes.length} aria-label="Next match">
+            <ArrowDownToLine size={15} />
+          </button>
+          <button type="button" onClick={closeTranscriptFind} aria-label="Close transcript find">
+            <X size={15} />
+          </button>
+        </form>
+      ) : null}
+
       <div
         className={
           shouldHideInitialMessageList(initialTranscriptSessionId, id, initialScrollReady)
@@ -1175,6 +1446,7 @@ export function SessionView() {
         }
         ref={messageListRef}
         onScroll={handleMessageListScroll}
+        tabIndex={-1}
       >
         {hasMoreBefore ? (
           <button
@@ -1189,7 +1461,7 @@ export function SessionView() {
           </button>
         ) : null}
         {transcriptItems.map((item) => renderTranscriptItem(item))}
-        {pendingUserChatMessage ? <MessageBubble message={pendingUserChatMessage} pending /> : null}
+        {pendingUserChatMessage ? <MessageBubble message={pendingUserChatMessage} pending onOpenMenu={openMessageMenu} /> : null}
         {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
         {question && !questionRenderedInline ? (
           <QuestionBanner question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
@@ -1253,13 +1525,7 @@ export function SessionView() {
                     : "Message Codex")
               }
               rows={3}
-              focusRequestKey={
-                shouldAutofocusComposer(vimAvailable)
-                  ? `${readySession.id}:${composerFocusRequest?.nonce ?? 0}`
-                  : composerFocusRequest
-                    ? String(composerFocusRequest.nonce)
-                    : null
-              }
+              focusRequestKey={composerFocusRequest ? String(composerFocusRequest.nonce) : null}
               focusCommand={composerFocusRequest?.command ?? "focus"}
               disabled={submitBusy || composerLocked}
             />
@@ -1458,28 +1724,45 @@ export function runVimEscapeCommand(view: EditorView): boolean {
   return true;
 }
 
+export function resetVimToNormalMode(view: EditorView): boolean {
+  const cm = getCM(view);
+  const vimState = cm?.state.vim ?? null;
+  if (!cm || !vimState) return false;
+  if (vimState.insertMode) {
+    Vim.exitInsertMode(cm as Parameters<typeof Vim.exitInsertMode>[0], true);
+  } else if (vimState.visualMode) {
+    Vim.exitVisualMode(cm as Parameters<typeof Vim.exitVisualMode>[0], true);
+  } else {
+    return false;
+  }
+  cm.refresh();
+  return true;
+}
+
 export function runVimFocusCommand(view: EditorView, command: PrimaryInputFocusCommand): boolean {
   view.focus();
   const cm = getCM(view);
   if (!cm) return command === "focus";
-  const vimState = cm.state.vim ?? null;
-  const enterInsertMode = () => {
-    if (!vimState?.insertMode) Vim.handleKey(cm, "i", "user");
+  const vimState = Vim.maybeInitVimState_(cm);
+  const handleNormalKey = (key: "a" | "i") => {
+    const vim = cm.state.vim ?? vimState;
+    vim.status = (vim.status || "") + key;
+    const handled = Vim.multiSelectHandleKey(cm, key, "user");
+    cm.refresh();
+    return handled === true || Boolean(cm.state.vim?.insertMode);
   };
+  const enterInsertMode = () => (cm.state.vim?.insertMode ? true : handleNormalKey("i"));
   if (command === "focus") return true;
   if (command === "insertStart") {
     view.dispatch({ selection: { anchor: 0 } });
-    enterInsertMode();
-    return true;
+    return enterInsertMode();
   }
   if (command === "appendEnd") {
     view.dispatch({ selection: { anchor: view.state.doc.length } });
-    enterInsertMode();
-    return true;
+    return enterInsertMode();
   }
-  if (vimState?.insertMode) return true;
-  Vim.handleKey(cm, command === "append" ? "a" : "i", "user");
-  return true;
+  if (cm.state.vim?.insertMode) return true;
+  return handleNormalKey(command === "append" ? "a" : "i");
 }
 
 function VimPromptEditor({
@@ -1556,7 +1839,11 @@ function VimPromptEditor({
   useEffect(() => {
     const view = viewRef.current;
     if (!view || !focusRequestKey || disabled) return;
-    runVimFocusCommand(view, focusCommand);
+    view.focus();
+    if (focusCommand === "focus") return;
+    requestAnimationFrame(() => {
+      if (viewRef.current === view && view.hasFocus) runVimFocusCommand(view, focusCommand);
+    });
   }, [disabled, focusCommand, focusRequestKey]);
 
   useEffect(() => {
@@ -1624,7 +1911,10 @@ function VimPromptEditor({
         }
         if (update.focusChanged) {
           if (update.view.hasFocus) onFocusRef.current?.();
-          else onBlurRef.current?.();
+          else {
+            resetVimToNormalMode(update.view);
+            onBlurRef.current?.();
+          }
         }
       })
     ];
@@ -1650,7 +1940,7 @@ function VimPromptEditor({
       view.destroy();
       if (viewRef.current === view) viewRef.current = null;
     };
-  }, [disabled, focusRequestKey, placeholder, skillNamesKey]);
+  }, [disabled, placeholder, skillNamesKey]);
 
   return <div className="vim-editor" ref={rootRef} />;
 }
@@ -1920,7 +2210,8 @@ function renderComposerHighlights(text: string, skillNames: Set<string>): ReactN
 
 export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo"> }) {
   const branch = session.repo.branch ?? "no branch";
-  const title = `${session.repo.name} · ${branch}`;
+  const dirtyLabel = session.repo.dirty ? " · dirty" : "";
+  const title = `${session.repo.name} · ${branch}${dirtyLabel}`;
 
   return (
     <p className="session-header-meta" title={title}>
@@ -1929,6 +2220,14 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
         ·
       </span>
       <span className="session-header-branch">{branch}</span>
+      {session.repo.dirty ? (
+        <>
+          <span className="session-header-branch-separator" aria-hidden="true">
+            ·
+          </span>
+          <span className="session-header-dirty dirty">dirty</span>
+        </>
+      ) : null}
     </p>
   );
 }
@@ -2674,19 +2973,23 @@ export function MessageBubble({
   itemId,
   pending = false,
   planAction = null,
-  questionAction = null
+  questionAction = null,
+  onOpenMenu
 }: {
   message: ChatMessage;
   itemId?: string;
   pending?: boolean;
   planAction?: ReactNode;
   questionAction?: ReactNode;
+  onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
+  const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
   return (
     <article
-      className={`message message-${message.role} message-type-${message.type}${pending ? " message-pending" : ""}`}
+      className={`message message-${message.role} message-type-${message.type}${pending ? " message-pending" : ""}${onOpenMenu ? " message-copyable" : ""}`}
       data-transcript-item-id={itemId}
       aria-busy={pending || undefined}
+      {...menuTrigger.triggerProps}
     >
       <div className="message-meta">
         <span className="message-meta-main">
@@ -2701,9 +3004,18 @@ export function MessageBubble({
   );
 }
 
-function UserAction({ message, itemId }: { message: ChatMessage; itemId?: string }) {
+function UserAction({
+  message,
+  itemId,
+  onOpenMenu
+}: {
+  message: ChatMessage;
+  itemId?: string;
+  onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
+}) {
+  const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
   return (
-    <div className="user-action" data-transcript-item-id={itemId}>
+    <div className={`user-action${onOpenMenu ? " user-action-copyable" : ""}`} data-transcript-item-id={itemId} {...menuTrigger.triggerProps}>
       <span>{message.text}</span>
       <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
     </div>
@@ -2790,6 +3102,21 @@ function displayText(message: ChatMessage): string | null {
     return normalized.kind === "message" ? normalized.text : null;
   }
   return message.text;
+}
+
+export function copyableMessageText(message: ChatMessage): string {
+  if (isToolOutput(message)) return message.text;
+  if (message.role === "assistant") {
+    return parseProposedPlanSegments(displayText(message) ?? "")
+      .map((segment) => segment.text)
+      .join("")
+      .trimEnd();
+  }
+  if (message.role === "user") {
+    const text = displayText(message);
+    return text ? userTextDisplayParts(text).body : "";
+  }
+  return displayText(message) ?? "";
 }
 
 const markdownComponents: Components = {
