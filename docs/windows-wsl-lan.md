@@ -9,16 +9,16 @@ In WSL mirrored networking, the app may work from Windows at `http://127.0.0.1:1
 From WSL:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm start:prod
+MUXPILOT_LAN_ENABLED=1 pnpm app start
 ```
 
-Production preview uses Web UI port `12778`. Development uses Web UI port `5177`:
+Production uses Web UI port `12778`. Development uses Web UI port `5177`:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm start:dev
+MUXPILOT_LAN_ENABLED=1 pnpm app start dev
 ```
 
-Leave the background server active while you install and verify the Windows firewall rules.
+You can close the WSL terminal after startup. Leave the background server active while you install and verify the Windows firewall rules. If the WSL distro or Windows host stops, start muxpilot again with `pnpm app start`.
 
 ## Find The Windows Path
 
@@ -91,7 +91,7 @@ Phone camera APIs require HTTPS for LAN IP URLs. If you need QR-code login from 
 
 ```bash
 pnpm pwa:setup
-pnpm start:prod
+pnpm app start
 ```
 
 Open the Install phone certificate URL or QR code from the Connect device modal on the phone and install the public root CA/profile. The phone must trust the certificate authority. After that, the Connect device modal will publish `https://` app URLs and the QR scanner can use the camera API.
@@ -100,7 +100,7 @@ For multiple WSL host checkouts, put the shared `rootCA.pem` and `rootCA-key.pem
 
 `pnpm pwa:setup` also imports the root CA into the Windows current-user Trusted Root store when WSL can invoke PowerShell. If it reports that Windows host trust was skipped, run the setup command from a normal WSL terminal with Windows interop enabled and retry.
 
-The Windows and Hyper-V firewall rules are still required for both the selected Web UI port and the trust-server port. Production preview defaults are `12778` for the Web UI and `12880` for certificate install links:
+The Windows and Hyper-V firewall rules are still required for both the selected Web UI port and the trust-server port. Production defaults are `12778` for the Web UI and `12880` for certificate install links:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows-lan.ps1 install -Port 12778

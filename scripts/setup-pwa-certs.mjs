@@ -77,10 +77,10 @@ function setup() {
   console.log("Next steps:");
   if (hostTrustResults.some((result) => !result.ok)) {
     console.log("  1. Review skipped host trust steps above if this browser still reports ERR_CERT_AUTHORITY_INVALID.");
-    console.log("  2. Run pnpm start:prod.");
+    console.log("  2. Run pnpm app start.");
     console.log("  3. Use Connect device to install the phone certificate, then open the app URL.");
   } else {
-    console.log("  1. Run pnpm start:prod.");
+    console.log("  1. Run pnpm app start.");
     console.log("  2. Use Connect device to install the phone certificate, then open the app URL.");
   }
   console.log("");

@@ -1,16 +1,33 @@
 import { execFileSync, spawn } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  unwatchFile,
+  watchFile,
+  writeFileSync
+} from "node:fs";
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 const START_TIMEOUT_MS = 30000;
 const START_POLL_MS = 500;
-const STOP_GRACE_MS = 750;
+const STOP_GRACE_MS = 1500;
 const DEFAULT_DEV_PORTS = ["4177", "5177"];
 const DEFAULT_PROD_PORTS = ["12777", "12778"];
+const MODES = ["dev", "prod"];
+const PROCESSES = ["supervisor", "server", "web"];
 const RUNTIME_ENV_KEYS = [
   "MUXPILOT_HOST",
   "MUXPILOT_PORT",
@@ -33,7 +50,7 @@ const MODE_CONFIG = {
     webArgs: ["--filter", "@muxpilot/web", "dev"]
   },
   prod: {
-    label: "production preview",
+    label: "production",
     backendPort: "12777",
     webPort: "12778",
     dataDir: "./data/prod",
@@ -45,66 +62,47 @@ const MODE_CONFIG = {
 };
 
 export async function startMode(mode) {
-  const config = modeConfig(mode);
-  const runtimeEnvSnapshot = snapshotEnv(RUNTIME_ENV_KEYS);
+  const details = prepareMode(mode);
+  const { config, state, urls } = details;
 
   try {
-    loadDotenv();
-    applyRuntimeDefaults(config);
-
-    const state = runtimeState(mode);
-    mkdirSync(state.dir, { recursive: true });
-
-    const backendPort = validPort(process.env.MUXPILOT_PORT, Number(config.backendPort));
-    const webPort = validPort(process.env.MUXPILOT_WEB_PORT, Number(config.webPort));
-    const webProtocol = process.env.MUXPILOT_WEB_PROTOCOL ?? "http";
-    const backendUrl = `http://127.0.0.1:${backendPort}`;
-    const webUrl = `${webProtocol}://127.0.0.1:${webPort}`;
-
     cleanupStalePidFiles(state);
 
-    const [backendActive, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
-      endpointActive(`${backendUrl}/healthz`),
-      endpointActive(webUrl),
-      portOccupied("127.0.0.1", backendPort),
-      portOccupied("127.0.0.1", webPort)
-    ]);
-
-    if (backendActive && webActive) {
-      console.log(`${capitalize(config.label)} is already active. Reusing ${webUrl}.`);
+    const status = await inspectPreparedMode(details);
+    if (status.backendActive && status.webActive) {
+      console.log(`${capitalize(config.label)} is already active at ${urls.webUrl}.`);
+      if (!status.supervisorRunning) {
+        console.log(`It is not currently supervisor-managed. Run "pnpm app restart ${mode}" to move it under the supervisor.`);
+      }
       printState(state);
       return;
     }
 
-    if (backendPortOccupied && !backendActive) {
-      console.error(`Backend port ${backendPort} is already in use, but ${backendUrl}/healthz did not respond.`);
-      console.error(`Not starting a duplicate backend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
+    if (status.supervisorRunning) {
+      console.error(`${capitalize(config.label)} supervisor is running, but the app is not healthy yet.`);
+      console.error(`Run "pnpm app status ${mode}" or "pnpm app logs ${mode} --process all" for details.`);
       process.exit(1);
     }
 
-    if (webPortOccupied && !webActive) {
-      console.error(`Frontend port ${webPort} is already in use, but ${webUrl} did not respond.`);
-      console.error(`Not starting a duplicate frontend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
+    if (status.backendPortOccupied || status.webPortOccupied) {
+      if (status.backendPortOccupied && !status.backendActive) {
+        console.error(`Backend port ${urls.backendPort} is already in use, but ${urls.backendUrl}/healthz did not respond.`);
+      }
+      if (status.webPortOccupied && !status.webActive) {
+        console.error(`Frontend port ${urls.webPort} is already in use, but ${urls.webUrl} did not respond.`);
+      }
+      console.error(`Not starting duplicate processes. Run "pnpm app status ${mode}" and stop the conflicting process first.`);
       process.exit(1);
     }
 
     if (config.build) runPnpmSync(["build"]);
 
-    const started = [];
-    if (!backendActive) {
-      started.push("backend");
-      spawnManaged("backend", config.backendArgs, state.backendPidPath, state.backendLogPath);
-    }
-    if (!webActive) {
-      started.push("frontend");
-      spawnManaged("frontend", config.webArgs, state.webPidPath, state.webLogPath);
-    }
-
-    console.log(`Starting ${config.label} ${started.join(" and ")} in the background...`);
+    spawnSupervisor(mode, state);
+    console.log(`Starting ${config.label} under the muxpilot supervisor...`);
 
     const ready = await waitForEndpoints([
-      { name: "backend", url: `${backendUrl}/healthz` },
-      { name: "frontend", url: webUrl }
+      { name: "backend", url: `${urls.backendUrl}/healthz` },
+      { name: "frontend", url: urls.webUrl }
     ]);
 
     if (!ready.ok) {
@@ -113,95 +111,306 @@ export async function startMode(mode) {
       process.exit(1);
     }
 
-    console.log(`${capitalize(config.label)} is ready at ${webUrl} with backend ${backendUrl}.`);
+    console.log(`${capitalize(config.label)} is ready at ${urls.webUrl} with backend ${urls.backendUrl}.`);
     printState(state);
   } finally {
-    restoreEnv(runtimeEnvSnapshot);
+    restoreEnv(details.envSnapshot);
   }
 }
 
 export async function stopMode(mode) {
-  if (!["all", "dev", "prod"].includes(mode)) {
-    console.error("Usage: node scripts/stop.mjs [all|dev|prod]");
-    process.exit(1);
-  }
-
+  assertModeOrAll(mode, "stop");
   loadDotenv();
 
-  const modes = mode === "all" ? ["dev", "prod"] : [mode];
+  const modes = mode === "all" ? MODES : [mode];
   const pidCandidates = new Map();
 
-  for (const stopMode of modes) {
-    for (const candidate of readStatePids(stopMode)) {
+  for (const targetMode of modes) {
+    for (const candidate of readStatePids(targetMode)) {
       pidCandidates.set(candidate.pid, candidate);
     }
   }
 
   const ports = mode === "all" ? allLocalPorts() : modePorts(mode);
   for (const port of ports) {
-    const pids = findListeningPids(port);
-    if (pids.length > 0) {
-      for (const pid of pids) {
-        pidCandidates.set(pid, { pid, source: `port ${port}` });
-      }
+    for (const pid of findListeningPids(port)) {
+      pidCandidates.set(pid, { pid, source: `port ${port}` });
     }
   }
 
   const allPids = [...pidCandidates.keys()].filter((pid) => pid !== process.pid && isRunning(pid));
-
   if (allPids.length === 0) {
     console.log(`No ${modeLabel(mode)} servers found on ports ${ports.join(", ")}.`);
     removePidFiles(modes);
     return;
   }
 
-  for (const candidate of allPids) {
-    console.log(`Stopping PID ${candidate} (${pidCandidates.get(candidate)?.source ?? "runtime state"})`);
-  }
+  const supervisorPids = allPids.filter((pid) => pidCandidates.get(pid)?.role === "supervisor");
+  const otherPids = allPids.filter((pid) => !supervisorPids.includes(pid));
 
-  for (const pid of allPids) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch (error) {
-      if (error?.code !== "ESRCH") {
-        console.warn(`Could not terminate PID ${pid}: ${error.message}`);
-      }
-    }
+  for (const pid of supervisorPids) {
+    console.log(`Stopping supervisor PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
+    terminatePid(pid, "SIGTERM");
   }
-
   await sleep(STOP_GRACE_MS);
 
-  const remaining = allPids.filter(isRunning);
-  for (const pid of remaining) {
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch (error) {
-      if (error?.code !== "ESRCH") {
-        console.warn(`Could not force-kill PID ${pid}: ${error.message}`);
-      }
-    }
+  for (const pid of otherPids) {
+    if (!isRunning(pid)) continue;
+    console.log(`Stopping PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
+    terminatePid(pid, "SIGTERM");
+  }
+  await sleep(STOP_GRACE_MS);
+
+  for (const pid of allPids.filter(isRunning)) {
+    console.log(`Force-stopping PID ${pid}`);
+    terminatePid(pid, "SIGKILL");
   }
 
   removePidFiles(modes);
   console.log(`${capitalize(modeLabel(mode))} server stop complete.`);
 }
 
-export function runningModes(mode = "all") {
-  if (!["all", "dev", "prod"].includes(mode)) {
-    console.error("Usage: node scripts/restart.mjs [all|dev|prod]");
-    process.exit(1);
+export async function restartMode(mode) {
+  assertModeOrAll(mode, "restart");
+
+  if (mode === "all") {
+    const modes = runningModes("all");
+    if (modes.length === 0) {
+      console.log("No active local servers found. Leaving development and production down.");
+      return;
+    }
+    console.log(`Restarting active environments: ${modes.join(", ")}.`);
+    for (const runningMode of modes) await stopMode(runningMode);
+    for (const runningMode of modes) await startMode(runningMode);
+    return;
   }
 
+  await stopMode(mode);
+  await startMode(mode);
+}
+
+export function runningModes(mode = "all") {
+  assertModeOrAll(mode, "status");
   loadDotenv();
 
-  const modes = mode === "all" ? ["dev", "prod"] : [mode];
+  const modes = mode === "all" ? MODES : [mode];
   return modes.filter(modeHasRunningServers);
+}
+
+export async function statusMode(mode = "all") {
+  assertModeOrAll(mode, "status");
+  const modes = mode === "all" ? MODES : [mode];
+
+  for (const [index, targetMode] of modes.entries()) {
+    const details = prepareMode(targetMode);
+    try {
+      cleanupStalePidFiles(details.state);
+      const status = await inspectPreparedMode(details);
+      if (index > 0) console.log("");
+      printStatus(targetMode, details, status);
+    } finally {
+      restoreEnv(details.envSnapshot);
+    }
+  }
+}
+
+export async function logsMode(mode, options = {}) {
+  assertMode(mode, "logs");
+  const state = runtimeState(mode);
+  const requestedProcesses = normalizeLogProcesses(options.processes ?? ["server"]);
+  const files = requestedProcesses.map((processName) => ({
+    processName,
+    path: state[`${processName}LogPath`]
+  }));
+  const lines = normalizeLineCount(options.lines ?? 80);
+
+  for (const [index, file] of files.entries()) {
+    if (files.length > 1 || index > 0) {
+      console.log(`${index > 0 ? "\n" : ""}==> ${file.processName}: ${file.path} <==`);
+    }
+    process.stdout.write(readLastLines(file.path, lines));
+  }
+
+  if (!options.follow) return;
+
+  console.log(files.length > 1 ? "\nFollowing logs. Press Ctrl+C to stop." : "\nFollowing log. Press Ctrl+C to stop.");
+  const offsets = new Map(files.map((file) => [file.path, fileSize(file.path)]));
+
+  for (const file of files) {
+    watchFile(file.path, { interval: 500 }, () => {
+      const previous = offsets.get(file.path) ?? 0;
+      const next = fileSize(file.path);
+      if (next < previous) offsets.set(file.path, 0);
+      const start = Math.min(previous, next);
+      const chunk = readRange(file.path, start, next);
+      offsets.set(file.path, next);
+      if (!chunk) return;
+      if (files.length > 1) process.stdout.write(`\n==> ${file.processName}: ${file.path} <==\n`);
+      process.stdout.write(chunk);
+    });
+  }
+
+  await new Promise((resolveFollow) => {
+    const stop = () => {
+      for (const file of files) unwatchFile(file.path);
+      resolveFollow(undefined);
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
+}
+
+export function supervisorConfig(mode) {
+  const details = prepareMode(mode);
+  return details;
+}
+
+export function writePid(path, pid = process.pid) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${pid}\n`);
+}
+
+export function appendSupervisorLog(state, message) {
+  appendFileSync(state.supervisorLogPath, `${new Date().toISOString()} ${message}\n`);
+}
+
+export function spawnService(name, args, state) {
+  const logPath = name === "server" ? state.serverLogPath : state.webLogPath;
+  const pidPath = name === "server" ? state.serverPidPath : state.webPidPath;
+  appendFileSync(logPath, `\n--- ${new Date().toISOString()} starting ${name}: pnpm ${args.join(" ")} ---\n`);
+  const logFd = openSync(logPath, "a");
+
+  try {
+    const child = spawn("pnpm", args, {
+      detached: true,
+      env: process.env,
+      stdio: ["ignore", logFd, logFd]
+    });
+    writePid(pidPath, child.pid);
+    return child;
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+export function runtimeState(mode) {
+  const dir = resolve("data", "runtime", mode);
+  return {
+    dir,
+    supervisorPidPath: join(dir, "supervisor.pid"),
+    serverPidPath: join(dir, "server.pid"),
+    webPidPath: join(dir, "web.pid"),
+    supervisorLogPath: join(dir, "supervisor.log"),
+    serverLogPath: join(dir, "server.log"),
+    webLogPath: join(dir, "web.log")
+  };
+}
+
+function prepareMode(mode) {
+  const config = modeConfig(mode);
+  const envSnapshot = snapshotEnv(RUNTIME_ENV_KEYS);
+
+  loadDotenv();
+  applyRuntimeDefaults(config);
+
+  const state = runtimeState(mode);
+  mkdirSync(state.dir, { recursive: true });
+
+  const backendPort = validPort(process.env.MUXPILOT_PORT, Number(config.backendPort));
+  const webPort = validPort(process.env.MUXPILOT_WEB_PORT, Number(config.webPort));
+  const webProtocol = process.env.MUXPILOT_WEB_PROTOCOL ?? "http";
+  const backendUrl = `http://127.0.0.1:${backendPort}`;
+  const webUrl = `${webProtocol}://127.0.0.1:${webPort}`;
+
+  return {
+    mode,
+    config,
+    state,
+    envSnapshot,
+    urls: { backendPort, webPort, backendUrl, webUrl }
+  };
+}
+
+async function inspectPreparedMode(details) {
+  const { state, urls } = details;
+  const [backendActive, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
+    endpointActive(`${urls.backendUrl}/healthz`),
+    endpointActive(urls.webUrl),
+    portOccupied("127.0.0.1", urls.backendPort),
+    portOccupied("127.0.0.1", urls.webPort)
+  ]);
+  const pids = readStatePids(details.mode, { includeStale: true });
+
+  return {
+    backendActive,
+    webActive,
+    backendPortOccupied,
+    webPortOccupied,
+    supervisorRunning: pids.some((candidate) => candidate.role === "supervisor" && candidate.running),
+    pids
+  };
+}
+
+function printStatus(mode, details, status) {
+  const { config, state, urls } = details;
+  const stalePids = status.pids.filter((candidate) => !candidate.running);
+  const runningPids = status.pids.filter((candidate) => candidate.running);
+  const portConflicts = [
+    status.backendPortOccupied && !status.backendActive ? `backend ${urls.backendPort}` : null,
+    status.webPortOccupied && !status.webActive ? `frontend ${urls.webPort}` : null
+  ].filter(Boolean);
+
+  let stateLabel = "stopped";
+  if (status.supervisorRunning && status.backendActive && status.webActive) stateLabel = "running";
+  else if (status.backendActive && status.webActive) stateLabel = "unmanaged";
+  else if (status.supervisorRunning) stateLabel = "unhealthy";
+  else if (status.backendActive || status.webActive || runningPids.length > 0) stateLabel = "partial";
+  else if (portConflicts.length > 0) stateLabel = "port-conflict";
+  else if (stalePids.length > 0) stateLabel = "stale-pid";
+
+  console.log(`${mode}: ${stateLabel} (${config.label})`);
+  console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
+  console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
+  console.log(`  runtime: ${state.dir}`);
+  console.log(`  logs:`);
+  console.log(`    supervisor: ${state.supervisorLogPath}`);
+  console.log(`    server: ${state.serverLogPath}`);
+  console.log(`    web: ${state.webLogPath}`);
+  console.log(`  pids:`);
+  for (const role of PROCESSES) {
+    const candidate = status.pids.find((pid) => pid.role === role);
+    const value = candidate ? `${candidate.pid} ${candidate.running ? "running" : "stale"}` : "none";
+    console.log(`    ${role}: ${value}`);
+  }
+  if (portConflicts.length > 0) console.log(`  port conflicts: ${portConflicts.join(", ")}`);
+}
+
+function spawnSupervisor(mode, state) {
+  const supervisorPath = fileURLToPath(new URL("./supervisor.mjs", import.meta.url));
+  appendFileSync(state.supervisorLogPath, `\n--- ${new Date().toISOString()} starting supervisor: node ${supervisorPath} ${mode} ---\n`);
+  const logFd = openSync(state.supervisorLogPath, "a");
+
+  try {
+    const child = spawn(process.execPath, [supervisorPath, mode], {
+      detached: true,
+      env: process.env,
+      stdio: ["ignore", logFd, logFd]
+    });
+    child.on("error", (error) => {
+      console.error(`Could not start supervisor: ${error.message}`);
+      process.exit(1);
+    });
+    child.unref();
+    writePid(state.supervisorPidPath, child.pid);
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 function modeConfig(mode) {
   const config = MODE_CONFIG[mode];
   if (!config) {
-    console.error("Usage: node scripts/start-[dev|prod].mjs");
+    console.error(`Usage: pnpm app <start|stop|restart|status|logs> [${MODES.join("|")}|all]`);
     process.exit(1);
   }
   return config;
@@ -220,87 +429,16 @@ function modeHasRunningServers(mode) {
   return false;
 }
 
-function runtimeState(mode) {
-  const dir = resolve("data", "runtime", mode);
-  return {
-    dir,
-    backendPidPath: join(dir, "server.pid"),
-    webPidPath: join(dir, "web.pid"),
-    backendLogPath: join(dir, "server.log"),
-    webLogPath: join(dir, "web.log")
-  };
-}
-
-function spawnManaged(name, args, pidPath, logPath) {
-  appendFileSync(logPath, `\n--- ${new Date().toISOString()} starting ${name}: pnpm ${args.join(" ")} ---\n`);
-  const logFd = openSync(logPath, "a");
-
-  try {
-    const child = spawn("pnpm", args, {
-      detached: true,
-      env: process.env,
-      stdio: ["ignore", logFd, logFd]
-    });
-
-    child.on("error", (error) => {
-      console.error(`Could not start ${name}: ${error.message}`);
-      process.exit(1);
-    });
-    child.unref();
-    writeFileSync(pidPath, `${child.pid}\n`);
-  } finally {
-    closeSync(logFd);
-  }
-}
-
-function runPnpmSync(args) {
-  execFileSync("pnpm", args, { env: process.env, stdio: "inherit" });
-}
-
-async function waitForEndpoints(endpoints) {
-  const deadline = Date.now() + START_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    for (const endpoint of endpoints) {
-      if (!(await endpointActive(endpoint.url))) {
-        await sleep(START_POLL_MS);
-        continue;
-      }
-    }
-    const active = await Promise.all(endpoints.map((endpoint) => endpointActive(endpoint.url)));
-    if (active.every(Boolean)) return { ok: true };
-  }
-
-  for (const endpoint of endpoints) {
-    if (!(await endpointActive(endpoint.url))) {
-      return { ok: false, ...endpoint };
-    }
-  }
-  return { ok: true };
-}
-
-function printState(state) {
-  console.log(`Logs:`);
-  console.log(`  backend: ${state.backendLogPath}`);
-  console.log(`  frontend: ${state.webLogPath}`);
-  console.log(`PIDs:`);
-  console.log(`  backend: ${state.backendPidPath}`);
-  console.log(`  frontend: ${state.webPidPath}`);
-}
-
-function cleanupStalePidFiles(state) {
-  for (const pidPath of [state.backendPidPath, state.webPidPath]) {
-    const pid = readPid(pidPath);
-    if (pid && isRunning(pid)) continue;
-    rmSync(pidPath, { force: true });
-  }
-}
-
-function readStatePids(mode) {
+function readStatePids(mode, options = {}) {
   const state = runtimeState(mode);
   return [
-    { pid: readPid(state.backendPidPath), source: `${mode} backend pid file` },
-    { pid: readPid(state.webPidPath), source: `${mode} frontend pid file` }
-  ].filter((candidate) => candidate.pid);
+    { role: "supervisor", pid: readPid(state.supervisorPidPath), source: `${mode} supervisor pid file` },
+    { role: "server", pid: readPid(state.serverPidPath), source: `${mode} server pid file` },
+    { role: "web", pid: readPid(state.webPidPath), source: `${mode} web pid file` }
+  ]
+    .filter((candidate) => candidate.pid)
+    .map((candidate) => ({ ...candidate, running: isRunning(candidate.pid) }))
+    .filter((candidate) => options.includeStale || candidate.running);
 }
 
 function readPid(path) {
@@ -315,9 +453,47 @@ function readPid(path) {
 function removePidFiles(modes) {
   for (const mode of modes) {
     const state = runtimeState(mode);
-    rmSync(state.backendPidPath, { force: true });
+    rmSync(state.supervisorPidPath, { force: true });
+    rmSync(state.serverPidPath, { force: true });
     rmSync(state.webPidPath, { force: true });
   }
+}
+
+function cleanupStalePidFiles(state) {
+  for (const pidPath of [state.supervisorPidPath, state.serverPidPath, state.webPidPath]) {
+    const pid = readPid(pidPath);
+    if (pid && isRunning(pid)) continue;
+    rmSync(pidPath, { force: true });
+  }
+}
+
+function printState(state) {
+  console.log(`Logs:`);
+  console.log(`  supervisor: ${state.supervisorLogPath}`);
+  console.log(`  backend: ${state.serverLogPath}`);
+  console.log(`  frontend: ${state.webLogPath}`);
+  console.log(`PIDs:`);
+  console.log(`  supervisor: ${state.supervisorPidPath}`);
+  console.log(`  backend: ${state.serverPidPath}`);
+  console.log(`  frontend: ${state.webPidPath}`);
+}
+
+function runPnpmSync(args) {
+  execFileSync("pnpm", args, { env: process.env, stdio: "inherit" });
+}
+
+async function waitForEndpoints(endpoints) {
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const active = await Promise.all(endpoints.map((endpoint) => endpointActive(endpoint.url)));
+    if (active.every(Boolean)) return { ok: true };
+    await sleep(START_POLL_MS);
+  }
+
+  for (const endpoint of endpoints) {
+    if (!(await endpointActive(endpoint.url))) return { ok: false, ...endpoint };
+  }
+  return { ok: true };
 }
 
 function portOccupied(host, port) {
@@ -326,11 +502,8 @@ function portOccupied(host, port) {
     let listening = false;
     const done = (occupied) => {
       server.removeAllListeners();
-      if (listening) {
-        server.close(() => resolveOccupied(occupied));
-      } else {
-        resolveOccupied(occupied);
-      }
+      if (listening) server.close(() => resolveOccupied(occupied));
+      else resolveOccupied(occupied);
     };
 
     server.once("error", (error) => {
@@ -391,6 +564,55 @@ function isRunning(pid) {
   }
 }
 
+function terminatePid(pid, signal) {
+  const pgid = processGroupId(pid);
+  const currentPgid = processGroupId(process.pid);
+  const groupPids = pgid ? pidsInProcessGroup(pgid).filter((groupPid) => groupPid !== process.pid) : [];
+  if (pgid && pgid !== currentPgid) {
+    try {
+      process.kill(-pgid, signal);
+    } catch (error) {
+      if (error?.code !== "ESRCH") console.warn(`Could not send ${signal} to process group ${pgid}: ${error.message}`);
+    }
+  }
+
+  for (const groupPid of groupPids) {
+    try {
+      process.kill(groupPid, signal);
+    } catch (error) {
+      if (error?.code !== "ESRCH") console.warn(`Could not send ${signal} to PID ${groupPid}: ${error.message}`);
+    }
+  }
+
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") console.warn(`Could not send ${signal} to PID ${pid}: ${error.message}`);
+  }
+}
+
+function pidsInProcessGroup(pgid) {
+  const pids = [];
+  for (const entry of safeReadDir("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    const pid = Number(entry);
+    if (processGroupId(pid) === pgid) pids.push(pid);
+  }
+  return pids;
+}
+
+function processGroupId(pid) {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const endOfCommand = stat.lastIndexOf(")");
+    const fields = stat.slice(endOfCommand + 2).trim().split(/\s+/);
+    const pgid = Number(fields[2]);
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
 function findLinuxProcPids(port) {
   const inodes = listeningSocketInodes(port);
   if (inodes.size === 0) return [];
@@ -439,8 +661,7 @@ function allLocalPorts() {
 }
 
 function modePorts(stopMode) {
-  const [defaultBackendPort, defaultWebPort] =
-    stopMode === "prod" ? DEFAULT_PROD_PORTS : DEFAULT_DEV_PORTS;
+  const [defaultBackendPort, defaultWebPort] = stopMode === "prod" ? DEFAULT_PROD_PORTS : DEFAULT_DEV_PORTS;
   return uniquePorts([
     process.env.MUXPILOT_PORT ?? defaultBackendPort,
     process.env.MUXPILOT_WEB_PORT ?? defaultWebPort
@@ -494,11 +715,8 @@ function snapshotEnv(keys) {
 
 function restoreEnv(snapshot) {
   for (const [key, value] of snapshot) {
-    if (value === undefined) {
-      delete process.env[key];
-    } else {
-      process.env[key] = value;
-    }
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
   }
 }
 
@@ -600,14 +818,64 @@ function parseDotenvLine(line) {
 }
 
 function unquoteDotenvValue(value) {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
     return value.slice(1, -1);
   }
 
   return value.replace(/\s+#.*$/, "");
+}
+
+function normalizeLogProcesses(processes) {
+  const normalized = processes.flatMap((value) => (value === "all" ? PROCESSES : [value]));
+  const unique = [...new Set(normalized)];
+  for (const processName of unique) {
+    if (!PROCESSES.includes(processName)) {
+      console.error(`Unknown log process "${processName}". Use server, web, supervisor, or all.`);
+      process.exit(1);
+    }
+  }
+  return unique;
+}
+
+function normalizeLineCount(value) {
+  const lines = Number(value);
+  return Number.isInteger(lines) && lines > 0 ? lines : 80;
+}
+
+function readLastLines(path, lines) {
+  const content = safeReadFile(path);
+  if (!content) return existsSync(path) ? "" : `(no log file at ${path})\n`;
+  const trimmed = content.endsWith("\n") ? content.slice(0, -1) : content;
+  const allLines = trimmed.split(/\r?\n/);
+  return `${allLines.slice(-lines).join("\n")}\n`;
+}
+
+function fileSize(path) {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
+}
+
+function readRange(path, start, end) {
+  if (end <= start) return "";
+  const content = safeReadFile(path);
+  return content.slice(start, end);
+}
+
+function assertMode(mode, command) {
+  if (!MODES.includes(mode)) {
+    console.error(`Usage: pnpm app ${command} [${MODES.join("|")}]`);
+    process.exit(1);
+  }
+}
+
+function assertModeOrAll(mode, command) {
+  if (mode !== "all" && !MODES.includes(mode)) {
+    console.error(`Usage: pnpm app ${command} [${MODES.join("|")}|all]`);
+    process.exit(1);
+  }
 }
 
 function sleep(ms) {
@@ -620,5 +888,5 @@ function modeLabel(mode) {
 }
 
 function capitalize(value) {
-  return `${value[0].toUpperCase()}${value.slice(1)}`;
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }

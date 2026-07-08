@@ -2,39 +2,71 @@
 
 Prerequisites:
 
-- WSL2 Ubuntu
-- tmux
-- Node.js 24 or newer
-- pnpm
-- Codex CLI sessions already running in tmux
+- WSL2 Ubuntu or another local Linux-like host.
+- tmux.
+- Codex CLI.
+- Node.js 24 or newer.
+- pnpm 10.28.0 or compatible.
 
-Install dependencies:
+Fresh install:
 
 ```bash
+git clone <muxpilot-repo-url>
+cd muxpilot
 pnpm install
-```
-
-Create local config:
-
-```bash
 cp .env.example .env
+pnpm app start
 ```
 
-Loopback local use does not require an access key. Before exposing the app to your LAN, set `MUXPILOT_LAN_ENABLED=1`.
+Open:
 
-Run development servers:
+```text
+http://127.0.0.1:12778
+```
+
+`pnpm app start` builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
+
+Useful production commands:
 
 ```bash
-pnpm start:dev
+pnpm app status
+pnpm app logs
+pnpm app logs prod --process all --follow
+pnpm app restart
+pnpm app stop
 ```
 
-`pnpm start:dev` checks the default/configured local ports first. If the backend and frontend are already active, it reuses the existing server instead of starting a second copy. When it starts a missing server, it runs it in the background with PID and log files under `data/runtime/dev/`. It uses `./data/dev/muxpilot.db` for local development state.
+Production defaults:
 
-The backend binds to `127.0.0.1:4177` by default. The frontend runs on `127.0.0.1:5177`.
+- Web UI: `http://127.0.0.1:12778`
+- Backend: `http://127.0.0.1:12777`
+- Database: `./data/prod/muxpilot.db`
+- Runtime logs/PIDs: `./data/runtime/prod/`
+
+The runtime directory contains `supervisor.log`, `server.log`, `web.log`, `supervisor.pid`, `server.pid`, and `web.pid`.
+
+## Development Mode
+
+Run the development servers:
+
+```bash
+pnpm app start dev
+```
+
+Development mode uses `127.0.0.1:4177` for the backend, `127.0.0.1:5177` for the Web UI, `./data/dev/muxpilot.db` for SQLite, and `data/runtime/dev/` for logs/PIDs.
+
+Stop or restart development mode:
+
+```bash
+pnpm app stop dev
+pnpm app restart dev
+```
 
 The dashboard shows discovered Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, and usage data when available. Opening a session shows the structured transcript, raw terminal view, pending approvals/questions, queued input, skill suggestions, and session actions.
 
 ## Phone Access On The Same Network
+
+Loopback local use does not require an access key. Before exposing the app to your LAN, set `MUXPILOT_LAN_ENABLED=1`.
 
 For installable PWA use and QR-code camera login from a phone, generate local HTTPS certificates first:
 
@@ -51,16 +83,25 @@ By default, the shared root CA lives in `.certs/pwa-ca/`. The directory exists i
 Start the app bound to the LAN:
 
 ```bash
-MUXPILOT_LAN_ENABLED=1 pnpm start:dev
+MUXPILOT_LAN_ENABLED=1 pnpm app start
 ```
 
 Open the app on your desktop, press the Connect device button in the top bar, and open the shown URL on your phone. The URL usually looks like:
 
 ```text
-https://192.168.1.25:5177
+https://192.168.1.25:12778
 ```
 
 Use the Connect device modal on the host machine to copy the generated access key or scan the QR code. The phone browser talks to the Web UI over the LAN, and the backend controls tmux/Codex sessions on the desktop.
+
+If the phone cannot reach the URL, install and verify the host firewall rule. On native Linux:
+
+```bash
+scripts/linux-lan.sh install --port 12778
+scripts/linux-lan.sh status --port 12778
+```
+
+On Windows 11 + WSL2, use [Windows WSL LAN Access](./windows-wsl-lan.md).
 
 If HTTPS PWA certs are configured, the Connect device modal also shows an Install phone certificate URL and QR code. Open that first on the phone, install the public root CA, then open the HTTPS app URL. The private CA key is never served by the app. On iOS, enable full trust for the installed profile in Settings. On Android, install the CA certificate in user credentials.
 
@@ -75,24 +116,28 @@ ip addr
 
 On macOS, use `ipconfig getifaddr en0`. On Windows, use `ipconfig`.
 
-Troubleshooting:
+## Updating
+
+From the repo directory:
+
+```bash
+git pull
+pnpm install
+pnpm app restart
+```
+
+`pnpm app restart` restarts production. Use `pnpm app restart all` to restart only the modes that are already running.
+
+## Troubleshooting
 
 - QR scan button missing on phone: confirm the phone opened an `https://` URL and trusts the muxpilot root CA.
 - Connection refused: confirm `MUXPILOT_LAN_ENABLED=1`, the phone is on the same network, and the desktop firewall allows the web port.
+- Native Linux: use [Native Linux LAN Access](./linux-lan.md) to install and verify the required local firewall rule.
 - Windows 11 + WSL2: use [Windows WSL LAN Access](./windows-wsl-lan.md) to install and verify the required Windows/Hyper-V firewall rules.
 - Access key rejected: open the Connect device modal on the host machine and use the current generated access key.
 - No sessions: confirm Codex is running inside tmux on the desktop user account that started the backend.
 - Input not reaching Codex: confirm the tmux pane still exists and the backend user owns or can access that tmux socket.
 - Skill suggestions missing: confirm `MUXPILOT_CODEX_HOME` points at the Codex home that contains your skills/plugins.
+- Stale PID or port conflict: run `pnpm app status`, inspect `data/runtime/<mode>/`, and stop the conflicting process before starting again.
 
-Run production preview:
-
-```bash
-pnpm start:prod
-```
-
-Production preview uses `127.0.0.1:12777` and `127.0.0.1:12778`, with a separate SQLite database under `./data/prod`, so it can run at the same time as the development server. If both production-preview endpoints are already healthy, `pnpm start:prod` reuses them instead of starting a duplicate. Started processes run in the background with PID and log files under `data/runtime/prod/`.
-
-Stop production preview with `pnpm stop:prod`. Restart it with `pnpm restart:prod`. `pnpm stop` stops both development and production-preview listeners.
-
-Production preview is for manual operator checks. Automated agent work should use `pnpm start:dev`.
+Production mode is for manual operator checks. Automated agent work should use `pnpm app start dev`.
