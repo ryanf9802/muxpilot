@@ -3,11 +3,13 @@ import { z } from "zod";
 import type {
   CodexSkillsResponse,
   CreateSessionRequest,
+  PushSubscriptionInput,
   QuestionAnswerRequest,
   ResolveApprovalRequest,
   SendInputRequest,
   SessionDirectoriesResponse,
   SessionAction,
+  UpdateNotificationSettingRequest,
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
@@ -30,6 +32,7 @@ import { buildConnectivity, buildRemoteAccess } from "../services/connectivity.j
 import { discoverCodexSkills } from "../services/skillDiscovery.js";
 import type { CodexUsageService } from "../services/codexUsage.js";
 import type { ActivitySummarizer } from "../services/activitySummarizer.js";
+import type { NotificationService } from "../services/notifications.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const sendInputSchema = z.object({ text: z.string().min(1).max(200_000), mode: collaborationModeSchema.optional() });
@@ -57,6 +60,19 @@ const questionAnswerSchema = z.object({
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
+const notificationRuleTypeSchema = z.enum(["done_task", "approval_gate", "status_change"]);
+const notificationSettingSchema = z.discriminatedUnion("scope", [
+  z.object({ scope: z.literal("global"), type: notificationRuleTypeSchema, enabled: z.boolean() }),
+  z.object({ scope: z.literal("session"), sessionId: z.string().min(1), type: notificationRuleTypeSchema, enabled: z.boolean() })
+]);
+const pushSubscriptionSchema = z.object({
+  endpoint: z.string().url(),
+  expirationTime: z.number().nullable().optional(),
+  keys: z.object({
+    p256dh: z.string().min(1),
+    auth: z.string().min(1)
+  })
+});
 const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
@@ -75,7 +91,8 @@ export function registerRoutes(
   config: AppConfig,
   access: AccessControl,
   codexUsage?: CodexUsageService,
-  activitySummarizer?: ActivitySummarizer
+  activitySummarizer?: ActivitySummarizer,
+  notificationService?: NotificationService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -95,6 +112,29 @@ export function registerRoutes(
     await db.setUnrestrictedRemoteAccessEnabled(parsed.unrestrictedRemoteAccess);
     access.setUnrestrictedRemoteAccessEnabled(parsed.unrestrictedRemoteAccess);
     return buildRemoteAccess(config, access.currentAccessKey(), undefined, access.isUnrestrictedRemoteAccessEnabled());
+  });
+
+  app.get("/api/notifications/settings", { preHandler: access.requireAccess }, async () => db.getNotificationSettings());
+
+  app.patch("/api/notifications/settings", { preHandler: access.requireAccess }, async (request) => {
+    const parsed = notificationSettingSchema.parse(request.body) satisfies UpdateNotificationSettingRequest;
+    return db.setNotificationRule(parsed.scope, parsed.scope === "session" ? parsed.sessionId : null, parsed.type, parsed.enabled, new Date().toISOString());
+  });
+
+  app.get("/api/notifications/push-key", { preHandler: access.requireAccess }, async () => ({
+    publicKey: notificationService ? await notificationService.publicPushKey() : ""
+  }));
+
+  app.post("/api/notifications/push-subscriptions", { preHandler: access.requireAccess }, async (request) => {
+    const parsed = pushSubscriptionSchema.parse(request.body) satisfies PushSubscriptionInput;
+    await db.upsertPushSubscription(parsed, new Date().toISOString());
+    return { ok: true };
+  });
+
+  app.delete("/api/notifications/push-subscriptions", { preHandler: access.requireAccess }, async (request) => {
+    const parsed = z.object({ endpoint: z.string().url() }).parse(request.body);
+    await db.deletePushSubscription(parsed.endpoint);
+    return { ok: true };
   });
 
   app.get("/api/codex/skills", { preHandler: access.requireAccess }, async (): Promise<CodexSkillsResponse> => ({

@@ -6,7 +6,6 @@ import {
   CodexUsagePanel,
   DASHBOARD_EVENT_DEBOUNCE_MS,
   DASHBOARD_SESSION_RECONCILE_INTERVAL_MS,
-  DASHBOARD_STATUS_FILTER_OPTIONS,
   DASHBOARD_STATUSES,
   DASHBOARD_USAGE_RECONCILE_INTERVAL_MS,
   dashboardLocationState,
@@ -28,15 +27,6 @@ describe("DASHBOARD_STATUSES", () => {
   it("includes plan-specific filter options", () => {
     expect(DASHBOARD_STATUSES).toContain("planning");
     expect(DASHBOARD_STATUSES).toContain("plan_ready");
-  });
-
-  it("includes stoplight bucket filter options", () => {
-    expect(DASHBOARD_STATUS_FILTER_OPTIONS.map((option) => option.value)).toEqual([
-      "",
-      "severity:red",
-      "severity:yellow",
-      "severity:green"
-    ]);
   });
 });
 
@@ -117,6 +107,14 @@ describe("SessionCard", () => {
 
     expect(html).not.toContain("main");
     expect(html).not.toContain("dirty");
+  });
+
+  it("renders session notification state without global-only rules", () => {
+    const session = testSession({ id: "a", paneId: "%111", windowName: "notify" });
+
+    expect(renderSessionCard(session)).not.toContain("session-notification-indicator");
+    expect(renderSessionCard(session, ["done_task"])).toContain("Notify: Done task");
+    expect(renderSessionCard(session, ["done_task"], "green")).toContain("session-card-notification-ring-green");
   });
 });
 
@@ -387,12 +385,18 @@ describe("dashboardLocationState", () => {
   });
 });
 
-function renderSessionCard(session: ManagedSession): string {
+function renderSessionCard(
+  session: ManagedSession,
+  notificationRules: Parameters<typeof SessionCard>[0]["notificationRules"] = [],
+  notificationRing: Parameters<typeof SessionCard>[0]["notificationRing"] = null
+): string {
   return renderToStaticMarkup(
     createElement(SessionCard, {
       session,
       displayName: sessionBaseTestName(session),
       previewLines: dashboardPreviewLines(session),
+      notificationRules,
+      notificationRing,
       onOpen: () => undefined,
       onOpenMenu: () => undefined,
       onOpenMenuFromButton: () => undefined

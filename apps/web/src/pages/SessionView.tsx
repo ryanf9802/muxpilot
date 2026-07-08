@@ -142,6 +142,10 @@ export function isDesktopVimAvailable(): boolean {
   return window.matchMedia(DESKTOP_VIM_MEDIA_QUERY).matches;
 }
 
+export function shouldAutofocusComposer(desktopInputAvailable: boolean): boolean {
+  return desktopInputAvailable;
+}
+
 function useDesktopVimAvailable(): boolean {
   const [available, setAvailable] = useState(isDesktopVimAvailable);
 
@@ -328,7 +332,7 @@ export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
 export function SessionView() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
-  const { refreshSessionStoplight, syncSessionStoplight, openCreateSession, connectionEpoch } = useOutletContext<AppShellOutletContext>();
+  const { refreshSessionStoplight, syncSessionStoplight, openCreateSession, connectionEpoch, accessMode } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
   const [initialTranscriptSessionId, setInitialTranscriptSessionId] = useState<string | null>(null);
@@ -1046,7 +1050,7 @@ export function SessionView() {
           <SessionHeaderMeta session={readySession} />
         </div>
         <StatusPill status={readySession.status} />
-        <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} onCopy={() => void copyTmuxCommand()} />
+        <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
       </div>
@@ -1190,7 +1194,7 @@ export function SessionView() {
                     : "Message Codex")
               }
               rows={3}
-              focusRequestKey={readySession.id}
+              focusRequestKey={shouldAutofocusComposer(vimAvailable) ? readySession.id : null}
               disabled={submitBusy || composerLocked}
             />
             <button
@@ -1920,14 +1924,33 @@ function VimLogoMark() {
 export function TmuxCommandButton({
   session,
   copied,
+  copyEnabled = true,
   onCopy
 }: {
   session: ManagedSession;
   copied: boolean;
+  copyEnabled?: boolean;
   onCopy: () => void;
 }) {
   const command = tmuxAttachCommand(session);
   const model = sessionModelDisplay(session);
+  const content = (
+    <>
+      {copyEnabled ? copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" /> : null}
+      <span className="tmux-command-label">
+        <span className="tmux-command-model">{model.model}</span>
+        <span className="tmux-command-effort">{model.reasoningEffort}</span>
+      </span>
+      {copyEnabled && copied ? <span className="tmux-command-copied">Copied</span> : null}
+    </>
+  );
+  if (!copyEnabled) {
+    return (
+      <div className="tmux-command-button tmux-command-display" title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
+        {content}
+      </div>
+    );
+  }
   return (
     <button
       type="button"
@@ -1936,12 +1959,7 @@ export function TmuxCommandButton({
       title={`${model.model} / ${model.reasoningEffort}\n${command}`}
       aria-label={`Copy tmux attach command for ${model.model} ${model.reasoningEffort}`}
     >
-      {copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
-      <span className="tmux-command-label">
-        <span className="tmux-command-model">{model.model}</span>
-        <span className="tmux-command-effort">{model.reasoningEffort}</span>
-      </span>
-      {copied ? <span className="tmux-command-copied">Copied</span> : null}
+      {content}
     </button>
   );
 }

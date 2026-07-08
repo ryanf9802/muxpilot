@@ -216,10 +216,52 @@ export interface UpdateQueuedInputRequest {
 
 export interface SessionEvent {
   id: string;
-  type: "session.updated" | "message.appended" | "status.changed" | "notification.created" | "queue.updated";
+  type: "session.updated" | "message.appended" | "status.changed" | "notification.created" | "notification.triggered" | "queue.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;
+}
+
+export type NotificationRuleType = "done_task" | "approval_gate" | "status_change";
+export type NotificationRuleScope = "global" | "session";
+
+export interface NotificationSettings {
+  globalRules: NotificationRuleType[];
+  sessionRules: Record<string, NotificationRuleType[]>;
+}
+
+export interface UpdateNotificationSettingRequest {
+  scope: NotificationRuleScope;
+  sessionId?: string;
+  type: NotificationRuleType;
+  enabled: boolean;
+}
+
+export interface NotificationTriggeredPayload {
+  sessionId: string;
+  sessionName: string;
+  rules: NotificationRuleType[];
+  previousStatus: SessionStatus;
+  status: SessionStatus;
+  severity: "red" | "yellow" | "green";
+  title: string;
+  body: string;
+  url: string;
+}
+
+export interface PushSubscriptionKeys {
+  p256dh: string;
+  auth: string;
+}
+
+export interface PushSubscriptionInput {
+  endpoint: string;
+  expirationTime?: number | null;
+  keys: PushSubscriptionKeys;
+}
+
+export interface PushKeyResponse {
+  publicKey: string;
 }
 
 export type AccessMode = "local" | "token" | "unrestricted";

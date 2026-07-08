@@ -15,6 +15,7 @@ import { ActivitySummarizer, OpenAIActivitySummaryClient } from "./services/acti
 import { buildOpenAIModelPricingTable } from "./services/openaiPricing.js";
 import { CodexUsageService } from "./services/codexUsage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
+import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 
@@ -27,6 +28,7 @@ const codexProcessResolver = new CodexProcessResolver();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
+const notifications = new NotificationService(db, events, app.log);
 const summaryClient = config.openaiApiKey
   ? new OpenAIActivitySummaryClient(config.openaiApiKey, config.summaryModel)
   : null;
@@ -85,15 +87,17 @@ await app.register(cors, {
 await app.register(websocket);
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications);
 
 app.get("/healthz", async () => ({ ok: true }));
 
+await notifications.start();
 manager.start();
 pwaTrustServer.start();
 
 const close = async () => {
   manager.stop();
+  notifications.stop();
   codexUsage.stop();
   await pwaTrustServer.close();
   await db.close();

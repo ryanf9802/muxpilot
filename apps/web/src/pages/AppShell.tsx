@@ -1,9 +1,20 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
+import { AlertTriangle, Bell, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
+import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError } from "../api/client.js";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { ManagedSession, MeResponse, RemoteAccessResponse, SessionDirectorySuggestion, SessionEvent } from "@muxpilot/core";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent } from "react";
+import type {
+  AccessMode,
+  ManagedSession,
+  MeResponse,
+  NotificationRuleType,
+  NotificationSettings,
+  NotificationTriggeredPayload,
+  RemoteAccessResponse,
+  SessionDirectorySuggestion,
+  SessionEvent
+} from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
@@ -16,10 +27,18 @@ import {
   type SessionStoplightCounts,
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
+import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
+import {
+  ensurePushSubscription,
+  globalNotificationRules,
+  notificationToastMessage,
+  playNotificationBell
+} from "../utils/notifications.js";
 
 export type ShellConnectionState = "checking" | "connected" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
+const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 
 export function AppShell() {
   const location = useLocation();
@@ -29,6 +48,7 @@ export function AppShell() {
   const [connectOpen, setConnectOpen] = useState(false);
   const [showConnectButton, setShowConnectButton] = useState(false);
   const [showLogoutButton, setShowLogoutButton] = useState(true);
+  const [accessMode, setAccessMode] = useState<AccessMode | null>(null);
   const [retryBusy, setRetryBusy] = useState(false);
   const [createSessionOpen, setCreateSessionOpen] = useState(false);
   const [createSessionCwd, setCreateSessionCwd] = useState("");
@@ -39,16 +59,25 @@ export function AppShell() {
   const [createSessionNameAutofocus, setCreateSessionNameAutofocus] = useState(false);
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
+  const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
+  const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
+  const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
   const sessionRequestIdRef = useRef(0);
   const connectionStateRef = useRef<ShellConnectionState>("checking");
+  const locationPathRef = useRef(location.pathname);
+  const notificationMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => installCtrlWGuard(), []);
 
   useEffect(() => {
     connectionStateRef.current = connectionState;
   }, [connectionState]);
+
+  useEffect(() => {
+    locationPathRef.current = location.pathname;
+  }, [location.pathname]);
 
   const markUnauthorized = useCallback(() => {
     setConnectionState("unauthorized");
@@ -70,6 +99,7 @@ export function AppShell() {
     }
     const wasDisconnected = connectionStateRef.current === "disconnected";
     setConnectionState("connected");
+    setAccessMode(me.accessMode);
     setShowConnectButton(shouldShowConnectDeviceButton(me));
     setShowLogoutButton(shouldShowLogoutButton(me));
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
@@ -85,6 +115,10 @@ export function AppShell() {
     const requestId = ++sessionRequestIdRef.current;
     const sessionResponse = await api.sessions();
     if (requestId === sessionRequestIdRef.current) setSessions(sessionResponse.sessions);
+  }, []);
+
+  const loadNotificationSettings = useCallback(async () => {
+    setNotificationSettings(await api.notificationSettings());
   }, []);
 
   const syncSessionStoplight = useCallback((session: ManagedSession) => {
@@ -111,6 +145,7 @@ export function AppShell() {
     };
 
     void loadSessions().catch(markDisconnected);
+    void loadNotificationSettings().catch(() => undefined);
     const interval = setInterval(() => void loadSessions().catch(markDisconnected), SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
@@ -125,6 +160,13 @@ export function AppShell() {
     };
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
+      if (isNotificationTriggeredEvent(event)) {
+        playNotificationBell();
+        toast(notificationToastMessage(event.payload), {
+          position: locationPathRef.current.startsWith("/sessions/") ? "top-right" : "top-left",
+          type: toastTypeForNotification(event.payload)
+        });
+      }
       if (shouldRefreshSessionsForEvent(event)) scheduleLoad();
     };
     socket.onclose = () => {
@@ -151,7 +193,7 @@ export function AppShell() {
       clearInterval(interval);
       socket.close();
     };
-  }, [applyMe, connectionState, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
+  }, [applyMe, connectionState, loadNotificationSettings, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "disconnected") return undefined;
@@ -200,6 +242,23 @@ export function AppShell() {
     };
   }, [createSessionOpen]);
 
+  useEffect(() => {
+    if (!notificationMenu) return undefined;
+    const closeOnPointer = (event: PointerEvent) => {
+      if (notificationMenuRef.current?.contains(event.target as Node)) return;
+      setNotificationMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNotificationMenu(null);
+    };
+    document.addEventListener("pointerdown", closeOnPointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [notificationMenu]);
+
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
   const clientDirectorySuggestions = useMemo(() => sessionDirectorySuggestionsFromSessions(sessions), [sessions]);
   const directorySuggestions = useMemo(
@@ -214,6 +273,7 @@ export function AppShell() {
   );
   const showDirectorySuggestions = createSessionOpen && createSessionDirectoryFocused && visibleDirectorySuggestions.length > 0;
   const contentClassName = location.pathname.startsWith("/sessions/") ? "content content-session" : "content";
+  const activeStoplightSeverity = activeSessionStoplightSeverity(location.search);
 
   const openCreateSession = useCallback((cwd = "") => {
     const hasPrefilledCwd = cwd.trim().length > 0;
@@ -339,12 +399,35 @@ export function AppShell() {
     navigate({ pathname: "/", search: nextSessionStoplightSearch(location.search, severity) });
   }
 
+  function openGlobalNotificationMenu(event: ReactMouseEvent<HTMLButtonElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    setNotificationMenu({
+      x: Math.max(8, Math.min(window.innerWidth - GLOBAL_NOTIFICATION_MENU_WIDTH - 8, rect.right - GLOBAL_NOTIFICATION_MENU_WIDTH)),
+      y: rect.bottom + 6
+    });
+  }
+
+  async function toggleGlobalNotification(type: NotificationRuleType, enabled: boolean) {
+    if (notificationToggleBusy) return;
+    setNotificationToggleBusy(true);
+    try {
+      const settings = await api.updateNotificationSetting({ scope: "global", type, enabled });
+      setNotificationSettings(settings);
+      if (enabled) void ensurePushSubscription().catch(() => undefined);
+    } finally {
+      setNotificationToggleBusy(false);
+    }
+  }
+
   return (
     <div className="app">
       <header className="topbar">
         <AppBrand />
-        <SessionStoplight counts={stoplightCounts} onSelect={selectSessionStoplightSeverity} />
+        <SessionStoplight counts={stoplightCounts} activeSeverity={activeStoplightSeverity} onSelect={selectSessionStoplightSeverity} />
         <div className="topbar-actions">
+          <button className="icon-button" onClick={openGlobalNotificationMenu} aria-label="Global notifications">
+            <Bell size={18} />
+          </button>
           {showConnectButton ? (
             <button className="icon-button" onClick={() => setConnectOpen(true)} aria-label="Connect device">
               <Smartphone size={18} />
@@ -364,13 +447,37 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
+      {notificationMenu ? (
+        <div
+          className="session-action-menu notification-rule-menu"
+          ref={notificationMenuRef}
+          style={{ left: notificationMenu.x, top: notificationMenu.y }}
+          role="menu"
+          aria-label="Global notification settings"
+        >
+          <NotificationRuleMenu
+            enabledRules={globalNotificationRules(notificationSettings)}
+            onToggle={(type, enabled) => void toggleGlobalNotification(type, enabled)}
+            disabled={notificationToggleBusy}
+          />
+        </div>
+      ) : null}
       <main className={contentClassName}>
         <Outlet
           context={
-            { refreshSessionStoplight: loadSessions, syncSessionStoplight, openCreateSession, connectionEpoch } satisfies AppShellOutletContext
+            {
+              refreshSessionStoplight: loadSessions,
+              syncSessionStoplight,
+              openCreateSession,
+              connectionEpoch,
+              accessMode,
+              notificationSettings,
+              setNotificationSettings
+            } satisfies AppShellOutletContext
           }
         />
       </main>
+      <ToastContainer theme="dark" newestOnTop closeOnClick pauseOnFocusLoss={false} />
       {createSessionOpen ? (
         <div
           className="dialog-backdrop"
@@ -475,6 +582,19 @@ export interface AppShellOutletContext {
   syncSessionStoplight: (session: ManagedSession) => void;
   openCreateSession: (cwd?: string) => void;
   connectionEpoch: number;
+  accessMode: AccessMode | null;
+  notificationSettings: NotificationSettings | null;
+  setNotificationSettings: (settings: NotificationSettings) => void;
+}
+
+function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: NotificationTriggeredPayload } {
+  return event.type === "notification.triggered" && Boolean((event as { payload?: unknown }).payload);
+}
+
+function toastTypeForNotification(payload: NotificationTriggeredPayload): "success" | "warning" | "error" {
+  if (payload.severity === "red") return "error";
+  if (payload.severity === "green") return "success";
+  return "warning";
 }
 
 export function DisconnectedNotice() {
@@ -620,22 +740,53 @@ export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession
 
 export function nextSessionStoplightSearch(currentSearch: string, severity: SessionStatusSeverity): string {
   const params = new URLSearchParams(currentSearch);
-  const currentSeverity = params.get("statusSeverity");
+  const currentSeverity = activeSessionStoplightSeverity(currentSearch);
   params.delete("status");
   params.delete("statusSeverity");
-  if (!isSessionStatusSeverity(currentSeverity) || currentSeverity !== severity) {
+  if (currentSeverity !== severity) {
     params.set("statusSeverity", severity);
   }
   const nextSearch = params.toString();
   return nextSearch ? `?${nextSearch}` : "";
 }
 
-export function SessionStoplight({ counts, onSelect }: { counts: SessionStoplightCounts; onSelect?: (severity: SessionStatusSeverity) => void }) {
+export function activeSessionStoplightSeverity(search: string): SessionStatusSeverity | null {
+  const severity = new URLSearchParams(search).get("statusSeverity");
+  return isSessionStatusSeverity(severity) ? severity : null;
+}
+
+export function SessionStoplight({
+  counts,
+  activeSeverity,
+  onSelect
+}: {
+  counts: SessionStoplightCounts;
+  activeSeverity?: SessionStatusSeverity | null;
+  onSelect?: (severity: SessionStatusSeverity) => void;
+}) {
   return (
     <div className="session-stoplight" aria-label={sessionStoplightSummary(counts)} title={sessionStoplightSummary(counts)}>
-      <SessionStoplightDot severity="red" count={counts.red} label={sessionStoplightDotLabel("red", counts.red)} onSelect={onSelect} />
-      <SessionStoplightDot severity="yellow" count={counts.yellow} label={sessionStoplightDotLabel("yellow", counts.yellow)} onSelect={onSelect} />
-      <SessionStoplightDot severity="green" count={counts.green} label={sessionStoplightDotLabel("green", counts.green)} onSelect={onSelect} />
+      <SessionStoplightDot
+        severity="red"
+        count={counts.red}
+        label={sessionStoplightDotLabel("red", counts.red)}
+        active={activeSeverity === "red"}
+        onSelect={onSelect}
+      />
+      <SessionStoplightDot
+        severity="yellow"
+        count={counts.yellow}
+        label={sessionStoplightDotLabel("yellow", counts.yellow)}
+        active={activeSeverity === "yellow"}
+        onSelect={onSelect}
+      />
+      <SessionStoplightDot
+        severity="green"
+        count={counts.green}
+        label={sessionStoplightDotLabel("green", counts.green)}
+        active={activeSeverity === "green"}
+        onSelect={onSelect}
+      />
     </div>
   );
 }
@@ -644,11 +795,13 @@ function SessionStoplightDot({
   severity,
   count,
   label,
+  active,
   onSelect
 }: {
   severity: SessionStatusSeverity;
   count: number;
   label: string;
+  active?: boolean;
   onSelect?: (severity: SessionStatusSeverity) => void;
 }) {
   if (count === 0) return null;
@@ -657,6 +810,8 @@ function SessionStoplightDot({
     <button
       type="button"
       className={`session-stoplight-dot session-stoplight-dot-${severity}`}
+      aria-pressed={active ? "true" : "false"}
+      data-active={active || undefined}
       aria-label={label}
       title={label}
       onClick={() => onSelect?.(severity)}

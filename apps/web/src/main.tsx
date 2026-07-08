@@ -5,6 +5,7 @@ import { AppRecoveryPage, AppShell } from "./pages/AppShell.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { AccessPage } from "./pages/Login.js";
 import { SessionView } from "./pages/SessionView.js";
+import "react-toastify/dist/ReactToastify.css";
 import "./styles/app.css";
 
 if (import.meta.env.PROD && typeof navigator !== "undefined" && "serviceWorker" in navigator) {

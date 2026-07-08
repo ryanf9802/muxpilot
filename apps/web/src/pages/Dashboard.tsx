@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Plus, Search, Skull, X } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Plus, Search, Skull, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -15,6 +15,8 @@ import type {
   CodexUsageLimit,
   CodexUsageSummaryResponse,
   ManagedSession,
+  NotificationRuleType,
+  NotificationTriggeredPayload,
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
   SessionEvent,
@@ -24,7 +26,13 @@ import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, n
 import { api, eventSocket } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
+import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
+import {
+  ensurePushSubscription,
+  notificationRulesLabel,
+  sessionNotificationRules
+} from "../utils/notifications.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
@@ -35,19 +43,15 @@ import {
 } from "../utils/sessionStatus.js";
 
 const ACTION_MENU_WIDTH = 220;
-const ACTION_MENU_HEIGHT = 128;
+const ACTION_MENU_HEIGHT = 176;
+const NOTIFICATION_MENU_WIDTH = 220;
+const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
 export const DASHBOARD_SESSION_RECONCILE_INTERVAL_MS = SESSION_STATUS_RECONCILE_INTERVAL_MS;
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
 export const DASHBOARD_EVENT_DEBOUNCE_MS = SESSION_STATUS_EVENT_DEBOUNCE_MS;
 export const DASHBOARD_STATUSES = ["", "working", "planning", "waiting", "question", "plan_ready", "approval", "unknown", "missing"];
-export const DASHBOARD_STATUS_FILTER_OPTIONS = [
-  { value: "", label: "all" },
-  { value: "severity:red", label: "needs attention" },
-  { value: "severity:yellow", label: "working / pending" },
-  { value: "severity:green", label: "ready" }
-];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 
 export type DashboardStatusFilter =
@@ -58,13 +62,16 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch, openCreateSession } = useOutletContext<AppShellOutletContext>();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings } = useOutletContext<AppShellOutletContext>();
+  const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
   const [codexUsageSummary, setCodexUsageSummary] = useState<CodexUsageSummaryResponse | null>(null);
   const [q, setQ] = useState("");
   const [menu, setMenu] = useState<{ session: ManagedSession; x: number; y: number } | null>(null);
+  const [notifySubmenuOpen, setNotifySubmenuOpen] = useState(false);
+  const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
+  const [notificationRings, setNotificationRings] = useState<Record<string, NotificationTriggeredPayload["severity"]>>({});
   const [renameSession, setRenameSession] = useState<ManagedSession | null>(null);
   const [renameName, setRenameName] = useState("");
   const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "kill" } | null>(null);
@@ -122,6 +129,16 @@ export function Dashboard() {
     const socket = eventSocket();
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
+      if (isNotificationTriggeredEvent(event)) {
+        setNotificationRings((current) => ({ ...current, [event.sessionId]: event.payload.severity }));
+        window.setTimeout(() => {
+          setNotificationRings((current) => {
+            const next = { ...current };
+            delete next[event.sessionId];
+            return next;
+          });
+        }, NOTIFICATION_RING_MS);
+      }
       if (shouldRefreshDashboardForEvent(event)) scheduleLoad();
     };
     return () => {
@@ -179,6 +196,7 @@ export function Dashboard() {
 
   function openMenu(session: ManagedSession, x: number, y: number) {
     setActionError(null);
+    setNotifySubmenuOpen(false);
     setMenu({ session, ...clampMenuPosition(x, y) });
   }
 
@@ -264,6 +282,18 @@ export function Dashboard() {
     }
   }
 
+  async function toggleSessionNotification(sessionId: string, type: NotificationRuleType, enabled: boolean) {
+    if (notificationToggleBusy) return;
+    setNotificationToggleBusy(true);
+    try {
+      const settings = await api.updateNotificationSetting({ scope: "session", sessionId, type, enabled });
+      setNotificationSettings(settings);
+      if (enabled) void ensurePushSubscription().catch(() => undefined);
+    } finally {
+      setNotificationToggleBusy(false);
+    }
+  }
+
   function toggleRepoCollapsed(repoKey: string) {
     setCollapsedRepoKeys((currentKeys) => {
       const nextKeys = new Set(currentKeys);
@@ -277,18 +307,6 @@ export function Dashboard() {
     });
   }
 
-  function updateStatusFilter(value: string) {
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.delete("status");
-    nextParams.delete("statusSeverity");
-    if (value.startsWith("severity:")) {
-      nextParams.set("statusSeverity", value.slice("severity:".length));
-    } else if (value) {
-      nextParams.set("status", value);
-    }
-    setSearchParams(nextParams);
-  }
-
   return (
     <section className="dashboard">
       <div className="filters">
@@ -296,16 +314,9 @@ export function Dashboard() {
           <Search size={18} />
           <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="Search sessions" />
         </label>
-        <select value={statusFilter.selectValue} onChange={(event) => updateStatusFilter(event.target.value)} aria-label="Status filter">
-          {DASHBOARD_STATUS_FILTER_OPTIONS.map((option) => (
-            <option key={option.value || "all"} value={option.value}>
-              {option.label}
-            </option>
-          ))}
-        </select>
         <button className="dashboard-new-session-button" type="button" onClick={() => openCreateSession()}>
           <Plus size={16} />
-          New session
+          <span className="dashboard-new-session-button-label">New session</span>
         </button>
       </div>
 
@@ -340,6 +351,8 @@ export function Dashboard() {
                         session={session}
                         displayName={sessionDisplayName(session, sessions)}
                         previewLines={previewLines}
+                        notificationRules={sessionNotificationRules(notificationSettings, session.id)}
+                        notificationRing={notificationRings[session.id] ?? null}
                         onOpen={() => navigate(`/sessions/${session.id}`)}
                         onOpenMenu={openMenu}
                         onOpenMenuFromButton={openMenuFromButton}
@@ -366,6 +379,20 @@ export function Dashboard() {
             Rename
           </button>
           <button
+            type="button"
+            role="menuitem"
+            aria-haspopup="menu"
+            aria-expanded={notifySubmenuOpen}
+            onMouseEnter={() => setNotifySubmenuOpen(true)}
+            onFocus={() => setNotifySubmenuOpen(true)}
+            onClick={() => setNotifySubmenuOpen((open) => !open)}
+            disabled={Boolean(busyAction)}
+          >
+            <Bell size={16} />
+            Notify
+            <ChevronRight className="menu-chevron" size={16} />
+          </button>
+          <button
             className="danger"
             type="button"
             role="menuitem"
@@ -377,6 +404,20 @@ export function Dashboard() {
             <Skull size={16} />
             {busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? "Killing" : "Kill pane"}
           </button>
+          {notifySubmenuOpen ? (
+            <div
+              className="session-action-menu notification-rule-menu session-notify-submenu"
+              style={notificationSubmenuStyle(menu.x, menu.y)}
+              role="menu"
+              aria-label={`Notification settings for ${sessionDisplayName(menu.session, sessions)}`}
+            >
+              <NotificationRuleMenu
+                enabledRules={sessionNotificationRules(notificationSettings, menu.session.id)}
+                onToggle={(type, enabled) => void toggleSessionNotification(menu.session.id, type, enabled)}
+                disabled={notificationToggleBusy}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -505,6 +546,8 @@ export function SessionCard({
   session,
   displayName,
   previewLines,
+  notificationRules,
+  notificationRing,
   onOpen,
   onOpenMenu,
   onOpenMenuFromButton
@@ -512,6 +555,8 @@ export function SessionCard({
   session: ManagedSession;
   displayName: string;
   previewLines: string[];
+  notificationRules: NotificationRuleType[];
+  notificationRing: NotificationTriggeredPayload["severity"] | null;
   onOpen: () => void;
   onOpenMenu: (session: ManagedSession, x: number, y: number) => void;
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -520,6 +565,7 @@ export function SessionCard({
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const suppressClickRef = useRef(false);
   const reserveSecondPromptSlot = !session.activitySummary && previewLines.length > 1;
+  const cardClassName = `session-card${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function clearLongPress() {
     if (longPressTimerRef.current) {
@@ -567,7 +613,7 @@ export function SessionCard({
   return (
     <div className="session-card-shell">
       <button
-        className="session-card"
+        className={cardClassName}
         type="button"
         onClick={handleClick}
         onContextMenu={handleContextMenu}
@@ -596,8 +642,15 @@ export function SessionCard({
         </div>
         <div className="card-foot">
           <span>{session.lastActivityAt ? new Date(session.lastActivityAt).toLocaleString() : "no activity"}</span>
-          <span className="session-size" title="Transcript size">
-            <FileText size={13} /> {formatTranscriptSize(session.transcriptSize)}
+          <span className="card-foot-events">
+            <span className="session-size" title="Transcript size">
+              <FileText size={13} /> {formatTranscriptSize(session.transcriptSize)}
+            </span>
+            {notificationRules.length > 0 ? (
+              <span className="session-notification-indicator" title={`Notify: ${notificationRulesLabel(notificationRules)}`} aria-label={`Notify: ${notificationRulesLabel(notificationRules)}`}>
+                <Bell size={13} />
+              </span>
+            ) : null}
           </span>
         </div>
       </button>
@@ -734,6 +787,19 @@ function clampMenuPosition(x: number, y: number): { x: number; y: number } {
     x: Math.max(ACTION_MENU_EDGE, Math.min(x, window.innerWidth - ACTION_MENU_WIDTH - ACTION_MENU_EDGE)),
     y: Math.max(ACTION_MENU_EDGE, Math.min(y, window.innerHeight - ACTION_MENU_HEIGHT - ACTION_MENU_EDGE))
   };
+}
+
+function notificationSubmenuStyle(x: number, y: number): { left: number; top: number } {
+  const rightX = x + ACTION_MENU_WIDTH + 4;
+  const leftX = x - NOTIFICATION_MENU_WIDTH - 4;
+  return {
+    left: rightX + NOTIFICATION_MENU_WIDTH + ACTION_MENU_EDGE <= window.innerWidth ? rightX : Math.max(ACTION_MENU_EDGE, leftX),
+    top: Math.max(ACTION_MENU_EDGE, Math.min(y + 48, window.innerHeight - 144 - ACTION_MENU_EDGE))
+  };
+}
+
+function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: NotificationTriggeredPayload } {
+  return event.type === "notification.triggered" && Boolean((event as { payload?: unknown }).payload);
 }
 
 export function OpenAIUsagePanel({

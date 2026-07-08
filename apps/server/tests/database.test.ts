@@ -534,6 +534,47 @@ describe("AppDatabase remote access settings", () => {
   });
 });
 
+describe("AppDatabase notifications", () => {
+  it("persists global and per-session notification rules", async () => {
+    const db = await tempDb();
+
+    expect(await db.getNotificationSettings()).toEqual({ globalRules: [], sessionRules: {} });
+    await db.setNotificationRule("global", null, "status_change", true, "2026-07-08T00:00:00.000Z");
+    await db.setNotificationRule("session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
+    await db.setNotificationRule("session", "session-1", "approval_gate", true, "2026-07-08T00:00:02.000Z");
+
+    expect(await db.getNotificationSettings()).toEqual({
+      globalRules: ["status_change"],
+      sessionRules: { "session-1": ["approval_gate", "done_task"] }
+    });
+
+    await db.setNotificationRule("session", "session-1", "done_task", false, "2026-07-08T00:00:03.000Z");
+    expect(await db.getNotificationSettings()).toEqual({
+      globalRules: ["status_change"],
+      sessionRules: { "session-1": ["approval_gate"] }
+    });
+    db.close();
+  });
+
+  it("persists push subscriptions and VAPID keys", async () => {
+    const db = await tempDb();
+    const subscription = {
+      endpoint: "https://example.test/push/1",
+      expirationTime: null,
+      keys: { p256dh: "p256dh", auth: "auth" }
+    };
+
+    await db.upsertPushSubscription(subscription, "2026-07-08T00:00:00.000Z");
+    await db.setPushVapidKeys({ publicKey: "public", privateKey: "private" }, "2026-07-08T00:00:01.000Z");
+
+    expect(await db.listPushSubscriptions()).toEqual([subscription]);
+    expect(await db.getPushVapidKeys()).toEqual({ publicKey: "public", privateKey: "private" });
+    await db.deletePushSubscription(subscription.endpoint);
+    expect(await db.listPushSubscriptions()).toEqual([]);
+    db.close();
+  });
+});
+
 async function tempDb(): Promise<AppDatabase> {
   const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
   return new AppDatabase(join(dir, "test.db"));

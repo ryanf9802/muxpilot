@@ -9,7 +9,10 @@ import type {
   CreateSessionRequest,
   ManagedSession,
   MeResponse,
+  NotificationSettings,
   OpenAIUsageSummaryResponse,
+  PushKeyResponse,
+  PushSubscriptionInput,
   QueuedInput,
   QueuedInputResponse,
   QuestionAnswerRequest,
@@ -20,6 +23,7 @@ import type {
   SessionActionResponse,
   SessionAction,
   TranscriptPageResponse,
+  UpdateNotificationSettingRequest,
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
@@ -80,6 +84,14 @@ export const api = {
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
     json<RemoteAccessResponse>("/api/remote-access/settings", { method: "PATCH", body: JSON.stringify(request) }),
+  notificationSettings: () => json<NotificationSettings>("/api/notifications/settings"),
+  updateNotificationSetting: (request: UpdateNotificationSettingRequest) =>
+    json<NotificationSettings>("/api/notifications/settings", { method: "PATCH", body: JSON.stringify(request) }),
+  notificationPushKey: () => json<PushKeyResponse>("/api/notifications/push-key"),
+  upsertPushSubscription: (request: PushSubscriptionInput) =>
+    json<{ ok: true }>("/api/notifications/push-subscriptions", { method: "POST", body: JSON.stringify(request) }),
+  deletePushSubscription: (endpoint: string) =>
+    json<{ ok: true }>("/api/notifications/push-subscriptions", { method: "DELETE", body: JSON.stringify({ endpoint }) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),

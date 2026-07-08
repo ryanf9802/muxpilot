@@ -47,6 +47,7 @@ import {
   shouldHideInitialMessageList,
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
+  shouldAutofocusComposer,
   shouldReconcileSessionForEvent,
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
@@ -178,6 +179,13 @@ describe("desktop vim availability", () => {
     vi.stubGlobal("window", {});
 
     expect(isDesktopVimAvailable()).toBe(false);
+  });
+});
+
+describe("composer autofocus", () => {
+  it("only autofocuses for desktop-class input", () => {
+    expect(shouldAutofocusComposer(true)).toBe(true);
+    expect(shouldAutofocusComposer(false)).toBe(false);
   });
 });
 
@@ -481,6 +489,23 @@ describe("tmux command helpers", () => {
     expect(copyHtml).toContain("tmux select-window -t &#x27;work:1&#x27;");
     expect(copiedHtml).toContain("Copied");
     expect(copiedHtml).toContain("gpt-5.5");
+  });
+
+  it("renders read-only model state without tmux command affordances for remote access", () => {
+    const session = managedSession({
+      models: {
+        default: { model: "gpt-5.5", reasoningEffort: "medium" },
+        plan: { model: null, reasoningEffort: null }
+      }
+    });
+    const html = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, copyEnabled: false, onCopy: () => undefined }));
+
+    expect(html).toContain('class="tmux-command-button tmux-command-display"');
+    expect(html).toContain("gpt-5.5");
+    expect(html).toContain("medium");
+    expect(html).not.toContain("<button");
+    expect(html).not.toContain("Copy tmux attach command");
+    expect(html).not.toContain("tmux select-window");
   });
 });
 

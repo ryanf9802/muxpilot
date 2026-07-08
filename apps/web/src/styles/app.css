@@ -178,6 +178,20 @@ select:focus-visible {
   color: var(--color-text-muted);
 }
 
+.card-foot-events {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-notification-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-warning);
+}
+
 .icon-button,
 .send-button {
   display: inline-flex;
@@ -214,6 +228,13 @@ select:focus-visible {
 .session-stoplight-dot:hover:not(:disabled) {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28);
   filter: brightness(1.08);
+}
+
+.session-stoplight-dot[data-active] {
+  box-shadow:
+    0 0 0 2px var(--color-background),
+    0 0 0 4px currentColor;
+  filter: brightness(1.1);
 }
 
 .session-stoplight-dot-red {
@@ -389,8 +410,7 @@ select:focus-visible {
 .login-card input,
 .search-box input,
 .composer textarea,
-.skill-textarea textarea,
-.filters select {
+.skill-textarea textarea {
   width: 100%;
   color: var(--color-text);
   background: var(--color-input);
@@ -399,8 +419,7 @@ select:focus-visible {
   outline: none;
 }
 
-.login-card input,
-.filters select {
+.login-card input {
   min-height: 44px;
   padding: 0 12px;
 }
@@ -495,7 +514,7 @@ select:focus-visible {
 
 .filters {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(112px, 150px) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   margin-bottom: 12px;
 }
@@ -863,6 +882,10 @@ select:focus-visible {
   background: var(--color-action-hover);
 }
 
+.dashboard-new-session-button-label {
+  display: inline;
+}
+
 .dashboard-action-error,
 .dialog-error {
   margin: 0 0 12px;
@@ -883,6 +906,37 @@ select:focus-visible {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: 8px;
+}
+
+.session-card-notification-ring {
+  animation: notification-ring 2.8s ease-out;
+}
+
+.session-card-notification-ring-red {
+  --notification-ring-color: var(--color-error);
+}
+
+.session-card-notification-ring-yellow {
+  --notification-ring-color: var(--color-warning);
+}
+
+.session-card-notification-ring-green {
+  --notification-ring-color: var(--color-success);
+}
+
+@keyframes notification-ring {
+  0%,
+  70% {
+    border-color: var(--notification-ring-color);
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, var(--notification-ring-color) 74%, transparent),
+      0 0 18px color-mix(in srgb, var(--notification-ring-color) 38%, transparent);
+  }
+
+  100% {
+    border-color: var(--color-border);
+    box-shadow: none;
+  }
 }
 
 .session-card .card-head {
@@ -923,6 +977,14 @@ select:focus-visible {
   box-shadow: var(--shadow-elevated);
 }
 
+.notification-rule-menu {
+  width: 220px;
+}
+
+.session-notify-submenu {
+  z-index: 55;
+}
+
 .session-action-menu button {
   display: flex;
   align-items: center;
@@ -933,6 +995,18 @@ select:focus-visible {
   background: transparent;
   border: 1px solid transparent;
   border-radius: 7px;
+}
+
+.menu-check-slot {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.menu-chevron {
+  margin-left: auto;
 }
 
 .session-action-menu button:hover:not(:disabled) {
@@ -1414,6 +1488,25 @@ select:focus-visible {
   border-color: var(--color-success);
 }
 
+.Toastify__toast {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.Toastify__progress-bar--success {
+  background: var(--color-success);
+}
+
+.Toastify__progress-bar--warning {
+  background: var(--color-warning);
+}
+
+.Toastify__progress-bar--error {
+  background: var(--color-error);
+}
+
 .session-view {
   position: relative;
   width: 100%;
@@ -1504,11 +1597,15 @@ select:focus-visible {
   overflow: hidden;
 }
 
-.tmux-command-button:hover:not(:disabled),
-.tmux-command-button:focus-visible {
+.tmux-command-button:not(.tmux-command-display):hover:not(:disabled),
+.tmux-command-button:not(.tmux-command-display):focus-visible {
   border-color: color-mix(in srgb, var(--color-secondary) 52%, var(--color-border));
   background: color-mix(in srgb, var(--color-secondary) 8%, var(--color-surface));
   box-shadow: none;
+}
+
+.tmux-command-display {
+  cursor: default;
 }
 
 .tmux-command-label {
@@ -2730,8 +2827,13 @@ select:focus-visible {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .filters .search-box {
-    grid-column: 1 / -1;
+  .dashboard-new-session-button {
+    width: 44px;
+    padding: 0;
+  }
+
+  .dashboard-new-session-button-label {
+    display: none;
   }
 
   .actions {

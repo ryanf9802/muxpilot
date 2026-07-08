@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion } from "@muxpilot/core";
 import {
+  activeSessionStoplightSeverity,
   AppBrand,
   AppRecoveryPage,
   ConnectDeviceContent,
@@ -289,11 +290,14 @@ describe("sessionNameValidationMessage", () => {
 
 describe("SessionStoplight", () => {
   it("renders red yellow green counters with accessible labels", () => {
-    const html = renderToStaticMarkup(createElement(SessionStoplight, { counts: { red: 3, yellow: 2, green: 1 } }));
+    const html = renderToStaticMarkup(createElement(SessionStoplight, { counts: { red: 3, yellow: 2, green: 1 }, activeSeverity: "yellow" }));
 
     expect(html).toContain('class="session-stoplight-dot session-stoplight-dot-red"');
     expect(html).toContain('class="session-stoplight-dot session-stoplight-dot-yellow"');
     expect(html).toContain('class="session-stoplight-dot session-stoplight-dot-green"');
+    expect(html).toContain('aria-pressed="false"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('data-active="true"');
     expect(html).toContain('<button type="button"');
     expect(html).toContain('aria-label="3 sessions need attention"');
     expect(html).toContain('aria-label="2 sessions working"');
@@ -315,6 +319,12 @@ describe("SessionStoplight", () => {
 });
 
 describe("nextSessionStoplightSearch", () => {
+  it("parses the active stoplight severity", () => {
+    expect(activeSessionStoplightSeverity("?statusSeverity=red")).toBe("red");
+    expect(activeSessionStoplightSeverity("?statusSeverity=blue")).toBeNull();
+    expect(activeSessionStoplightSeverity("")).toBeNull();
+  });
+
   it("applies a stoplight severity when none is active", () => {
     expect(nextSessionStoplightSearch("", "yellow")).toBe("?statusSeverity=yellow");
   });

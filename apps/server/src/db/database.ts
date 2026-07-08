@@ -4,8 +4,12 @@ import type {
   ChatMessage,
   CollaborationMode,
   ManagedSession,
+  NotificationRuleScope,
+  NotificationRuleType,
+  NotificationSettings,
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
+  PushSubscriptionInput,
   QueuedInput,
   SessionModelSettings,
   SessionModelSelections,
@@ -19,6 +23,7 @@ import { buildExpandedTranscriptItems, buildTranscriptItems, hasCompleteProposed
 type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
 const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
+const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 
 interface SessionRow {
   id: string;
@@ -75,6 +80,22 @@ interface QueuedInputRow {
   created_at: string;
   updated_at: string;
   sent_at: string | null;
+}
+
+interface NotificationRuleRow {
+  scope: NotificationRuleScope;
+  session_id: string;
+  type: NotificationRuleType;
+}
+
+interface PushSubscriptionRow {
+  endpoint: string;
+  subscription_json: string;
+}
+
+export interface PushVapidKeys {
+  publicKey: string;
+  privateKey: string;
 }
 
 export interface OpenAIUsageEventInput {
@@ -284,6 +305,40 @@ export class AppDatabase {
 
   setUnrestrictedRemoteAccessEnabled(enabled: boolean): Promise<boolean> {
     return this.call("setUnrestrictedRemoteAccessEnabled", enabled) as Promise<boolean>;
+  }
+
+  getNotificationSettings(): Promise<NotificationSettings> {
+    return this.call("getNotificationSettings") as Promise<NotificationSettings>;
+  }
+
+  setNotificationRule(
+    scope: NotificationRuleScope,
+    sessionId: string | null,
+    type: NotificationRuleType,
+    enabled: boolean,
+    updatedAt: string
+  ): Promise<NotificationSettings> {
+    return this.call("setNotificationRule", scope, sessionId, type, enabled, updatedAt) as Promise<NotificationSettings>;
+  }
+
+  upsertPushSubscription(subscription: PushSubscriptionInput, updatedAt: string): Promise<void> {
+    return this.call("upsertPushSubscription", subscription, updatedAt) as Promise<void>;
+  }
+
+  deletePushSubscription(endpoint: string): Promise<void> {
+    return this.call("deletePushSubscription", endpoint) as Promise<void>;
+  }
+
+  listPushSubscriptions(): Promise<PushSubscriptionInput[]> {
+    return this.call("listPushSubscriptions") as Promise<PushSubscriptionInput[]>;
+  }
+
+  getPushVapidKeys(): Promise<PushVapidKeys | null> {
+    return this.call("getPushVapidKeys") as Promise<PushVapidKeys | null>;
+  }
+
+  setPushVapidKeys(keys: PushVapidKeys, updatedAt: string): Promise<PushVapidKeys> {
+    return this.call("setPushVapidKeys", keys, updatedAt) as Promise<PushVapidKeys>;
   }
 
   latestApprovalMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -933,13 +988,92 @@ export class SyncAppDatabase {
     return enabled;
   }
 
+  getNotificationSettings(): NotificationSettings {
+    const rows = this.db.prepare("SELECT scope, session_id, type FROM notification_rules ORDER BY scope, session_id, type").all() as unknown as NotificationRuleRow[];
+    const settings: NotificationSettings = { globalRules: [], sessionRules: {} };
+    for (const row of rows) {
+      if (row.scope === "global") {
+        settings.globalRules.push(row.type);
+      } else {
+        if (!settings.sessionRules[row.session_id]) settings.sessionRules[row.session_id] = [];
+        settings.sessionRules[row.session_id]!.push(row.type);
+      }
+    }
+    return settings;
+  }
+
+  setNotificationRule(
+    scope: NotificationRuleScope,
+    sessionId: string | null,
+    type: NotificationRuleType,
+    enabled: boolean,
+    updatedAt: string
+  ): NotificationSettings {
+    const normalizedSessionId = scope === "global" ? "" : (sessionId ?? "");
+    if (scope === "session" && !normalizedSessionId) throw new Error("Session notification rules require a session id");
+    if (enabled) {
+      this.db
+        .prepare(
+          `INSERT INTO notification_rules (scope, session_id, type, updated_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(scope, session_id, type) DO UPDATE SET updated_at = excluded.updated_at`
+        )
+        .run(scope, normalizedSessionId, type, updatedAt);
+    } else {
+      this.db
+        .prepare("DELETE FROM notification_rules WHERE scope = ? AND session_id = ? AND type = ?")
+        .run(scope, normalizedSessionId, type);
+    }
+    return this.getNotificationSettings();
+  }
+
+  upsertPushSubscription(subscription: PushSubscriptionInput, updatedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO push_subscriptions (endpoint, subscription_json, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+          subscription_json = excluded.subscription_json,
+          updated_at = excluded.updated_at`
+      )
+      .run(subscription.endpoint, JSON.stringify(subscription), updatedAt);
+  }
+
+  deletePushSubscription(endpoint: string): void {
+    this.db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint);
+  }
+
+  listPushSubscriptions(): PushSubscriptionInput[] {
+    const rows = this.db.prepare("SELECT endpoint, subscription_json FROM push_subscriptions ORDER BY endpoint").all() as unknown as PushSubscriptionRow[];
+    return rows.map((row) => JSON.parse(row.subscription_json) as PushSubscriptionInput);
+  }
+
+  getPushVapidKeys(): PushVapidKeys | null {
+    const value = this.getSetting(PUSH_VAPID_KEYS_SETTING);
+    return value ? (JSON.parse(value) as PushVapidKeys) : null;
+  }
+
+  setPushVapidKeys(keys: PushVapidKeys, updatedAt: string): PushVapidKeys {
+    this.setSetting(PUSH_VAPID_KEYS_SETTING, JSON.stringify(keys), updatedAt);
+    return keys;
+  }
+
   private getBooleanSetting(key: string, defaultValue: boolean): boolean {
-    const row = this.db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
-    if (!row) return defaultValue;
-    return row.value === "true";
+    const value = this.getSetting(key);
+    if (value === null) return defaultValue;
+    return value === "true";
   }
 
   private setBooleanSetting(key: string, enabled: boolean): void {
+    this.setSetting(key, enabled ? "true" : "false", new Date().toISOString());
+  }
+
+  private getSetting(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM app_settings WHERE key = ?").get(key) as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  private setSetting(key: string, value: string, updatedAt: string): void {
     this.db
       .prepare(
         `INSERT INTO app_settings (key, value, updated_at)
@@ -948,7 +1082,7 @@ export class SyncAppDatabase {
           value=excluded.value,
           updated_at=excluded.updated_at`
       )
-      .run(key, enabled ? "true" : "false", new Date().toISOString());
+      .run(key, value, updatedAt);
   }
 
   latestApprovalMessage(sessionId: string): ChatMessage | null {
@@ -1310,11 +1444,26 @@ export class SyncAppDatabase {
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS notification_rules (
+        scope TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(scope, session_id, type)
+      );
+
+      CREATE TABLE IF NOT EXISTS push_subscriptions (
+        endpoint TEXT PRIMARY KEY,
+        subscription_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_sessions_activity ON managed_sessions(last_activity_at);
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
   }
