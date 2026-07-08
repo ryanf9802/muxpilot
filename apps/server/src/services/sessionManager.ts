@@ -968,7 +968,7 @@ async function claimCodexFile(
     return resumedMatch;
   }
 
-  const visibleMatch = await visibleCodexFileForPane(compatibleExact, capturePane);
+  const visibleMatch = await visibleCodexFileForPane(compatibleExact, capturePane, existingMatch?.path);
   if (visibleMatch && !claims.has(visibleMatch.path)) {
     claims.add(visibleMatch.path);
     return visibleMatch;
@@ -1019,7 +1019,8 @@ async function bestCodexFileForPane(
 
 async function visibleCodexFileForPane(
   candidates: CodexSessionFile[],
-  capturePane: (lines: number) => Promise<string>
+  capturePane: (lines: number) => Promise<string>,
+  stablePath?: string | null
 ): Promise<CodexSessionFile | null> {
   if (candidates.length <= 1) return null;
 
@@ -1031,8 +1032,17 @@ async function visibleCodexFileForPane(
         score: await transcriptOverlapScore(file.path, capture)
       }))
     );
-    scored.sort((a, b) => b.score - a.score || b.file.updatedAtMs - a.file.updatedAtMs);
+    scored.sort(
+      (a, b) =>
+        b.score - a.score ||
+        Number(b.file.path === stablePath) - Number(a.file.path === stablePath) ||
+        b.file.updatedAtMs - a.file.updatedAtMs
+    );
     const best = scored[0];
+    const stable = stablePath ? scored.find((candidate) => candidate.file.path === stablePath) : null;
+    if (stable && stable.score > 0 && best && best.file.path !== stable.file.path && best.score <= stable.score) {
+      return stable.file;
+    }
     if (best && best.score > 0) return best.file;
   } catch {
     // Leave ambiguous candidates unbound when visible transcript matching is unavailable.
