@@ -301,6 +301,14 @@ export function shouldHideInitialMessageList(initialTranscriptSessionId: string 
   return initialTranscriptSessionId === routeSessionId && !initialScrollReady;
 }
 
+export function shouldResetInitialTranscriptForLiveTail(
+  sourceChanged: boolean,
+  initialTranscriptSessionId: string | null,
+  routeSessionId: string
+): boolean {
+  return sourceChanged || initialTranscriptSessionId !== routeSessionId;
+}
+
 interface TranscriptSourceIdentity {
   sessionId: string;
   codexSessionId: string | null;
@@ -373,6 +381,7 @@ export function SessionView() {
   const liveTailRefreshQueuedRef = useRef(false);
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
+  const initialTranscriptSessionIdRef = useRef<string | null>(null);
   const hasMoreAfterRef = useRef(false);
   const isNearBottomRef = useRef(true);
   const lastSequenceRef = useRef(0);
@@ -504,7 +513,7 @@ export function SessionView() {
     if (idChanged || connectionEpoch === 0) {
       setSession(null);
       setTranscriptItems([]);
-      setInitialTranscriptSessionId(null);
+      clearInitialTranscriptSessionId();
       setInitialScrollReady(false);
       setText(loadComposerDraft(id));
       setApproval(null);
@@ -636,7 +645,7 @@ export function SessionView() {
     setTranscriptItems(appendUniqueTranscriptItems([], response.items));
     reconcilePendingUserMessage(response.items);
     setPagination(response.hasMoreBefore, response.hasMoreAfter);
-    setInitialTranscriptSessionId(targetId);
+    markInitialTranscriptSessionId(targetId);
   }
 
   async function reconcileLiveSession(targetId = id, token = requestTokenRef.current) {
@@ -665,9 +674,9 @@ export function SessionView() {
         const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
         if (!isCurrentTranscriptResponse(targetId, token, response)) return;
         const sourceChanged = acceptTranscriptSource(response);
-        if (sourceChanged) {
+        if (shouldResetInitialTranscriptForLiveTail(sourceChanged, initialTranscriptSessionIdRef.current, targetId)) {
           scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
-          setInitialTranscriptSessionId(targetId);
+          markInitialTranscriptSessionId(targetId);
           setInitialScrollReady(false);
         }
         setTranscriptItems((current) => (sourceChanged ? appendUniqueTranscriptItems([], response.items) : replaceTranscriptTail(current, response.items)));
@@ -692,6 +701,7 @@ export function SessionView() {
     setTranscriptItems(appendUniqueTranscriptItems([], response.items));
     reconcilePendingUserMessage(response.items);
     setPagination(response.hasMoreBefore, response.hasMoreAfter);
+    markInitialTranscriptSessionId(targetId);
   }
 
   async function loadOlderMessages() {
@@ -787,6 +797,16 @@ export function SessionView() {
     setExpandedStacks(new Set());
   }
 
+  function markInitialTranscriptSessionId(targetId: string) {
+    initialTranscriptSessionIdRef.current = targetId;
+    setInitialTranscriptSessionId(targetId);
+  }
+
+  function clearInitialTranscriptSessionId() {
+    initialTranscriptSessionIdRef.current = null;
+    setInitialTranscriptSessionId(null);
+  }
+
   function clearTranscriptOnSessionSourceChange(nextSession: ManagedSession) {
     const currentSourceKey = transcriptSourceKeyRef.current;
     if (!currentSourceKey) return;
@@ -794,7 +814,7 @@ export function SessionView() {
     if (nextSourceKey === currentSourceKey) return;
     transcriptSourceKeyRef.current = null;
     setTranscriptItems([]);
-    setInitialTranscriptSessionId(null);
+    clearInitialTranscriptSessionId();
     setInitialScrollReady(false);
     setPagination(false, false);
     clearTranscriptSourceCaches();

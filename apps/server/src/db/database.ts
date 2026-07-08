@@ -688,11 +688,13 @@ export class SyncAppDatabase {
 
     const previousOutput = this.latestAssistantOutputBefore(sessionId, prompt.sequence);
     const activeItems = this.compactActiveTailItems(sessionId, prompt, previousOutput);
-    const pageItems = activeItems.slice(Math.max(0, activeItems.length - fallbackLimit));
-    const firstPageSequence = pageItems[0]?.firstSequence ?? prompt.sequence;
+    const pageItems = activeTailPageItems(activeItems, fallbackLimit);
+    const firstLoadedSequence = pageItems[0]?.firstSequence ?? prompt.sequence;
+    const loadedTopLevelCount = topLevelTranscriptItemCount(pageItems);
+    const olderTopLevelCount = this.topLevelMessageCountBefore(sessionId, firstLoadedSequence);
 
     return transcriptItemsPage(sessionId, pageItems, {
-      hasMoreBefore: this.hasMessageBefore(sessionId, firstPageSequence),
+      hasMoreBefore: olderTopLevelCount + loadedTopLevelCount > fallbackLimit,
       hasMoreAfter: false
     });
   }
@@ -854,10 +856,10 @@ export class SyncAppDatabase {
       )
       .all(sessionId, beforeSequence) as unknown as MessageRow[];
     const items = buildTranscriptItems(rows.map(hydrateMessage));
-    const pageItems = items.slice(Math.max(0, items.length - limit));
+    const pageItems = activeTailPageItems(items, limit);
 
     return transcriptItemsPage(sessionId, pageItems, {
-      hasMoreBefore: items.length > pageItems.length,
+      hasMoreBefore: topLevelTranscriptItemCount(items) > topLevelTranscriptItemCount(pageItems),
       hasMoreAfter: pageItems.length > 0
     });
   }
@@ -889,6 +891,17 @@ export class SyncAppDatabase {
       )
       .get(sessionId, sequence) as { found: number } | undefined;
     return Boolean(row);
+  }
+
+  private topLevelMessageCountBefore(sessionId: string, sequence: number): number {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND sequence < ?
+         ORDER BY sequence ASC`
+      )
+      .all(sessionId, sequence) as unknown as MessageRow[];
+    return topLevelTranscriptItemCount(buildTranscriptItems(rows.map(hydrateMessage)));
   }
 
   listMessageRange(sessionId: string, fromSequence: number, toSequence: number): TranscriptPageResponse {
@@ -1695,6 +1708,24 @@ function transcriptItemsPage(
 
 function appendRangeItem(items: TranscriptItem[], item: Extract<TranscriptItem, { type: "range" }> | null): void {
   if (item) items.push(item);
+}
+
+function activeTailPageItems(items: TranscriptItem[], limit: number): TranscriptItem[] {
+  let remaining = limit;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item && isTopLevelTranscriptItem(item)) remaining -= 1;
+    if (remaining === 0) return items.slice(index);
+  }
+  return items;
+}
+
+function topLevelTranscriptItemCount(items: TranscriptItem[]): number {
+  return items.filter(isTopLevelTranscriptItem).length;
+}
+
+function isTopLevelTranscriptItem(item: TranscriptItem): boolean {
+  return item.type !== "range";
 }
 
 function collapsedRangeLabel(kind: TranscriptRangeKind, count: number): string {

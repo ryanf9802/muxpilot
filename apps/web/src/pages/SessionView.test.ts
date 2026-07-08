@@ -45,6 +45,7 @@ import {
   scrollBehaviorForTranscriptUpdate,
   shouldQueueComposerInput,
   shouldHideInitialMessageList,
+  shouldResetInitialTranscriptForLiveTail,
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
   shouldAutofocusComposer,
@@ -531,6 +532,13 @@ describe("session scroll behavior", () => {
     expect(shouldHideInitialMessageList("session-b", "session-a", false)).toBe(false);
     expect(shouldHideInitialMessageList("session-a", "session-a", false)).toBe(true);
     expect(shouldHideInitialMessageList("session-a", "session-a", true)).toBe(false);
+  });
+
+  it("marks live-tail transcript responses as initial-ready after a source clear", () => {
+    expect(shouldResetInitialTranscriptForLiveTail(false, null, "session-a")).toBe(true);
+    expect(shouldResetInitialTranscriptForLiveTail(false, "session-b", "session-a")).toBe(true);
+    expect(shouldResetInitialTranscriptForLiveTail(true, "session-a", "session-a")).toBe(true);
+    expect(shouldResetInitialTranscriptForLiveTail(false, "session-a", "session-a")).toBe(false);
   });
 
   it("detects transcript source changes before merging transcript pages", () => {

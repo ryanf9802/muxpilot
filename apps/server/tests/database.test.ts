@@ -153,7 +153,7 @@ describe("AppDatabase activity summaries", () => {
     const tail = db.listActiveTailMessages(session.id, 4);
 
     expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "range:stack"], [6, 6, "message"], [7, 16, "range:activity"]]);
-    expect(tail.hasMoreBefore).toBe(true);
+    expect(tail.hasMoreBefore).toBe(false);
     expect(tail.hasMoreAfter).toBe(false);
 
     const older = db.listMessagesBefore(session.id, tail.items[0]?.firstSequence ?? 0, 3);
@@ -187,6 +187,69 @@ describe("AppDatabase activity summaries", () => {
       [9, 9, "message"],
       [10, 30, "range:activity"]
     ]);
+    expect(tail.hasMoreBefore).toBe(false);
+    expect(tail.hasMoreAfter).toBe(false);
+    db.close();
+  });
+
+  it("does not show older pagination for a short active visible tail", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-short-visible");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "First answer"));
+    db.appendMessage(testMessage(session.id, 3, "user", "Previous prompt"));
+    db.appendMessage(testMessage(session.id, 4, "assistant", "Previous answer"));
+    db.appendMessage(testMessage(session.id, 5, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 6, "assistant", "Current answer"));
+
+    const tail = db.listActiveTailMessages(session.id, 80);
+
+    expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "message"], [6, 6, "message"]]);
+    expect(tail.hasMoreBefore).toBe(false);
+    expect(tail.hasMoreAfter).toBe(false);
+    db.close();
+  });
+
+  it("shows older pagination for a long transcript even when the active tail is short", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-long-visible-history");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    for (let sequence = 1; sequence <= 90; sequence += 1) {
+      db.appendMessage(testMessage(session.id, sequence, sequence % 2 === 0 ? "assistant" : "user", `Earlier message ${sequence}`));
+    }
+    db.appendMessage(testMessage(session.id, 91, "assistant", "Previous answer"));
+    db.appendMessage(testMessage(session.id, 92, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 93, "assistant", "Current answer"));
+
+    const tail = db.listActiveTailMessages(session.id, 80);
+
+    expect(itemSpans(tail)).toEqual([[91, 91, "message"], [92, 92, "message"], [93, 93, "message"]]);
+    expect(tail.hasMoreBefore).toBe(true);
+    expect(tail.hasMoreAfter).toBe(false);
+
+    const older = db.listMessagesBefore(session.id, tail.items[0]?.firstSequence ?? 0, 80);
+    expect(older.items).toHaveLength(80);
+    expect(older.items[0]?.firstSequence).toBe(11);
+    expect(older.items.at(-1)?.lastSequence).toBe(90);
+    expect(older.hasMoreBefore).toBe(true);
+    db.close();
+  });
+
+  it("shows older pagination when the active tail fills the visible item page", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-full-visible-page");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "First answer"));
+    db.appendMessage(testMessage(session.id, 3, "user", "Previous prompt"));
+    db.appendMessage(testMessage(session.id, 4, "assistant", "Previous answer"));
+    db.appendMessage(testMessage(session.id, 5, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 6, "assistant", "Current answer"));
+
+    const tail = db.listActiveTailMessages(session.id, 3);
+
+    expect(itemSpans(tail)).toEqual([[4, 4, "message"], [5, 5, "message"], [6, 6, "message"]]);
     expect(tail.hasMoreBefore).toBe(true);
     expect(tail.hasMoreAfter).toBe(false);
     db.close();
@@ -216,13 +279,21 @@ describe("AppDatabase activity summaries", () => {
       activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
 
     expect(itemSpans(tail)).toEqual([
+      [7, 7, "message"],
       [8, 8, "range:stack"],
       [9, 9, "message"],
       [10, 120, "range:activity"]
     ]);
     expect(tail.hasMoreBefore).toBe(true);
     expect(tail.hasMoreAfter).toBe(false);
-    expect(itemSpans(older)).toEqual([[3, 3, "range:stack"], [4, 4, "message"], [5, 6, "range:activity"], [7, 7, "message"]]);
+    expect(itemSpans(older)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [3, 3, "range:stack"],
+      [4, 4, "message"],
+      [5, 5, "message"],
+      [6, 6, "range:stack"]
+    ]);
     expect(expandedRange?.items[0]).toMatchObject({ type: "message", message: { text: "Collapsed row 10" } });
     db.close();
   });
@@ -314,7 +385,7 @@ describe("AppDatabase activity summaries", () => {
     const tail = db.listActiveTailMessages(session.id, 2);
 
     expect(itemSpans(tail)).toEqual([[2, 2, "message"], [3, 3, "range:activity"]]);
-    expect(tail.hasMoreBefore).toBe(true);
+    expect(tail.hasMoreBefore).toBe(false);
     expect(tail.hasMoreAfter).toBe(false);
     db.close();
   });
@@ -331,8 +402,8 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 3);
 
-    expect(itemSpans(tail)).toEqual([[3, 3, "message"], [4, 4, "message"], [5, 5, "range:activity"]]);
-    expect(tail.hasMoreBefore).toBe(true);
+    expect(itemSpans(tail)).toEqual([[2, 2, "range:stack"], [3, 3, "message"], [4, 4, "message"], [5, 5, "range:activity"]]);
+    expect(tail.hasMoreBefore).toBe(false);
     db.close();
   });
 
