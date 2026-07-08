@@ -7,6 +7,7 @@ import { isLoopbackBindHost } from "../config/config.js";
 const TRUST_FILES = new Map([
   ["/muxpilot-root-ca.pem", "muxpilot-root-ca.pem"],
   ["/muxpilot-root-ca.crt", "muxpilot-root-ca.crt"],
+  ["/muxpilot-root-ca.crl", "muxpilot-root-ca.crl"],
   ["/muxpilot-root-ca.mobileconfig", "muxpilot-root-ca.mobileconfig"]
 ]);
 
@@ -96,6 +97,7 @@ function safeRegularFile(trustDir: string, filePath: string): boolean {
 
 function contentType(filename: string): string {
   if (filename.endsWith(".mobileconfig")) return "application/x-apple-aspen-config";
+  if (filename.endsWith(".crl")) return "application/pkix-crl";
   return "application/x-pem-file";
 }
 

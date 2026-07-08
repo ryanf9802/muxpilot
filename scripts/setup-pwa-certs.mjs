@@ -18,12 +18,18 @@ const caCertPath = join(caDir, "rootCA.pem");
 const caSerialPath = join(caDir, "rootCA.srl");
 const publicCaPemPath = join(trustDir, "muxpilot-root-ca.pem");
 const publicCaCrtPath = join(trustDir, "muxpilot-root-ca.crt");
+const publicCaCrlPath = join(trustDir, "muxpilot-root-ca.crl");
 const mobileConfigPath = join(trustDir, "muxpilot-root-ca.mobileconfig");
 const certPath = resolvePath(options.cert ?? join(certDir, "muxpilot.pem"));
 const keyPath = resolvePath(options.key ?? join(certDir, "muxpilot-key.pem"));
 const envLocalPath = options.envOutput ? resolvePath(options.envOutput) : join(repoRoot, ".env.local");
 const csrPath = join(certDir, "muxpilot.csr");
 const opensslConfigPath = join(certDir, "muxpilot-openssl.cnf");
+const caOpenSslConfigPath = join(caDir, "muxpilot-ca-openssl.cnf");
+const caIndexPath = join(caDir, "index.txt");
+const caIndexAttrPath = join(caDir, "index.txt.attr");
+const caCrlNumberPath = join(caDir, "crlnumber");
+const caCrlPemPath = join(caDir, "rootCA.crl.pem");
 
 if (command === "setup") setup();
 else if (command === "trust") trust();
@@ -41,6 +47,7 @@ function setup() {
   const hosts = certificateHosts();
   const ips = certificateIps();
   issueHostCertificate(hosts, ips);
+  generateCertificateRevocationList();
   writeTrustFiles();
   const hostTrustResults = trustHostCa();
   updateEnvLocal({
@@ -97,17 +104,27 @@ function trustWindowsCurrentUserRoot() {
   const wslpath = commandPath("wslpath");
   if (!powershell || !wslpath) return { ok: false, label: "Windows CurrentUser Root", message: "powershell.exe or wslpath was not found" };
 
-  const windowsCaPath = spawnSync(wslpath, ["-w", caCertPath], { encoding: "utf8" }).stdout.trim();
-  if (!windowsCaPath) return { ok: false, label: "Windows CurrentUser Root", message: "could not convert CA path for Windows" };
+  let importPath;
+  try {
+    importPath = windowsImportableCaPath(powershell, wslpath);
+  } catch (error) {
+    return {
+      ok: false,
+      label: "Windows CurrentUser Root",
+      message: error instanceof Error ? error.message : String(error)
+    };
+  }
+  if (!importPath.windowsPath) return { ok: false, label: "Windows CurrentUser Root", message: "could not prepare CA path for Windows" };
 
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    `$certPath = ${powerShellString(windowsCaPath)}`,
+    `$certPath = ${powerShellString(importPath.windowsPath)}`,
     "$target = 'Cert:\\CurrentUser\\Root'",
     "$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath)",
     "$existing = Get-ChildItem $target | Where-Object { $_.Thumbprint -eq $cert.Thumbprint }",
     "if (-not $existing) { Import-Certificate -FilePath $certPath -CertStoreLocation $target | Out-Null }",
-    "Write-Output $cert.Thumbprint"
+    "Write-Output $cert.Thumbprint",
+    importPath.cleanupWindowsPath ? `Remove-Item -LiteralPath ${powerShellString(importPath.cleanupWindowsPath)} -Force -ErrorAction SilentlyContinue` : ""
   ].join("; ");
 
   const result = spawnSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], { encoding: "utf8" });
@@ -119,6 +136,25 @@ function trustWindowsCurrentUserRoot() {
     };
   }
   return { ok: true, label: "Windows CurrentUser Root", message: `trusted ${result.stdout.trim()}` };
+}
+
+function windowsImportableCaPath(powershell, wslpath) {
+  const tempResult = spawnSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "[System.IO.Path]::GetTempPath()"], {
+    encoding: "utf8"
+  });
+  const windowsTempDir = tempResult.status === 0 ? tempResult.stdout.trim() : "";
+  if (windowsTempDir) {
+    const separator = windowsTempDir.endsWith("\\") || windowsTempDir.endsWith("/") ? "" : "\\";
+    const windowsTempPath = `${windowsTempDir}${separator}muxpilot-root-ca-${randomUUID()}.pem`;
+    const wslTempPath = spawnSync(wslpath, ["-u", windowsTempPath], { encoding: "utf8" }).stdout.trim();
+    if (wslTempPath) {
+      writeFileSync(wslTempPath, readFileSync(caCertPath));
+      return { windowsPath: windowsTempPath, cleanupWindowsPath: windowsTempPath };
+    }
+  }
+
+  const windowsCaPath = spawnSync(wslpath, ["-w", caCertPath], { encoding: "utf8" }).stdout.trim();
+  return { windowsPath: windowsCaPath, cleanupWindowsPath: "" };
 }
 
 function trustLinuxRoot() {
@@ -154,6 +190,7 @@ function trust() {
   const files = new Map([
     ["/muxpilot-root-ca.pem", publicCaPemPath],
     ["/muxpilot-root-ca.crt", publicCaCrtPath],
+    ["/muxpilot-root-ca.crl", publicCaCrlPath],
     ["/muxpilot-root-ca.mobileconfig", mobileConfigPath]
   ]);
 
@@ -196,6 +233,7 @@ function status() {
   console.log(`CA directory: ${caDir}`);
   console.log(`CA certificate: ${caCertPath} ${existsSync(caCertPath) ? "(exists)" : "(missing)"}`);
   console.log(`CA private key: ${caKeyPath} ${existsSync(caKeyPath) ? "(exists)" : "(missing)"}`);
+  console.log(`CA revocation list: ${publicCaCrlPath} ${existsSync(publicCaCrlPath) ? "(exists)" : "(missing)"}`);
   console.log(`Host certificate: ${certPath} ${existsSync(certPath) ? "(exists)" : "(missing)"}`);
   console.log(`Host private key: ${keyPath} ${existsSync(keyPath) ? "(exists)" : "(missing)"}`);
   console.log("");
@@ -211,7 +249,7 @@ function status() {
 
 function ensureCa() {
   mkdirSync(caDir, { recursive: true, mode: 0o700 });
-  if (existsSync(caKeyPath) && existsSync(caCertPath)) return;
+  if (existsSync(caKeyPath) && existsSync(caCertPath) && !options.force) return;
   if ((existsSync(caKeyPath) || existsSync(caCertPath)) && !options.force) {
     console.error(`Partial CA files exist in ${caDir}. Remove them or rerun with --force.`);
     process.exit(1);
@@ -275,6 +313,7 @@ function writeTrustFiles() {
     console.error(`Missing CA certificate: ${caCertPath}. Run pnpm pwa:setup first.`);
     process.exit(1);
   }
+  if (!existsSync(publicCaCrlPath)) generateCertificateRevocationList();
   mkdirSync(trustDir, { recursive: true });
   const caPem = readFileSync(caCertPath);
   writeFileSync(publicCaPemPath, caPem);
@@ -337,6 +376,7 @@ function opensslConfig(hosts, ips) {
     ...hosts.map((host, index) => `DNS.${index + 1} = ${host}`),
     ...ips.map((ip, index) => `IP.${index + 1} = ${ip}`)
   ].join("\n");
+  const crlUrls = certificateRevocationListUrls().map((url, index) => `URI.${index + 1} = ${url}`).join("\n");
 
   return `[req]
 default_bits = 2048
@@ -354,9 +394,55 @@ basicConstraints = CA:FALSE
 keyUsage = critical, digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
+crlDistributionPoints = @crl_urls
 
 [alt_names]
 ${altNames}
+
+[crl_urls]
+${crlUrls}
+`;
+}
+
+function certificateRevocationListUrls() {
+  const port = Number(options.port ?? process.env.MUXPILOT_PWA_TRUST_PORT ?? 12880);
+  return unique([
+    `http://localhost:${port}/muxpilot-root-ca.crl`,
+    `http://127.0.0.1:${port}/muxpilot-root-ca.crl`,
+    ...lanAddresses().map((ip) => `http://${ip}:${port}/muxpilot-root-ca.crl`)
+  ]);
+}
+
+function generateCertificateRevocationList() {
+  if (!existsSync(caCertPath) || !existsSync(caKeyPath)) {
+    console.error(`Missing CA files in ${caDir}. Run pnpm pwa:setup first.`);
+    process.exit(1);
+  }
+  mkdirSync(caDir, { recursive: true, mode: 0o700 });
+  mkdirSync(trustDir, { recursive: true });
+  if (!existsSync(caIndexPath)) writeFileSync(caIndexPath, "");
+  if (!existsSync(caIndexAttrPath)) writeFileSync(caIndexAttrPath, "unique_subject = no\n");
+  if (!existsSync(caCrlNumberPath)) writeFileSync(caCrlNumberPath, "1000\n");
+  writeFileSync(caOpenSslConfigPath, caOpenSslConfig());
+  runOpenSsl(["ca", "-gencrl", "-config", caOpenSslConfigPath, "-out", caCrlPemPath]);
+  runOpenSsl(["crl", "-in", caCrlPemPath, "-outform", "DER", "-out", publicCaCrlPath]);
+}
+
+function caOpenSslConfig() {
+  return `[ca]
+default_ca = CA_default
+
+[CA_default]
+dir = ${caDir}
+database = ${caIndexPath}
+new_certs_dir = ${caDir}
+certificate = ${caCertPath}
+private_key = ${caKeyPath}
+serial = ${caSerialPath}
+crlnumber = ${caCrlNumberPath}
+default_md = sha256
+default_crl_days = 30
+unique_subject = no
 `;
 }
 
@@ -509,6 +595,7 @@ function contentType(file) {
   const extension = extname(file);
   if (extension === ".html") return "text/html; charset=utf-8";
   if (extension === ".mobileconfig") return "application/x-apple-aspen-config";
+  if (extension === ".crl") return "application/pkix-crl";
   if (extension === ".crt" || extension === ".pem") return "application/x-pem-file";
   return "application/octet-stream";
 }
