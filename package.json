@@ -11,6 +11,7 @@
     "stop": "node scripts/stop.mjs all",
     "stop:dev": "node scripts/stop.mjs dev",
     "stop:prod": "node scripts/stop.mjs prod",
+    "restart": "node scripts/restart.mjs all",
     "restart:dev": "node scripts/restart.mjs dev",
     "restart:prod": "node scripts/restart.mjs prod",
     "icons:generate": "node scripts/generate-icons.mjs",

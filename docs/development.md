@@ -19,6 +19,7 @@ pnpm test
 pnpm start:dev
 pnpm stop
 pnpm stop:dev
+pnpm restart
 pnpm restart:dev
 pnpm dev:server
 pnpm dev:web
@@ -27,7 +28,7 @@ pnpm db:reset:dev
 
 Always use `pnpm start:dev` for the development server. It checks whether the local backend and frontend are already running, reuses them when both are active, starts only the missing side when one process is already up, and forces dev state into `./data/dev/muxpilot.db`. Started processes run in the background with PID and log files under `data/runtime/dev/`.
 Codex and other automated agents must only interact with the dev server. Do not run or stop the production-preview server from an agent workflow: `pnpm start:prod`, `pnpm stop:prod`, `pnpm restart:prod`, and `pnpm stop` are off-limits for agents.
-Use `pnpm stop:dev` to stop the dev server only. `pnpm restart:dev` stops and starts it again. `pnpm stop` is an operator convenience that stops both development and production-preview listeners.
+Use `pnpm stop:dev` to stop the dev server only. `pnpm restart:dev` stops and starts it again. `pnpm restart` restarts only environments that are already running, leaving stopped development or production-preview servers down. `pnpm stop` is an operator convenience that stops both development and production-preview listeners.
 
 `pnpm db:reset:dev` removes the development SQLite database and its WAL/SHM files. It refuses to run while the development ports are active unless `--force` is passed through to `scripts/reset-dbs.mjs`.
 

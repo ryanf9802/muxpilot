@@ -11,6 +11,15 @@ const START_POLL_MS = 500;
 const STOP_GRACE_MS = 750;
 const DEFAULT_DEV_PORTS = ["4177", "5177"];
 const DEFAULT_PROD_PORTS = ["12777", "12778"];
+const RUNTIME_ENV_KEYS = [
+  "MUXPILOT_HOST",
+  "MUXPILOT_PORT",
+  "MUXPILOT_API_TARGET",
+  "MUXPILOT_WEB_PROTOCOL",
+  "MUXPILOT_WEB_PORT",
+  "MUXPILOT_DATA_DIR",
+  "MUXPILOT_DB_PATH"
+];
 
 const MODE_CONFIG = {
   dev: {
@@ -37,72 +46,78 @@ const MODE_CONFIG = {
 
 export async function startMode(mode) {
   const config = modeConfig(mode);
-  loadDotenv();
-  applyRuntimeDefaults(config);
+  const runtimeEnvSnapshot = snapshotEnv(RUNTIME_ENV_KEYS);
 
-  const state = runtimeState(mode);
-  mkdirSync(state.dir, { recursive: true });
+  try {
+    loadDotenv();
+    applyRuntimeDefaults(config);
 
-  const backendPort = validPort(process.env.MUXPILOT_PORT, Number(config.backendPort));
-  const webPort = validPort(process.env.MUXPILOT_WEB_PORT, Number(config.webPort));
-  const webProtocol = process.env.MUXPILOT_WEB_PROTOCOL ?? "http";
-  const backendUrl = `http://127.0.0.1:${backendPort}`;
-  const webUrl = `${webProtocol}://127.0.0.1:${webPort}`;
+    const state = runtimeState(mode);
+    mkdirSync(state.dir, { recursive: true });
 
-  cleanupStalePidFiles(state);
+    const backendPort = validPort(process.env.MUXPILOT_PORT, Number(config.backendPort));
+    const webPort = validPort(process.env.MUXPILOT_WEB_PORT, Number(config.webPort));
+    const webProtocol = process.env.MUXPILOT_WEB_PROTOCOL ?? "http";
+    const backendUrl = `http://127.0.0.1:${backendPort}`;
+    const webUrl = `${webProtocol}://127.0.0.1:${webPort}`;
 
-  const [backendActive, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
-    endpointActive(`${backendUrl}/healthz`),
-    endpointActive(webUrl),
-    portOccupied("127.0.0.1", backendPort),
-    portOccupied("127.0.0.1", webPort)
-  ]);
+    cleanupStalePidFiles(state);
 
-  if (backendActive && webActive) {
-    console.log(`${capitalize(config.label)} is already active. Reusing ${webUrl}.`);
+    const [backendActive, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
+      endpointActive(`${backendUrl}/healthz`),
+      endpointActive(webUrl),
+      portOccupied("127.0.0.1", backendPort),
+      portOccupied("127.0.0.1", webPort)
+    ]);
+
+    if (backendActive && webActive) {
+      console.log(`${capitalize(config.label)} is already active. Reusing ${webUrl}.`);
+      printState(state);
+      return;
+    }
+
+    if (backendPortOccupied && !backendActive) {
+      console.error(`Backend port ${backendPort} is already in use, but ${backendUrl}/healthz did not respond.`);
+      console.error(`Not starting a duplicate backend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
+      process.exit(1);
+    }
+
+    if (webPortOccupied && !webActive) {
+      console.error(`Frontend port ${webPort} is already in use, but ${webUrl} did not respond.`);
+      console.error(`Not starting a duplicate frontend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
+      process.exit(1);
+    }
+
+    if (config.build) runPnpmSync(["build"]);
+
+    const started = [];
+    if (!backendActive) {
+      started.push("backend");
+      spawnManaged("backend", config.backendArgs, state.backendPidPath, state.backendLogPath);
+    }
+    if (!webActive) {
+      started.push("frontend");
+      spawnManaged("frontend", config.webArgs, state.webPidPath, state.webLogPath);
+    }
+
+    console.log(`Starting ${config.label} ${started.join(" and ")} in the background...`);
+
+    const ready = await waitForEndpoints([
+      { name: "backend", url: `${backendUrl}/healthz` },
+      { name: "frontend", url: webUrl }
+    ]);
+
+    if (!ready.ok) {
+      console.error(`Timed out waiting for ${ready.name} at ${ready.url}.`);
+      printState(state);
+      process.exit(1);
+    }
+
+    console.log(`${capitalize(config.label)} is ready at ${webUrl} with backend ${backendUrl}.`);
     printState(state);
-    return;
+  } finally {
+    restoreEnv(runtimeEnvSnapshot);
   }
-
-  if (backendPortOccupied && !backendActive) {
-    console.error(`Backend port ${backendPort} is already in use, but ${backendUrl}/healthz did not respond.`);
-    console.error(`Not starting a duplicate backend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
-    process.exit(1);
-  }
-
-  if (webPortOccupied && !webActive) {
-    console.error(`Frontend port ${webPort} is already in use, but ${webUrl} did not respond.`);
-    console.error(`Not starting a duplicate frontend. Reuse the existing process if it is intentional, or run pnpm stop:${mode} before pnpm start:${mode}.`);
-    process.exit(1);
-  }
-
-  if (config.build) runPnpmSync(["build"]);
-
-  const started = [];
-  if (!backendActive) {
-    started.push("backend");
-    spawnManaged("backend", config.backendArgs, state.backendPidPath, state.backendLogPath);
-  }
-  if (!webActive) {
-    started.push("frontend");
-    spawnManaged("frontend", config.webArgs, state.webPidPath, state.webLogPath);
-  }
-
-  console.log(`Starting ${config.label} ${started.join(" and ")} in the background...`);
-
-  const ready = await waitForEndpoints([
-    { name: "backend", url: `${backendUrl}/healthz` },
-    { name: "frontend", url: webUrl }
-  ]);
-
-  if (!ready.ok) {
-    console.error(`Timed out waiting for ${ready.name} at ${ready.url}.`);
-    printState(state);
-    process.exit(1);
-  }
-
-  console.log(`${capitalize(config.label)} is ready at ${webUrl} with backend ${backendUrl}.`);
-  printState(state);
 }
 
 export async function stopMode(mode) {
@@ -171,6 +186,18 @@ export async function stopMode(mode) {
   console.log(`${capitalize(modeLabel(mode))} server stop complete.`);
 }
 
+export function runningModes(mode = "all") {
+  if (!["all", "dev", "prod"].includes(mode)) {
+    console.error("Usage: node scripts/restart.mjs [all|dev|prod]");
+    process.exit(1);
+  }
+
+  loadDotenv();
+
+  const modes = mode === "all" ? ["dev", "prod"] : [mode];
+  return modes.filter(modeHasRunningServers);
+}
+
 function modeConfig(mode) {
   const config = MODE_CONFIG[mode];
   if (!config) {
@@ -178,6 +205,19 @@ function modeConfig(mode) {
     process.exit(1);
   }
   return config;
+}
+
+function modeHasRunningServers(mode) {
+  for (const candidate of readStatePids(mode)) {
+    if (candidate.pid !== process.pid && isRunning(candidate.pid)) return true;
+  }
+
+  for (const port of modePorts(mode)) {
+    const pids = findListeningPids(port).filter((pid) => pid !== process.pid && isRunning(pid));
+    if (pids.length > 0) return true;
+  }
+
+  return false;
 }
 
 function runtimeState(mode) {
@@ -446,6 +486,20 @@ function safeReadLink(path) {
 function validPort(value, fallback) {
   const port = Number(value ?? fallback);
   return Number.isInteger(port) && port > 0 && port <= 65535 ? port : fallback;
+}
+
+function snapshotEnv(keys) {
+  return new Map(keys.map((key) => [key, process.env[key]]));
+}
+
+function restoreEnv(snapshot) {
+  for (const [key, value] of snapshot) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
 }
 
 function applyRuntimeDefaults(config) {

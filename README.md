@@ -163,11 +163,12 @@ pnpm typecheck
 pnpm test
 pnpm start:dev
 pnpm stop:dev
+pnpm restart
 pnpm restart:dev
 pnpm db:reset:dev
 ```
 
-Automated agents should use only the development server lifecycle. `pnpm start:prod`, `pnpm stop:prod`, `pnpm restart:prod`, and `pnpm stop` are manual-operator commands.
+`pnpm restart` restarts only environments that are already running, leaving stopped development or production-preview servers down. Automated agents should use only the development server lifecycle. `pnpm start:prod`, `pnpm stop:prod`, `pnpm restart:prod`, and `pnpm stop` are manual-operator commands.
 
 Developer implementation notes live in [docs/development.md](docs/development.md) and [docs/architecture.md](docs/architecture.md). Keep shared transcript and user-context behavior in `packages/core`, backend side effects in `apps/server`, and browser-only behavior in `apps/web`.
 
