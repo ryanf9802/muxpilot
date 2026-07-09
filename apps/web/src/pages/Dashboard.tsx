@@ -27,6 +27,7 @@ import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
 import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
+import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/LoadingSkeleton.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -65,6 +66,9 @@ export function Dashboard() {
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
   const [codexUsageSummary, setCodexUsageSummary] = useState<CodexUsageSummaryResponse | null>(null);
+  const [sessionsInitialLoading, setSessionsInitialLoading] = useState(true);
+  const [usageSummaryInitialLoading, setUsageSummaryInitialLoading] = useState(true);
+  const [codexUsageSummaryInitialLoading, setCodexUsageSummaryInitialLoading] = useState(true);
   const [q, setQ] = useState("");
   const [menu, setMenu] = useState<{ session: ManagedSession; x: number; y: number } | null>(null);
   const [notifySubmenuOpen, setNotifySubmenuOpen] = useState(false);
@@ -87,23 +91,35 @@ export function Dashboard() {
 
   const loadSessions = useCallback(async () => {
     const requestId = ++sessionRequestIdRef.current;
-    const sessionResponse = await api.sessions(q, statusFilter.kind === "status" ? statusFilter.status : "");
-    if (requestId === sessionRequestIdRef.current) {
-      const visibleSessions = filterSessionsByDashboardStatus(sessionResponse.sessions, statusFilter);
-      setSessions(removeSessionsFromDashboard(visibleSessions, optimisticallyRemovedSessionIdsRef.current));
+    try {
+      const sessionResponse = await api.sessions(q, statusFilter.kind === "status" ? statusFilter.status : "");
+      if (requestId === sessionRequestIdRef.current) {
+        const visibleSessions = filterSessionsByDashboardStatus(sessionResponse.sessions, statusFilter);
+        setSessions(removeSessionsFromDashboard(visibleSessions, optimisticallyRemovedSessionIdsRef.current));
+      }
+    } finally {
+      if (requestId === sessionRequestIdRef.current) setSessionsInitialLoading(false);
     }
   }, [q, statusFilter]);
 
   const loadUsageSummary = useCallback(async () => {
     const requestId = ++usageRequestIdRef.current;
-    const summary = await api.openaiUsageSummary(30);
-    if (requestId === usageRequestIdRef.current) setUsageSummary(summary);
+    try {
+      const summary = await api.openaiUsageSummary(30);
+      if (requestId === usageRequestIdRef.current) setUsageSummary(summary);
+    } finally {
+      if (requestId === usageRequestIdRef.current) setUsageSummaryInitialLoading(false);
+    }
   }, []);
 
   const loadCodexUsageSummary = useCallback(async () => {
     const requestId = ++codexUsageRequestIdRef.current;
-    const summary = await api.codexUsageSummary();
-    if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummary(summary);
+    try {
+      const summary = await api.codexUsageSummary();
+      if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummary(summary);
+    } finally {
+      if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummaryInitialLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -344,7 +360,7 @@ export function Dashboard() {
       ) : null}
 
       <div className="repo-session-groups">
-        {sessionGroups.map((group) => {
+        {sessionsInitialLoading ? <DashboardSessionsSkeleton /> : sessionGroups.map((group) => {
           const isCollapsed = collapsedRepoKeys.has(group.key);
           const sessionGridId = repoSessionGridId(group.key);
 
@@ -490,13 +506,38 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      <CodexUsagePanel summary={codexUsageSummary} />
-      <OpenAIUsagePanel
-        summary={usageSummary}
-        toggleBusy={activitySummaryToggleBusy}
-        toggleError={activitySummaryToggleError}
-        onToggleActivitySummaries={setActivitySummariesEnabled}
-      />
+      {codexUsageSummaryInitialLoading && !codexUsageSummary ? (
+        <UsagePanelSkeleton />
+      ) : codexUsageSummary ? (
+        <CodexUsagePanel summary={codexUsageSummary} />
+      ) : (
+        <UsageUnavailablePanel title="Codex usage" />
+      )}
+      {usageSummaryInitialLoading && !usageSummary ? (
+        <UsagePanelSkeleton chart />
+      ) : usageSummary ? (
+        <OpenAIUsagePanel
+          summary={usageSummary}
+          toggleBusy={activitySummaryToggleBusy}
+          toggleError={activitySummaryToggleError}
+          onToggleActivitySummaries={setActivitySummariesEnabled}
+        />
+      ) : (
+        <UsageUnavailablePanel title="OpenAI cost, past 30 days" />
+      )}
+    </section>
+  );
+}
+
+function UsageUnavailablePanel({ title }: { title: string }) {
+  return (
+    <section className="usage-panel">
+      <div className="usage-panel-head">
+        <div>
+          <h2>{title}</h2>
+          <p>Usage data is unavailable. Muxpilot will retry automatically.</p>
+        </div>
+      </div>
     </section>
   );
 }

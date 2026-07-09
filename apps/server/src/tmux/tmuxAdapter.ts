@@ -39,10 +39,22 @@ export class TmuxAdapter {
     return this.createMuxpilotSession(cwd, name);
   }
 
+  async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
+    if (await this.hasSession("muxpilot")) return this.createCodexResumeWindow("muxpilot", cwd, name, codexSessionId);
+    return this.createMuxpilotResumeSession(cwd, name, codexSessionId);
+  }
+
   private async createCodexWindow(targetSessionId: string, cwd: string, name: string): Promise<TmuxPane> {
     const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
+    return parsePaneLine(line);
+  }
+
+  private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
+    const { stdout } = await execFileAsync("tmux", tmuxNewCodexResumeWindowArgs(targetSessionId, cwd, name, codexSessionId));
+    const line = stdout.trim().split("\n").find(Boolean);
+    if (!line) throw new Error("tmux did not return a pane for the resumed Codex window");
     return parsePaneLine(line);
   }
 
@@ -63,6 +75,28 @@ export class TmuxAdapter {
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex session");
+    return parsePaneLine(line);
+  }
+
+  private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
+    const { stdout } = await execFileAsync("tmux", [
+      "new-session",
+      "-d",
+      "-P",
+      "-F",
+      PANE_FORMAT,
+      "-s",
+      "muxpilot",
+      "-n",
+      name,
+      "-c",
+      cwd,
+      "codex",
+      "resume",
+      codexSessionId
+    ]);
+    const line = stdout.trim().split("\n").find(Boolean);
+    if (!line) throw new Error("tmux did not return a pane for the resumed Codex session");
     return parsePaneLine(line);
   }
 
@@ -145,6 +179,24 @@ export function tmuxNewCodexWindowArgs(targetSessionId: string, cwd: string, nam
     "-c",
     cwd,
     "codex"
+  ];
+}
+
+export function tmuxNewCodexResumeWindowArgs(targetSessionId: string, cwd: string, name: string, codexSessionId: string): string[] {
+  return [
+    "new-window",
+    "-P",
+    "-F",
+    PANE_FORMAT,
+    "-t",
+    `${targetSessionId}:`,
+    "-n",
+    name,
+    "-c",
+    cwd,
+    "codex",
+    "resume",
+    codexSessionId
   ];
 }
 

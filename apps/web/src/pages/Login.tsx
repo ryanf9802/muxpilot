@@ -4,6 +4,7 @@ import { Camera, Lock, X } from "lucide-react";
 import { api } from "../api/client.js";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { credentialSuppressedField } from "../utils/formFields.js";
+import { AccessLoadingSkeleton } from "../components/LoadingSkeleton.js";
 
 interface QrScanResult {
   data: string;
@@ -101,7 +102,7 @@ export function AccessPage() {
     }
   }
 
-  if (checking) return <div className="center-screen">Checking access</div>;
+  if (checking) return <AccessLoadingSkeleton />;
 
   return (
     <div className="login-page">

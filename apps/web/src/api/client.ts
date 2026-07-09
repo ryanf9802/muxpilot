@@ -18,9 +18,11 @@ import type {
   QueuedInputResponse,
   QuestionAnswerRequest,
   RemoteAccessResponse,
+  RestoreSessionResponse,
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
+  SessionHistoryResponse,
   SessionActionResponse,
   SessionAction,
   TranscriptPageResponse,
@@ -100,6 +102,9 @@ export const api = {
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
+  sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),
+  restoreSession: (id: string) =>
+    json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),

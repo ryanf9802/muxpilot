@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inputSubmitDelayMs, tmuxNewCodexWindowArgs } from "../src/tmux/tmuxAdapter.js";
+import { inputSubmitDelayMs, tmuxNewCodexResumeWindowArgs, tmuxNewCodexWindowArgs } from "../src/tmux/tmuxAdapter.js";
 
 describe("inputSubmitDelayMs", () => {
   it("keeps short commands fast and gives larger pastes time to settle", () => {
@@ -28,6 +28,26 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-c",
       "/home/ryanf/workspace/teamweave",
       "codex"
+    ]);
+  });
+
+  it("builds a Codex resume command for restorable sessions", () => {
+    const args = tmuxNewCodexResumeWindowArgs("muxpilot", "/home/ryanf/workspace/muxpilot", "old-work", "codex-session-id");
+
+    expect(args).toEqual([
+      "new-window",
+      "-P",
+      "-F",
+      expect.any(String),
+      "-t",
+      "muxpilot:",
+      "-n",
+      "old-work",
+      "-c",
+      "/home/ryanf/workspace/muxpilot",
+      "codex",
+      "resume",
+      "codex-session-id"
     ]);
   });
 });

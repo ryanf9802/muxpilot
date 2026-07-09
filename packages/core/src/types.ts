@@ -125,6 +125,19 @@ export interface ChatMessage {
 
 export type ApprovalKind = "command" | "tool" | "patch" | "permissions";
 
+export type ApprovalDecision =
+  | "approve_once"
+  | "approve_for_session"
+  | "approve_always"
+  | "approve_for_prefix"
+  | "deny";
+
+export interface ApprovalOption {
+  decision: ApprovalDecision;
+  label: string;
+  description: string;
+}
+
 export interface ApprovalRequest {
   id: string;
   sessionId: string;
@@ -136,10 +149,9 @@ export interface ApprovalRequest {
   cwd: string | null;
   reason: string | null;
   prefixRule: string[] | null;
+  options: ApprovalOption[];
   createdAt: string;
 }
-
-export type ApprovalDecision = "approve_once" | "approve_for_prefix" | "deny";
 
 export interface ResolveApprovalRequest {
   decision: ApprovalDecision;
@@ -344,6 +356,36 @@ export interface SendInputRequest {
 export interface CreateSessionRequest {
   cwd: string;
   name: string;
+}
+
+export interface SessionHistoryPromptMatch {
+  sequence: number;
+  timestamp: string;
+  text: string;
+}
+
+export interface SessionHistoryResult {
+  sessionId: string;
+  codexSessionId: string;
+  codexJsonlPath: string | null;
+  status: SessionStatus;
+  archived: boolean;
+  sessionName: string;
+  repoName: string;
+  repoBranch: string | null;
+  cwd: string;
+  lastActivityAt: string | null;
+  transcriptSize: number;
+  matchedPrompts: SessionHistoryPromptMatch[];
+}
+
+export interface SessionHistoryResponse {
+  results: SessionHistoryResult[];
+}
+
+export interface RestoreSessionResponse {
+  session: ManagedSession;
+  restored: boolean;
 }
 
 export interface SessionDirectorySuggestion {

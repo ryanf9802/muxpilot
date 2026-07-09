@@ -92,7 +92,7 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("ranks prompt history by exact, substring, fuzzy match, then recency", async () => {
+  it("ranks indexed prompt history by exact and token matches", async () => {
     const db = await tempDb();
     const session = testSession("session-history-ranking");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -103,12 +103,59 @@ describe("AppDatabase activity summaries", () => {
 
     const history = await db.listPromptHistory("graph", 10);
 
-    expect(history.map((result) => result.text)).toEqual([
-      "graph",
-      "xylophone graph",
-      "build a graph view",
-      "gather rough app hints"
-    ]);
+    expect(history.map((result) => result.text)).toEqual(["graph", "xylophone graph", "build a graph view"]);
+    db.close();
+  });
+
+  it("searches restorable session history through the prompt index", async () => {
+    const db = await tempDb();
+    const active = { ...testSession("session-history-active"), codexSessionId: "codex-active" };
+    const missing = { ...testSession("session-history-missing"), codexSessionId: "codex-missing", status: "missing" as const };
+    const noCodex = testSession("session-history-no-codex");
+    db.upsertSession(active, "2026-07-07T00:00:00.000Z");
+    db.upsertSession(missing, "2026-07-07T00:00:00.000Z");
+    db.upsertSession(noCodex, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(active.id, 1, "user", "Build indexed session history", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(missing.id, 1, "user", "Restore indexed session history", "2026-07-07T00:00:02.000Z"));
+    db.appendMessage(testMessage(noCodex.id, 1, "user", "No Codex session history", "2026-07-07T00:00:03.000Z"));
+
+    const history = await db.listSessionHistory("indexed history", 10);
+
+    expect(history.map((result) => result.codexSessionId).sort()).toEqual(["codex-active", "codex-missing"]);
+    expect(history.flatMap((result) => result.matchedPrompts.map((prompt) => prompt.text))).toEqual(
+      expect.arrayContaining(["Build indexed session history", "Restore indexed session history"])
+    );
+    db.close();
+  });
+
+  it("rekeys a managed session without duplicating transcript history", async () => {
+    const db = await tempDb();
+    const oldSession = { ...testSession("session-rekey-old"), codexSessionId: "codex-rekey", codexJsonlPath: "/tmp/rekey.jsonl" };
+    const newSession = {
+      ...oldSession,
+      id: "session-rekey-new",
+      tmux: { ...oldSession.tmux, paneId: "%9", windowId: "@9", windowName: "restored" },
+      status: "unknown" as const,
+      archived: false
+    };
+    db.upsertSession({ ...oldSession, status: "missing", archived: true }, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(oldSession.id, 1, "user", "Rekey searchable prompt", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(oldSession.id, 2, "assistant", "Rekey answer", "2026-07-07T00:00:02.000Z"));
+    db.upsertActivitySummary(oldSession.id, "Existing summary", "2026-07-07T00:00:03.000Z", 2);
+    db.setNotificationRule("device-rekey", "session", oldSession.id, "done_task", true, "2026-07-07T00:00:04.000Z");
+    db.setParserOffset("old-offset", 1234, "parser-test", "2026-07-07T00:00:05.000Z");
+
+    const rebound = db.rekeySession(oldSession.id, newSession, { from: "old-offset", to: "new-offset" }, "2026-07-07T00:00:06.000Z");
+
+    expect(rebound?.id).toBe(newSession.id);
+    expect(db.getSession(oldSession.id)).toBeNull();
+    expect(db.listMessages(newSession.id, 0).map((message) => message.text)).toEqual(["Rekey searchable prompt", "Rekey answer"]);
+    expect(db.listMessages(oldSession.id, 0)).toEqual([]);
+    expect(db.listPromptHistory("rekey", 10).map((result) => result.sessionId)).toEqual([newSession.id]);
+    expect(db.getActivitySummary(newSession.id)?.summary).toBe("Existing summary");
+    expect(db.getNotificationSettings("device-rekey").sessionRules[newSession.id]).toEqual(["done_task"]);
+    expect(db.getParserOffset("old-offset")).toBe(0);
+    expect(db.getParserOffset("new-offset")).toBe(1234);
     db.close();
   });
 

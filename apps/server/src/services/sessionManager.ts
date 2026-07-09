@@ -11,6 +11,7 @@ import type {
   QuestionRequest,
   QueuedInput,
   ResolveApprovalRequest,
+  SessionHistoryResult,
   SessionAction,
   SessionDirectorySuggestion,
   SessionModelSettings,
@@ -24,6 +25,11 @@ import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName,
 import type { AppDatabase } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
+import {
+  interactiveApprovalKeys,
+  parseInteractiveApprovalPrompt,
+  type InteractiveApprovalPrompt
+} from "../codex/approvalPrompt.js";
 import { TmuxAdapter } from "../tmux/tmuxAdapter.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
@@ -349,6 +355,33 @@ export class SessionManager {
     return this.db.listQueuedInputs(sessionId);
   }
 
+  async listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
+    const results = await this.db.listSessionHistory(query, limit * 2);
+    return collapseHistoryByCodexSession(results, limit);
+  }
+
+  async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
+    const source = await this.db.getSession(sessionId);
+    if (!source) throw new SessionNotFoundError("Session not found");
+    if (!source.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
+
+    const live = await this.findLiveSessionByCodexSessionId(source.codexSessionId);
+    if (live) {
+      if (live.archived) await this.db.markSessionArchived(live.id, false, nowIso());
+      const session = requireSession(await this.db.getSession(live.id));
+      this.publish("session.updated", session.id, session);
+      return { session, restored: false };
+    }
+
+    const cwd = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
+    const name = restoreSessionName(source);
+    const pane = await this.tmux.createCodexResumeWindowInMuxpilotSession(cwd, name, source.codexSessionId);
+    const session = await this.rebindRestoredSession(source, pane);
+    await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
+    this.publish("session.updated", session.id, session);
+    return { session, restored: true };
+  }
+
   async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
     const session = requireSession(await this.db.getSession(sessionId));
     const now = nowIso();
@@ -439,6 +472,10 @@ export class SessionManager {
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status !== "approval") return null;
+    const interactive = await this.captureInteractiveApprovalPrompt(session);
+    if (interactive) {
+      return materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
+    }
     const message = await this.db.latestApprovalMessage(sessionId);
     if (!message) return null;
     return materializeApproval(message);
@@ -497,16 +534,33 @@ export class SessionManager {
     const session = requireSession(await this.db.getSession(sessionId));
     const approval = await this.getPendingApproval(sessionId);
     if (!approval) throw new ApprovalResolutionError("No pending approval for this session");
+    if (!approval.options.some((option) => option.decision === request.decision)) {
+      throw new ApprovalResolutionError("This choice is not available for the pending approval");
+    }
     if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) {
       throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
     }
 
-    const active = await this.isApprovalGateVisible(session);
-    if (!active) {
-      throw new ApprovalResolutionError("The tmux pane is not showing an approval gate");
+    const interactive = await this.captureInteractiveApprovalPrompt(session);
+    let keys: string[];
+    if (interactive) {
+      if (!interactiveApprovalMatches(approval, interactive)) {
+        throw new ApprovalResolutionError("The pending approval changed before this choice was submitted");
+      }
+      if (!interactive.options.some((option) => option.decision === request.decision)) {
+        throw new ApprovalResolutionError("This choice is no longer available for the pending approval");
+      }
+      const interactiveKeys =
+        request.decision === "deny" ? this.approvalKeys.deny : interactiveApprovalKeys(interactive, request.decision);
+      if (!interactiveKeys) throw new ApprovalResolutionError("Could not select this approval choice");
+      keys = interactiveKeys;
+    } else {
+      const active = await this.isApprovalGateVisible(session);
+      if (!active) throw new ApprovalResolutionError("The tmux pane is not showing an approval gate");
+      keys = this.keysForDecision(request.decision);
     }
 
-    await this.tmux.sendKeys(session.tmux.paneId, this.keysForDecision(request.decision));
+    await this.tmux.sendKeys(session.tmux.paneId, keys);
     const now = nowIso();
     await this.db.setSessionStatus(sessionId, "waiting", now);
     await this.db.addAudit("local", `approval:${request.decision}`, sessionId, "ok", now);
@@ -744,7 +798,17 @@ export class SessionManager {
   private keysForDecision(decision: ApprovalDecision): string[] {
     if (decision === "approve_once") return this.approvalKeys.approveOnce;
     if (decision === "approve_for_prefix") return this.approvalKeys.approveForPrefix;
-    return this.approvalKeys.deny;
+    if (decision === "deny") return this.approvalKeys.deny;
+    throw new ApprovalResolutionError("This approval choice requires an interactive permission prompt");
+  }
+
+  private async captureInteractiveApprovalPrompt(session: ManagedSession): Promise<InteractiveApprovalPrompt | null> {
+    try {
+      const capture = await this.tmux.capturePane(session.tmux.paneId, 100, false);
+      return parseInteractiveApprovalPrompt(capture);
+    } catch {
+      return null;
+    }
   }
 
   private async isApprovalGateVisible(session: ManagedSession): Promise<boolean> {
@@ -793,6 +857,52 @@ export class SessionManager {
     throw new Error("Session pane is no longer available in tmux");
   }
 
+  private async findLiveSessionByCodexSessionId(codexSessionId: string): Promise<ManagedSession | null> {
+    const sessions = await this.db.listSessions(true);
+    for (const session of sessions) {
+      if (session.codexSessionId !== codexSessionId) continue;
+      if (session.status === "missing") continue;
+      try {
+        return await this.liveSession(session);
+      } catch {
+        // Discovery will mark stale rows missing on the next tick.
+      }
+    }
+    return null;
+  }
+
+  private async rebindRestoredSession(source: ManagedSession, pane: TmuxPane): Promise<ManagedSession> {
+    const now = nowIso();
+    const repo = await loadRepoMetadata(pane.cwd);
+    const parserOffsetMove =
+      source.codexJsonlPath ? { from: parserOffsetKey(source.id, source.codexJsonlPath), to: parserOffsetKey(tmuxPaneSessionId(pane), source.codexJsonlPath) } : null;
+    const session: ManagedSession = {
+      id: tmuxPaneSessionId(pane),
+      tmux: pane,
+      repo,
+      codexSessionId: source.codexSessionId,
+      codexJsonlPath: source.codexJsonlPath,
+      discoveryConfidence: "medium",
+      status: "unknown",
+      lastActivityAt: source.lastActivityAt,
+      preview: source.preview,
+      recentUserPrompts: source.recentUserPrompts,
+      activitySummary: source.activitySummary,
+      activitySummaryGeneratedAt: source.activitySummaryGeneratedAt,
+      activitySummarySourceSequence: source.activitySummarySourceSequence,
+      inputMode: source.inputMode,
+      models: source.models,
+      transcriptSize: source.transcriptSize,
+      unreadCount: source.unreadCount,
+      pinned: source.pinned,
+      archived: false
+    };
+    const rebound = await this.db.rekeySession(source.id, session, parserOffsetMove, now);
+    if (!rebound) throw new SessionRestoreError("Session not found");
+    await this.recordTouchedRepository(session, now);
+    return requireSession(rebound);
+  }
+
   private async refreshRenamedSession(session: ManagedSession): Promise<void> {
     const liveSession = await this.liveSession(session);
     const now = nowIso();
@@ -833,6 +943,7 @@ export class SessionManager {
   }
 
   private async shouldIncludePane(pane: TmuxPane, match: CodexSessionFile | null): Promise<boolean> {
+    if (match) return true;
     if (looksLikeCodexPane(pane)) return true;
     if (pane.currentCommand !== "node") return false;
 
@@ -880,6 +991,12 @@ export class SessionNameError extends Error {
 }
 
 export class CreateSessionError extends Error {
+  constructor(message: string, readonly statusCode = 409) {
+    super(message);
+  }
+}
+
+export class SessionRestoreError extends Error {
   constructor(message: string, readonly statusCode = 409) {
     super(message);
   }
@@ -933,6 +1050,34 @@ function requireSessionName(input: string): string {
   const name = normalizeSessionName(input);
   if (!isValidSessionName(name)) throw new SessionNameError("Session name must be 2-32 lowercase letters, numbers, or hyphens");
   return name;
+}
+
+function restoreSessionName(session: ManagedSession): string {
+  for (const candidate of [session.tmux.windowName, session.repo.name, "restored"]) {
+    const name = normalizeSessionName(candidate);
+    if (isValidSessionName(name)) return name;
+  }
+  return "restored";
+}
+
+function collapseHistoryByCodexSession(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
+  const byCodexSession = new Map<string, SessionHistoryResult>();
+  for (const result of results) {
+    const current = byCodexSession.get(result.codexSessionId);
+    if (!current || historyResultPreference(result, current) < 0) {
+      byCodexSession.set(result.codexSessionId, result);
+    }
+  }
+  return [...byCodexSession.values()].slice(0, limit);
+}
+
+function historyResultPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {
+  const firstLive = first.status !== "missing" && !first.archived;
+  const secondLive = second.status !== "missing" && !second.archived;
+  if (firstLive !== secondLive) return firstLive ? -1 : 1;
+  const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  return secondTime - firstTime;
 }
 
 function preservePendingStatus(
@@ -1431,7 +1576,9 @@ function looksLikeCodexScreen(capture: string): boolean {
 }
 
 function looksLikeApprovalScreen(capture: string): boolean {
-  const haystack = visibleTail(capture).toLowerCase();
+  const visible = visibleTail(capture);
+  if (parseInteractiveApprovalPrompt(visible)) return true;
+  const haystack = visible.toLowerCase();
   return (
     haystack.includes("approval required") ||
     haystack.includes("ask for approval") ||
@@ -1563,6 +1710,7 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
   const id = stringValue(approval.id) ?? message.id;
   const kind = approvalKind(approval.kind);
   const title = stringValue(approval.title) ?? "Approval required";
+  const prefixRule = stringArray(approval.prefixRule);
   return {
     id,
     sessionId: message.sessionId,
@@ -1573,9 +1721,103 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
     toolName: stringValue(approval.toolName),
     cwd: stringValue(approval.cwd),
     reason: stringValue(approval.reason),
-    prefixRule: stringArray(approval.prefixRule),
+    prefixRule,
+    options: approvalOptions(approval.options, prefixRule),
     createdAt: stringValue(approval.createdAt) ?? message.timestamp
   };
+}
+
+function materializeInteractiveApproval(
+  session: ManagedSession,
+  prompt: InteractiveApprovalPrompt,
+  latestMessage: ChatMessage | null
+): ApprovalRequest {
+  const toolCall = latestMessage?.type === "tool_call" ? recordValue(latestMessage.payload.payload) : null;
+  const callId = stringValue(toolCall?.call_id);
+  const toolName = prompt.kind === "permissions" ? toolCallName(toolCall) : null;
+  const id =
+    callId ??
+    stableId(
+      `${session.id}:${prompt.kind}:${prompt.title}:${prompt.command ?? ""}:${prompt.reason ?? ""}:${prompt.prefixRule?.join(" ") ?? ""}:${prompt.options
+        .map((option) => option.decision)
+        .join(":")}`
+    );
+  return {
+    id,
+    sessionId: session.id,
+    messageId: latestMessage?.id ?? id,
+    kind: prompt.kind,
+    title: prompt.title,
+    command: prompt.command,
+    toolName,
+    cwd: null,
+    reason: prompt.reason,
+    prefixRule: prompt.prefixRule,
+    options: prompt.options.map(({ decision, label, description }) => ({ decision, label, description })),
+    createdAt: latestMessage?.timestamp ?? nowIso()
+  };
+}
+
+function interactiveApprovalMatches(approval: ApprovalRequest, prompt: InteractiveApprovalPrompt): boolean {
+  return (
+    approval.kind === prompt.kind &&
+    approval.title === prompt.title &&
+    approval.command === prompt.command &&
+    approval.reason === prompt.reason &&
+    stringArraysEqual(approval.prefixRule, prompt.prefixRule) &&
+    approval.options.map((option) => option.decision).join(":") === prompt.options.map((option) => option.decision).join(":")
+  );
+}
+
+function stringArraysEqual(first: string[] | null, second: string[] | null): boolean {
+  if (first === null || second === null) return first === second;
+  return first.length === second.length && first.every((value, index) => value === second[index]);
+}
+
+function toolCallName(payload: Record<string, unknown> | null): string | null {
+  if (!payload || payload.type !== "function_call") return null;
+  const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
+  const namespace = stringValue(payload.namespace)
+    ?.replace(/^mcp__codex_apps__/, "codex_apps.")
+    .replace(/__/g, ".");
+  if (namespace && name) return `${namespace}.${name}`;
+  return name ?? namespace ?? null;
+}
+
+function approvalOptions(value: unknown, prefixRule: string[] | null): ApprovalRequest["options"] {
+  if (Array.isArray(value)) {
+    const options = value.map(approvalOption).filter((option): option is ApprovalRequest["options"][number] => Boolean(option));
+    if (options.length > 0) return options;
+  }
+  return [
+    { decision: "approve_once", label: "Approve once", description: "Run this tool call and continue." },
+    ...(prefixRule
+      ? [{ decision: "approve_for_prefix" as const, label: "Always allow prefix", description: "Remember this command prefix." }]
+      : []),
+    { decision: "deny", label: "Deny", description: "Cancel this tool call." }
+  ];
+}
+
+function approvalOption(value: unknown): ApprovalRequest["options"][number] | null {
+  const option = recordValue(value);
+  if (!option) return null;
+  const decision = approvalDecision(option.decision);
+  const label = stringValue(option.label);
+  if (!decision || !label) return null;
+  return { decision, label, description: stringValue(option.description) ?? "" };
+}
+
+function approvalDecision(value: unknown): ApprovalDecision | null {
+  if (
+    value === "approve_once" ||
+    value === "approve_for_session" ||
+    value === "approve_always" ||
+    value === "approve_for_prefix" ||
+    value === "deny"
+  ) {
+    return value;
+  }
+  return null;
 }
 
 function materializeQuestion(message: ChatMessage): QuestionRequest | null {

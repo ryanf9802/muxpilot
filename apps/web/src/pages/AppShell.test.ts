@@ -27,9 +27,11 @@ import {
   shouldHandlePrimaryInputFocusShortcut,
   shouldShowConnectDeviceButton,
   shouldShowLogoutButton,
+  shouldProbeShellConnection,
   syncSessionIntoStoplightSessions
 } from "./AppShell.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
+import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
   it("renders the app logo next to the wordmark", () => {
@@ -42,6 +44,12 @@ describe("shell connection state", () => {
 
   it("uses a short reconnect interval for transient disconnects", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);
+  });
+
+  it("only probes connectivity for failures that did not receive an HTTP response", () => {
+    expect(shouldProbeShellConnection(new ApiError("Conflict", 409))).toBe(false);
+    expect(shouldProbeShellConnection(new ApiError("Server error", 500))).toBe(false);
+    expect(shouldProbeShellConnection(new TypeError("Failed to fetch"))).toBe(true);
   });
 
   it("renders a clear disconnected reconnecting notice", () => {

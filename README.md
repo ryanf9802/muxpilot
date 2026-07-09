@@ -78,7 +78,7 @@ The transcript UI is intentionally not a raw dump. It keeps user prompts, assist
 
 Use the new-session button or press `Ctrl+N`.
 
-The dialog asks for:
+The Create tab asks for:
 
 - Directory: the repo or working directory where Codex should start.
 - Name: the tmux window name for the new Codex session.
@@ -86,6 +86,8 @@ The dialog asks for:
 Directory suggestions come from active sessions and recently touched repositories. Session names are normalized and must be 2-32 lowercase letters, numbers, or hyphens.
 
 When a session is created, muxpilot runs `codex` in a tmux window inside the shared `muxpilot` tmux session. If that tmux session does not exist, muxpilot creates it.
+
+The History tab searches restorable sessions that muxpilot has managed before. Search matches only submitted user prompts, not assistant replies, tool output, or command output. Selecting a live result opens the existing pane; selecting a missing or archived result starts a new tmux window with `codex resume <session-id>` and opens the resumed session.
 
 ### Sending Input
 
@@ -108,7 +110,7 @@ If Codex is waiting on a question or proposed plan, the composer is locked until
 
 muxpilot handles the common interactive Codex gates:
 
-- Approval prompts can be approved once, approved for a prefix when Codex provides a prefix rule, or denied.
+- Approval prompts can be approved once, approved for a prefix when Codex provides a prefix rule, or denied. App/connector permission prompts also expose Codex's session-wide and persistent allow choices.
 - Structured questions render as browser form controls.
 - Multiple-choice question answers are sent through Codex's menu selection path.
 - Free-form question answers are pasted into the pane.
@@ -120,7 +122,7 @@ These actions still operate through tmux. muxpilot is not bypassing the Codex CL
 
 Press `Ctrl+R` to open prompt history.
 
-Prompt history searches submitted user prompts stored in SQLite and shows repo/session metadata for each result. Selecting a result copies it to the clipboard.
+Prompt history searches submitted user prompts stored in SQLite and shows repo/session metadata for each result. Selecting a result copies it to the clipboard. Prompt History and the New Session History tab share a persistent SQLite full-text index of displayable user prompts so searches stay quick as transcripts grow.
 
 ### Skill Suggestions
 

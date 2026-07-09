@@ -210,6 +210,17 @@ describe("api client request headers", () => {
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 
+  it("searches and restores session history", async () => {
+    const fetchMock = mockJsonResponse({ results: [] });
+
+    await api.sessionHistory("build graph", 25);
+    await api.restoreSession("session-1");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session-history?q=build%20graph&limit=25");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/session-history/session-1/restore");
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe("POST");
+  });
+
   it("manages queued inputs for a session", async () => {
     const fetchMock = mockJsonResponse({ queuedInputs: [] });
 

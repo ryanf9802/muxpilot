@@ -366,6 +366,151 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces and resolves app permission prompts that have no JSONL approval event", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "app-approval.jsonl");
+    const sentKeys: string[][] = [];
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "_create_pull_request",
+            namespace: "mcp__codex_apps__github",
+            call_id: "call-app-approval",
+            arguments: JSON.stringify({ title: "Scope assignment CADs to workspace", base: "stage" })
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => appApprovalCapture(1);
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("approval");
+    await harness.manager.ingest();
+
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-app-approval",
+      kind: "permissions",
+      title: "Allow GitHub to create a pull request?",
+      toolName: "codex_apps.github.create_pull_request",
+      options: [
+        { decision: "approve_once", label: "Allow" },
+        { decision: "approve_for_session", label: "Allow for this session" },
+        { decision: "approve_always", label: "Always allow" },
+        { decision: "deny", label: "Cancel" }
+      ]
+    });
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_for_session" });
+    expect(sentKeys).toEqual([["Down", "Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
+  it("surfaces and resolves command approval prompts that have no JSONL approval event", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "command-approval.jsonl");
+    const sentKeys: string[][] = [];
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-command-approval",
+            input: "const r = await tools.exec_command({ sandbox_permissions: 'require_escalated' });"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1);
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("approval");
+    await harness.manager.ingest();
+
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      kind: "command",
+      title: "Would you like to run the following command?",
+      command: "pnpm app restart prod",
+      reason: "Do you want to allow restarting the muxpilot production server so the simplified hold feedback is live?",
+      prefixRule: ["pnpm", "app", "restart", "prod"],
+      options: [
+        { decision: "approve_once", label: "Approve once" },
+        { decision: "approve_for_prefix", label: "Always allow prefix" },
+        { decision: "deny", label: "Deny" }
+      ]
+    });
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
+    expect(sentKeys).toEqual([["Down", "Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    harness.db.close();
+  });
+
+  it("does not send approval keys when an app permission prompt changes before resolution", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentKeys: string[][] = [];
+    let resolving = false;
+    let resolutionCaptureCount = 0;
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => {
+      if (!resolving) return appApprovalCapture(1);
+      resolutionCaptureCount += 1;
+      return resolutionCaptureCount === 1 ? appApprovalCapture(1) : "Ready\n› ";
+    };
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("approval");
+    resolving = true;
+
+    await expect(harness.manager.resolveApproval(session.id, { decision: "approve_always" })).rejects.toThrow(
+      "not showing an approval gate"
+    );
+    expect(sentKeys).toEqual([]);
+    harness.db.close();
+  });
+
   it("keeps parsed questions pending and answers option prompts with menu keys", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2526,6 +2671,80 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("restores a missing managed session with codex resume", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-restorable",
+      cwd: repo,
+      user: "restore this session",
+      assistant: "ready",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    const originalPane = testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "old-work" });
+    let panes: TmuxPane[] = [originalPane];
+    const resumeCalls: Array<{ cwd: string; name: string; codexSessionId: string }> = [];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const original = (await harness.manager.listSessions(true))[0];
+    expect(original?.codexSessionId).toBe("codex-restorable");
+    expect(harness.manager.listMessages(original!.id, 0).map((message) => message.text)).toEqual(["restore this session", "ready"]);
+
+    panes = [];
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(original!.id))?.status).toBe("missing");
+
+    const appendedMessages: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "message.appended") appendedMessages.push((event.payload as { text?: string }).text ?? "");
+    });
+    harness.tmux.createCodexResumeWindowInMuxpilotSession = async (cwd, name, codexSessionId) => {
+      resumeCalls.push({ cwd, name, codexSessionId });
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: "shell", title: "node", pid: 456, sessionName: "muxpilot" });
+      panes = [pane];
+      return pane;
+    };
+
+    const restored = await harness.manager.restoreSession(original!.id);
+
+    expect(resumeCalls).toEqual([{ cwd: repo, name: "old-work", codexSessionId: "codex-restorable" }]);
+    expect(restored.restored).toBe(true);
+    expect(restored.session.tmux.paneId).toBe("%2");
+    expect(restored.session.codexSessionId).toBe("codex-restorable");
+    expect(restored.session.status).toBe("unknown");
+    expect(await harness.manager.getSession(original!.id)).toBeNull();
+    expect(harness.manager.listMessages(restored.session.id, 0).map((message) => message.text)).toEqual(["restore this session", "ready"]);
+    expect(appendedMessages).toEqual([]);
+
+    harness.tmux.capturePane = async () => "Starting Codex";
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(restored.session.id))?.status).toBe("unknown");
+
+    await appendFile(
+      join(harness.codexHome, "sessions", "session.jsonl"),
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:03.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "new after restore" }
+        }),
+        ""
+      ].join("\n")
+    );
+    await harness.manager.ingest();
+
+    expect(harness.manager.listMessages(restored.session.id, 0).map((message) => message.text)).toEqual([
+      "restore this session",
+      "ready",
+      "new after restore"
+    ]);
+    unsubscribe();
+    harness.db.close();
+  });
+
   it("lists active and touched existing directories for new session suggestions", async () => {
     const harness = await createHarness();
     const activeRepo = join(harness.dir, "active");
@@ -2720,6 +2939,45 @@ async function writeCodexResponseSession(
     ].join("\n")
   );
   await utimes(path, input.mtime, input.mtime);
+}
+
+function appApprovalCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;
+  return [
+    "◦ Calling",
+    "  └ codex_apps.github.create_pull_request({\"title\":\"Scope assignment CADs to workspace\"})",
+    "",
+    "  Field 1/1",
+    "  Allow GitHub to create a pull request?",
+    "",
+    "  Title: Scope assignment CADs to workspace",
+    "  base: stage",
+    "",
+    option(1, "Allow                   Run the tool and continue."),
+    option(2, "Allow for this session  Run the tool and remember this choice for this session."),
+    option(3, "Always allow            Run the tool and remember this choice for future tool calls."),
+    option(4, "Cancel                  Cancel this tool call"),
+    "  enter to submit | esc to cancel"
+  ].join("\n");
+}
+
+function commandApprovalCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "›" : " "} ${number}. ${text}`;
+  return [
+    "◦ Running pnpm app restart prod",
+    "",
+    "  Would you like to run the following command?",
+    "",
+    "  Environment: local",
+    "",
+    "  Reason: Do you want to allow restarting the muxpilot production server so the simplified hold feedback is live?",
+    "",
+    "  $ pnpm app restart prod",
+    "",
+    option(1, "Yes, proceed (y)"),
+    option(2, "Yes, and don't ask again for commands that start with `pnpm app restart prod` (p)"),
+    option(3, "No, and tell Codex what to do differently (esc)")
+  ].join("\n");
 }
 
 function testPane(input: {

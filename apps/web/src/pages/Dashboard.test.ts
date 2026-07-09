@@ -126,6 +126,12 @@ describe("SessionCard", () => {
     expect(renderSessionCard(session)).toContain("session-card-pinned");
     expect(renderSessionCard(session)).toContain("Pinned session");
   });
+
+  it("marks session cards as shared context-menu triggers", () => {
+    expect(renderSessionCard(testSession({ id: "a", paneId: "%111", windowName: "context-menu" }))).toContain(
+      'data-context-menu-trigger=""'
+    );
+  });
 });
 
 describe("dashboardPreviewLines", () => {

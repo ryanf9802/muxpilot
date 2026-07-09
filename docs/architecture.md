@@ -27,7 +27,7 @@ tmux is authoritative for live session existence, pane ids, cwd, window names, p
 
 Codex JSONL files under `~/.codex/sessions` are the preferred transcript source because they contain structured user, assistant, and tool events. Terminal capture is used for raw view and recovery previews.
 
-SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, OpenAI usage estimates, events, and audit records.
+SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
 ## Components
 
@@ -80,6 +80,7 @@ React composer -> POST /api/sessions/:id/input -> tmux load-buffer -> paste-buff
 Busy session -> queued input stored in SQLite -> sent when the session becomes input-ready
 Mode toggle -> POST /api/sessions/:id/actions -> tmux send configured mode-cycle keys
 Interactive buttons -> POST /api/sessions/:id/actions or /question -> tmux menu keys
+App permission form in terminal -> live approval parser -> GET/POST /approval -> verified relative tmux menu keys
 ```
 
 Session actions:
@@ -89,3 +90,12 @@ React action button -> POST /api/sessions/:id/actions -> SessionManager -> TmuxA
 ```
 
 Supported actions include interrupt, input-mode switch, proposed-plan choice, rename, detach notice, kill pane, and archive transcript.
+
+Restorable session history:
+
+```text
+Parsed user messages -> SQLite FTS prompt index -> GET /api/session-history -> New Session History tab
+History restore -> POST /api/session-history/:id/restore -> tmux new-window "codex resume <session-id>"
+```
+
+The history index contains only displayable user prompts from sessions muxpilot has managed. Assistant, tool, command, hidden environment context, and action-only user context are excluded from the index.

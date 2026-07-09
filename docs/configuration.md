@@ -62,6 +62,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS`: tmux keys for approving once, default `Enter`.
 - `MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS`: tmux keys for persistent prefix approval, default `Down Enter`.
 - `MUXPILOT_APPROVAL_DENY_KEYS`: tmux keys for denying/canceling an approval, default `Escape`.
+- App/connector permission forms are read from the live Codex terminal and navigated relative to their currently selected option; the legacy approval key settings above remain in effect for structured command and patch approvals.
 - `MUXPILOT_SUMMARY_MODEL`: OpenAI model for activity summaries, default `gpt-4.1-mini`.
 - `MUXPILOT_SUMMARY_INTERVAL_MS`: minimum per-session summary refresh interval, default `10000`.
 - `MUXPILOT_SUMMARY_DEBOUNCE_MS`: debounce before refreshing after new messages, default `0`.

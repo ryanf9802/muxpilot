@@ -1,8 +1,8 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Check, ChevronRight, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Search, Settings, Smartphone, X } from "lucide-react";
+import { AlertTriangle, Bell, Check, ChevronRight, Copy, Eye, EyeOff, History, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
-import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
+import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
@@ -14,7 +14,8 @@ import type {
   PromptHistoryResult,
   RemoteAccessResponse,
   SessionDirectorySuggestion,
-  SessionEvent
+  SessionEvent,
+  SessionHistoryResult
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
@@ -30,6 +31,8 @@ import {
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
+import { AppBrand } from "../components/AppBrand.js";
+import { AppLoadingSkeleton, loadingSkeletonVariantForPath } from "../components/LoadingSkeleton.js";
 import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, dropdownMenuPosition, submenuPosition, useDismissableContextMenu } from "../components/ContextMenu.js";
 import {
   disablePushSubscription,
@@ -68,9 +71,16 @@ export function AppShell() {
   const [createSessionName, setCreateSessionName] = useState("");
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
+  const [createSessionTab, setCreateSessionTab] = useState<"create" | "history">("create");
   const [createSessionDirectoryFocused, setCreateSessionDirectoryFocused] = useState(false);
   const [createSessionDirectorySelectedIndex, setCreateSessionDirectorySelectedIndex] = useState(0);
   const [createSessionNameAutofocus, setCreateSessionNameAutofocus] = useState(false);
+  const [sessionHistoryQuery, setSessionHistoryQuery] = useState("");
+  const [sessionHistoryResults, setSessionHistoryResults] = useState<SessionHistoryResult[]>([]);
+  const [sessionHistorySelectedIndex, setSessionHistorySelectedIndex] = useState(0);
+  const [sessionHistoryLoading, setSessionHistoryLoading] = useState(false);
+  const [sessionHistoryError, setSessionHistoryError] = useState("");
+  const [sessionHistoryRestoreId, setSessionHistoryRestoreId] = useState<string | null>(null);
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
@@ -91,6 +101,8 @@ export function AppShell() {
   const promptHistoryPrefillRef = useRef<() => string>(() => "");
   const createSessionCwdPrefillRef = useRef<() => string>(() => "");
   const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
+  const sessionHistoryRequestIdRef = useRef(0);
+  const connectionProbeRunningRef = useRef(false);
 
   useEffect(() => installCtrlWGuard(), []);
 
@@ -132,6 +144,23 @@ export function AppShell() {
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
   }, [markUnauthorized]);
 
+  const handleConnectedRequestFailure = useCallback((error: unknown) => {
+    if (isUnauthorizedError(error)) {
+      markUnauthorized();
+      return;
+    }
+    if (!shouldProbeShellConnection(error)) return;
+    if (connectionProbeRunningRef.current) return;
+    connectionProbeRunningRef.current = true;
+    void api
+      .me()
+      .then(applyMe)
+      .catch(markDisconnected)
+      .finally(() => {
+        connectionProbeRunningRef.current = false;
+      });
+  }, [applyMe, markDisconnected, markUnauthorized]);
+
   useEffect(() => {
     const handleAuthExpired = () => markUnauthorized();
     window.addEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
@@ -167,13 +196,13 @@ export function AppShell() {
       if (refreshTimer) return;
       refreshTimer = setTimeout(() => {
         refreshTimer = null;
-        void loadSessions().catch(markDisconnected);
+        void loadSessions().catch(handleConnectedRequestFailure);
       }, SESSION_STATUS_EVENT_DEBOUNCE_MS);
     };
 
-    void loadSessions().catch(markDisconnected);
+    void loadSessions().catch(handleConnectedRequestFailure);
     void loadNotificationSettings().catch(() => undefined);
-    const interval = setInterval(() => void loadSessions().catch(markDisconnected), SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    const interval = setInterval(() => void loadSessions().catch(handleConnectedRequestFailure), SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -220,7 +249,7 @@ export function AppShell() {
       clearInterval(interval);
       socket.close();
     };
-  }, [applyMe, connectionState, loadNotificationSettings, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
+  }, [applyMe, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "disconnected") return undefined;
@@ -269,6 +298,33 @@ export function AppShell() {
     };
   }, [createSessionOpen]);
 
+  useEffect(() => {
+    if (!createSessionOpen || createSessionTab !== "history") return undefined;
+    const requestId = ++sessionHistoryRequestIdRef.current;
+    setSessionHistoryLoading(true);
+    setSessionHistoryError("");
+    const timer = window.setTimeout(() => {
+      api
+        .sessionHistory(sessionHistoryQuery)
+        .then((response) => {
+          if (requestId !== sessionHistoryRequestIdRef.current) return;
+          setSessionHistoryResults(response.results);
+          setSessionHistorySelectedIndex(0);
+        })
+        .catch(() => {
+          if (requestId !== sessionHistoryRequestIdRef.current) return;
+          setSessionHistoryResults([]);
+          setSessionHistoryError("Could not load session history.");
+        })
+        .finally(() => {
+          if (requestId === sessionHistoryRequestIdRef.current) setSessionHistoryLoading(false);
+        });
+    }, 80);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [createSessionOpen, createSessionTab, sessionHistoryQuery]);
+
   useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
     setNotificationMenu(null);
     setNotificationSettingsSubmenuOpen(false);
@@ -309,6 +365,7 @@ export function AppShell() {
   const openCreateSession = useCallback((cwd = "") => {
     const hasPrefilledCwd = cwd.trim().length > 0;
     setCreateSessionOpen(true);
+    setCreateSessionTab("create");
     setCreateSessionCwd(cwd);
     setCreateSessionName("");
     setCreateSessionError(null);
@@ -407,14 +464,7 @@ export function AppShell() {
   }, [applyMe, markDisconnected, retryBusy]);
 
   if (connectionState === "checking") {
-    return (
-      <AppRecoveryPage
-        role="status"
-        busy
-        title="Opening muxpilot"
-        message="Checking the local backend connection."
-      />
-    );
+    return <AppLoadingSkeleton variant={loadingSkeletonVariantForPath(location.pathname)} />;
   }
   if (connectionState === "unauthorized") return null;
   if (connectionState === "disconnected") {
@@ -452,9 +502,10 @@ export function AppShell() {
   }
 
   function closeCreateSession() {
-    if (createSessionBusy) return;
+    if (createSessionBusy || sessionHistoryRestoreId) return;
     setCreateSessionOpen(false);
     setCreateSessionError(null);
+    setSessionHistoryError("");
     setCreateSessionDirectoryFocused(false);
     setCreateSessionDirectorySelectedIndex(0);
     setCreateSessionNameAutofocus(false);
@@ -510,6 +561,48 @@ export function AppShell() {
     setCreateSessionError(null);
   }
 
+  function handleSessionHistoryKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeCreateSession();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSessionHistorySelectedIndex((index) => Math.min(sessionHistoryResults.length - 1, index + 1));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSessionHistorySelectedIndex((index) => Math.max(0, index - 1));
+      return;
+    }
+    if (event.key === "Enter") {
+      const selected = sessionHistoryResults[sessionHistorySelectedIndex];
+      if (!selected) return;
+      event.preventDefault();
+      void restoreHistorySession(selected);
+    }
+  }
+
+  async function restoreHistorySession(result: SessionHistoryResult) {
+    if (sessionHistoryRestoreId) return;
+    setSessionHistoryRestoreId(result.sessionId);
+    setSessionHistoryError("");
+    try {
+      const response = await api.restoreSession(result.sessionId);
+      syncSessionStoplight(response.session);
+      setCreateSessionOpen(false);
+      navigate(`/sessions/${response.session.id}`, { state: { restoringSessionId: response.session.id } });
+      void loadSessions().catch(handleConnectedRequestFailure);
+    } catch (error) {
+      handleConnectedRequestFailure(error);
+      setSessionHistoryError(error instanceof Error ? error.message : "Could not restore session.");
+    } finally {
+      setSessionHistoryRestoreId(null);
+    }
+  }
+
   async function submitCreateSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (createSessionBusy) return;
@@ -546,6 +639,10 @@ export function AppShell() {
     const rect = event.currentTarget.getBoundingClientRect();
     setNotificationSettingsSubmenuOpen(false);
     setNotificationMenu(dropdownMenuPosition(rect, { width: GLOBAL_NOTIFICATION_MENU_WIDTH, height: GLOBAL_NOTIFICATION_MENU_HEIGHT, edge: MENU_EDGE }));
+  }
+
+  if (sessionHistoryRestoreId) {
+    return <AppLoadingSkeleton variant="session" label="Restoring session" />;
   }
 
   async function toggleGlobalNotification(type: NotificationRuleType, enabled: boolean) {
@@ -683,88 +780,146 @@ export function AppShell() {
           <form className="session-name-dialog" onSubmit={submitCreateSession} role="dialog" aria-modal="true" aria-labelledby="create-session-title">
             <div className="dialog-head">
               <h2 id="create-session-title">New session</h2>
-              <button type="button" className="icon-button" onClick={closeCreateSession} aria-label="Close" disabled={createSessionBusy}>
+              <button type="button" className="icon-button" onClick={closeCreateSession} aria-label="Close" disabled={createSessionBusy || Boolean(sessionHistoryRestoreId)}>
                 <X size={18} />
               </button>
             </div>
-            <label className="rename-field">
-              <span>Directory</span>
-              <div className="session-directory-combobox">
-                <input
-                  {...noAutofillTextField}
-                  autoFocus={!createSessionNameAutofocus}
-                  value={createSessionCwd}
-                  onChange={(event) => updateCreateSessionCwd(event.target.value)}
-                  onFocus={() => setCreateSessionDirectoryFocused(true)}
-                  onBlur={() => window.setTimeout(() => setCreateSessionDirectoryFocused(false), 120)}
-                  onKeyDown={handleCreateSessionDirectoryKeyDown}
-                  maxLength={4096}
-                  disabled={createSessionBusy}
-                  role="combobox"
-                  aria-expanded={showDirectorySuggestions}
-                  aria-controls="session-directory-suggestions"
-                  aria-activedescendant={activeDirectorySuggestionId}
-                  aria-autocomplete="list"
-                />
-                {showDirectorySuggestions ? (
-                  <div className="session-directory-suggestions" id="session-directory-suggestions" role="listbox" aria-label="Session directories">
-                    {visibleDirectorySuggestions.map((suggestion, index) => (
-                      <button
-                        key={suggestion.path}
-                        id={sessionDirectorySuggestionOptionId(suggestion.path)}
-                        ref={(element) => updateDirectorySuggestionRef(directorySuggestionRefs.current, suggestion.path, element)}
-                        type="button"
-                        role="option"
-                        aria-selected={index === createSessionDirectorySelectedIndex}
-                        className={index === createSessionDirectorySelectedIndex ? "session-directory-suggestion-selected" : undefined}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onMouseEnter={() => setCreateSessionDirectorySelectedIndex(index)}
-                        onClick={() => chooseCreateSessionDirectory(suggestion.path)}
-                      >
-                        <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
-                        <span className="session-directory-suggestion-path">{suggestion.path}</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-            </label>
-            <label className="rename-field">
-              <span>Name</span>
-              <input
-                {...noAutofillTextField}
-                autoFocus={createSessionNameAutofocus}
-                value={createSessionName}
-                onChange={(event) => updateCreateSessionName(event.target.value)}
-                maxLength={SESSION_NAME_MAX_LENGTH}
-                aria-invalid={createSessionNameInvalid}
-                disabled={createSessionBusy}
-              />
-            </label>
-            {createSessionNameWarning ? (
-              <p className="dialog-error" role="alert">
-                {createSessionNameWarning}
-              </p>
-            ) : null}
-            {createSessionError ? (
-              <p className="dialog-error" role="alert">
-                {createSessionError}
-              </p>
-            ) : null}
-            <div className="dialog-actions">
-              <button type="button" onClick={closeCreateSession} disabled={createSessionBusy}>
-                Cancel
+            <div className="dialog-tabs" role="tablist" aria-label="New session options">
+              <button type="button" role="tab" aria-selected={createSessionTab === "create"} data-active={createSessionTab === "create" || undefined} onClick={() => setCreateSessionTab("create")}>
+                <Play size={15} />
+                Create
               </button>
-              <button
-                className="primary"
-                type="submit"
-                disabled={createSessionBusy || createSessionNameInvalid}
-                aria-busy={createSessionBusy}
-                data-busy={createSessionBusy || undefined}
-              >
-                {createSessionBusy ? "Creating" : "Create"}
+              <button type="button" role="tab" aria-selected={createSessionTab === "history"} data-active={createSessionTab === "history" || undefined} onClick={() => setCreateSessionTab("history")}>
+                <History size={15} />
+                History
               </button>
             </div>
+            {createSessionTab === "create" ? (
+              <>
+                <label className="rename-field">
+                  <span>Directory</span>
+                  <div className="session-directory-combobox">
+                    <input
+                      {...noAutofillTextField}
+                      autoFocus={!createSessionNameAutofocus}
+                      value={createSessionCwd}
+                      onChange={(event) => updateCreateSessionCwd(event.target.value)}
+                      onFocus={() => setCreateSessionDirectoryFocused(true)}
+                      onBlur={() => window.setTimeout(() => setCreateSessionDirectoryFocused(false), 120)}
+                      onKeyDown={handleCreateSessionDirectoryKeyDown}
+                      maxLength={4096}
+                      disabled={createSessionBusy}
+                      role="combobox"
+                      aria-expanded={showDirectorySuggestions}
+                      aria-controls="session-directory-suggestions"
+                      aria-activedescendant={activeDirectorySuggestionId}
+                      aria-autocomplete="list"
+                    />
+                    {showDirectorySuggestions ? (
+                      <div className="session-directory-suggestions" id="session-directory-suggestions" role="listbox" aria-label="Session directories">
+                        {visibleDirectorySuggestions.map((suggestion, index) => (
+                          <button
+                            key={suggestion.path}
+                            id={sessionDirectorySuggestionOptionId(suggestion.path)}
+                            ref={(element) => updateDirectorySuggestionRef(directorySuggestionRefs.current, suggestion.path, element)}
+                            type="button"
+                            role="option"
+                            aria-selected={index === createSessionDirectorySelectedIndex}
+                            className={index === createSessionDirectorySelectedIndex ? "session-directory-suggestion-selected" : undefined}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onMouseEnter={() => setCreateSessionDirectorySelectedIndex(index)}
+                            onClick={() => chooseCreateSessionDirectory(suggestion.path)}
+                          >
+                            <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
+                            <span className="session-directory-suggestion-path">{suggestion.path}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </label>
+                <label className="rename-field">
+                  <span>Name</span>
+                  <input
+                    {...noAutofillTextField}
+                    autoFocus={createSessionNameAutofocus}
+                    value={createSessionName}
+                    onChange={(event) => updateCreateSessionName(event.target.value)}
+                    maxLength={SESSION_NAME_MAX_LENGTH}
+                    aria-invalid={createSessionNameInvalid}
+                    disabled={createSessionBusy}
+                  />
+                </label>
+                {createSessionNameWarning ? (
+                  <p className="dialog-error" role="alert">
+                    {createSessionNameWarning}
+                  </p>
+                ) : null}
+                {createSessionError ? (
+                  <p className="dialog-error" role="alert">
+                    {createSessionError}
+                  </p>
+                ) : null}
+                <div className="dialog-actions">
+                  <button type="button" onClick={closeCreateSession} disabled={createSessionBusy}>
+                    Cancel
+                  </button>
+                  <button
+                    className="primary"
+                    type="submit"
+                    disabled={createSessionBusy || createSessionNameInvalid}
+                    aria-busy={createSessionBusy}
+                    data-busy={createSessionBusy || undefined}
+                  >
+                    {createSessionBusy ? "Creating" : "Create"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="session-history-panel">
+                <label className="prompt-history-search">
+                  <Search size={17} aria-hidden="true" />
+                  <input
+                    {...searchField}
+                    autoFocus
+                    value={sessionHistoryQuery}
+                    onChange={(event) => setSessionHistoryQuery(event.target.value)}
+                    onKeyDown={handleSessionHistoryKeyDown}
+                    placeholder="Search user prompts"
+                    aria-controls="session-history-results"
+                  />
+                </label>
+                {sessionHistoryError ? <p className="dialog-error">{sessionHistoryError}</p> : null}
+                <div className="session-history-results" id="session-history-results" role="listbox" aria-label="Restorable sessions">
+                  {sessionHistoryLoading ? <p className="prompt-history-muted">Searching sessions</p> : null}
+                  {!sessionHistoryLoading && !sessionHistoryError && sessionHistoryResults.length === 0 ? <p className="prompt-history-muted">No restorable sessions</p> : null}
+                  {!sessionHistoryLoading
+                    ? sessionHistoryResults.map((result, index) => (
+                        <button
+                          key={`${result.codexSessionId}-${result.sessionId}`}
+                          type="button"
+                          role="option"
+                          aria-selected={index === sessionHistorySelectedIndex}
+                          className={index === sessionHistorySelectedIndex ? "session-history-result session-history-result-selected" : "session-history-result"}
+                          disabled={Boolean(sessionHistoryRestoreId)}
+                          onMouseEnter={() => setSessionHistorySelectedIndex(index)}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => void restoreHistorySession(result)}
+                        >
+                          <span className="session-history-result-main">
+                            <strong>{result.sessionName}</strong>
+                            <span>{sessionHistoryResultMeta(result)}</span>
+                          </span>
+                          <span className="session-history-result-prompt">{sessionHistoryPromptPreview(result)}</span>
+                          <span className="session-history-result-action" aria-hidden="true">
+                            {sessionHistoryRestoreId === result.sessionId ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
+                          </span>
+                        </button>
+                      ))
+                    : null}
+                </div>
+              </div>
+            )}
           </form>
         </div>
       ) : null}
@@ -780,14 +935,7 @@ export function AppShell() {
   );
 }
 
-export function AppBrand() {
-  return (
-    <div className="brand">
-      <img className="brand-logo" src="/favicon.svg" alt="" aria-hidden="true" />
-      <strong>muxpilot</strong>
-    </div>
-  );
-}
+export { AppBrand };
 
 export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
@@ -800,6 +948,10 @@ export interface AppShellOutletContext {
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
   setNotificationSettings: (settings: NotificationSettings) => void;
+}
+
+export function shouldProbeShellConnection(error: unknown): boolean {
+  return !(error instanceof ApiError);
 }
 
 function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: NotificationTriggeredPayload } {
@@ -1276,6 +1428,17 @@ function PromptHistoryDialog({
 export function promptHistoryResultMeta(result: Pick<PromptHistoryResult, "repoName" | "repoBranch" | "sessionName" | "timestamp">): string {
   const repo = result.repoBranch ? `${result.repoName} · ${result.repoBranch}` : result.repoName;
   return `${repo} · ${result.sessionName} · ${formatPromptHistoryTimestamp(result.timestamp)}`;
+}
+
+export function sessionHistoryResultMeta(result: Pick<SessionHistoryResult, "repoName" | "repoBranch" | "cwd" | "lastActivityAt" | "status" | "archived">): string {
+  const repo = result.repoBranch ? `${result.repoName} · ${result.repoBranch}` : result.repoName;
+  const time = result.lastActivityAt ? formatPromptHistoryTimestamp(result.lastActivityAt) : "No activity";
+  const state = result.archived ? "archived" : result.status;
+  return `${repo || result.cwd} · ${state} · ${time}`;
+}
+
+function sessionHistoryPromptPreview(result: Pick<SessionHistoryResult, "matchedPrompts" | "cwd">): string {
+  return result.matchedPrompts[0]?.text || result.cwd;
 }
 
 function formatPromptHistoryTimestamp(value: string): string {

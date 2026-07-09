@@ -254,6 +254,7 @@ function approvalFromFunctionCall(event: RawEvent, timestamp: string): ParsedApp
     cwd: stringValue(args.cwd),
     reason: stringValue(args.justification),
     prefixRule: stringArray(args.prefix_rule),
+    options: approvalOptions(stringArray(args.prefix_rule)),
     createdAt: timestamp
   };
 }
@@ -271,6 +272,7 @@ function approvalFromEventPayload(
     stringValue(payload.callId) ??
     approvalId(`${timestamp}:${payload.type ?? ""}:${JSON.stringify(payload).slice(0, 200)}`);
 
+  const prefixRule = prefixRuleFromPayload(payload);
   return {
     id,
     kind,
@@ -279,9 +281,20 @@ function approvalFromEventPayload(
     toolName: stringValue(payload.tool_name) ?? stringValue(payload.toolName),
     cwd: stringValue(payload.cwd),
     reason: stringValue(payload.reason) ?? stringValue(payload.justification),
-    prefixRule: prefixRuleFromPayload(payload),
+    prefixRule,
+    options: approvalOptions(prefixRule),
     createdAt: timestamp
   };
+}
+
+function approvalOptions(prefixRule: string[] | null): ParsedApproval["options"] {
+  return [
+    { decision: "approve_once", label: "Approve once", description: "Run this tool call and continue." },
+    ...(prefixRule
+      ? [{ decision: "approve_for_prefix" as const, label: "Always allow prefix", description: "Remember this command prefix." }]
+      : []),
+    { decision: "deny", label: "Deny", description: "Cancel this tool call." }
+  ];
 }
 
 function approvalMessage(

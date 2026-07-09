@@ -6,8 +6,10 @@ import type {
   PushSubscriptionInput,
   QuestionAnswerRequest,
   ResolveApprovalRequest,
+  RestoreSessionResponse,
   SendInputRequest,
   SessionDirectoriesResponse,
+  SessionHistoryResponse,
   SessionAction,
   UpdateNotificationSettingRequest,
   UpdateActivitySummarySettingsRequest,
@@ -20,6 +22,7 @@ import {
   InputModeSwitchError,
   QuestionResolutionError,
   QueuedInputError,
+  SessionRestoreError,
   SessionNotFoundError,
   SessionNameError,
   type SessionManager
@@ -53,10 +56,12 @@ const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
 const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
 const MAX_PROMPT_HISTORY_LIMIT = 100;
+const DEFAULT_SESSION_HISTORY_LIMIT = 40;
+const MAX_SESSION_HISTORY_LIMIT = 100;
 const DEFAULT_TRANSCRIPT_SEARCH_LIMIT = 100;
 const MAX_TRANSCRIPT_SEARCH_LIMIT = 500;
 const approvalSchema = z.object({
-  decision: z.enum(["approve_once", "approve_for_prefix", "deny"])
+  decision: z.enum(["approve_once", "approve_for_session", "approve_always", "approve_for_prefix", "deny"])
 });
 const questionAnswerSchema = z.object({
   answers: z.record(
@@ -216,6 +221,26 @@ export function registerRoutes(
     return {
       results: await db.listPromptHistory(String(query.q ?? "").slice(0, 2000), parsePromptHistoryLimit(query.limit))
     };
+  });
+
+  app.get("/api/session-history", { preHandler: access.requireAccess }, async (request): Promise<SessionHistoryResponse> => {
+    const query = request.query as { q?: string; limit?: string };
+    return {
+      results: await manager.listSessionHistory(String(query.q ?? "").slice(0, 2000), parseSessionHistoryLimit(query.limit))
+    };
+  });
+
+  app.post("/api/session-history/:id/restore", { preHandler: access.requireAccess }, async (request, reply): Promise<RestoreSessionResponse | void> => {
+    const { id } = request.params as { id: string };
+    try {
+      return await manager.restoreSession(id);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError || error instanceof SessionRestoreError || error instanceof CreateSessionError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {
@@ -475,4 +500,10 @@ function parsePromptHistoryLimit(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_PROMPT_HISTORY_LIMIT);
   if (!Number.isFinite(parsed)) return DEFAULT_PROMPT_HISTORY_LIMIT;
   return Math.min(MAX_PROMPT_HISTORY_LIMIT, Math.max(1, Math.floor(parsed)));
+}
+
+function parseSessionHistoryLimit(value: string | undefined): number {
+  const parsed = Number(value ?? DEFAULT_SESSION_HISTORY_LIMIT);
+  if (!Number.isFinite(parsed)) return DEFAULT_SESSION_HISTORY_LIMIT;
+  return Math.min(MAX_SESSION_HISTORY_LIMIT, Math.max(1, Math.floor(parsed)));
 }

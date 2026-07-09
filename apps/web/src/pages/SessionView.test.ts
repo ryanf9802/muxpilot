@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ChatMessage, ManagedSession, QuestionRequest, RepoMetadata, TranscriptItem } from "@muxpilot/core";
+import type { ApprovalRequest, ChatMessage, ManagedSession, QuestionRequest, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
   activeSkillToken,
+  ApprovalBanner,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
   blurActiveElementForVimSubmit,
@@ -36,6 +37,7 @@ import {
   queuedInputRemovable,
   relativeLineNumber,
   replaceTranscriptTail,
+  restoringSessionIdFromLocationState,
   loadComposerDraft,
   loadVimModePreference,
   sessionWithPendingInputMode,
@@ -100,6 +102,80 @@ function installLocalStorage(): Storage {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("ApprovalBanner", () => {
+  it("renders the choices supplied by an app permission prompt", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-1",
+      sessionId: "session-a",
+      messageId: "message-a",
+      kind: "permissions",
+      title: "Allow GitHub to create a pull request?",
+      command: null,
+      toolName: "codex_apps.github.create_pull_request",
+      cwd: null,
+      reason: null,
+      prefixRule: null,
+      options: [
+        { decision: "approve_once", label: "Allow", description: "Run the tool and continue." },
+        {
+          decision: "approve_for_session",
+          label: "Allow for this session",
+          description: "Remember this choice for this session."
+        },
+        { decision: "approve_always", label: "Always allow", description: "Remember this choice for future calls." },
+        { decision: "deny", label: "Cancel", description: "Cancel this tool call." }
+      ],
+      createdAt: "2026-07-09T00:00:00.000Z"
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(ApprovalBanner, { approval, busy: null, error: "", onDecision: () => undefined })
+    );
+
+    expect(html).toContain("Allow GitHub to create a pull request?");
+    expect(html).toContain("Allow for this session");
+    expect(html).toContain("Always allow");
+    expect(html).toContain("Cancel");
+    expect(html).toContain('title="Remember this choice for future calls."');
+  });
+
+  it("renders a live command approval prompt and its available actions", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-command",
+      sessionId: "session-a",
+      messageId: "message-command",
+      kind: "command",
+      title: "Would you like to run the following command?",
+      command: "pnpm app restart prod",
+      toolName: null,
+      cwd: null,
+      reason: "Restart the muxpilot production server.",
+      prefixRule: ["pnpm", "app", "restart", "prod"],
+      options: [
+        { decision: "approve_once", label: "Approve once", description: "Yes, proceed" },
+        {
+          decision: "approve_for_prefix",
+          label: "Always allow prefix",
+          description: "Yes, and don't ask again for this command prefix"
+        },
+        { decision: "deny", label: "Deny", description: "No, and tell Codex what to do differently" }
+      ],
+      createdAt: "2026-07-09T00:00:00.000Z"
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(ApprovalBanner, { approval, busy: null, error: "", onDecision: () => undefined })
+    );
+
+    expect(html).toContain("Would you like to run the following command?");
+    expect(html).toContain("pnpm app restart prod");
+    expect(html).toContain("Restart the muxpilot production server.");
+    expect(html).toContain("Approve once");
+    expect(html).toContain("Always allow prefix");
+    expect(html).toContain("Deny");
+  });
 });
 
 describe("shouldSubmitComposer", () => {
@@ -743,6 +819,19 @@ describe("session scroll behavior", () => {
     expect(shouldShowSessionLoading({ id: "session-a" }, "session-a", "session-b")).toBe(true);
     expect(shouldShowSessionLoading({ id: "session-a" }, "session-b", "session-b")).toBe(true);
     expect(shouldShowSessionLoading({ id: "session-a" }, "session-a", "session-a")).toBe(false);
+  });
+
+  it("keeps restored sessions loading while discovery is not ready", () => {
+    expect(shouldShowSessionLoading({ id: "session-a", status: "missing" }, "session-a", "session-a", "session-a")).toBe(true);
+    expect(shouldShowSessionLoading({ id: "session-a", status: "unknown" }, "session-a", "session-a", "session-a")).toBe(true);
+    expect(shouldShowSessionLoading({ id: "session-a", status: "waiting" }, "session-a", "session-a", "session-a")).toBe(false);
+    expect(shouldShowSessionLoading({ id: "session-a", status: "missing" }, "session-a", "session-a", "session-b")).toBe(false);
+  });
+
+  it("reads the restoring session id from route state", () => {
+    expect(restoringSessionIdFromLocationState({ restoringSessionId: "session-a" })).toBe("session-a");
+    expect(restoringSessionIdFromLocationState({ restoringSessionId: 1 })).toBeNull();
+    expect(restoringSessionIdFromLocationState(null)).toBeNull();
   });
 
   it("hides the initial message list until the bottom scroll has been applied", () => {
@@ -1426,6 +1515,7 @@ describe("MessageBubble", () => {
     const html = renderToStaticMarkup(createElement(MessageBubble, { message: message("session-a", 1, "copy me"), onOpenMenu: () => undefined }));
 
     expect(html).toContain("message-copyable");
+    expect(html).toContain('data-context-menu-trigger=""');
   });
 });
 

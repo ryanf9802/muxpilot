@@ -1,7 +1,38 @@
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, clampContextMenuPosition, dropdownMenuPosition, submenuPosition } from "./ContextMenu.js";
+import {
+  ContextMenu,
+  ContextMenuCheckboxItem,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  clampContextMenuPosition,
+  dropdownMenuPosition,
+  requestContextMenuHaptic,
+  submenuPosition
+} from "./ContextMenu.js";
+
+describe("requestContextMenuHaptic", () => {
+  it("requests one short vibration when the API is available", () => {
+    const vibrate = vi.fn(() => true);
+
+    expect(requestContextMenuHaptic({ vibrate })).toBe(true);
+    expect(vibrate).toHaveBeenCalledOnce();
+    expect(vibrate).toHaveBeenCalledWith(20);
+  });
+
+  it("silently falls back when vibration is unavailable or rejected", () => {
+    expect(requestContextMenuHaptic(null)).toBe(false);
+    expect(requestContextMenuHaptic({ vibrate: () => false })).toBe(false);
+    expect(
+      requestContextMenuHaptic({
+        vibrate: () => {
+          throw new Error("blocked");
+        }
+      })
+    ).toBe(false);
+  });
+});
 
 describe("ContextMenu", () => {
   it("renders a positioned menu with menu items", () => {

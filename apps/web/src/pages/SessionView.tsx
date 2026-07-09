@@ -48,7 +48,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
@@ -74,6 +74,7 @@ import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUse
 import { api, eventSocket } from "../api/client.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { StatusPill } from "../components/StatusPill.js";
+import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { codeMirrorComposerFieldAttributes, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
@@ -400,11 +401,19 @@ function messageCreatedAtOrAfterPending(message: ChatMessage, pending: PendingUs
 }
 
 export function shouldShowSessionLoading(
-  session: Pick<ManagedSession, "id"> | null,
+  session: (Pick<ManagedSession, "id"> & Partial<Pick<ManagedSession, "status">>) | null,
   routeSessionId: string,
-  initialTranscriptSessionId: string | null
+  initialTranscriptSessionId: string | null,
+  restoringSessionId: string | null = null
 ): boolean {
+  if (restoringSessionId === routeSessionId && (!session || session.status === "missing" || session.status === "unknown")) return true;
   return !session || session.id !== routeSessionId || initialTranscriptSessionId !== routeSessionId;
+}
+
+export function restoringSessionIdFromLocationState(state: unknown): string | null {
+  if (!state || typeof state !== "object") return null;
+  const value = (state as { restoringSessionId?: unknown }).restoringSessionId;
+  return typeof value === "string" ? value : null;
 }
 
 export function shouldHideInitialMessageList(initialTranscriptSessionId: string | null, routeSessionId: string, initialScrollReady: boolean): boolean {
@@ -453,6 +462,7 @@ export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
 
 export function SessionView() {
   const { id = "" } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const {
     refreshSessionStoplight,
@@ -465,6 +475,10 @@ export function SessionView() {
     accessMode
   } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
+  const [restoringSessionId, setRestoringSessionId] = useState<string | null>(() => {
+    const value = restoringSessionIdFromLocationState(location.state);
+    return value === id ? value : null;
+  });
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
   const [initialTranscriptSessionId, setInitialTranscriptSessionId] = useState<string | null>(null);
   const [initialScrollReady, setInitialScrollReady] = useState(false);
@@ -874,6 +888,16 @@ export function SessionView() {
       socket.close();
     };
   }, [connectionEpoch, id]);
+
+  useEffect(() => {
+    const value = restoringSessionIdFromLocationState(location.state);
+    setRestoringSessionId(value === id ? value : null);
+  }, [id, location.state]);
+
+  useEffect(() => {
+    if (restoringSessionId !== id) return;
+    if (session && session.status !== "missing" && session.status !== "unknown") setRestoringSessionId(null);
+  }, [id, restoringSessionId, session?.status]);
 
   function updateComposerText(value: string) {
     setText(value);
@@ -1432,9 +1456,9 @@ export function SessionView() {
     await loadQueuedInputs(targetId, token);
   }
 
-  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId)) return <div className="center-screen">Loading</div>;
+  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId, restoringSessionId)) return <SessionLoadingSkeleton />;
   const readySession = session;
-  if (!readySession) return <div className="center-screen">Loading</div>;
+  if (!readySession) return <SessionLoadingSkeleton />;
 
   return (
     <section className={composerFocused ? "session-view session-view-composer-focused" : "session-view"}>
@@ -2434,7 +2458,7 @@ function fallbackCopy(value: string): void {
   input.remove();
 }
 
-function ApprovalBanner({
+export function ApprovalBanner({
   approval,
   busy,
   error,
@@ -2477,36 +2501,28 @@ function ApprovalBanner({
       </dl>
       {error ? <p className="approval-error">{error}</p> : null}
       <div className="approval-actions">
-        <button
-          disabled={Boolean(busy)}
-          aria-busy={busy === "approve_once"}
-          data-busy={busy === "approve_once" || undefined}
-          onClick={() => onDecision("approve_once")}
-        >
-          <Check size={16} /> {busy === "approve_once" ? "Approving" : "Approve once"}
-        </button>
-        {approval.prefixRule?.length ? (
+        {approval.options.map((option) => (
           <button
+            key={option.decision}
+            className={option.decision === "deny" ? "danger" : undefined}
             disabled={Boolean(busy)}
-            aria-busy={busy === "approve_for_prefix"}
-            data-busy={busy === "approve_for_prefix" || undefined}
-            onClick={() => onDecision("approve_for_prefix")}
+            aria-busy={busy === option.decision}
+            data-busy={busy === option.decision || undefined}
+            title={option.description || undefined}
+            onClick={() => onDecision(option.decision)}
           >
-            <ShieldCheck size={16} /> {busy === "approve_for_prefix" ? "Approving" : "Always allow prefix"}
+            {approvalDecisionIcon(option.decision)} {busy === option.decision ? "Submitting" : option.label}
           </button>
-        ) : null}
-        <button
-          className="danger"
-          disabled={Boolean(busy)}
-          aria-busy={busy === "deny"}
-          data-busy={busy === "deny" || undefined}
-          onClick={() => onDecision("deny")}
-        >
-          <X size={16} /> {busy === "deny" ? "Denying" : "Deny"}
-        </button>
+        ))}
       </div>
     </section>
   );
+}
+
+function approvalDecisionIcon(decision: ApprovalDecision): ReactNode {
+  if (decision === "deny") return <X size={16} />;
+  if (decision === "approve_once") return <Check size={16} />;
+  return <ShieldCheck size={16} />;
 }
 
 function QueuedInputList({

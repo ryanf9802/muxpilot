@@ -14,6 +14,7 @@ import type {
   PromptHistoryResult,
   PushSubscriptionInput,
   QueuedInput,
+  SessionHistoryResult,
   SessionModelSettings,
   SessionModelSelections,
   SessionDirectorySuggestion,
@@ -37,6 +38,7 @@ type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | 
 const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
+const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 
 interface SessionRow {
   id: string;
@@ -62,6 +64,28 @@ interface MessageRow {
 
 interface PromptHistoryRow extends MessageRow {
   session_data_json: string;
+}
+
+interface PromptIndexRow {
+  message_id: string;
+  session_id: string;
+  sequence: number;
+  timestamp: string;
+  text: string;
+  session_data_json: string;
+}
+
+interface SessionHistoryMatchRow {
+  session_rowid: number;
+  session_id: string;
+  session_data_json: string;
+  status: SessionStatus;
+  last_activity_at: string | null;
+  archived: number;
+  match_sequence: number;
+  match_timestamp: string;
+  match_text: string;
+  rank: number;
 }
 
 export interface MessagePage {
@@ -220,6 +244,15 @@ export class AppDatabase {
     return this.call("upsertSession", session, updatedAt) as Promise<void>;
   }
 
+  rekeySession(
+    oldSessionId: string,
+    session: ManagedSession,
+    parserOffsetMove: { from: string; to: string } | null,
+    updatedAt: string
+  ): Promise<ManagedSession | null> {
+    return this.call("rekeySession", oldSessionId, session, parserOffsetMove, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   setSessionStatus(sessionId: string, status: SessionStatus, updatedAt: string): Promise<void> {
     return this.call("setSessionStatus", sessionId, status, updatedAt) as Promise<void>;
   }
@@ -292,6 +325,10 @@ export class AppDatabase {
 
   listPromptHistory(query: string, limit: number): Promise<PromptHistoryResult[]> {
     return this.call("listPromptHistory", query, limit) as Promise<PromptHistoryResult[]>;
+  }
+
+  listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
+    return this.call("listSessionHistory", query, limit) as Promise<SessionHistoryResult[]>;
   }
 
   listRecentMessages(sessionId: string, limit: number): Promise<TranscriptPageResponse> {
@@ -544,6 +581,96 @@ export class SyncAppDatabase {
       );
   }
 
+  rekeySession(
+    oldSessionId: string,
+    session: ManagedSession,
+    parserOffsetMove: { from: string; to: string } | null,
+    updatedAt: string
+  ): ManagedSession | null {
+    const oldRow = this.db.prepare("SELECT * FROM managed_sessions WHERE id = ?").get(oldSessionId) as SessionRow | undefined;
+    if (!oldRow) return null;
+
+    const existing = this.hydrateSession(oldRow);
+    const nextSession = {
+      ...session,
+      pinned: existing.pinned,
+      archived: session.archived
+    };
+    const archived = nextSession.archived ? 1 : 0;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (oldSessionId === nextSession.id) {
+        this.db
+          .prepare(
+            `UPDATE managed_sessions
+             SET data_json = ?,
+                 status = ?,
+                 last_activity_at = ?,
+                 preview = ?,
+                 archived = ?,
+                 updated_at = ?
+             WHERE id = ?`
+          )
+          .run(
+            JSON.stringify(nextSession),
+            nextSession.status,
+            nextSession.lastActivityAt,
+            nextSession.preview,
+            archived,
+            updatedAt,
+            oldSessionId
+          );
+      } else {
+        this.db.prepare("DELETE FROM managed_sessions WHERE id = ?").run(nextSession.id);
+        this.db
+          .prepare(
+            `INSERT INTO managed_sessions
+              (id, data_json, status, last_activity_at, preview, unread_count, archived, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            nextSession.id,
+            JSON.stringify(nextSession),
+            nextSession.status,
+            nextSession.lastActivityAt,
+            nextSession.preview,
+            oldRow.unread_count,
+            archived,
+            updatedAt
+          );
+        this.rekeySessionReferences(oldSessionId, nextSession.id);
+        this.db.prepare("DELETE FROM managed_sessions WHERE id = ?").run(oldSessionId);
+      }
+
+      if (parserOffsetMove && parserOffsetMove.from !== parserOffsetMove.to) {
+        this.db.prepare("DELETE FROM parser_offsets WHERE source = ?").run(parserOffsetMove.to);
+        this.db.prepare("UPDATE parser_offsets SET source = ?, updated_at = ? WHERE source = ?").run(
+          parserOffsetMove.to,
+          updatedAt,
+          parserOffsetMove.from
+        );
+      }
+
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+
+    return this.getSession(nextSession.id);
+  }
+
+  private rekeySessionReferences(oldSessionId: string, newSessionId: string): void {
+    this.db.prepare("UPDATE messages SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE session_prompt_index SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE notification_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE notification_device_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE events SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+  }
+
   setSessionStatus(sessionId: string, status: SessionStatus, updatedAt: string): void {
     const existing = this.getSession(sessionId);
     const dataJson = existing ? JSON.stringify({ ...existing, status }) : null;
@@ -689,6 +816,7 @@ export class SyncAppDatabase {
       );
 
     if (Number(result.changes) > 0) {
+      this.upsertPromptIndexMessage(message);
       this.db
         .prepare(
           `UPDATE managed_sessions
@@ -783,6 +911,8 @@ export class SyncAppDatabase {
       .run(text, message.id, message.sessionId);
 
     if (Number(result.changes) === 0) return null;
+    this.deletePromptIndexMessage(message.id);
+    this.upsertPromptIndexMessage({ ...message, text });
     if (message.role === "user") {
       this.db
         .prepare(
@@ -808,30 +938,83 @@ export class SyncAppDatabase {
   }
 
   listPromptHistory(query: string, limit: number): PromptHistoryResult[] {
-    const normalizedQuery = query.trim().toLowerCase();
+    const normalizedQuery = ftsPromptQuery(query);
+    if (!normalizedQuery) {
+      const rows = this.db
+        .prepare(
+          `SELECT prompt_index.message_id, prompt_index.session_id, prompt_index.sequence, prompt_index.timestamp, prompt_index.text,
+                  managed_sessions.data_json AS session_data_json
+           FROM session_prompt_index AS prompt_index
+           INNER JOIN managed_sessions ON managed_sessions.id = prompt_index.session_id
+           ORDER BY prompt_index.timestamp DESC, prompt_index.sequence DESC
+           LIMIT ?`
+        )
+        .all(limit) as unknown as PromptIndexRow[];
+      return rows.map(promptHistoryResultFromIndex);
+    }
+
     const rows = this.db
       .prepare(
-        `SELECT messages.*, managed_sessions.data_json AS session_data_json
-         FROM messages
-         INNER JOIN managed_sessions ON managed_sessions.id = messages.session_id
-         WHERE messages.role = 'user'
-           AND messages.text <> ''
-         ORDER BY messages.timestamp DESC, messages.sequence DESC`
+        `SELECT prompt_index.message_id, prompt_index.session_id, prompt_index.sequence, prompt_index.timestamp, prompt_index.text,
+                managed_sessions.data_json AS session_data_json
+         FROM session_prompt_index AS prompt_index
+         INNER JOIN managed_sessions ON managed_sessions.id = prompt_index.session_id
+         WHERE session_prompt_index MATCH ?
+         ORDER BY bm25(session_prompt_index), prompt_index.timestamp DESC, prompt_index.sequence DESC
+         LIMIT ?`
       )
-      .all() as unknown as PromptHistoryRow[];
+      .all(normalizedQuery, limit) as unknown as PromptIndexRow[];
 
-    const matches = rows
-      .filter((row) => isDisplayableUserPromptText(row.text))
-      .map((row, index) => ({
-        row,
-        score: normalizedQuery ? promptHistoryScore(row.text, normalizedQuery) : 0,
-        index
-      }))
-      .filter((match): match is { row: PromptHistoryRow; score: number; index: number } => match.score !== null)
-      .sort((first, second) => first.score - second.score || second.row.timestamp.localeCompare(first.row.timestamp) || first.index - second.index)
-      .slice(0, limit);
+    return rows.map(promptHistoryResultFromIndex);
+  }
 
-    return matches.map(({ row }) => promptHistoryResult(row));
+  listSessionHistory(query: string, limit: number): SessionHistoryResult[] {
+    const normalizedQuery = ftsPromptQuery(query);
+    if (!normalizedQuery) return collapseSessionHistory(this.recentRestorableSessionHistory(limit * 2), limit);
+
+    const rows = this.db
+      .prepare(
+        `SELECT managed_sessions.rowid AS session_rowid,
+                managed_sessions.id AS session_id,
+                managed_sessions.data_json AS session_data_json,
+                managed_sessions.status,
+                managed_sessions.last_activity_at,
+                managed_sessions.archived,
+                prompt_index.sequence AS match_sequence,
+                prompt_index.timestamp AS match_timestamp,
+                prompt_index.text AS match_text,
+                bm25(session_prompt_index) AS rank
+         FROM session_prompt_index AS prompt_index
+         INNER JOIN managed_sessions ON managed_sessions.id = prompt_index.session_id
+         WHERE session_prompt_index MATCH ?
+         ORDER BY rank ASC, prompt_index.timestamp DESC, prompt_index.sequence DESC
+         LIMIT ?`
+      )
+      .all(normalizedQuery, Math.max(limit * 12, 80)) as unknown as SessionHistoryMatchRow[];
+
+    const bySession = new Map<string, { row: SessionHistoryMatchRow; prompts: SessionHistoryResult["matchedPrompts"] }>();
+    for (const row of rows) {
+      const session = JSON.parse(row.session_data_json) as ManagedSession;
+      if (!session.codexSessionId) continue;
+      const current = bySession.get(row.session_id);
+      const prompt = {
+        sequence: row.match_sequence,
+        timestamp: row.match_timestamp,
+        text: normalizePreviewText(row.match_text)
+      };
+      if (current) {
+        if (current.prompts.length < 3 && !current.prompts.some((item) => item.sequence === prompt.sequence)) {
+          current.prompts.push(prompt);
+        }
+        continue;
+      }
+      bySession.set(row.session_id, { row, prompts: [prompt] });
+    }
+
+    return collapseSessionHistory(
+      [...bySession.values()].map(({ row, prompts }) => sessionHistoryResultFromMatchRow(row, prompts)),
+      limit
+    );
   }
 
   listRecentMessages(sessionId: string, limit: number): TranscriptPageResponse {
@@ -1226,6 +1409,7 @@ export class SyncAppDatabase {
 
   clearSessionTranscript(sessionId: string): void {
     this.db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
+    this.db.prepare("DELETE FROM session_prompt_index WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM session_summaries WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM queued_inputs WHERE session_id = ?").run(sessionId);
     this.db
@@ -1733,6 +1917,32 @@ export class SyncAppDatabase {
       .run(actor, action, target, result, timestamp);
   }
 
+  private recentRestorableSessionHistory(limit: number): SessionHistoryResult[] {
+    return this.listSessions(true)
+      .filter((session) => Boolean(session.codexSessionId))
+      .slice(0, limit)
+      .map((session) => sessionHistoryResultFromSession(session, session.recentUserPrompts.map((text, index) => ({
+        sequence: Math.max(0, session.transcriptSize - index),
+        timestamp: session.lastActivityAt ?? "",
+        text
+      }))));
+  }
+
+  private upsertPromptIndexMessage(message: ChatMessage): void {
+    if (message.role !== "user" || !isDisplayableUserPromptText(message.text)) return;
+    this.deletePromptIndexMessage(message.id);
+    this.db
+      .prepare(
+        `INSERT INTO session_prompt_index (text, message_id, session_id, sequence, timestamp)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(message.text, message.id, message.sessionId, message.sequence, message.timestamp);
+  }
+
+  private deletePromptIndexMessage(messageId: string): void {
+    this.db.prepare("DELETE FROM session_prompt_index WHERE message_id = ?").run(messageId);
+  }
+
   private hydrateSession(row: SessionRow): ManagedSession {
     const session = JSON.parse(row.data_json) as ManagedSession;
     const recentUserPrompts = this.recentUserPrompts(row.id);
@@ -1758,14 +1968,13 @@ export class SyncAppDatabase {
   private recentUserPrompts(sessionId: string): string[] {
     const rows = this.db
       .prepare(
-        `SELECT text FROM messages
-         WHERE session_id = ? AND role = 'user' AND text <> ''
+        `SELECT text FROM session_prompt_index
+         WHERE session_id = ?
          ORDER BY sequence DESC`
       )
-      .all(sessionId) as unknown as Pick<MessageRow, "text">[];
+      .all(sessionId) as unknown as Pick<PromptIndexRow, "text">[];
 
     return rows
-      .filter((row) => isDisplayableUserPromptText(row.text))
       .slice(0, 2)
       .map((row) => normalizePreviewText(row.text))
       .filter(Boolean);
@@ -1820,6 +2029,15 @@ export class SyncAppDatabase {
         payload_json TEXT NOT NULL,
         UNIQUE(session_id, sequence),
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS session_prompt_index USING fts5(
+        text,
+        message_id UNINDEXED,
+        session_id UNINDEXED,
+        sequence UNINDEXED,
+        timestamp UNINDEXED,
+        tokenize = 'unicode61'
       );
 
       CREATE TABLE IF NOT EXISTS parser_offsets (
@@ -1952,7 +2170,24 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
+    this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
+  }
+
+  private backfillPromptIndexIfNeeded(): void {
+    if (this.getSetting(PROMPT_INDEX_BACKFILLED_SETTING) === "true") return;
+    this.db.prepare("DELETE FROM session_prompt_index").run();
+    const rows = this.db
+      .prepare(
+        `SELECT *
+         FROM messages
+         WHERE role = 'user'
+           AND text <> ''
+         ORDER BY session_id ASC, sequence ASC`
+      )
+      .all() as unknown as MessageRow[];
+    for (const row of rows) this.upsertPromptIndexMessage(hydrateMessage(row));
+    this.setSetting(PROMPT_INDEX_BACKFILLED_SETTING, "true", new Date().toISOString());
   }
 
   private backfillSessionRepositories(): void {
@@ -2045,31 +2280,93 @@ function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
   };
 }
 
-function promptHistoryScore(text: string, normalizedQuery: string): number | null {
-  if (!normalizedQuery) return 0;
-  const normalizedText = text.toLowerCase();
-  if (normalizedText === normalizedQuery) return 0;
-  if (normalizedText.startsWith(normalizedQuery)) return 10 + normalizedText.length - normalizedQuery.length;
-  const substringIndex = normalizedText.indexOf(normalizedQuery);
-  if (substringIndex >= 0) return 100 + substringIndex + normalizedText.length - normalizedQuery.length;
-
-  let cursor = 0;
-  let previousIndex = -1;
-  let score = 500;
-  for (const char of normalizedQuery) {
-    const nextIndex = normalizedText.indexOf(char, cursor);
-    if (nextIndex < 0) return null;
-    if (previousIndex >= 0) score += nextIndex - previousIndex - 1;
-    if (isPromptHistoryWordBoundary(normalizedText, nextIndex)) score -= 8;
-    previousIndex = nextIndex;
-    cursor = nextIndex + 1;
-  }
-  return score + normalizedText.length - normalizedQuery.length;
+function promptHistoryResultFromIndex(row: PromptIndexRow): PromptHistoryResult {
+  return promptHistoryResult({
+    id: row.message_id,
+    session_id: row.session_id,
+    sequence: row.sequence,
+    type: "user",
+    role: "user",
+    timestamp: row.timestamp,
+    text: row.text,
+    payload_json: "{}",
+    session_data_json: row.session_data_json
+  });
 }
 
-function isPromptHistoryWordBoundary(value: string, index: number): boolean {
-  if (index === 0) return true;
-  return /[\s_\-/:.]/.test(value[index - 1] ?? "");
+function sessionHistoryResultFromMatchRow(
+  row: SessionHistoryMatchRow,
+  matchedPrompts: SessionHistoryResult["matchedPrompts"]
+): SessionHistoryResult {
+  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  return sessionHistoryResultFromSession(
+    {
+      ...session,
+      status: row.status,
+      lastActivityAt: row.last_activity_at ?? session.lastActivityAt,
+      archived: row.archived === 1
+    },
+    matchedPrompts
+  );
+}
+
+function sessionHistoryResultFromSession(
+  session: ManagedSession,
+  matchedPrompts: SessionHistoryResult["matchedPrompts"]
+): SessionHistoryResult {
+  return {
+    sessionId: session.id,
+    codexSessionId: session.codexSessionId ?? "",
+    codexJsonlPath: session.codexJsonlPath,
+    status: session.status,
+    archived: session.archived,
+    sessionName: session.tmux.windowName || session.tmux.sessionName || session.id,
+    repoName: session.repo.name,
+    repoBranch: session.repo.branch,
+    cwd: session.tmux.cwd,
+    lastActivityAt: session.lastActivityAt,
+    transcriptSize: session.transcriptSize,
+    matchedPrompts
+  };
+}
+
+function collapseSessionHistory(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
+  const byCodexSession = new Map<string, SessionHistoryResult>();
+  for (const result of results) {
+    if (!result.codexSessionId) continue;
+    const current = byCodexSession.get(result.codexSessionId);
+    if (!current || compareSessionHistoryPreference(result, current) < 0) {
+      byCodexSession.set(result.codexSessionId, result);
+    } else if (current.matchedPrompts.length < 3) {
+      current.matchedPrompts.push(...result.matchedPrompts.slice(0, 3 - current.matchedPrompts.length));
+    }
+  }
+  return [...byCodexSession.values()].sort(compareSessionHistoryResults).slice(0, limit);
+}
+
+function compareSessionHistoryPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {
+  const firstLive = first.status !== "missing" && !first.archived;
+  const secondLive = second.status !== "missing" && !second.archived;
+  if (firstLive !== secondLive) return firstLive ? -1 : 1;
+  return compareSessionHistoryResults(first, second);
+}
+
+function compareSessionHistoryResults(first: SessionHistoryResult, second: SessionHistoryResult): number {
+  const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  if (firstTime !== secondTime) return secondTime - firstTime;
+  return first.sessionName.localeCompare(second.sessionName) || first.sessionId.localeCompare(second.sessionId);
+}
+
+function ftsPromptQuery(query: string): string {
+  const tokens = query
+    .trim()
+    .toLowerCase()
+    .match(/[\p{L}\p{N}_-]+/gu)
+    ?.map((token) => token.replace(/"/g, "\"\""))
+    .filter(Boolean)
+    .slice(0, 12) ?? [];
+  return tokens.map((token) => `"${token}"*`).join(" AND ");
 }
 
 function searchableTranscriptText(message: ChatMessage): string {

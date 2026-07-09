@@ -11,6 +11,24 @@ import {
 } from "react";
 import { Check } from "lucide-react";
 
+const CONTEXT_MENU_HAPTIC_MS = 20;
+const LONG_PRESS_ACTIVE_ATTRIBUTE = "data-context-menu-long-press";
+
+interface VibrationTarget {
+  vibrate?: (pattern: number | number[]) => boolean;
+}
+
+export function requestContextMenuHaptic(
+  target: VibrationTarget | null | undefined = typeof navigator === "undefined" ? undefined : navigator
+): boolean {
+  if (typeof target?.vibrate !== "function") return false;
+  try {
+    return target.vibrate(CONTEXT_MENU_HAPTIC_MS);
+  } catch {
+    return false;
+  }
+}
+
 export interface ContextMenuPosition {
   x: number;
   y: number;
@@ -144,9 +162,17 @@ export function useContextMenuTrigger<T>(
 ) {
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerStartRef = useRef<ContextMenuPosition | null>(null);
+  const pointerTargetRef = useRef<HTMLElement | null>(null);
   const suppressClickRef = useRef(false);
   const longPressMs = options.longPressMs ?? 600;
   const moveTolerancePx = options.moveTolerancePx ?? 10;
+
+  function clearLongPressFeedback() {
+    const target = pointerTargetRef.current;
+    if (!target) return;
+    target.removeAttribute(LONG_PRESS_ACTIVE_ATTRIBUTE);
+    pointerTargetRef.current = null;
+  }
 
   function clearLongPress() {
     if (longPressTimerRef.current) {
@@ -154,19 +180,24 @@ export function useContextMenuTrigger<T>(
       longPressTimerRef.current = null;
     }
     pointerStartRef.current = null;
+    clearLongPressFeedback();
   }
 
   useEffect(() => clearLongPress, []);
 
   function openFromLongPress(x: number, y: number) {
     suppressClickRef.current = true;
-    clearLongPress();
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+    pointerStartRef.current = null;
+    requestContextMenuHaptic();
     onOpen(value, x, y);
   }
 
   const triggerProps = options.disabled
     ? {}
     : {
+        "data-context-menu-trigger": "",
         onContextMenu(event: ReactMouseEvent<HTMLElement>) {
           event.preventDefault();
           clearLongPress();
@@ -174,7 +205,10 @@ export function useContextMenuTrigger<T>(
         },
         onPointerDown(event: ReactPointerEvent<HTMLElement>) {
           if (event.pointerType === "mouse" || event.button !== 0) return;
+          clearLongPress();
           pointerStartRef.current = { x: event.clientX, y: event.clientY };
+          pointerTargetRef.current = event.currentTarget;
+          event.currentTarget.setAttribute(LONG_PRESS_ACTIVE_ATTRIBUTE, "");
           longPressTimerRef.current = setTimeout(() => openFromLongPress(event.clientX, event.clientY), longPressMs);
         },
         onPointerMove(event: ReactPointerEvent<HTMLElement>) {
