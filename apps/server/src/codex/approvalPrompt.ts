@@ -27,6 +27,7 @@ function parseAppPermissionPrompt(text: string): InteractiveApprovalPrompt | nul
   if (!/enter to submit\s*\|\s*esc to cancel/i.test(text)) return null;
 
   const lines = text.split("\n");
+  if (!/enter to submit\s*\|\s*esc to cancel/i.test(lastNonEmptyLine(lines))) return null;
   const titleIndex = lastLineIndex(lines, (line) => /^Allow\s+.+\?$/i.test(line.trim()));
   if (titleIndex < 0) return null;
   const title = lines[titleIndex]?.trim();
@@ -46,6 +47,7 @@ function parseAppPermissionPrompt(text: string): InteractiveApprovalPrompt | nul
 
 function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | null {
   const lines = text.split("\n");
+  if (!parseCommandApprovalOption(lastNonEmptyLine(lines))) return null;
   const titleIndex = lastLineIndex(lines, (line) => /^\s*Would you like to run the following command\?\s*$/i.test(line));
   if (titleIndex < 0) return null;
 
@@ -77,6 +79,14 @@ function lastLineIndex(lines: string[], predicate: (line: string) => boolean): n
     if (predicate(lines[index] ?? "")) return index;
   }
   return -1;
+}
+
+function lastNonEmptyLine(lines: string[]): string {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index] ?? "";
+    if (line.trim()) return line;
+  }
+  return "";
 }
 
 export function interactiveApprovalKeys(

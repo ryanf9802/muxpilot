@@ -106,6 +106,12 @@ describe("interactive Codex approval prompts", () => {
     expect(interactiveApprovalKeys(prompt!, "approve_once")).toEqual(["Up", "Enter"]);
   });
 
+  it("does not parse a quoted command gate followed by normal chat UI", () => {
+    const capture = `${commandApprovalCapture(1)}\n\n• The prompt above is only an example.\n\n› `;
+
+    expect(parseInteractiveApprovalPrompt(capture)).toBeNull();
+  });
+
   it("does not treat a normal composer or unrelated picker as an approval", () => {
     expect(parseInteractiveApprovalPrompt("Ready\n› ")).toBeNull();
     expect(parseInteractiveApprovalPrompt("Choose an option?\n› 1. Continue\nenter to submit | esc to cancel")).toBeNull();

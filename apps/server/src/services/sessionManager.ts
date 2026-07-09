@@ -68,6 +68,7 @@ export class SessionManager {
   private readonly answeredPlanMessageIds = new Set<string>();
   private readonly answeredQuestionMessageIds = new Set<string>();
   private readonly processingQueuedSessionIds = new Set<string>();
+  private readonly liveApprovals = new Map<string, ApprovalRequest>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -170,14 +171,23 @@ export class SessionManager {
         (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
         existing?.inputMode ??
         "default";
-      const inferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
+      const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
+      const latestMessage = await this.db.latestMessage(existingId);
+      const liveApprovalPrompt =
+        rawInferredStatus === "approval" && latestMessage?.type !== "approval_request"
+          ? await this.corroboratedLiveApproval(pane, latestMessage)
+          : null;
+      const inferredStatus =
+        rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
+          ? rejectedApprovalFallbackStatus(pane, existing?.status)
+          : rawInferredStatus;
       const latestUserMessage = await this.db.latestUserMessage(existingId);
       const latestQuestionMessage = await this.db.latestQuestionMessage(existingId);
       const status = resolveSessionStatus(
         inferredStatus,
         existing?.status,
         inputMode,
-        await this.db.latestMessage(existingId),
+        latestMessage,
         latestQuestionMessage,
         await this.latestQuestionAnswerMessage(existingId, latestQuestionMessage),
         await this.db.latestPlanReadyMessage(existingId),
@@ -210,6 +220,12 @@ export class SessionManager {
         archived: existing?.archived ?? false
       };
 
+      if (status === "approval" && liveApprovalPrompt) {
+        this.liveApprovals.set(existingId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
+      } else {
+        this.liveApprovals.delete(existingId);
+      }
+
       const changed = !existing || sessionChanged(existing, session);
       await this.db.upsertSession(session, now);
       await this.recordTouchedRepository(session, now);
@@ -219,6 +235,7 @@ export class SessionManager {
 
     for (const session of await this.db.listSessions(true)) {
       if (!seen.has(session.id) && session.status !== "missing") {
+        this.liveApprovals.delete(session.id);
         await this.db.setSessionStatus(session.id, "missing", now);
         this.publish("status.changed", session.id, { status: "missing" });
       }
@@ -472,6 +489,8 @@ export class SessionManager {
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status !== "approval") return null;
+    const liveApproval = this.liveApprovals.get(sessionId);
+    if (liveApproval) return liveApproval;
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
       return materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
@@ -806,6 +825,18 @@ export class SessionManager {
     try {
       const capture = await this.tmux.capturePane(session.tmux.paneId, 100, false);
       return parseInteractiveApprovalPrompt(capture);
+    } catch {
+      return null;
+    }
+  }
+
+  private async corroboratedLiveApproval(
+    pane: TmuxPane,
+    latestMessage: ChatMessage | null
+  ): Promise<InteractiveApprovalPrompt | null> {
+    try {
+      const prompt = parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
+      return prompt && interactiveApprovalHasTranscriptContext(prompt, latestMessage) ? prompt : null;
     } catch {
       return null;
     }
@@ -1621,12 +1652,21 @@ function inferStatusFromTitle(pane: TmuxPane): SessionStatus | null {
   return null;
 }
 
+function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus | undefined): SessionStatus {
+  const titleStatus = inferStatusFromTitle(pane);
+  if (titleStatus && titleStatus !== "approval") return titleStatus;
+  if (previous && previous !== "approval" && previous !== "missing") return previous;
+  return "waiting";
+}
+
 function inferStatusFromScreen(capture: string): SessionStatus | null {
   const visible = visibleTail(capture);
   const haystack = visible.toLowerCase();
-  if (looksLikeApprovalScreen(visible)) return "approval";
   if (haystack.includes("working (") || haystack.includes("esc to interrupt")) return "working";
-  if (/(^|\n)\s*›\s/m.test(visible)) return "waiting";
+  if (parseInteractiveApprovalPrompt(visible)) return "approval";
+  const footer = visible.split("\n").slice(-6).join("\n");
+  if (/(^|\n)\s*›(?!\s*\d+\.)/m.test(footer)) return "waiting";
+  if (looksLikeApprovalScreen(visible)) return "approval";
   if (looksLikeBlockedStatus(visible)) return "blocked";
   return null;
 }
@@ -1766,6 +1806,23 @@ function interactiveApprovalMatches(approval: ApprovalRequest, prompt: Interacti
     approval.reason === prompt.reason &&
     stringArraysEqual(approval.prefixRule, prompt.prefixRule) &&
     approval.options.map((option) => option.decision).join(":") === prompt.options.map((option) => option.decision).join(":")
+  );
+}
+
+function interactiveApprovalHasTranscriptContext(
+  prompt: InteractiveApprovalPrompt,
+  latestMessage: ChatMessage | null
+): boolean {
+  if (!latestMessage || latestMessage.type !== "tool_call") return false;
+  const payload = recordValue(latestMessage.payload.payload);
+  if (!payload) return false;
+  if (prompt.kind === "permissions") return payload.type === "function_call";
+  if (prompt.kind !== "command" || payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
+  const input = stringValue(payload.input);
+  return Boolean(
+    input &&
+      /tools\.exec_command\s*\(/.test(input) &&
+      /sandbox_permissions\s*:\s*["']require_escalated["']/.test(input)
   );
 }
 

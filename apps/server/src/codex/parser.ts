@@ -134,6 +134,12 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
     return message("tool_call", "tool", timestamp, command, event as unknown as Record<string, unknown>, collaborationMode);
   }
 
+  if (topType === "response_item" && payloadType === "custom_tool_call") {
+    const input = stringValue(event.payload?.input) ?? "";
+    const command = event.payload?.name ? `${event.payload.name}(${input})` : "Tool call";
+    return message("tool_call", "tool", timestamp, command, event as unknown as Record<string, unknown>, collaborationMode);
+  }
+
   if (topType === "response_item" && payloadType === "function_call_output") {
     const output = String(event.payload?.output ?? "");
     const type: MessageType = output.includes("Process exited with code") ? "command_output" : "tool_output";

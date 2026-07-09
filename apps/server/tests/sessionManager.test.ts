@@ -395,15 +395,19 @@ describe("SessionManager transcript isolation", () => {
       ].join("\n")
     );
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
-    harness.tmux.capturePane = async () => appApprovalCapture(1);
+    let capture = appApprovalCapture(1);
+    harness.tmux.capturePane = async () => capture;
     harness.tmux.sendKeys = async (_paneId, keys) => {
       sentKeys.push(keys);
     };
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
-    expect(session?.status).toBe("approval");
+    expect(session?.status).toBe("waiting");
     await harness.manager.ingest();
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    capture = "Ready\n› ";
 
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
       id: "call-app-approval",
@@ -418,6 +422,7 @@ describe("SessionManager transcript isolation", () => {
       ]
     });
 
+    capture = appApprovalCapture(1);
     await harness.manager.resolveApproval(session.id, { decision: "approve_for_session" });
     expect(sentKeys).toEqual([["Down", "Enter"]]);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
@@ -459,8 +464,10 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
-    expect(session?.status).toBe("approval");
+    expect(session?.status).toBe("waiting");
     await harness.manager.ingest();
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
 
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
       kind: "command",
@@ -501,7 +508,7 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
-    expect(session?.status).toBe("approval");
+    await harness.db.setSessionStatus(session.id, "approval", "2026-07-09T00:00:00.000Z");
     resolving = true;
 
     await expect(harness.manager.resolveApproval(session.id, { decision: "approve_always" })).rejects.toThrow(
@@ -1918,6 +1925,64 @@ describe("SessionManager transcript isolation", () => {
 
     const session = harness.manager.listSessions(true)[0];
     expect(session?.status).toBe("working");
+    harness.db.close();
+  });
+
+  it("prefers active working cues over approval wording in transcript text", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", title: "⠇ muxpilot" })];
+    harness.tmux.capturePane = async () => [
+      "- Parses ‘Would you like to run…’ gates and don't ask again choices.",
+      "",
+      "Working (20s • esc to interrupt)"
+    ].join("\n");
+
+    await harness.manager.discover();
+
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("working");
+    harness.db.close();
+  });
+
+  it("prefers the active composer over approval wording in transcript text", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => [
+      "The earlier example said: Would you like to run this command and don't ask again?",
+      "",
+      "› "
+    ].join("\n");
+
+    await harness.manager.discover();
+
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("waiting");
+    harness.db.close();
+  });
+
+  it("does not publish approval for an uncorroborated quoted approval form", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type !== "session.updated" && event.type !== "status.changed") return;
+      const status = (event.payload as { status?: unknown }).status;
+      if (typeof status === "string") publishedStatuses.push(status);
+    });
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1);
+
+    await harness.manager.discover();
+
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("waiting");
+    expect(publishedStatuses).not.toContain("approval");
+    unsubscribe();
     harness.db.close();
   });
 

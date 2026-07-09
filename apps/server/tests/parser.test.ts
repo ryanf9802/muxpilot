@@ -102,6 +102,35 @@ describe("parseCodexJsonl", () => {
     });
   });
 
+  it("maps wrapped custom tool calls into tool-call transcript context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-wrapped-approval",
+            input: "const r = await tools.exec_command({ sandbox_permissions: 'require_escalated' });"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
+    expect(result.messages[0]?.payload).toMatchObject({
+      payload: { type: "custom_tool_call", name: "exec", call_id: "call-wrapped-approval" }
+    });
+  });
+
   it("maps request_user_input calls into question requests", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
