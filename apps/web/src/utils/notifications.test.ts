@@ -5,6 +5,7 @@ describe("notificationToastMessage", () => {
   it("shows only the new status in a concise message", () => {
     expect(
       notificationToastMessage({
+        deviceId: "device-test",
         sessionId: "session-1",
         sessionName: "muxpilot",
         rules: ["status_change"],

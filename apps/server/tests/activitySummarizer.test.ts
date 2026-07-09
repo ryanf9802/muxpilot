@@ -409,6 +409,7 @@ function testSession(id: string): ManagedSession {
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
+    pinned: false,
     archived: false
   };
 }

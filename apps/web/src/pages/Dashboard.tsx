@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Plus, Search, Skull, X } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull, X } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -22,18 +22,14 @@ import type {
   SessionStatus
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
-import { api, eventSocket } from "../api/client.js";
+import { api, eventSocket, notificationDeviceId } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
-import { ContextMenu, ContextMenuItem, clampContextMenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
+import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
-import {
-  ensurePushSubscription,
-  notificationRulesLabel,
-  sessionNotificationRules
-} from "../utils/notifications.js";
+import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
@@ -44,7 +40,7 @@ import {
 } from "../utils/sessionStatus.js";
 
 const ACTION_MENU_WIDTH = 220;
-const ACTION_MENU_HEIGHT = 176;
+const ACTION_MENU_HEIGHT = 224;
 const NOTIFICATION_MENU_WIDTH = 220;
 const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
@@ -76,7 +72,7 @@ export function Dashboard() {
   const [notificationRings, setNotificationRings] = useState<Record<string, NotificationTriggeredPayload["severity"]>>({});
   const [renameSession, setRenameSession] = useState<ManagedSession | null>(null);
   const [renameName, setRenameName] = useState("");
-  const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "kill" } | null>(null);
+  const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [activitySummaryToggleBusy, setActivitySummaryToggleBusy] = useState(false);
   const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
@@ -263,6 +259,24 @@ export function Dashboard() {
     }
   }
 
+  async function setSessionPinned(session: ManagedSession, pinned: boolean) {
+    setMenu(null);
+    setActionError(null);
+    setBusyAction({ sessionId: session.id, type: "pin" });
+    setSessions((currentSessions) =>
+      currentSessions.map((candidate) => (candidate.id === session.id ? { ...candidate, pinned } : candidate))
+    );
+    try {
+      await api.action(session.id, { type: pinned ? "pin" : "unpin" });
+      await loadSessions();
+    } catch (error) {
+      await loadSessions();
+      setActionError(error instanceof Error ? error.message : pinned ? "Could not pin session." : "Could not unpin session.");
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
   async function setActivitySummariesEnabled(enabled: boolean) {
     if (activitySummaryToggleBusy) return;
     setActivitySummaryToggleBusy(true);
@@ -284,9 +298,8 @@ export function Dashboard() {
     if (notificationToggleBusy) return;
     setNotificationToggleBusy(true);
     try {
-      const settings = await api.updateNotificationSetting({ scope: "session", sessionId, type, enabled });
+      const settings = await api.updateNotificationSetting({ deviceId: notificationDeviceId(), setting: "rule", scope: "session", sessionId, type, enabled });
       setNotificationSettings(settings);
-      if (enabled) void ensurePushSubscription().catch(() => undefined);
     } finally {
       setNotificationToggleBusy(false);
     }
@@ -377,6 +390,15 @@ export function Dashboard() {
           position={menu}
           label={`Actions for ${sessionDisplayName(menu.session, sessions)}`}
         >
+          <ContextMenuItem
+            icon={menu.session.pinned ? <PinOff size={16} /> : <Pin size={16} />}
+            onClick={() => void setSessionPinned(menu.session, !menu.session.pinned)}
+            disabled={Boolean(busyAction)}
+            aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "pin"}
+            data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "pin" ? true : undefined}
+          >
+            {menu.session.pinned ? "Unpin" : "Pin"}
+          </ContextMenuItem>
           <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction)}>
             Rename
           </ContextMenuItem>
@@ -386,7 +408,7 @@ export function Dashboard() {
             aria-expanded={notifySubmenuOpen}
             onMouseEnter={() => setNotifySubmenuOpen(true)}
             onFocus={() => setNotifySubmenuOpen(true)}
-            onClick={() => setNotifySubmenuOpen((open) => !open)}
+            onClick={() => setNotifySubmenuOpen(true)}
             disabled={Boolean(busyAction)}
           >
             Notify
@@ -560,7 +582,7 @@ export function SessionCard({
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(session, onOpenMenu);
-  const cardClassName = `session-card${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
+  const cardClassName = `session-card${session.pinned ? " session-card-pinned" : ""}${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function handleClick() {
     if (menuTrigger.consumeSuppressedClick()) return;
@@ -579,7 +601,14 @@ export function SessionCard({
           <div>
             <h2>{displayName}</h2>
           </div>
-          <StatusPill status={session.status} />
+          <span className="session-card-head-actions">
+            {session.pinned ? (
+              <span className="session-pin-indicator" title="Pinned" aria-label="Pinned session">
+                <Pin size={14} />
+              </span>
+            ) : null}
+            <StatusPill status={session.status} />
+          </span>
         </div>
         <div className="preview">
           {previewLines.length > 0 ? (
@@ -685,7 +714,7 @@ export interface RepoSessionGroup {
   sessions: ManagedSession[];
 }
 
-function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGroup[] {
+export function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGroup[] {
   const groups: RepoSessionGroup[] = [];
   const groupByKey = new Map<string, RepoSessionGroup>();
 
@@ -709,7 +738,18 @@ function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGroup[] {
     group.sessions.push(session);
   }
 
+  for (const group of groups) {
+    group.sessions = orderSessionsWithinRepo(group.sessions);
+  }
+
   return groups;
+}
+
+export function orderSessionsWithinRepo(sessions: ManagedSession[]): ManagedSession[] {
+  return sessions
+    .map((session, index) => ({ session, index }))
+    .sort((first, second) => Number(second.session.pinned) - Number(first.session.pinned) || first.index - second.index)
+    .map(({ session }) => session);
 }
 
 function loadStoredCollapsedRepoKeys(): string[] {
@@ -739,12 +779,7 @@ function clampMenuPosition(x: number, y: number): { x: number; y: number } {
 }
 
 function notificationSubmenuPosition(x: number, y: number): { x: number; y: number } {
-  const rightX = x + ACTION_MENU_WIDTH + 4;
-  const leftX = x - NOTIFICATION_MENU_WIDTH - 4;
-  return {
-    x: rightX + NOTIFICATION_MENU_WIDTH + ACTION_MENU_EDGE <= window.innerWidth ? rightX : Math.max(ACTION_MENU_EDGE, leftX),
-    y: Math.max(ACTION_MENU_EDGE, Math.min(y + 48, window.innerHeight - 144 - ACTION_MENU_EDGE))
-  };
+  return submenuPosition({ x, y }, { parentWidth: ACTION_MENU_WIDTH, width: NOTIFICATION_MENU_WIDTH, height: 144, itemOffsetY: 96, edge: ACTION_MENU_EDGE });
 }
 
 function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: NotificationTriggeredPayload } {

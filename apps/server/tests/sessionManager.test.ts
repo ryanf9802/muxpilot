@@ -1418,6 +1418,51 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("allows clearing sent queued inputs but keeps sending inputs protected", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "Working (esc to interrupt)";
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+
+    await harness.db.appendQueuedInput({
+      id: "sent-input",
+      sessionId: session.id,
+      text: "already sent prompt",
+      mode: "default",
+      status: "sent",
+      error: null,
+      codexSessionId: session.codexSessionId,
+      codexJsonlPath: session.codexJsonlPath,
+      createdAt: "2026-07-07T00:00:01.000Z",
+      updatedAt: "2026-07-07T00:00:02.000Z",
+      sentAt: "2026-07-07T00:00:02.000Z"
+    });
+    await harness.db.appendQueuedInput({
+      id: "sending-input",
+      sessionId: session.id,
+      text: "sending prompt",
+      mode: "default",
+      status: "sending",
+      error: null,
+      codexSessionId: session.codexSessionId,
+      codexJsonlPath: session.codexJsonlPath,
+      createdAt: "2026-07-07T00:00:03.000Z",
+      updatedAt: "2026-07-07T00:00:04.000Z",
+      sentAt: null
+    });
+
+    await harness.manager.deleteQueuedInput(session.id, "sent-input");
+    await expect(harness.manager.deleteQueuedInput(session.id, "sending-input")).rejects.toThrow("Queued input is already sending");
+
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ id: "sending-input", status: "sending" }]);
+    harness.db.close();
+  });
+
   it("discovers input mode from the live Codex pane", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2359,6 +2404,29 @@ describe("SessionManager transcript isolation", () => {
     await expect(harness.manager.act(session.id, { type: "rename", name: "!" })).rejects.toThrow(
       "Session name must be 2-32 lowercase letters, numbers, or hyphens"
     );
+    harness.db.close();
+  });
+
+  it("pins and unpins sessions through session actions", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+
+    await harness.manager.discover();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session).toBeDefined();
+    const updatedPins: boolean[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "session.updated") updatedPins.push((event.payload as { pinned?: boolean } | null)?.pinned ?? false);
+    });
+
+    await harness.manager.act(session.id, { type: "pin" });
+    await harness.manager.act(session.id, { type: "unpin" });
+    unsubscribe();
+
+    expect(updatedPins).toEqual([true, false]);
+    expect((await harness.manager.getSession(session.id))?.pinned).toBe(false);
     harness.db.close();
   });
 

@@ -31,6 +31,7 @@ import type {
 } from "@muxpilot/core";
 
 export const AUTH_EXPIRED_EVENT = "muxpilot-auth-expired";
+const NOTIFICATION_DEVICE_ID_STORAGE_KEY = "muxpilot.notification-device-id.v1";
 
 export class ApiError extends Error {
   constructor(
@@ -87,14 +88,14 @@ export const api = {
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
     json<RemoteAccessResponse>("/api/remote-access/settings", { method: "PATCH", body: JSON.stringify(request) }),
-  notificationSettings: () => json<NotificationSettings>("/api/notifications/settings"),
+  notificationSettings: () => json<NotificationSettings>(`/api/notifications/settings?deviceId=${encodeURIComponent(notificationDeviceId())}`),
   updateNotificationSetting: (request: UpdateNotificationSettingRequest) =>
     json<NotificationSettings>("/api/notifications/settings", { method: "PATCH", body: JSON.stringify(request) }),
   notificationPushKey: () => json<PushKeyResponse>("/api/notifications/push-key"),
   upsertPushSubscription: (request: PushSubscriptionInput) =>
-    json<{ ok: true }>("/api/notifications/push-subscriptions", { method: "POST", body: JSON.stringify(request) }),
+    json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "POST", body: JSON.stringify(request) }),
   deletePushSubscription: (endpoint: string) =>
-    json<{ ok: true }>("/api/notifications/push-subscriptions", { method: "DELETE", body: JSON.stringify({ endpoint }) }),
+    json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "DELETE", body: JSON.stringify({ endpoint }) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
@@ -151,5 +152,31 @@ function messageQueryString(query: MessageQuery): string {
 
 export function eventSocket(): WebSocket {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return new WebSocket(`${proto}://${location.host}/api/events`);
+  return new WebSocket(`${proto}://${location.host}/api/events?deviceId=${encodeURIComponent(notificationDeviceId())}`);
+}
+
+export function notificationDeviceId(): string {
+  if (typeof window === "undefined") return fallbackNotificationDeviceId();
+  try {
+    const existing = window.localStorage.getItem(NOTIFICATION_DEVICE_ID_STORAGE_KEY);
+    if (existing && isNotificationDeviceId(existing)) return existing;
+    const next = newNotificationDeviceId();
+    window.localStorage.setItem(NOTIFICATION_DEVICE_ID_STORAGE_KEY, next);
+    return next;
+  } catch {
+    return fallbackNotificationDeviceId();
+  }
+}
+
+function newNotificationDeviceId(): string {
+  const randomId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+  return `device-${randomId.replace(/[^a-zA-Z0-9_-]/g, "")}`.slice(0, 80);
+}
+
+function fallbackNotificationDeviceId(): string {
+  return "device-fallback";
+}
+
+function isNotificationDeviceId(value: string): boolean {
+  return /^[a-zA-Z0-9_-]{8,80}$/.test(value);
 }

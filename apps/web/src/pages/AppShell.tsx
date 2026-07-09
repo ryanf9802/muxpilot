@@ -1,8 +1,8 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Check, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Search, Smartphone, X } from "lucide-react";
+import { AlertTriangle, Bell, Check, ChevronRight, Copy, Eye, EyeOff, LoaderCircle, LogOut, RotateCcw, Search, Settings, Smartphone, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
-import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError } from "../api/client.js";
+import { AUTH_EXPIRED_EVENT, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
@@ -30,9 +30,14 @@ import {
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
+import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, dropdownMenuPosition, submenuPosition, useDismissableContextMenu } from "../components/ContextMenu.js";
 import {
+  disablePushSubscription,
   ensurePushSubscription,
   globalNotificationRules,
+  isPushNotificationAvailable,
+  notificationPushEnabled,
+  notificationSoundEnabled,
   notificationToastMessage,
   playNotificationBell
 } from "../utils/notifications.js";
@@ -41,6 +46,10 @@ export type ShellConnectionState = "checking" | "connected" | "disconnected" | "
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
+const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
+const GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT = 96;
+const GLOBAL_NOTIFICATION_SETTINGS_MENU_OFFSET_Y = 145;
+const MENU_EDGE = 8;
 export type PrimaryInputFocusCommand = "focus" | "insert" | "insertStart" | "append" | "appendEnd";
 type PrimaryInputFocusHandler = (command: PrimaryInputFocusCommand) => boolean | void;
 
@@ -66,6 +75,7 @@ export function AppShell() {
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
+  const [notificationSettingsSubmenuOpen, setNotificationSettingsSubmenuOpen] = useState(false);
   const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
@@ -75,6 +85,7 @@ export function AppShell() {
   const sessionRequestIdRef = useRef(0);
   const connectionStateRef = useRef<ShellConnectionState>("checking");
   const locationPathRef = useRef(location.pathname);
+  const notificationSettingsRef = useRef<NotificationSettings | null>(null);
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
   const directorySuggestionRefs = useRef(new Map<string, HTMLButtonElement>());
   const promptHistoryPrefillRef = useRef<() => string>(() => "");
@@ -90,6 +101,10 @@ export function AppShell() {
   useEffect(() => {
     locationPathRef.current = location.pathname;
   }, [location.pathname]);
+
+  useEffect(() => {
+    notificationSettingsRef.current = notificationSettings;
+  }, [notificationSettings]);
 
   const markUnauthorized = useCallback(() => {
     setConnectionState("unauthorized");
@@ -173,7 +188,7 @@ export function AppShell() {
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
       if (isNotificationTriggeredEvent(event)) {
-        playNotificationBell();
+        if (notificationSoundEnabled(notificationSettingsRef.current)) playNotificationBell();
         toast(notificationToastMessage(event.payload), {
           position: locationPathRef.current.startsWith("/sessions/") ? "top-right" : "top-left",
           type: toastTypeForNotification(event.payload)
@@ -254,22 +269,10 @@ export function AppShell() {
     };
   }, [createSessionOpen]);
 
-  useEffect(() => {
-    if (!notificationMenu) return undefined;
-    const closeOnPointer = (event: PointerEvent) => {
-      if (notificationMenuRef.current?.contains(event.target as Node)) return;
-      setNotificationMenu(null);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setNotificationMenu(null);
-    };
-    document.addEventListener("pointerdown", closeOnPointer);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("pointerdown", closeOnPointer);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [notificationMenu]);
+  useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
+    setNotificationMenu(null);
+    setNotificationSettingsSubmenuOpen(false);
+  });
 
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
   const clientDirectorySuggestions = useMemo(() => sessionDirectorySuggestionsFromSessions(sessions), [sessions]);
@@ -541,19 +544,35 @@ export function AppShell() {
 
   function openGlobalNotificationMenu(event: ReactMouseEvent<HTMLButtonElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
-    setNotificationMenu({
-      x: Math.max(8, Math.min(window.innerWidth - GLOBAL_NOTIFICATION_MENU_WIDTH - 8, rect.right - GLOBAL_NOTIFICATION_MENU_WIDTH)),
-      y: rect.bottom + 6
-    });
+    setNotificationSettingsSubmenuOpen(false);
+    setNotificationMenu(dropdownMenuPosition(rect, { width: GLOBAL_NOTIFICATION_MENU_WIDTH, height: GLOBAL_NOTIFICATION_MENU_HEIGHT, edge: MENU_EDGE }));
   }
 
   async function toggleGlobalNotification(type: NotificationRuleType, enabled: boolean) {
     if (notificationToggleBusy) return;
     setNotificationToggleBusy(true);
     try {
-      const settings = await api.updateNotificationSetting({ scope: "global", type, enabled });
+      const settings = await api.updateNotificationSetting({ deviceId: notificationDeviceId(), setting: "rule", scope: "global", type, enabled });
       setNotificationSettings(settings);
-      if (enabled) void ensurePushSubscription().catch(() => undefined);
+    } finally {
+      setNotificationToggleBusy(false);
+    }
+  }
+
+  async function toggleNotificationDelivery(channel: "push" | "sound", enabled: boolean) {
+    if (notificationToggleBusy) return;
+    setNotificationToggleBusy(true);
+    try {
+      if (channel === "push") {
+        if (enabled) {
+          const subscribed = await ensurePushSubscription();
+          if (!subscribed) return;
+        } else {
+          await disablePushSubscription();
+        }
+      }
+      const settings = await api.updateNotificationSetting({ deviceId: notificationDeviceId(), setting: "delivery", channel, enabled });
+      setNotificationSettings(settings);
     } finally {
       setNotificationToggleBusy(false);
     }
@@ -588,19 +607,53 @@ export function AppShell() {
         </div>
       </header>
       {notificationMenu ? (
-        <div
-          className="session-action-menu notification-rule-menu"
+        <ContextMenu
+          className="notification-rule-menu"
           ref={notificationMenuRef}
-          style={{ left: notificationMenu.x, top: notificationMenu.y }}
-          role="menu"
-          aria-label="Global notification settings"
+          position={notificationMenu}
+          label="Global notification settings"
         >
           <NotificationRuleMenu
             enabledRules={globalNotificationRules(notificationSettings)}
             onToggle={(type, enabled) => void toggleGlobalNotification(type, enabled)}
             disabled={notificationToggleBusy}
           />
-        </div>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            icon={<Settings size={16} />}
+            trailing={<ChevronRight className="menu-chevron" size={16} />}
+            aria-haspopup="menu"
+            aria-expanded={notificationSettingsSubmenuOpen}
+            onMouseEnter={() => setNotificationSettingsSubmenuOpen(true)}
+            onFocus={() => setNotificationSettingsSubmenuOpen(true)}
+            onClick={() => setNotificationSettingsSubmenuOpen(true)}
+            disabled={notificationToggleBusy}
+          >
+            Settings
+          </ContextMenuItem>
+          {notificationSettingsSubmenuOpen ? (
+            <ContextMenu
+              className="notification-rule-menu session-notify-submenu"
+              position={notificationSettingsSubmenuPosition(notificationMenu)}
+              label="Notification delivery settings"
+            >
+              <ContextMenuCheckboxItem
+                checked={notificationPushEnabled(notificationSettings)}
+                disabled={notificationToggleBusy || (!isPushNotificationAvailable() && !notificationPushEnabled(notificationSettings))}
+                onClick={() => void toggleNotificationDelivery("push", !notificationPushEnabled(notificationSettings))}
+              >
+                Push
+              </ContextMenuCheckboxItem>
+              <ContextMenuCheckboxItem
+                checked={notificationSoundEnabled(notificationSettings)}
+                disabled={notificationToggleBusy}
+                onClick={() => void toggleNotificationDelivery("sound", !notificationSoundEnabled(notificationSettings))}
+              >
+                Sound
+              </ContextMenuCheckboxItem>
+            </ContextMenu>
+          ) : null}
+        </ContextMenu>
       ) : null}
       <main className={contentClassName}>
         <Outlet
@@ -757,6 +810,16 @@ function toastTypeForNotification(payload: NotificationTriggeredPayload): "succe
   if (payload.severity === "red") return "error";
   if (payload.severity === "green") return "success";
   return "warning";
+}
+
+function notificationSettingsSubmenuPosition(position: { x: number; y: number }): { x: number; y: number } {
+  return submenuPosition(position, {
+    parentWidth: GLOBAL_NOTIFICATION_MENU_WIDTH,
+    width: GLOBAL_NOTIFICATION_MENU_WIDTH,
+    height: GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT,
+    itemOffsetY: GLOBAL_NOTIFICATION_SETTINGS_MENU_OFFSET_Y,
+    edge: MENU_EDGE
+  });
 }
 
 export function DisconnectedNotice() {

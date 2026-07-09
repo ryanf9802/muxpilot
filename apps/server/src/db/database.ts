@@ -3,6 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   ChatMessage,
   CollaborationMode,
+  NotificationDeliveryChannel,
+  NotificationDeliverySettings,
   ManagedSession,
   NotificationRuleScope,
   NotificationRuleType,
@@ -97,15 +99,28 @@ interface QueuedInputRow {
   sent_at: string | null;
 }
 
+interface QueuedInputEchoCandidateRow {
+  text: string;
+  timestamp: string;
+}
+
 interface NotificationRuleRow {
+  device_id?: string;
   scope: NotificationRuleScope;
   session_id: string;
   type: NotificationRuleType;
 }
 
 interface PushSubscriptionRow {
+  device_id?: string;
   endpoint: string;
   subscription_json: string;
+}
+
+interface NotificationDeviceSettingsRow {
+  device_id: string;
+  push_enabled: number;
+  sound_enabled: number;
 }
 
 interface SessionRepositoryRow {
@@ -122,6 +137,10 @@ export type TouchedSessionRepository = Omit<SessionDirectorySuggestion, "source"
 export interface PushVapidKeys {
   publicKey: string;
   privateKey: string;
+}
+
+export interface StoredPushSubscription extends PushSubscriptionInput {
+  deviceId: string;
 }
 
 export interface OpenAIUsageEventInput {
@@ -207,6 +226,10 @@ export class AppDatabase {
 
   markSessionArchived(sessionId: string, archived: boolean, updatedAt: string): Promise<void> {
     return this.call("markSessionArchived", sessionId, archived, updatedAt) as Promise<void>;
+  }
+
+  setSessionPinned(sessionId: string, pinned: boolean, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionPinned", sessionId, pinned, updatedAt) as Promise<ManagedSession | null>;
   }
 
   setSessionInputMode(sessionId: string, inputMode: CollaborationMode, updatedAt: string): Promise<ManagedSession | null> {
@@ -353,30 +376,44 @@ export class AppDatabase {
     return this.call("setUnrestrictedRemoteAccessEnabled", enabled) as Promise<boolean>;
   }
 
-  getNotificationSettings(): Promise<NotificationSettings> {
-    return this.call("getNotificationSettings") as Promise<NotificationSettings>;
+  getNotificationSettings(deviceId: string): Promise<NotificationSettings> {
+    return this.call("getNotificationSettings", deviceId) as Promise<NotificationSettings>;
+  }
+
+  listNotificationSettings(): Promise<Record<string, NotificationSettings>> {
+    return this.call("listNotificationSettings") as Promise<Record<string, NotificationSettings>>;
   }
 
   setNotificationRule(
+    deviceId: string,
     scope: NotificationRuleScope,
     sessionId: string | null,
     type: NotificationRuleType,
     enabled: boolean,
     updatedAt: string
   ): Promise<NotificationSettings> {
-    return this.call("setNotificationRule", scope, sessionId, type, enabled, updatedAt) as Promise<NotificationSettings>;
+    return this.call("setNotificationRule", deviceId, scope, sessionId, type, enabled, updatedAt) as Promise<NotificationSettings>;
   }
 
-  upsertPushSubscription(subscription: PushSubscriptionInput, updatedAt: string): Promise<void> {
-    return this.call("upsertPushSubscription", subscription, updatedAt) as Promise<void>;
+  setNotificationDeliverySetting(
+    deviceId: string,
+    channel: NotificationDeliveryChannel,
+    enabled: boolean,
+    updatedAt: string
+  ): Promise<NotificationSettings> {
+    return this.call("setNotificationDeliverySetting", deviceId, channel, enabled, updatedAt) as Promise<NotificationSettings>;
   }
 
-  deletePushSubscription(endpoint: string): Promise<void> {
-    return this.call("deletePushSubscription", endpoint) as Promise<void>;
+  upsertPushSubscription(deviceId: string, subscription: PushSubscriptionInput, updatedAt: string): Promise<void> {
+    return this.call("upsertPushSubscription", deviceId, subscription, updatedAt) as Promise<void>;
   }
 
-  listPushSubscriptions(): Promise<PushSubscriptionInput[]> {
-    return this.call("listPushSubscriptions") as Promise<PushSubscriptionInput[]>;
+  deletePushSubscription(deviceId: string, endpoint: string): Promise<void> {
+    return this.call("deletePushSubscription", deviceId, endpoint) as Promise<void>;
+  }
+
+  listPushSubscriptions(deviceId?: string): Promise<StoredPushSubscription[]> {
+    return this.call("listPushSubscriptions", deviceId) as Promise<StoredPushSubscription[]>;
   }
 
   getPushVapidKeys(): Promise<PushVapidKeys | null> {
@@ -479,6 +516,8 @@ export class SyncAppDatabase {
   }
 
   upsertSession(session: ManagedSession, updatedAt: string): void {
+    const existing = this.getSession(session.id);
+    const nextSession = { ...session, pinned: existing?.pinned ?? session.pinned ?? false };
     this.db
       .prepare(
         `INSERT INTO managed_sessions
@@ -494,13 +533,13 @@ export class SyncAppDatabase {
           updated_at=excluded.updated_at`
       )
       .run(
-        session.id,
-        JSON.stringify(session),
-        session.status,
-        session.lastActivityAt,
-        session.preview,
-        session.unreadCount,
-        session.archived ? 1 : 0,
+        nextSession.id,
+        JSON.stringify(nextSession),
+        nextSession.status,
+        nextSession.lastActivityAt,
+        nextSession.preview,
+        nextSession.unreadCount,
+        nextSession.archived ? 1 : 0,
         updatedAt
       );
   }
@@ -522,6 +561,16 @@ export class SyncAppDatabase {
     this.db
       .prepare("UPDATE managed_sessions SET archived = ?, updated_at = ? WHERE id = ?")
       .run(archived ? 1 : 0, updatedAt, sessionId);
+  }
+
+  setSessionPinned(sessionId: string, pinned: boolean, updatedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, pinned };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
   }
 
   setSessionInputMode(sessionId: string, inputMode: CollaborationMode, updatedAt: string): ManagedSession | null {
@@ -1309,64 +1358,128 @@ export class SyncAppDatabase {
     return enabled;
   }
 
-  getNotificationSettings(): NotificationSettings {
-    const rows = this.db.prepare("SELECT scope, session_id, type FROM notification_rules ORDER BY scope, session_id, type").all() as unknown as NotificationRuleRow[];
-    const settings: NotificationSettings = { globalRules: [], sessionRules: {} };
+  getNotificationSettings(deviceId: string): NotificationSettings {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    const rows = this.db
+      .prepare("SELECT scope, session_id, type FROM notification_device_rules WHERE device_id = ? ORDER BY scope, session_id, type")
+      .all(normalizedDeviceId) as unknown as NotificationRuleRow[];
+    return notificationSettingsFromRows(rows, this.getNotificationDeliverySettings(normalizedDeviceId));
+  }
+
+  listNotificationSettings(): Record<string, NotificationSettings> {
+    const rows = this.db
+      .prepare("SELECT device_id, scope, session_id, type FROM notification_device_rules ORDER BY device_id, scope, session_id, type")
+      .all() as unknown as NotificationRuleRow[];
+    const settingsRows = this.db
+      .prepare("SELECT device_id, push_enabled, sound_enabled FROM notification_device_settings ORDER BY device_id")
+      .all() as unknown as NotificationDeviceSettingsRow[];
+    const deviceIds = new Set<string>();
+    for (const row of rows) if (row.device_id) deviceIds.add(row.device_id);
+    for (const row of settingsRows) deviceIds.add(row.device_id);
+
+    const rulesByDevice = new Map<string, NotificationRuleRow[]>();
     for (const row of rows) {
-      if (row.scope === "global") {
-        settings.globalRules.push(row.type);
-      } else {
-        if (!settings.sessionRules[row.session_id]) settings.sessionRules[row.session_id] = [];
-        settings.sessionRules[row.session_id]!.push(row.type);
-      }
+      const deviceId = row.device_id;
+      if (!deviceId) continue;
+      const deviceRows = rulesByDevice.get(deviceId) ?? [];
+      deviceRows.push(row);
+      rulesByDevice.set(deviceId, deviceRows);
+    }
+    const deliveryByDevice = new Map(settingsRows.map((row) => [row.device_id, notificationDeliverySettingsFromRow(row)]));
+    const settings: Record<string, NotificationSettings> = {};
+    for (const deviceId of deviceIds) {
+      settings[deviceId] = notificationSettingsFromRows(rulesByDevice.get(deviceId) ?? [], deliveryByDevice.get(deviceId) ?? defaultNotificationDeliverySettings());
     }
     return settings;
   }
 
   setNotificationRule(
+    deviceId: string,
     scope: NotificationRuleScope,
     sessionId: string | null,
     type: NotificationRuleType,
     enabled: boolean,
     updatedAt: string
   ): NotificationSettings {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.ensureNotificationDeviceSettings(normalizedDeviceId, updatedAt);
     const normalizedSessionId = scope === "global" ? "" : (sessionId ?? "");
     if (scope === "session" && !normalizedSessionId) throw new Error("Session notification rules require a session id");
     if (enabled) {
       this.db
         .prepare(
-          `INSERT INTO notification_rules (scope, session_id, type, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(scope, session_id, type) DO UPDATE SET updated_at = excluded.updated_at`
+          `INSERT INTO notification_device_rules (device_id, scope, session_id, type, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(device_id, scope, session_id, type) DO UPDATE SET updated_at = excluded.updated_at`
         )
-        .run(scope, normalizedSessionId, type, updatedAt);
+        .run(normalizedDeviceId, scope, normalizedSessionId, type, updatedAt);
     } else {
       this.db
-        .prepare("DELETE FROM notification_rules WHERE scope = ? AND session_id = ? AND type = ?")
-        .run(scope, normalizedSessionId, type);
+        .prepare("DELETE FROM notification_device_rules WHERE device_id = ? AND scope = ? AND session_id = ? AND type = ?")
+        .run(normalizedDeviceId, scope, normalizedSessionId, type);
     }
-    return this.getNotificationSettings();
+    return this.getNotificationSettings(normalizedDeviceId);
   }
 
-  upsertPushSubscription(subscription: PushSubscriptionInput, updatedAt: string): void {
+  setNotificationDeliverySetting(
+    deviceId: string,
+    channel: NotificationDeliveryChannel,
+    enabled: boolean,
+    updatedAt: string
+  ): NotificationSettings {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.ensureNotificationDeviceSettings(normalizedDeviceId, updatedAt);
+    const column = channel === "push" ? "push_enabled" : "sound_enabled";
+    this.db.prepare(`UPDATE notification_device_settings SET ${column} = ?, updated_at = ? WHERE device_id = ?`).run(enabled ? 1 : 0, updatedAt, normalizedDeviceId);
+    return this.getNotificationSettings(normalizedDeviceId);
+  }
+
+  private getNotificationDeliverySettings(deviceId: string): NotificationDeliverySettings {
+    const row = this.db
+      .prepare("SELECT device_id, push_enabled, sound_enabled FROM notification_device_settings WHERE device_id = ?")
+      .get(deviceId) as NotificationDeviceSettingsRow | undefined;
+    return row ? notificationDeliverySettingsFromRow(row) : defaultNotificationDeliverySettings();
+  }
+
+  private ensureNotificationDeviceSettings(deviceId: string, updatedAt: string): void {
     this.db
       .prepare(
-        `INSERT INTO push_subscriptions (endpoint, subscription_json, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(endpoint) DO UPDATE SET
+        `INSERT INTO notification_device_settings (device_id, push_enabled, sound_enabled, updated_at)
+         VALUES (?, 0, 1, ?)
+         ON CONFLICT(device_id) DO NOTHING`
+      )
+      .run(deviceId, updatedAt);
+  }
+
+  upsertPushSubscription(deviceId: string, subscription: PushSubscriptionInput, updatedAt: string): void {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.ensureNotificationDeviceSettings(normalizedDeviceId, updatedAt);
+    this.db
+      .prepare(
+        `INSERT INTO notification_push_subscriptions (device_id, endpoint, subscription_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(device_id, endpoint) DO UPDATE SET
           subscription_json = excluded.subscription_json,
           updated_at = excluded.updated_at`
       )
-      .run(subscription.endpoint, JSON.stringify(subscription), updatedAt);
+      .run(normalizedDeviceId, subscription.endpoint, JSON.stringify(subscription), updatedAt);
   }
 
-  deletePushSubscription(endpoint: string): void {
-    this.db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint);
+  deletePushSubscription(deviceId: string, endpoint: string): void {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.db.prepare("DELETE FROM notification_push_subscriptions WHERE device_id = ? AND endpoint = ?").run(normalizedDeviceId, endpoint);
   }
 
-  listPushSubscriptions(): PushSubscriptionInput[] {
-    const rows = this.db.prepare("SELECT endpoint, subscription_json FROM push_subscriptions ORDER BY endpoint").all() as unknown as PushSubscriptionRow[];
-    return rows.map((row) => JSON.parse(row.subscription_json) as PushSubscriptionInput);
+  listPushSubscriptions(deviceId?: string): StoredPushSubscription[] {
+    const normalizedDeviceId = deviceId ? normalizeNotificationDeviceId(deviceId) : null;
+    const rows = normalizedDeviceId
+      ? (this.db
+          .prepare("SELECT device_id, endpoint, subscription_json FROM notification_push_subscriptions WHERE device_id = ? ORDER BY endpoint")
+          .all(normalizedDeviceId) as unknown as PushSubscriptionRow[])
+      : (this.db
+          .prepare("SELECT device_id, endpoint, subscription_json FROM notification_push_subscriptions ORDER BY device_id, endpoint")
+          .all() as unknown as PushSubscriptionRow[]);
+    return rows.map((row) => ({ ...(JSON.parse(row.subscription_json) as PushSubscriptionInput), deviceId: row.device_id ?? "" }));
   }
 
   getPushVapidKeys(): PushVapidKeys | null {
@@ -1539,7 +1652,7 @@ export class SyncAppDatabase {
     let deleted = 0;
 
     for (const row of rows) {
-      const match = this.db
+      const exactMatch = this.db
         .prepare(
           `SELECT 1 AS found
            FROM messages
@@ -1549,13 +1662,29 @@ export class SyncAppDatabase {
              AND timestamp >= ?
            LIMIT 1`
         )
-        .get(sessionId, row.text, row.sent_at ?? row.updated_at) as { found: number } | undefined;
-      if (!match) continue;
+        .get(sessionId, row.text, row.created_at) as { found: number } | undefined;
+      if (!exactMatch && !this.hasNormalizedQueuedInputEcho(sessionId, row)) continue;
       this.deleteQueuedInput(sessionId, row.id);
       deleted += 1;
     }
 
     return deleted;
+  }
+
+  private hasNormalizedQueuedInputEcho(sessionId: string, row: QueuedInputRow): boolean {
+    const queuedFingerprint = queuedInputEchoFingerprint(row.text);
+    if (!queuedFingerprint) return false;
+    const candidates = this.db
+      .prepare(
+        `SELECT text, timestamp
+         FROM messages
+         WHERE session_id = ?
+           AND role = 'user'
+           AND timestamp >= ?
+         ORDER BY timestamp ASC`
+      )
+      .all(sessionId, row.created_at) as unknown as QueuedInputEchoCandidateRow[];
+    return candidates.some((candidate) => queuedInputEchoFingerprint(candidate.text) === queuedFingerprint);
   }
 
   nextSequence(sessionId: string): number {
@@ -1621,6 +1750,7 @@ export class SyncAppDatabase {
       models: sessionModels(session.models),
       transcriptSize: this.messageCount(row.id),
       unreadCount: row.unread_count,
+      pinned: session.pinned === true,
       archived: row.archived === 1
     };
   }
@@ -1775,6 +1905,32 @@ export class SyncAppDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS notification_device_settings (
+        device_id TEXT PRIMARY KEY,
+        push_enabled INTEGER NOT NULL DEFAULT 0,
+        sound_enabled INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_device_rules (
+        device_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        session_id TEXT NOT NULL DEFAULT '',
+        type TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(device_id, scope, session_id, type),
+        FOREIGN KEY(device_id) REFERENCES notification_device_settings(device_id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_push_subscriptions (
+        device_id TEXT NOT NULL,
+        endpoint TEXT NOT NULL,
+        subscription_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(device_id, endpoint),
+        FOREIGN KEY(device_id) REFERENCES notification_device_settings(device_id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS session_repositories (
         path TEXT PRIMARY KEY,
         label TEXT NOT NULL,
@@ -1791,6 +1947,8 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
+      CREATE INDEX IF NOT EXISTS idx_notification_device_rules_session ON notification_device_rules(session_id);
+      CREATE INDEX IF NOT EXISTS idx_notification_push_subscriptions_endpoint ON notification_push_subscriptions(endpoint);
       CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
@@ -1827,6 +1985,45 @@ export class SyncAppDatabase {
     if (rows.some((row) => row.name === column)) return;
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+const NOTIFICATION_DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{8,80}$/;
+
+function normalizeNotificationDeviceId(deviceId: string): string {
+  const normalized = deviceId.trim();
+  if (!NOTIFICATION_DEVICE_ID_PATTERN.test(normalized)) throw new Error("Invalid notification device id");
+  return normalized;
+}
+
+function defaultNotificationDeliverySettings(): NotificationDeliverySettings {
+  return { pushEnabled: false, soundEnabled: true };
+}
+
+function notificationDeliverySettingsFromRow(row: NotificationDeviceSettingsRow): NotificationDeliverySettings {
+  return { pushEnabled: row.push_enabled === 1, soundEnabled: row.sound_enabled !== 0 };
+}
+
+function notificationSettingsFromRows(rows: NotificationRuleRow[], delivery: NotificationDeliverySettings): NotificationSettings {
+  const settings: NotificationSettings = { globalRules: [], sessionRules: {}, delivery };
+  for (const row of rows) {
+    if (row.scope === "global") {
+      settings.globalRules.push(row.type);
+    } else {
+      if (!settings.sessionRules[row.session_id]) settings.sessionRules[row.session_id] = [];
+      settings.sessionRules[row.session_id]!.push(row.type);
+    }
+  }
+  return settings;
+}
+
+function queuedInputEchoFingerprint(text: string): string | null {
+  const fingerprint = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (fingerprint.length < 16 && fingerprint.split(" ").filter(Boolean).length < 3) return null;
+  return fingerprint || null;
 }
 
 function normalizePreviewText(text: string): string {

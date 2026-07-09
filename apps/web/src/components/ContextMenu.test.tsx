@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ContextMenu, ContextMenuItem, clampContextMenuPosition } from "./ContextMenu.js";
+import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, clampContextMenuPosition, dropdownMenuPosition, submenuPosition } from "./ContextMenu.js";
 
 describe("ContextMenu", () => {
   it("renders a positioned menu with menu items", () => {
@@ -20,6 +20,23 @@ describe("ContextMenu", () => {
     expect(html).toContain('role="menuitem"');
     expect(html).toContain("Copy");
   });
+
+  it("renders checkbox items and separators", () => {
+    const html = renderToStaticMarkup(
+      createElement(
+        ContextMenu,
+        { position: { x: 0, y: 0 }, label: "Notification settings" },
+        createElement(ContextMenuCheckboxItem, { checked: true, onClick: () => undefined }, "Sound"),
+        createElement(ContextMenuSeparator),
+        createElement(ContextMenuItem, { onClick: () => undefined }, "Settings")
+      )
+    );
+
+    expect(html).toContain('role="menuitemcheckbox"');
+    expect(html).toContain('aria-checked="true"');
+    expect(html).toContain('role="separator"');
+    expect(html).toContain("Sound");
+  });
 });
 
 describe("clampContextMenuPosition", () => {
@@ -28,5 +45,12 @@ describe("clampContextMenuPosition", () => {
 
     expect(clampContextMenuPosition(400, 300, { width: 100, height: 80, edge: 8 })).toEqual({ x: 212, y: 152 });
     expect(clampContextMenuPosition(-40, -20, { width: 100, height: 80, edge: 8 })).toEqual({ x: 8, y: 8 });
+  });
+
+  it("positions dropdowns and flips submenus into the viewport", () => {
+    vi.stubGlobal("window", { innerWidth: 320, innerHeight: 240 });
+
+    expect(dropdownMenuPosition({ left: 20, right: 80, bottom: 30 }, { width: 100, height: 80, align: "start" })).toEqual({ x: 20, y: 36 });
+    expect(submenuPosition({ x: 250, y: 120 }, { parentWidth: 80, width: 100, height: 80, itemOffsetY: 20 })).toEqual({ x: 146, y: 140 });
   });
 });

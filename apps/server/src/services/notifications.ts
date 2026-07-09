@@ -80,32 +80,36 @@ export class NotificationService {
     if (!previousStatus || previousStatus === nextStatus) return;
 
     const session = await this.db.getSession(sessionId);
-    const settings = await this.db.getNotificationSettings();
-    const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus, { inputMode: session?.inputMode ?? null });
-    if (matchedRules.length === 0) return;
+    const settingsByDevice = await this.db.listNotificationSettings();
+    await Promise.all(
+      Object.entries(settingsByDevice).map(async ([deviceId, settings]) => {
+        const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus, { inputMode: session?.inputMode ?? null });
+        if (matchedRules.length === 0) return;
 
-    const payload = notificationPayload(session, sessionId, previousStatus, nextStatus, matchedRules);
-    const triggeredEvent: SessionEvent = {
-      id: eventId(),
-      type: "notification.triggered",
-      sessionId,
-      payload,
-      timestamp: nowIso()
-    };
-    await this.db.appendEvent(triggeredEvent);
-    this.events.publish(triggeredEvent);
-    await this.sendPushNotifications(payload);
+        const payload = notificationPayload(deviceId, session, sessionId, previousStatus, nextStatus, matchedRules);
+        const triggeredEvent: SessionEvent = {
+          id: eventId(),
+          type: "notification.triggered",
+          sessionId,
+          payload,
+          timestamp: nowIso()
+        };
+        await this.db.appendEvent(triggeredEvent);
+        this.events.publish(triggeredEvent);
+        if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload);
+      })
+    );
   }
 
-  private async sendPushNotifications(payload: NotificationTriggeredPayload): Promise<void> {
-    const subscriptions = await this.db.listPushSubscriptions();
+  private async sendPushNotifications(deviceId: string, payload: NotificationTriggeredPayload): Promise<void> {
+    const subscriptions = await this.db.listPushSubscriptions(deviceId);
     await Promise.all(
       subscriptions.map(async (subscription) => {
         try {
           await webPush.sendNotification(toWebPushSubscription(subscription), JSON.stringify(payload));
         } catch (error) {
           if (isExpiredPushSubscriptionError(error)) {
-            await this.db.deletePushSubscription(subscription.endpoint);
+            await this.db.deletePushSubscription(subscription.deviceId, subscription.endpoint);
           } else {
             this.logger.warn({ err: error }, "push notification send failed");
           }
@@ -148,6 +152,7 @@ function isInputReadyStatus(status: SessionStatus): boolean {
 }
 
 function notificationPayload(
+  deviceId: string,
   session: ManagedSession | null,
   sessionId: string,
   previousStatus: SessionStatus,
@@ -158,6 +163,7 @@ function notificationPayload(
   const title = rules.length === 1 ? notificationRuleLabel(rules[0]!) : "Multiple muxpilot alerts";
   const body = `${sessionName}: ${notificationStatusLabel(status)}`;
   return {
+    deviceId,
     sessionId,
     sessionName,
     rules,

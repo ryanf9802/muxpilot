@@ -200,6 +200,7 @@ export class SessionManager {
         models: mergeSessionModels(existing?.models, inputMode, liveModelSettings),
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
+        pinned: existing?.pinned ?? false,
         archived: existing?.archived ?? false
       };
 
@@ -395,7 +396,6 @@ export class SessionManager {
     const current = await this.db.getQueuedInput(sessionId, queuedInputId);
     if (!current) return;
     if (current.status === "sending") throw new QueuedInputError("Queued input is already sending");
-    if (current.status === "sent") throw new QueuedInputError("Queued input has already been sent");
     await this.db.deleteQueuedInput(sessionId, queuedInputId);
     this.publish("queue.updated", sessionId, { queuedInputs: await this.db.listQueuedInputs(sessionId) });
   }
@@ -584,6 +584,7 @@ export class SessionManager {
       models: emptySessionModels(),
       transcriptSize: 0,
       unreadCount: 0,
+      pinned: false,
       archived: false
     };
     await this.db.upsertSession(session, now);
@@ -611,6 +612,8 @@ export class SessionManager {
       await this.tmux.renameWindow(session.tmux.paneId, requireSessionName(action.name));
       await this.refreshRenamedSession(session);
     }
+    if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
+    if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
     if (action.type === "kill") await this.tmux.killPane(session.tmux.paneId);
     if (action.type === "archiveTranscript") await this.db.markSessionArchived(sessionId, true, nowIso());
     if (action.type === "setInputMode") {
@@ -1318,6 +1321,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     lastActivityAt: session.lastActivityAt,
     inputMode: session.inputMode,
     models: session.models,
+    pinned: session.pinned,
     archived: session.archived
   };
 }

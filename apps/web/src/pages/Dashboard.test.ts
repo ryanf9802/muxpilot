@@ -12,7 +12,9 @@ import {
   dashboardPreviewLines,
   dashboardStatusFilterFromSearchParams,
   filterSessionsByDashboardStatus,
+  groupSessionsByRepo,
   OpenAIUsagePanel,
+  orderSessionsWithinRepo,
   parseStoredCollapsedRepoKeys,
   RepoSessionGroupHeader,
   removeSessionFromDashboard,
@@ -117,6 +119,13 @@ describe("SessionCard", () => {
     expect(renderSessionCard(session, ["done_task"])).toContain("Notify: Done task");
     expect(renderSessionCard(session, ["done_task"], "green")).toContain("session-card-notification-ring-green");
   });
+
+  it("marks pinned sessions", () => {
+    const session = testSession({ id: "a", paneId: "%111", windowName: "pinned", pinned: true });
+
+    expect(renderSessionCard(session)).toContain("session-card-pinned");
+    expect(renderSessionCard(session)).toContain("Pinned session");
+  });
 });
 
 describe("dashboardPreviewLines", () => {
@@ -212,6 +221,38 @@ describe("RepoSessionGroupHeader", () => {
     expect(html).toContain('aria-label="Expand muxpilot"');
     expect(html).toContain('aria-expanded="false"');
     expect(html).toContain('title="Expand repo"');
+  });
+});
+
+describe("dashboard repo session ordering", () => {
+  it("places pinned sessions first while preserving existing order within partitions", () => {
+    const sessions = [
+      testSession({ id: "newest-unpinned", paneId: "%111", windowName: "newest-unpinned" }),
+      testSession({ id: "newest-pinned", paneId: "%112", windowName: "newest-pinned", pinned: true }),
+      testSession({ id: "oldest-pinned", paneId: "%113", windowName: "oldest-pinned", pinned: true }),
+      testSession({ id: "oldest-unpinned", paneId: "%114", windowName: "oldest-unpinned" })
+    ];
+
+    expect(orderSessionsWithinRepo(sessions).map((session) => session.id)).toEqual([
+      "newest-pinned",
+      "oldest-pinned",
+      "newest-unpinned",
+      "oldest-unpinned"
+    ]);
+  });
+
+  it("orders sessions within each repo without changing repo group order", () => {
+    const sessions = [
+      testSession({ id: "repo-a-active", paneId: "%111", windowName: "repo-a-active", repoRoot: "/repo-a", repoName: "repo-a" }),
+      testSession({ id: "repo-b-pinned", paneId: "%112", windowName: "repo-b-pinned", repoRoot: "/repo-b", repoName: "repo-b", pinned: true }),
+      testSession({ id: "repo-a-pinned", paneId: "%113", windowName: "repo-a-pinned", repoRoot: "/repo-a", repoName: "repo-a", pinned: true })
+    ];
+
+    const groups = groupSessionsByRepo(sessions);
+
+    expect(groups.map((group) => group.key)).toEqual(["/repo-a", "/repo-b"]);
+    expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["repo-a-pinned", "repo-a-active"]);
+    expect(groups[1]?.sessions.map((session) => session.id)).toEqual(["repo-b-pinned"]);
   });
 });
 
@@ -432,7 +473,9 @@ function testSession(
     id: string;
     paneId: string;
     windowName: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status">>
+    repoRoot?: string;
+    repoName?: string;
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "pinned">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -452,7 +495,7 @@ function testSession(
       pid: 123,
       size: "120x40"
     },
-    repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
+    repo: { root: input.repoRoot ?? "/repo", name: input.repoName ?? "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: null,
     codexJsonlPath: null,
     discoveryConfidence: "medium",
@@ -467,6 +510,7 @@ function testSession(
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
+    pinned: input.pinned ?? false,
     archived: false
   };
 }

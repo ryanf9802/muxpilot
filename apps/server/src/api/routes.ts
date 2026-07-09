@@ -67,10 +67,19 @@ const questionAnswerSchema = z.object({
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
+const notificationDeviceIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,80}$/);
 const notificationRuleTypeSchema = z.enum(["done_task", "approval_gate", "status_change"]);
-const notificationSettingSchema = z.discriminatedUnion("scope", [
-  z.object({ scope: z.literal("global"), type: notificationRuleTypeSchema, enabled: z.boolean() }),
-  z.object({ scope: z.literal("session"), sessionId: z.string().min(1), type: notificationRuleTypeSchema, enabled: z.boolean() })
+const notificationSettingSchema = z.union([
+  z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("rule"), scope: z.literal("global"), type: notificationRuleTypeSchema, enabled: z.boolean() }),
+  z.object({
+    deviceId: notificationDeviceIdSchema,
+    setting: z.literal("rule"),
+    scope: z.literal("session"),
+    sessionId: z.string().min(1),
+    type: notificationRuleTypeSchema,
+    enabled: z.boolean()
+  }),
+  z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("delivery"), channel: z.enum(["push", "sound"]), enabled: z.boolean() })
 ]);
 const pushSubscriptionSchema = z.object({
   endpoint: z.string().url(),
@@ -86,6 +95,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
   z.object({ type: z.literal("rename"), name: sessionNameSchema }),
+  z.object({ type: z.literal("pin") }),
+  z.object({ type: z.literal("unpin") }),
   z.object({ type: z.literal("detach") }),
   z.object({ type: z.literal("kill") })
 ]);
@@ -121,11 +132,17 @@ export function registerRoutes(
     return buildRemoteAccess(config, access.currentAccessKey(), undefined, access.isUnrestrictedRemoteAccessEnabled());
   });
 
-  app.get("/api/notifications/settings", { preHandler: access.requireAccess }, async () => db.getNotificationSettings());
+  app.get("/api/notifications/settings", { preHandler: access.requireAccess }, async (request) => {
+    const { deviceId } = z.object({ deviceId: notificationDeviceIdSchema }).parse(request.query);
+    return db.getNotificationSettings(deviceId);
+  });
 
   app.patch("/api/notifications/settings", { preHandler: access.requireAccess }, async (request) => {
     const parsed = notificationSettingSchema.parse(request.body) satisfies UpdateNotificationSettingRequest;
-    return db.setNotificationRule(parsed.scope, parsed.scope === "session" ? parsed.sessionId : null, parsed.type, parsed.enabled, new Date().toISOString());
+    if (parsed.setting === "delivery") {
+      return db.setNotificationDeliverySetting(parsed.deviceId, parsed.channel, parsed.enabled, new Date().toISOString());
+    }
+    return db.setNotificationRule(parsed.deviceId, parsed.scope, parsed.scope === "session" ? parsed.sessionId : null, parsed.type, parsed.enabled, new Date().toISOString());
   });
 
   app.get("/api/notifications/push-key", { preHandler: access.requireAccess }, async () => ({
@@ -133,14 +150,16 @@ export function registerRoutes(
   }));
 
   app.post("/api/notifications/push-subscriptions", { preHandler: access.requireAccess }, async (request) => {
+    const { deviceId } = z.object({ deviceId: notificationDeviceIdSchema }).parse(request.query);
     const parsed = pushSubscriptionSchema.parse(request.body) satisfies PushSubscriptionInput;
-    await db.upsertPushSubscription(parsed, new Date().toISOString());
+    await db.upsertPushSubscription(deviceId, parsed, new Date().toISOString());
     return { ok: true };
   });
 
   app.delete("/api/notifications/push-subscriptions", { preHandler: access.requireAccess }, async (request) => {
+    const { deviceId } = z.object({ deviceId: notificationDeviceIdSchema }).parse(request.query);
     const parsed = z.object({ endpoint: z.string().url() }).parse(request.body);
-    await db.deletePushSubscription(parsed.endpoint);
+    await db.deletePushSubscription(deviceId, parsed.endpoint);
     return { ok: true };
   });
 
@@ -410,7 +429,9 @@ export function registerRoutes(
 
   app.get("/api/events", { websocket: true, preHandler: access.requireAccess }, (socket, request) => {
     access.trackRemoteSocket(request, socket);
+    const socketDeviceId = notificationSocketDeviceId(request.query);
     const unsubscribe = events.subscribe((event) => {
+      if (event.type === "notification.triggered" && !shouldSendNotificationEventToDevice(event.payload, socketDeviceId)) return;
       socket.send(JSON.stringify(event));
     });
     socket.on("close", () => {
@@ -419,6 +440,16 @@ export function registerRoutes(
     });
     socket.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString() }));
   });
+}
+
+function notificationSocketDeviceId(query: unknown): string | null {
+  const parsed = z.object({ deviceId: notificationDeviceIdSchema.optional() }).safeParse(query);
+  return parsed.success ? (parsed.data.deviceId ?? null) : null;
+}
+
+function shouldSendNotificationEventToDevice(payload: unknown, deviceId: string | null): boolean {
+  if (!deviceId || !payload || typeof payload !== "object" || !("deviceId" in payload)) return false;
+  return (payload as { deviceId?: unknown }).deviceId === deviceId;
 }
 
 function parsePositiveSequence(value: string | undefined): number | null {

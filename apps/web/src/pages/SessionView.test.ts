@@ -31,7 +31,9 @@ import {
   planActionText,
   questionRemainingSeconds,
   parseProposedPlanSegments,
+  queuedInputEditable,
   queuedInputHasLineBreaks,
+  queuedInputRemovable,
   relativeLineNumber,
   replaceTranscriptTail,
   loadComposerDraft,
@@ -717,6 +719,20 @@ describe("queuedInputHasLineBreaks", () => {
     expect(queuedInputHasLineBreaks("single line")).toBe(false);
     expect(queuedInputHasLineBreaks("first line\nsecond line")).toBe(true);
     expect(queuedInputHasLineBreaks("first line\r\nsecond line")).toBe(true);
+  });
+});
+
+describe("queued input action state", () => {
+  it("keeps sent queued inputs read-only but removable", () => {
+    expect(queuedInputEditable({ status: "queued" })).toBe(true);
+    expect(queuedInputEditable({ status: "failed" })).toBe(true);
+    expect(queuedInputEditable({ status: "sent" })).toBe(false);
+    expect(queuedInputEditable({ status: "sending" })).toBe(false);
+
+    expect(queuedInputRemovable({ status: "queued" })).toBe(true);
+    expect(queuedInputRemovable({ status: "failed" })).toBe(true);
+    expect(queuedInputRemovable({ status: "sent" })).toBe(true);
+    expect(queuedInputRemovable({ status: "sending" })).toBe(false);
   });
 });
 
@@ -1873,6 +1889,7 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
+    pinned: false,
     archived: false,
     ...overrides
   };

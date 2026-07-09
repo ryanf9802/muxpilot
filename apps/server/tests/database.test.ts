@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ManagedSession, TranscriptPageResponse } from "@muxpilot/core";
+import type { ChatMessage, ManagedSession, QueuedInput, TranscriptPageResponse } from "@muxpilot/core";
 import { AppDatabase } from "../src/db/database.js";
 
 describe("AppDatabase activity summaries", () => {
@@ -161,6 +161,28 @@ describe("AppDatabase activity summaries", () => {
       default: { model: null, reasoningEffort: null },
       plan: { model: null, reasoningEffort: null }
     });
+    db.close();
+  });
+
+  it("hydrates missing legacy session pin state as unpinned", async () => {
+    const db = await tempDb();
+    const legacySession = { ...testSession("session-legacy-pinned") };
+    delete (legacySession as Partial<ManagedSession>).pinned;
+    db.upsertSession(legacySession as ManagedSession, "2026-07-07T00:00:00.000Z");
+
+    expect(db.getSession(legacySession.id)?.pinned).toBe(false);
+    db.close();
+  });
+
+  it("persists session pin state across session upserts", async () => {
+    const db = await tempDb();
+    const session = testSession("session-pinned");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+
+    expect(db.setSessionPinned(session.id, true, "2026-07-07T00:00:01.000Z")?.pinned).toBe(true);
+    db.upsertSession({ ...session, lastActivityAt: "2026-07-07T00:00:02.000Z" }, "2026-07-07T00:00:02.000Z");
+
+    expect(db.getSession(session.id)?.pinned).toBe(true);
     db.close();
   });
 
@@ -849,43 +871,131 @@ describe("AppDatabase remote access settings", () => {
   });
 });
 
+describe("AppDatabase queued inputs", () => {
+  it("clears sent queued inputs after a normalized transcript echo", async () => {
+    const db = await tempDb();
+    const session = testSession("session-queue-normalized");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendQueuedInput(
+      testQueuedInput(session.id, {
+        id: "queued-1",
+        text: "Fix repo validation gaps:\n\n:add prettier to UI dev dependencies",
+        status: "sent",
+        createdAt: "2026-07-07T00:00:01.000Z",
+        updatedAt: "2026-07-07T00:00:03.000Z",
+        sentAt: "2026-07-07T00:00:03.000Z"
+      })
+    );
+    db.appendMessage(
+      testMessage(
+        session.id,
+        1,
+        "user",
+        "Fix repo validation gaps\n\nadd prettier to UI dev dependencies",
+        "2026-07-07T00:00:02.000Z"
+      )
+    );
+
+    expect(await db.deleteEchoedSentQueuedInputs(session.id)).toBe(1);
+    expect(await db.listQueuedInputs(session.id)).toEqual([]);
+    db.close();
+  });
+
+  it("keeps sent queued inputs when later user messages are unrelated", async () => {
+    const db = await tempDb();
+    const session = testSession("session-queue-unrelated");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const input = testQueuedInput(session.id, {
+      id: "queued-1",
+      text: "Implement the custom integration route tests",
+      status: "sent",
+      createdAt: "2026-07-07T00:00:01.000Z",
+      updatedAt: "2026-07-07T00:00:02.000Z",
+      sentAt: "2026-07-07T00:00:02.000Z"
+    });
+    db.appendQueuedInput(input);
+    db.appendMessage(testMessage(session.id, 1, "user", "Open the notification settings", "2026-07-07T00:00:03.000Z"));
+
+    expect(await db.deleteEchoedSentQueuedInputs(session.id)).toBe(0);
+    expect(await db.listQueuedInputs(session.id)).toEqual([input]);
+    db.close();
+  });
+});
+
 describe("AppDatabase notifications", () => {
   it("persists global and per-session notification rules", async () => {
     const db = await tempDb();
+    const deviceId = "device-test";
 
-    expect(await db.getNotificationSettings()).toEqual({ globalRules: [], sessionRules: {} });
-    await db.setNotificationRule("global", null, "status_change", true, "2026-07-08T00:00:00.000Z");
-    await db.setNotificationRule("session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
-    await db.setNotificationRule("session", "session-1", "approval_gate", true, "2026-07-08T00:00:02.000Z");
+    expect(await db.getNotificationSettings(deviceId)).toEqual({ globalRules: [], sessionRules: {}, delivery: { pushEnabled: false, soundEnabled: true } });
+    await db.setNotificationRule(deviceId, "global", null, "status_change", true, "2026-07-08T00:00:00.000Z");
+    await db.setNotificationRule(deviceId, "session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
+    await db.setNotificationRule(deviceId, "session", "session-1", "approval_gate", true, "2026-07-08T00:00:02.000Z");
 
-    expect(await db.getNotificationSettings()).toEqual({
+    expect(await db.getNotificationSettings(deviceId)).toEqual({
       globalRules: ["status_change"],
-      sessionRules: { "session-1": ["approval_gate", "done_task"] }
+      sessionRules: { "session-1": ["approval_gate", "done_task"] },
+      delivery: { pushEnabled: false, soundEnabled: true }
     });
 
-    await db.setNotificationRule("session", "session-1", "done_task", false, "2026-07-08T00:00:03.000Z");
-    expect(await db.getNotificationSettings()).toEqual({
+    await db.setNotificationRule(deviceId, "session", "session-1", "done_task", false, "2026-07-08T00:00:03.000Z");
+    expect(await db.getNotificationSettings(deviceId)).toEqual({
       globalRules: ["status_change"],
-      sessionRules: { "session-1": ["approval_gate"] }
+      sessionRules: { "session-1": ["approval_gate"] },
+      delivery: { pushEnabled: false, soundEnabled: true }
+    });
+    db.close();
+  });
+
+  it("keeps notification settings separate per device", async () => {
+    const db = await tempDb();
+
+    await db.setNotificationRule("device-one", "global", null, "status_change", true, "2026-07-08T00:00:00.000Z");
+    await db.setNotificationRule("device-two", "session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
+    await db.setNotificationDeliverySetting("device-two", "sound", false, "2026-07-08T00:00:02.000Z");
+    await db.setNotificationDeliverySetting("device-two", "push", true, "2026-07-08T00:00:03.000Z");
+
+    expect(await db.getNotificationSettings("device-one")).toEqual({
+      globalRules: ["status_change"],
+      sessionRules: {},
+      delivery: { pushEnabled: false, soundEnabled: true }
+    });
+    expect(await db.getNotificationSettings("device-two")).toEqual({
+      globalRules: [],
+      sessionRules: { "session-1": ["done_task"] },
+      delivery: { pushEnabled: true, soundEnabled: false }
+    });
+    expect(await db.listNotificationSettings()).toEqual({
+      "device-one": {
+        globalRules: ["status_change"],
+        sessionRules: {},
+        delivery: { pushEnabled: false, soundEnabled: true }
+      },
+      "device-two": {
+        globalRules: [],
+        sessionRules: { "session-1": ["done_task"] },
+        delivery: { pushEnabled: true, soundEnabled: false }
+      }
     });
     db.close();
   });
 
   it("persists push subscriptions and VAPID keys", async () => {
     const db = await tempDb();
+    const deviceId = "device-test";
     const subscription = {
       endpoint: "https://example.test/push/1",
       expirationTime: null,
       keys: { p256dh: "p256dh", auth: "auth" }
     };
 
-    await db.upsertPushSubscription(subscription, "2026-07-08T00:00:00.000Z");
+    await db.upsertPushSubscription(deviceId, subscription, "2026-07-08T00:00:00.000Z");
     await db.setPushVapidKeys({ publicKey: "public", privateKey: "private" }, "2026-07-08T00:00:01.000Z");
 
-    expect(await db.listPushSubscriptions()).toEqual([subscription]);
+    expect(await db.listPushSubscriptions(deviceId)).toEqual([{ ...subscription, deviceId }]);
     expect(await db.getPushVapidKeys()).toEqual({ publicKey: "public", privateKey: "private" });
-    await db.deletePushSubscription(subscription.endpoint);
-    expect(await db.listPushSubscriptions()).toEqual([]);
+    await db.deletePushSubscription(deviceId, subscription.endpoint);
+    expect(await db.listPushSubscriptions(deviceId)).toEqual([]);
     db.close();
   });
 });
@@ -1059,6 +1169,7 @@ function testSession(id: string): ManagedSession {
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
+    pinned: false,
     archived: false
   };
 }
@@ -1080,6 +1191,20 @@ function testMessage(
     timestamp,
     text,
     payload: {}
+  };
+}
+
+function testQueuedInput(sessionId: string, input: Partial<QueuedInput> & Pick<QueuedInput, "id" | "text" | "status">): QueuedInput {
+  return {
+    sessionId,
+    mode: "default",
+    error: null,
+    codexSessionId: "codex-session",
+    codexJsonlPath: "/tmp/codex.jsonl",
+    createdAt: "2026-07-07T00:00:01.000Z",
+    updatedAt: "2026-07-07T00:00:01.000Z",
+    sentAt: null,
+    ...input
   };
 }
 

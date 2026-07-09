@@ -3,11 +3,13 @@ import {
   useEffect,
   useRef,
   type ButtonHTMLAttributes,
+  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
   type RefObject
 } from "react";
+import { Check } from "lucide-react";
 
 export interface ContextMenuPosition {
   x: number;
@@ -26,6 +28,29 @@ export function clampContextMenuPosition(
   };
 }
 
+export function dropdownMenuPosition(
+  rect: Pick<DOMRect, "left" | "right" | "bottom">,
+  options: { width: number; height: number; align?: "start" | "end"; offset?: number; edge?: number }
+): ContextMenuPosition {
+  const offset = options.offset ?? 6;
+  const x = options.align === "start" ? rect.left : rect.right - options.width;
+  return clampContextMenuPosition(x, rect.bottom + offset, options);
+}
+
+export function submenuPosition(
+  parent: ContextMenuPosition,
+  options: { parentWidth: number; width: number; height: number; itemOffsetY: number; edge?: number; gap?: number }
+): ContextMenuPosition {
+  const edge = options.edge ?? 8;
+  const gap = options.gap ?? 4;
+  const rightX = parent.x + options.parentWidth + gap;
+  const leftX = parent.x - options.width - gap;
+  return {
+    x: rightX + options.width + edge <= window.innerWidth ? rightX : Math.max(edge, leftX),
+    y: Math.max(edge, Math.min(parent.y + options.itemOffsetY, window.innerHeight - options.height - edge))
+  };
+}
+
 export const ContextMenu = forwardRef<
   HTMLDivElement,
   {
@@ -33,14 +58,15 @@ export const ContextMenu = forwardRef<
     label: string;
     className?: string;
     width?: number;
+    style?: CSSProperties;
     children?: ReactNode;
   }
->(function ContextMenu({ position, label, className = "", width, children }, ref) {
+>(function ContextMenu({ position, label, className = "", width, style, children }, ref) {
   return (
     <div
       className={`context-menu${className ? ` ${className}` : ""}`}
       ref={ref}
-      style={{ left: position.x, top: position.y, width }}
+      style={{ left: position.x, top: position.y, width, ...style }}
       role="menu"
       aria-label={label}
     >
@@ -51,17 +77,39 @@ export const ContextMenu = forwardRef<
 
 export function ContextMenuItem({
   icon,
+  trailing,
   children,
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
   icon?: ReactNode;
+  trailing?: ReactNode;
 }) {
   return (
     <button type="button" role="menuitem" {...props}>
       {icon}
       {children}
+      {trailing}
     </button>
   );
+}
+
+export function ContextMenuCheckboxItem({
+  checked,
+  children,
+  ...props
+}: Omit<ButtonHTMLAttributes<HTMLButtonElement>, "role"> & {
+  checked: boolean;
+}) {
+  return (
+    <button type="button" role="menuitemcheckbox" aria-checked={checked} {...props}>
+      <span className="menu-check-slot">{checked ? <Check size={15} /> : null}</span>
+      {children}
+    </button>
+  );
+}
+
+export function ContextMenuSeparator() {
+  return <div className="menu-separator" role="separator" />;
 }
 
 export function useDismissableContextMenu(

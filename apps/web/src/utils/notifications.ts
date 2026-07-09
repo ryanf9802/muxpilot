@@ -21,6 +21,14 @@ export function globalNotificationRules(settings: NotificationSettings | null): 
   return settings?.globalRules ?? [];
 }
 
+export function notificationPushEnabled(settings: NotificationSettings | null): boolean {
+  return settings?.delivery.pushEnabled ?? false;
+}
+
+export function notificationSoundEnabled(settings: NotificationSettings | null): boolean {
+  return settings?.delivery.soundEnabled ?? true;
+}
+
 export function notificationToastMessage(payload: NotificationTriggeredPayload): string {
   return `${payload.sessionName}: ${notificationStatusLabel(payload.status)}`;
 }
@@ -49,23 +57,44 @@ export function playNotificationBell(): void {
   oscillator.onended = () => void context.close();
 }
 
-export async function ensurePushSubscription(): Promise<void> {
-  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) return;
+export function isPushNotificationAvailable(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  return (
+    window.isSecureContext &&
+    isInstalledPwa() &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window &&
+    "Notification" in window
+  );
+}
+
+export async function ensurePushSubscription(): Promise<boolean> {
+  if (!isPushNotificationAvailable()) return false;
   const permission = await Notification.requestPermission();
-  if (permission !== "granted") return;
+  if (permission !== "granted") return false;
   const registration = await navigator.serviceWorker.ready;
   const existing = await registration.pushManager.getSubscription();
   if (existing) {
     await api.upsertPushSubscription(pushSubscriptionInput(existing));
-    return;
+    return true;
   }
   const { publicKey } = await api.notificationPushKey();
-  if (!publicKey) return;
+  if (!publicKey) return false;
   const subscription = await registration.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToArrayBuffer(publicKey)
   });
   await api.upsertPushSubscription(pushSubscriptionInput(subscription));
+  return true;
+}
+
+export async function disablePushSubscription(): Promise<void> {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  const registration = await navigator.serviceWorker.ready;
+  const existing = await registration.pushManager.getSubscription();
+  if (!existing) return;
+  await api.deletePushSubscription(existing.endpoint);
+  await existing.unsubscribe();
 }
 
 function pushSubscriptionInput(subscription: PushSubscription): PushSubscriptionInput {
@@ -95,4 +124,9 @@ declare global {
   interface Window {
     webkitAudioContext?: typeof AudioContext;
   }
+}
+
+function isInstalledPwa(): boolean {
+  const standaloneNavigator = navigator as Navigator & { standalone?: boolean };
+  return standaloneNavigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches;
 }

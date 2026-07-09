@@ -908,6 +908,10 @@ select:focus-visible {
   border-radius: 8px;
 }
 
+.session-card-pinned {
+  border-color: color-mix(in srgb, var(--color-action) 42%, var(--color-border));
+}
+
 .session-card-notification-ring {
   animation: notification-ring 2.8s ease-out;
 }
@@ -943,6 +947,25 @@ select:focus-visible {
   padding-right: 44px;
 }
 
+.session-card-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-pin-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--color-action);
+  background: color-mix(in srgb, var(--color-action) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-action) 34%, transparent);
+  border-radius: 999px;
+}
+
 .session-card-menu-button {
   position: absolute;
   top: 8px;
@@ -965,8 +988,7 @@ select:focus-visible {
   background: var(--color-surface-raised);
 }
 
-.context-menu,
-.session-action-menu {
+.context-menu {
   position: fixed;
   z-index: 50;
   display: grid;
@@ -986,8 +1008,7 @@ select:focus-visible {
   z-index: 55;
 }
 
-.context-menu button,
-.session-action-menu button {
+.context-menu button {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -1011,15 +1032,19 @@ select:focus-visible {
   margin-left: auto;
 }
 
-.context-menu button:hover:not(:disabled),
-.session-action-menu button:hover:not(:disabled) {
+.menu-separator {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--color-border);
+}
+
+.context-menu button:hover:not(:disabled) {
   background: var(--color-surface-raised);
   border-color: transparent;
   box-shadow: none;
 }
 
 .context-menu .danger,
-.session-action-menu .danger,
 .dialog-actions .danger {
   color: var(--color-error);
 }

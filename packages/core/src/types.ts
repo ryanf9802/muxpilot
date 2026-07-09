@@ -108,6 +108,7 @@ export interface ManagedSession {
   models: SessionModelSelections;
   transcriptSize: number;
   unreadCount: number;
+  pinned: boolean;
   archived: boolean;
 }
 
@@ -224,20 +225,39 @@ export interface SessionEvent {
 
 export type NotificationRuleType = "done_task" | "approval_gate" | "status_change";
 export type NotificationRuleScope = "global" | "session";
+export type NotificationDeliveryChannel = "push" | "sound";
+
+export interface NotificationDeliverySettings {
+  pushEnabled: boolean;
+  soundEnabled: boolean;
+}
 
 export interface NotificationSettings {
   globalRules: NotificationRuleType[];
   sessionRules: Record<string, NotificationRuleType[]>;
+  delivery: NotificationDeliverySettings;
 }
 
-export interface UpdateNotificationSettingRequest {
+export interface UpdateNotificationRuleSettingRequest {
+  deviceId: string;
+  setting: "rule";
   scope: NotificationRuleScope;
   sessionId?: string;
   type: NotificationRuleType;
   enabled: boolean;
 }
 
+export interface UpdateNotificationDeliverySettingRequest {
+  deviceId: string;
+  setting: "delivery";
+  channel: NotificationDeliveryChannel;
+  enabled: boolean;
+}
+
+export type UpdateNotificationSettingRequest = UpdateNotificationRuleSettingRequest | UpdateNotificationDeliverySettingRequest;
+
 export interface NotificationTriggeredPayload {
+  deviceId: string;
   sessionId: string;
   sessionName: string;
   rules: NotificationRuleType[];
@@ -347,6 +367,8 @@ export type SessionAction =
   | { type: "setInputMode"; mode: CollaborationMode }
   | { type: "choosePlanAction"; action: PlanActionChoice }
   | { type: "rename"; name: string }
+  | { type: "pin" }
+  | { type: "unpin" }
   | { type: "detach" }
   | { type: "kill" };
 

@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import webPush from "web-push";
-import type { ManagedSession, SessionEvent } from "@muxpilot/core";
+import type { ManagedSession, NotificationRuleType, NotificationSettings, SessionEvent } from "@muxpilot/core";
 import { matchingNotificationRules, NotificationService } from "../src/services/notifications.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 describe("matchingNotificationRules", () => {
   it("fires done task only for yellow to waiting transitions", () => {
-    const settings = { globalRules: [], sessionRules: { a: ["done_task" as const] } };
+    const settings = testNotificationSettings([], { a: ["done_task"] });
 
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "generating", "idle")).toEqual(["done_task"]);
@@ -17,7 +17,7 @@ describe("matchingNotificationRules", () => {
   });
 
   it("fires approval gate for red target statuses", () => {
-    const settings = { globalRules: ["approval_gate" as const], sessionRules: {} };
+    const settings = testNotificationSettings(["approval_gate"]);
 
     expect(matchingNotificationRules(settings, "a", "working", "approval")).toEqual(["approval_gate"]);
     expect(matchingNotificationRules(settings, "a", "working", "question")).toEqual(["approval_gate"]);
@@ -25,7 +25,7 @@ describe("matchingNotificationRules", () => {
   });
 
   it("fires status change on any actual transition", () => {
-    const settings = { globalRules: ["status_change" as const], sessionRules: {} };
+    const settings = testNotificationSettings(["status_change"]);
 
     expect(matchingNotificationRules(settings, "a", "working", "planning")).toEqual(["status_change"]);
     expect(matchingNotificationRules(settings, "a", "working", "waiting", { inputMode: "plan" })).toEqual([]);
@@ -35,7 +35,8 @@ describe("matchingNotificationRules", () => {
   it("combines overlapping global and session rules once", () => {
     const settings = {
       globalRules: ["status_change" as const, "done_task" as const],
-      sessionRules: { a: ["done_task" as const, "approval_gate" as const] }
+      sessionRules: { a: ["done_task" as const, "approval_gate" as const] },
+      delivery: { pushEnabled: false, soundEnabled: true }
     };
 
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task", "status_change"]);
@@ -44,7 +45,8 @@ describe("matchingNotificationRules", () => {
   it("does not fire notifications for sessions becoming missing", () => {
     const settings = {
       globalRules: ["approval_gate" as const, "status_change" as const],
-      sessionRules: { a: ["approval_gate" as const, "status_change" as const] }
+      sessionRules: { a: ["approval_gate" as const, "status_change" as const] },
+      delivery: { pushEnabled: false, soundEnabled: true }
     };
 
     expect(matchingNotificationRules(settings, "a", "waiting", "missing")).toEqual([]);
@@ -57,7 +59,7 @@ describe("matchingNotificationRules", () => {
       {
         getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
         listSessions: async () => [testSession({ status: "working" })],
-        getNotificationSettings: async () => ({ globalRules: ["done_task"], sessionRules: {} }),
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: "waiting" }),
         appendEvent: async (event: SessionEvent) => {
           appendedEvents.push(event);
@@ -76,11 +78,56 @@ describe("matchingNotificationRules", () => {
       type: "notification.triggered",
       sessionId: "a",
       payload: {
+        deviceId: "device-test",
         rules: ["done_task"],
         previousStatus: "working",
         status: "waiting"
       }
     });
+  });
+
+  it("matches rules per device and sends push only when enabled", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    const sendNotification = vi.spyOn(webPush, "sendNotification").mockResolvedValue({} as never);
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({
+          "device-muted": testNotificationSettings(["done_task"], {}, { pushEnabled: false, soundEnabled: true }),
+          "device-push": testNotificationSettings(["done_task"], {}, { pushEnabled: true, soundEnabled: true })
+        }),
+        getSession: async () => testSession({ status: "waiting" }),
+        appendEvent: async (event: SessionEvent) => {
+          appendedEvents.push(event);
+        },
+        listPushSubscriptions: async (deviceId: string) => [
+          {
+            deviceId,
+            endpoint: `https://example.test/${deviceId}`,
+            expirationTime: null,
+            keys: { p256dh: "p256dh", auth: "auth" }
+          }
+        ],
+        deletePushSubscription: async () => undefined
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void> };
+
+    try {
+      await transitionHandler.handleStatusTransition("a", "working");
+      await transitionHandler.handleStatusTransition("a", "waiting");
+
+      await vi.waitFor(() => expect(appendedEvents).toHaveLength(2));
+      expect(appendedEvents.map((event) => (event.payload as { deviceId: string }).deviceId).sort()).toEqual(["device-muted", "device-push"]);
+      expect(sendNotification).toHaveBeenCalledTimes(1);
+      expect(sendNotification.mock.calls[0]?.[0].endpoint).toBe("https://example.test/device-push");
+    } finally {
+      sendNotification.mockRestore();
+    }
   });
 
   it("does not fire done task for plan-mode sessions that briefly look waiting", async () => {
@@ -90,7 +137,7 @@ describe("matchingNotificationRules", () => {
       {
         getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
         listSessions: async () => [testSession({ status: "working", inputMode: "plan" })],
-        getNotificationSettings: async () => ({ globalRules: ["done_task"], sessionRules: {} }),
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: "waiting", inputMode: "plan" }),
         appendEvent: async (event: SessionEvent) => {
           appendedEvents.push(event);
@@ -116,7 +163,7 @@ describe("matchingNotificationRules", () => {
       {
         getPushVapidKeys: async () => vapidKeys,
         listSessions: async () => [testSession({ status: currentStatus })],
-        getNotificationSettings: async () => ({ globalRules: ["done_task"], sessionRules: {} }),
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: currentStatus }),
         appendEvent: async (event: SessionEvent) => {
           appendedEvents.push(event);
@@ -160,6 +207,7 @@ describe("matchingNotificationRules", () => {
       type: "notification.triggered",
       sessionId: "a",
       payload: {
+        deviceId: "device-test",
         rules: ["done_task"],
         previousStatus: "working",
         status: "waiting"
@@ -176,7 +224,7 @@ describe("matchingNotificationRules", () => {
       {
         getPushVapidKeys: async () => vapidKeys,
         listSessions: async () => [testSession({ status: "question" })],
-        getNotificationSettings: async () => ({ globalRules: ["approval_gate"], sessionRules: {} }),
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["approval_gate"]) }),
         getSession: async () => testSession({ status: "question" }),
         appendEvent: async (event: SessionEvent) => {
           appendedEvents.push(event);
@@ -201,6 +249,14 @@ describe("matchingNotificationRules", () => {
     service.stop();
   });
 });
+
+function testNotificationSettings(
+  globalRules: NotificationRuleType[] = [],
+  sessionRules: Record<string, NotificationRuleType[]> = {},
+  delivery = { pushEnabled: false, soundEnabled: true }
+): NotificationSettings {
+  return { globalRules, sessionRules, delivery };
+}
 
 function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
   return {
@@ -235,6 +291,7 @@ function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
+    pinned: false,
     archived: false,
     ...input
   };

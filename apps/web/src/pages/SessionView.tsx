@@ -2553,7 +2553,7 @@ function QueuedInputList({
   }
 
   async function remove(input: QueuedInput) {
-    if (!queuedInputEditable(input) || busyId) return;
+    if (!queuedInputRemovable(input) || busyId) return;
     setBusyId(input.id);
     setError("");
     try {
@@ -2573,6 +2573,7 @@ function QueuedInputList({
       <div className="queued-input-list">
         {inputs.map((input) => {
           const editable = queuedInputEditable(input);
+          const removable = queuedInputRemovable(input);
           const busy = busyId === input.id;
           const editing = editingId === input.id;
           const multiline = queuedInputHasLineBreaks(input.text);
@@ -2615,7 +2616,7 @@ function QueuedInputList({
                       <button
                         type="button"
                         className="danger"
-                        disabled={!editable || busy}
+                        disabled={!removable || busy}
                         aria-busy={busy}
                         data-busy={busy || undefined}
                         onClick={() => void remove(input)}
@@ -2640,8 +2641,12 @@ export function queuedInputHasLineBreaks(text: string): boolean {
   return /[\r\n]/.test(text);
 }
 
-function queuedInputEditable(input: QueuedInput): boolean {
+export function queuedInputEditable(input: Pick<QueuedInput, "status">): boolean {
   return input.status === "queued" || input.status === "failed";
+}
+
+export function queuedInputRemovable(input: Pick<QueuedInput, "status">): boolean {
+  return input.status === "queued" || input.status === "failed" || input.status === "sent";
 }
 
 function QuestionBanner({

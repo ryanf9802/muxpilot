@@ -1,5 +1,5 @@
-import { Check } from "lucide-react";
 import type { NotificationRuleType } from "@muxpilot/core";
+import { ContextMenuCheckboxItem } from "./ContextMenu.js";
 import { NOTIFICATION_RULE_TYPES, notificationRuleLabel } from "../utils/notifications.js";
 
 export function NotificationRuleMenu({
@@ -16,10 +16,9 @@ export function NotificationRuleMenu({
       {NOTIFICATION_RULE_TYPES.map((type) => {
         const enabled = enabledRules.includes(type);
         return (
-          <button key={type} type="button" role="menuitemcheckbox" aria-checked={enabled} disabled={disabled} onClick={() => onToggle(type, !enabled)}>
-            <span className="menu-check-slot">{enabled ? <Check size={15} /> : null}</span>
+          <ContextMenuCheckboxItem key={type} checked={enabled} disabled={disabled} onClick={() => onToggle(type, !enabled)}>
             {notificationRuleLabel(type)}
-          </button>
+          </ContextMenuCheckboxItem>
         );
       })}
     </>
