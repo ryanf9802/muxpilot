@@ -40,19 +40,7 @@ export class TmuxAdapter {
   }
 
   private async createCodexWindow(targetSessionId: string, cwd: string, name: string): Promise<TmuxPane> {
-    const { stdout } = await execFileAsync("tmux", [
-      "new-window",
-      "-P",
-      "-F",
-      PANE_FORMAT,
-      "-t",
-      targetSessionId,
-      "-n",
-      name,
-      "-c",
-      cwd,
-      "codex"
-    ]);
+    const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
     return parsePaneLine(line);
@@ -142,6 +130,22 @@ export class TmuxAdapter {
 
 export function inputSubmitDelayMs(text: string): number {
   return Math.min(MAX_INPUT_SUBMIT_DELAY_MS, MIN_INPUT_SUBMIT_DELAY_MS + Math.floor(text.length / 8));
+}
+
+export function tmuxNewCodexWindowArgs(targetSessionId: string, cwd: string, name: string): string[] {
+  return [
+    "new-window",
+    "-P",
+    "-F",
+    PANE_FORMAT,
+    "-t",
+    `${targetSessionId}:`,
+    "-n",
+    name,
+    "-c",
+    cwd,
+    "codex"
+  ];
 }
 
 function delay(ms: number): Promise<void> {
