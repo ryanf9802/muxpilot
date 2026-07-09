@@ -1662,8 +1662,8 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
 function inferStatusFromScreen(capture: string): SessionStatus | null {
   const visible = visibleTail(capture);
   const haystack = visible.toLowerCase();
-  if (haystack.includes("working (") || haystack.includes("esc to interrupt")) return "working";
   if (parseInteractiveApprovalPrompt(visible)) return "approval";
+  if (haystack.includes("working (") || haystack.includes("esc to interrupt")) return "working";
   const footer = visible.split("\n").slice(-6).join("\n");
   if (/(^|\n)\s*›(?!\s*\d+\.)/m.test(footer)) return "waiting";
   if (looksLikeApprovalScreen(visible)) return "approval";

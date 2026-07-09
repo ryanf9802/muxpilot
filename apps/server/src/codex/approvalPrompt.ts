@@ -51,8 +51,8 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
   const titleIndex = lastLineIndex(lines, (line) => /^\s*Would you like to run the following command\?\s*$/i.test(line));
   if (titleIndex < 0) return null;
 
-  const options = lines
-    .slice(titleIndex + 1)
+  const promptLines = lines.slice(titleIndex + 1);
+  const options = commandApprovalOptionLines(promptLines)
     .map(parseCommandApprovalOption)
     .filter((option): option is InteractiveApprovalOption => Boolean(option));
   const decisions = new Set(options.map((option) => option.decision));
@@ -60,10 +60,10 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
     return null;
   }
 
-  const command = labeledCommand(lines.slice(titleIndex + 1));
+  const command = labeledCommand(promptLines);
   if (!command) return null;
-  const reason = labeledValue(lines.slice(titleIndex + 1), "Reason");
-  const prefixRule = commandPrefixRule(lines.slice(titleIndex + 1));
+  const reason = labeledValue(promptLines, "Reason");
+  const prefixRule = commandPrefixRule(commandApprovalOptionLines(promptLines));
   return {
     kind: "command",
     title: lines[titleIndex]?.trim() ?? "Command approval required",
@@ -72,6 +72,20 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
     prefixRule,
     options
   };
+}
+
+function commandApprovalOptionLines(lines: string[]): string[] {
+  const options: string[] = [];
+  for (const line of lines) {
+    if (/^\s*(?:›\s*)?\d+\.\s+/.test(line)) {
+      options.push(line.trim());
+      continue;
+    }
+    if (options.length === 0 || !line.trim()) continue;
+    if (/^\s*(?:Environment|Reason):|^\s*\$\s+/.test(line)) continue;
+    options[options.length - 1] = `${options[options.length - 1]} ${line.trim()}`;
+  }
+  return options;
 }
 
 function lastLineIndex(lines: string[], predicate: (line: string) => boolean): number {
@@ -154,9 +168,16 @@ function labeledCommand(lines: string[]): string | null {
 
 function labeledValue(lines: string[], label: string): string | null {
   const pattern = new RegExp(`^\\s*${label}:\\s*(.+?)\\s*$`, "i");
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
     const match = line.match(pattern);
-    if (match?.[1]) return match[1];
+    if (!match?.[1]) continue;
+    const parts = [match[1]];
+    for (const continuation of lines.slice(index + 1)) {
+      if (!continuation.trim()) break;
+      if (/^\s*(?:Environment|Reason):|^\s*\$\s+|^\s*(?:›\s*)?\d+\.\s+/.test(continuation)) break;
+      parts.push(continuation.trim());
+    }
+    return parts.join(" ");
   }
   return null;
 }
@@ -165,7 +186,7 @@ function commandPrefixRule(lines: string[]): string[] | null {
   for (const line of lines) {
     const match = line.match(/commands that start with\s+`([^`]+)`/i);
     if (!match?.[1]) continue;
-    const parts = match[1].trim().split(/\s+/).filter(Boolean);
+    const parts = match[1].trim().replace(/\/\s+/g, "/").split(/\s+/).filter(Boolean);
     if (parts.length > 0) return parts;
   }
   return null;

@@ -102,7 +102,7 @@ describe("parseCodexJsonl", () => {
     });
   });
 
-  it("maps wrapped custom tool calls into tool-call transcript context", async () => {
+  it("maps escalated wrapped custom tool calls into approval requests", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
     await writeFile(
@@ -115,7 +115,49 @@ describe("parseCodexJsonl", () => {
             type: "custom_tool_call",
             name: "exec",
             call_id: "call-wrapped-approval",
-            input: "const r = await tools.exec_command({ sandbox_permissions: 'require_escalated' });"
+            input: [
+              "const r = await tools.exec_command({",
+              "  cmd: 'node fetch-codex-manual.mjs',",
+              "  workdir: '/repo',",
+              "  sandbox_permissions: 'require_escalated',",
+              "  justification: 'Fetch the official manual',",
+              "  prefix_rule: ['node', 'fetch-codex-manual.mjs']",
+              "});"
+            ].join("\n")
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({ type: "approval_request", role: "system" });
+    expect(result.messages[0]?.payload.approval).toMatchObject({
+      id: "call-wrapped-approval",
+      kind: "command",
+      command: "node fetch-codex-manual.mjs",
+      cwd: "/repo",
+      reason: "Fetch the official manual",
+      prefixRule: ["node", "fetch-codex-manual.mjs"]
+    });
+  });
+
+  it("keeps non-escalated wrapped custom exec calls as tool transcript context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-wrapped-normal",
+            input: "const r = await tools.exec_command({ cmd: 'pnpm test' });"
           }
         }),
         ""
@@ -126,9 +168,6 @@ describe("parseCodexJsonl", () => {
 
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
-    expect(result.messages[0]?.payload).toMatchObject({
-      payload: { type: "custom_tool_call", name: "exec", call_id: "call-wrapped-approval" }
-    });
   });
 
   it("maps request_user_input calls into question requests", async () => {

@@ -99,6 +99,26 @@ describe("interactive Codex approval prompts", () => {
     expect(interactiveApprovalKeys(prompt!, "approve_for_session")).toBeNull();
   });
 
+  it("parses wrapped command reasons and persistent prefix choices", () => {
+    const prompt = parseInteractiveApprovalPrompt(wrappedCommandApprovalCapture());
+
+    expect(prompt).toMatchObject({
+      kind: "command",
+      command: "node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+      reason: "May I fetch the current official Codex manual to verify sandbox, skill, and resume guarantees for this architecture plan?",
+      prefixRule: [
+        "node",
+        "/home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
+      ]
+    });
+    expect(prompt?.options.map((option) => option.decision)).toEqual([
+      "approve_once",
+      "approve_for_prefix",
+      "deny"
+    ]);
+    expect(interactiveApprovalKeys(prompt!, "approve_for_prefix")).toEqual(["Down", "Enter"]);
+  });
+
   it("uses the newest approval form when the capture includes an older gate", () => {
     const prompt = parseInteractiveApprovalPrompt(`${githubApprovalCapture(1)}\n${commandApprovalCapture(2)}`);
 
@@ -156,5 +176,25 @@ function commandApprovalCapture(selected: number): string {
     option(1, "Yes, proceed (y)"),
     option(2, "Yes, and don't ask again for commands that start with `pnpm app restart prod` (p)"),
     option(3, "No, and tell Codex what to do differently (esc)")
+  ].join("\n");
+}
+
+function wrappedCommandApprovalCapture(): string {
+  return [
+    "◦ Running node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+    "",
+    "  Would you like to run the following command?",
+    "",
+    "  Environment: local",
+    "",
+    "  Reason: May I fetch the current official Codex manual to verify sandbox, skill, and resume guarantees for this",
+    "  architecture plan?",
+    "",
+    "  $ node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+    "",
+    "› 1. Yes, proceed (y)",
+    "  2. Yes, and don't ask again for commands that start with `node /home/ryanf/.codex/skills/.system/openai-docs/scripts/",
+    "     fetch-codex-manual.mjs` (p)",
+    "  3. No, and tell Codex what to do differently (esc)"
   ].join("\n");
 }

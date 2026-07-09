@@ -429,7 +429,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("surfaces and resolves command approval prompts that have no JSONL approval event", async () => {
+  it("surfaces and resolves wrapped custom command approvals despite working cues", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -456,8 +456,9 @@ describe("SessionManager transcript isolation", () => {
         ""
       ].join("\n")
     );
+    let capture = commandApprovalCapture(1);
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
-    harness.tmux.capturePane = async () => commandApprovalCapture(1);
+    harness.tmux.capturePane = async () => capture;
     harness.tmux.sendKeys = async (_paneId, keys) => {
       sentKeys.push(keys);
     };
@@ -465,6 +466,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
     expect(session?.status).toBe("waiting");
+    capture = `Working (20s • esc to interrupt)\n${commandApprovalCapture(1)}`;
     await harness.manager.ingest();
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
