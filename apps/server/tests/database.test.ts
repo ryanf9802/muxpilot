@@ -115,6 +115,7 @@ describe("AppDatabase activity summaries", () => {
     db.upsertSession(active, "2026-07-07T00:00:00.000Z");
     db.upsertSession(missing, "2026-07-07T00:00:00.000Z");
     db.upsertSession(noCodex, "2026-07-07T00:00:00.000Z");
+    db.upsertGitWorkspace(testGitWorkspace(missing.id), "2026-07-07T00:00:00.000Z");
     db.appendMessage(testMessage(active.id, 1, "user", "Build indexed session history", "2026-07-07T00:00:01.000Z"));
     db.appendMessage(testMessage(missing.id, 1, "user", "Restore indexed session history", "2026-07-07T00:00:02.000Z"));
     db.appendMessage(testMessage(noCodex.id, 1, "user", "No Codex session history", "2026-07-07T00:00:03.000Z"));
@@ -125,6 +126,41 @@ describe("AppDatabase activity summaries", () => {
     expect(history.flatMap((result) => result.matchedPrompts.map((prompt) => prompt.text))).toEqual(
       expect.arrayContaining(["Build indexed session history", "Restore indexed session history"])
     );
+    expect(history.find((result) => result.sessionId === missing.id)?.gitWorkspace).toEqual({
+      id: "workspace-rekey",
+      worktreePath: "/tmp/workspace-rekey",
+      sessionBranch: "muxpilot/workspace-rekey",
+      targetBranch: "main"
+    });
+    db.close();
+  });
+
+  it("keeps the same Codex session distinct across managed worktrees", async () => {
+    const db = await tempDb();
+    const first = { ...testSession("history-workspace-first"), codexSessionId: "shared-codex", lastActivityAt: "2026-07-07T00:00:01.000Z" };
+    const second = { ...testSession("history-workspace-second"), codexSessionId: "shared-codex", lastActivityAt: "2026-07-07T00:00:02.000Z" };
+    db.upsertSession(first, first.lastActivityAt);
+    db.upsertSession(second, second.lastActivityAt);
+    db.upsertGitWorkspace(testGitWorkspace(first.id, "workspace-first"), first.lastActivityAt);
+    db.upsertGitWorkspace(testGitWorkspace(second.id, "workspace-second"), second.lastActivityAt);
+
+    const history = await db.listSessionHistory("", 10);
+
+    expect(history.map((result) => result.gitWorkspace?.id)).toEqual(["workspace-second", "workspace-first"]);
+    db.close();
+  });
+
+  it("continues collapsing unmanaged history by Codex session", async () => {
+    const db = await tempDb();
+    const older = { ...testSession("history-unmanaged-old"), codexSessionId: "shared-unmanaged", lastActivityAt: "2026-07-07T00:00:01.000Z" };
+    const newer = { ...testSession("history-unmanaged-new"), codexSessionId: "shared-unmanaged", lastActivityAt: "2026-07-07T00:00:02.000Z" };
+    db.upsertSession(older, older.lastActivityAt);
+    db.upsertSession(newer, newer.lastActivityAt);
+
+    const history = await db.listSessionHistory("", 10);
+
+    expect(history).toHaveLength(1);
+    expect(history[0]?.sessionId).toBe(newer.id);
     db.close();
   });
 
@@ -1260,17 +1296,17 @@ function testQueuedInput(sessionId: string, input: Partial<QueuedInput> & Pick<Q
   };
 }
 
-function testGitWorkspace(sessionId: string): StoredGitWorkspace {
+function testGitWorkspace(sessionId: string, workspaceId = "workspace-rekey"): StoredGitWorkspace {
   const timestamp = "2026-07-07T00:00:05.000Z";
   return {
-    id: "workspace-rekey",
+    id: workspaceId,
     sessionId,
     commonGitDir: "/repo/.git",
     helperToken: "test-helper-token",
     createdAt: timestamp,
     updatedAt: timestamp,
     summary: {
-      id: "workspace-rekey",
+      id: workspaceId,
       state: "active",
       entryPath: "/repo",
       repoRoot: "/repo",
@@ -1279,9 +1315,9 @@ function testGitWorkspace(sessionId: string): StoredGitWorkspace {
       targetSource: null,
       sourceSha: "a".repeat(40),
       targetSha: "a".repeat(40),
-      sessionBranch: "muxpilot/workspace-rekey",
+      sessionBranch: `muxpilot/${workspaceId}`,
       sessionHeadSha: "a".repeat(40),
-      worktreePath: "/tmp/workspace-rekey",
+      worktreePath: `/tmp/${workspaceId}`,
       dirty: false,
       aheadBy: 0,
       targetCheckedOutAt: null,

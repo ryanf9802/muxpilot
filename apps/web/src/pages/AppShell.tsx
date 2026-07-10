@@ -21,7 +21,7 @@ import type {
   SessionEvent,
   SessionHistoryResult
 } from "@muxpilot/core";
-import { GIT_STYLE_NAME_MAX_LENGTH, isValidGitStyleName, normalizeGitStyleName, normalizeGitStyleNameInput, SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
+import { GIT_STYLE_NAME_MAX_LENGTH, isValidGitStyleName, normalizeGitStyleName, normalizeGitStyleNameInput, SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { credentialSuppressedField, noAutofillTextField, searchField } from "../utils/formFields.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
@@ -1055,7 +1055,7 @@ export function AppShell() {
                   {!sessionHistoryLoading
                     ? sessionHistoryResults.map((result, index) => (
                         <button
-                          key={`${result.codexSessionId}-${result.sessionId}`}
+                          key={sessionHistoryResultKey(result)}
                           type="button"
                           role="option"
                           aria-selected={index === sessionHistorySelectedIndex}
@@ -1322,7 +1322,7 @@ export interface GitRefSuggestion {
 export function targetBranchSuggestions(probe: GitRepositoryProbe, selectedRemote: string): GitRefSuggestion[] {
   const suggestions = new Map<string, GitRefSuggestion>();
   for (const branch of probe.localBranches) {
-    if (!isValidGitStyleName(branch)) continue;
+    if (!isValidGitStyleName(branch) || isMuxpilotManagedSessionBranch(branch)) continue;
     suggestions.set(branch, { value: branch, label: branch, detail: "Local branch" });
   }
   for (const ref of probe.remoteBranches) {
@@ -1345,6 +1345,7 @@ export function sourceRevisionSuggestions(probe: GitRepositoryProbe, selectedRem
     });
   }
   for (const branch of probe.localBranches) {
+    if (isMuxpilotManagedSessionBranch(branch)) continue;
     suggestions.push({ value: `local:${branch}`, label: branch, detail: "Local branch" });
   }
   for (const tag of probe.tags) {
@@ -1799,11 +1800,20 @@ export function promptHistoryResultMeta(result: Pick<PromptHistoryResult, "repoN
   return `${repo} · ${result.sessionName} · ${formatPromptHistoryTimestamp(result.timestamp)}`;
 }
 
-export function sessionHistoryResultMeta(result: Pick<SessionHistoryResult, "repoName" | "repoBranch" | "cwd" | "lastActivityAt" | "status" | "archived">): string {
-  const repo = result.repoBranch ? `${result.repoName} · ${result.repoBranch}` : result.repoName;
+export function sessionHistoryResultMeta(result: Pick<SessionHistoryResult, "repoName" | "repoBranch" | "cwd" | "lastActivityAt" | "status" | "archived" | "gitWorkspace">): string {
+  const branch = result.gitWorkspace?.sessionBranch ?? result.repoBranch;
+  const repo = branch ? `${result.repoName} · ${branch}` : result.repoName;
   const time = result.lastActivityAt ? formatPromptHistoryTimestamp(result.lastActivityAt) : "No activity";
   const state = result.archived ? "archived" : result.status;
   return `${repo || result.cwd} · ${state} · ${time}`;
+}
+
+export function sessionHistoryResultKey(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
+  return sessionHistoryIdentity(result);
+}
+
+export function isMuxpilotManagedSessionBranch(branch: string): boolean {
+  return /^muxpilot\/[A-Za-z0-9_-]{16}(?:\/g[1-9]\d*)?$/.test(branch);
 }
 
 function sessionHistoryPromptPreview(result: Pick<SessionHistoryResult, "matchedPrompts" | "cwd">): string {

@@ -25,7 +25,7 @@ import type {
   TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName } from "@muxpilot/core";
+import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -409,7 +409,7 @@ export class SessionManager {
 
   async listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
     const results = await this.db.listSessionHistory(query, limit * 2);
-    return collapseHistoryByCodexSession(results, limit);
+    return collapseHistoryByIdentity(results, limit);
   }
 
   async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
@@ -1261,15 +1261,16 @@ export function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helper
   };
 }
 
-function collapseHistoryByCodexSession(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
-  const byCodexSession = new Map<string, SessionHistoryResult>();
+function collapseHistoryByIdentity(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
+  const byIdentity = new Map<string, SessionHistoryResult>();
   for (const result of results) {
-    const current = byCodexSession.get(result.codexSessionId);
+    const identity = sessionHistoryIdentity(result);
+    const current = byIdentity.get(identity);
     if (!current || historyResultPreference(result, current) < 0) {
-      byCodexSession.set(result.codexSessionId, result);
+      byIdentity.set(identity, result);
     }
   }
-  return [...byCodexSession.values()].slice(0, limit);
+  return [...byIdentity.values()].slice(0, limit);
 }
 
 function historyResultPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {

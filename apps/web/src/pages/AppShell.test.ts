@@ -13,6 +13,7 @@ import {
   SessionStoplight,
   filterSessionDirectorySuggestions,
   hasShortcutBlockingOverlay,
+  isMuxpilotManagedSessionBranch,
   isEditableShortcutTarget,
   isNewSessionShortcut,
   isPrimaryInputFocusShortcut,
@@ -27,6 +28,8 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
+  sessionHistoryResultKey,
+  sessionHistoryResultMeta,
   sessionDirectorySuggestionsFromSessions,
   sessionNameValidationMessage,
   shouldHandlePrimaryInputFocusShortcut,
@@ -55,7 +58,13 @@ describe("shell connection state", () => {
       dirty: false,
       remotes: ["origin", "upstream"],
       defaultRemote: "origin",
-      localBranches: ["main", "local-only"],
+      localBranches: [
+        "main",
+        "local-only",
+        "muxpilot/1234567890ABCDEF/g1",
+        "muxpilot/1234567890ABCDEF",
+        "muxpilot/feature"
+      ],
       remoteBranches: [
         { remote: "origin", branch: "main" },
         { remote: "origin", branch: "stage" },
@@ -64,15 +73,22 @@ describe("shell connection state", () => {
       tags: ["v1.0.0"]
     };
 
-    expect(targetBranchSuggestions(probe, "origin").map((item) => item.value)).toEqual(["local-only", "main", "stage"]);
+    expect(targetBranchSuggestions(probe, "origin").map((item) => item.value)).toEqual(["local-only", "main", "muxpilot/feature", "stage"]);
     expect(sourceRevisionSuggestions(probe, "origin").map((item) => item.value)).toEqual([
       "origin/main",
       "origin/stage",
       "local:local-only",
       "local:main",
+      "local:muxpilot/feature",
       "upstream/release",
       "tag:v1.0.0"
     ]);
+  });
+  it("recognizes current and legacy managed branches without hiding ordinary muxpilot branches", () => {
+    expect(isMuxpilotManagedSessionBranch("muxpilot/1234567890ABCDEF/g12")).toBe(true);
+    expect(isMuxpilotManagedSessionBranch("muxpilot/1234567890ABCDEF")).toBe(true);
+    expect(isMuxpilotManagedSessionBranch("muxpilot/feature")).toBe(false);
+    expect(isMuxpilotManagedSessionBranch("muxpilot/1234567890ABCDEF/review")).toBe(false);
   });
   it("selects origin automatically, then the first available remote", () => {
     expect(preferredGitRemote({ remotes: ["upstream", "origin"] })).toBe("origin");
@@ -183,6 +199,34 @@ describe("prompt history helpers", () => {
     });
 
     expect(meta).toContain("muxpilot · main · codex");
+  });
+});
+
+describe("session history helpers", () => {
+  const managed = {
+    sessionId: "pane-1",
+    codexSessionId: "codex-1",
+    repoName: "muxpilot",
+    repoBranch: "main",
+    cwd: "/repo",
+    lastActivityAt: "2026-07-08T12:34:00.000Z",
+    status: "missing" as const,
+    archived: false,
+    gitWorkspace: {
+      id: "1234567890ABCDEF",
+      worktreePath: "/worktrees/1234567890ABCDEF",
+      sessionBranch: "muxpilot/1234567890ABCDEF/g2",
+      targetBranch: "main"
+    }
+  };
+
+  it("labels and keys managed results by their associated workspace", () => {
+    expect(sessionHistoryResultMeta(managed)).toContain("muxpilot · muxpilot/1234567890ABCDEF/g2");
+    expect(sessionHistoryResultKey(managed)).toBe("workspace:1234567890ABCDEF");
+  });
+
+  it("falls back to Codex identity for unmanaged results", () => {
+    expect(sessionHistoryResultKey({ ...managed, gitWorkspace: null })).toBe("codex:codex-1");
   });
 });
 

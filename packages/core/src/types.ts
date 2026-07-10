@@ -511,6 +511,11 @@ export interface SessionHistoryResult {
   lastActivityAt: string | null;
   transcriptSize: number;
   matchedPrompts: SessionHistoryPromptMatch[];
+  gitWorkspace: Pick<GitWorkspaceSummary, "id" | "worktreePath" | "sessionBranch" | "targetBranch"> | null;
+}
+
+export function sessionHistoryIdentity(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
+  return result.gitWorkspace ? `workspace:${result.gitWorkspace.id}` : `codex:${result.codexSessionId || result.sessionId}`;
 }
 
 export interface SessionHistoryResponse {

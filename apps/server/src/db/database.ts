@@ -32,7 +32,8 @@ import {
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
   normalizeSubagentNotificationText,
-  normalizeUserContextText
+  normalizeUserContextText,
+  sessionHistoryIdentity
 } from "@muxpilot/core";
 
 type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
@@ -80,6 +81,7 @@ interface SessionHistoryMatchRow {
   session_rowid: number;
   session_id: string;
   session_data_json: string;
+  git_workspace_data_json: string | null;
   status: SessionStatus;
   last_activity_at: string | null;
   archived: number;
@@ -1052,6 +1054,7 @@ export class SyncAppDatabase {
         `SELECT managed_sessions.rowid AS session_rowid,
                 managed_sessions.id AS session_id,
                 managed_sessions.data_json AS session_data_json,
+                git_workspaces.data_json AS git_workspace_data_json,
                 managed_sessions.status,
                 managed_sessions.last_activity_at,
                 managed_sessions.archived,
@@ -1061,6 +1064,7 @@ export class SyncAppDatabase {
                 bm25(session_prompt_index) AS rank
          FROM session_prompt_index AS prompt_index
          INNER JOIN managed_sessions ON managed_sessions.id = prompt_index.session_id
+         LEFT JOIN git_workspaces ON git_workspaces.session_id = managed_sessions.id
          WHERE session_prompt_index MATCH ?
          ORDER BY rank ASC, prompt_index.timestamp DESC, prompt_index.sequence DESC
          LIMIT ?`
@@ -1996,11 +2000,15 @@ export class SyncAppDatabase {
     return this.listSessions(true)
       .filter((session) => Boolean(session.codexSessionId))
       .slice(0, limit)
-      .map((session) => sessionHistoryResultFromSession(session, session.recentUserPrompts.map((text, index) => ({
-        sequence: Math.max(0, session.transcriptSize - index),
-        timestamp: session.lastActivityAt ?? "",
-        text
-      }))));
+      .map((session) => sessionHistoryResultFromSession(
+        session,
+        session.recentUserPrompts.map((text, index) => ({
+          sequence: Math.max(0, session.transcriptSize - index),
+          timestamp: session.lastActivityAt ?? "",
+          text
+        })),
+        this.getGitWorkspaceBySession(session.id)?.summary ?? null
+      ));
   }
 
   private upsertPromptIndexMessage(message: ChatMessage): void {
@@ -2394,6 +2402,7 @@ function sessionHistoryResultFromMatchRow(
   matchedPrompts: SessionHistoryResult["matchedPrompts"]
 ): SessionHistoryResult {
   const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const workspace = row.git_workspace_data_json ? (JSON.parse(row.git_workspace_data_json) as StoredGitWorkspace).summary : null;
   return sessionHistoryResultFromSession(
     {
       ...session,
@@ -2401,13 +2410,15 @@ function sessionHistoryResultFromMatchRow(
       lastActivityAt: row.last_activity_at ?? session.lastActivityAt,
       archived: row.archived === 1
     },
-    matchedPrompts
+    matchedPrompts,
+    workspace
   );
 }
 
 function sessionHistoryResultFromSession(
   session: ManagedSession,
-  matchedPrompts: SessionHistoryResult["matchedPrompts"]
+  matchedPrompts: SessionHistoryResult["matchedPrompts"],
+  gitWorkspace: GitWorkspaceSummary | null
 ): SessionHistoryResult {
   return {
     sessionId: session.id,
@@ -2421,22 +2432,29 @@ function sessionHistoryResultFromSession(
     cwd: session.tmux.cwd,
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,
-    matchedPrompts
+    matchedPrompts,
+    gitWorkspace: gitWorkspace ? {
+      id: gitWorkspace.id,
+      worktreePath: gitWorkspace.worktreePath,
+      sessionBranch: gitWorkspace.sessionBranch,
+      targetBranch: gitWorkspace.targetBranch
+    } : null
   };
 }
 
 function collapseSessionHistory(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
-  const byCodexSession = new Map<string, SessionHistoryResult>();
+  const byIdentity = new Map<string, SessionHistoryResult>();
   for (const result of results) {
     if (!result.codexSessionId) continue;
-    const current = byCodexSession.get(result.codexSessionId);
+    const identity = sessionHistoryIdentity(result);
+    const current = byIdentity.get(identity);
     if (!current || compareSessionHistoryPreference(result, current) < 0) {
-      byCodexSession.set(result.codexSessionId, result);
+      byIdentity.set(identity, result);
     } else if (current.matchedPrompts.length < 3) {
       current.matchedPrompts.push(...result.matchedPrompts.slice(0, 3 - current.matchedPrompts.length));
     }
   }
-  return [...byCodexSession.values()].sort(compareSessionHistoryResults).slice(0, limit);
+  return [...byIdentity.values()].sort(compareSessionHistoryResults).slice(0, limit);
 }
 
 function compareSessionHistoryPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {
