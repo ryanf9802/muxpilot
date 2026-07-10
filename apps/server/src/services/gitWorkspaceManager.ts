@@ -362,10 +362,11 @@ export class GitWorkspaceManager {
   }
 
   private async finalizeWithoutReview(workspace: StoredGitWorkspace): Promise<GitFinalizeResponse> {
-    const reviewFailure = workspace.summary.review?.report ?? "Independent review did not complete";
     const commitCount = workspace.summary.aheadBy;
     const integrated = await this.withLock(workspaceLockKey(workspace), () => this.integrate(workspace, true));
-    const reviewSummary = `Independent review bypassed after user approval. Review failure: ${reviewFailure}`;
+    const reviewSummary = workspace.summary.review?.report
+      ? `Independent review bypassed after explicit user approval. Last review: ${workspace.summary.review.report}`
+      : "Independent review bypassed after explicit user approval.";
     const completed = await this.withLock(workspaceLockKey(integrated), () =>
       this.completeGeneration(integrated, commitCount, reviewSummary, "bypassed")
     );
@@ -441,16 +442,6 @@ export class GitWorkspaceManager {
 
   private async integrate(workspace: StoredGitWorkspace, allowUnreviewed = false): Promise<StoredGitWorkspace> {
     const current = await this.refresh(workspace);
-    const failedReviewIsCurrent =
-      current.summary.review?.status === "failed" &&
-      current.summary.review.targetSha === current.summary.targetSha &&
-      current.summary.review.headSha === current.summary.sessionHeadSha;
-    if (allowUnreviewed && !failedReviewIsCurrent) {
-      throw new GitWorkspaceError(
-        "Unreviewed integration requires a failed review for the exact current target and session head",
-        "review_bypass_unavailable"
-      );
-    }
     if (!current.summary.reviewCurrent && !allowUnreviewed) {
       throw new GitWorkspaceError("A current review is required before integration", "review_required");
     }
