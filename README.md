@@ -87,7 +87,7 @@ The Create tab asks for:
 
 Directory suggestions come from active sessions and recently touched repositories. Session names are normalized and must be 2-32 lowercase letters, numbers, or hyphens.
 
-For Git repositories, muxpilot creates a private session branch and worktree first, then runs `codex` there. The original checkout may remain on any branch and may be dirty, including the named target branch. Before reporting completion, the agent commits, runs an independent structured review/fix loop, atomically fast-forwards a shared muxpilot-managed target ref, and rotates to a fresh worktree generation at the same path. The compact session Git panel shows managed/remote status and is the only place that can explicitly push the result to the named remote branch.
+For Git repositories, muxpilot creates a private session branch and worktree first, then runs `codex` there. The original checkout may remain on any branch and may be dirty, including the named target branch. Before reporting completion, the agent commits, runs an independent structured review/fix loop, atomically fast-forwards a shared muxpilot-managed target ref, and rotates to a fresh worktree generation at the same path. Independent reviews are capped at five minutes; if one does not complete, the agent halts and asks before using the explicit unreviewed-integration override. The compact session Git panel shows managed/remote status and is the only place that can explicitly push the result to the named remote branch.
 
 Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into another working directory. Non-Git directories retain the direct-directory session flow.
 

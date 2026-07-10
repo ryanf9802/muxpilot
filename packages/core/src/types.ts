@@ -142,6 +142,7 @@ export interface GitCompletionSummary {
   completedAt: string;
   commitCount: number;
   reviewSummary: string;
+  reviewDisposition?: "passed" | "bypassed";
 }
 
 export interface GitWorkspaceSummary {
@@ -186,9 +187,13 @@ export interface GitReviewFinding {
   line: number | null;
 }
 
+export interface GitFinalizeOptions {
+  allowUnreviewed?: boolean;
+}
+
 export type GitFinalizeResponse =
   | { status: "changes_requested"; summary: string; findings: GitReviewFinding[]; workspace: GitWorkspaceSummary }
-  | { status: "integrated"; targetSha: string; generation: number; workspace: GitWorkspaceSummary };
+  | { status: "integrated"; targetSha: string; generation: number; reviewed: boolean; workspace: GitWorkspaceSummary };
 
 export interface ManagedSession {
   id: string;

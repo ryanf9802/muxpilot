@@ -99,7 +99,7 @@ Managed Git session creation and integration:
 ```text
 entry directory + target/source -> fetch exact refs -> private branch/worktree -> tmux/Codex -C worktree
 private commits -> agent finish capability -> rebase onto current managed target ref
-structured ephemeral Codex review -> agent fixes and recommits until zero findings
+five-minute structured ephemeral Codex review -> agent fixes findings, or halts for explicit user approval when review infrastructure fails
 reviewed head -> atomic compare-and-swap fast-forward of managed target -> fresh worktree generation
 explicit inline Git-panel confirmation -> fetch remote target -> normal non-force push of managed target
 ```

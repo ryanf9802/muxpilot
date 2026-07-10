@@ -278,10 +278,13 @@ export function registerRoutes(
     if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
     const { workspaceId } = request.params as { workspaceId: string };
     const token = String(request.headers["x-muxpilot-git-token"] ?? "");
+    const body = z.object({ allowUnreviewed: z.boolean().optional() }).parse(request.body ?? {});
     try {
-      return await manager.finalizeGitWorkspaceByCapability(workspaceId, token);
+      return await manager.finalizeGitWorkspaceByCapability(workspaceId, token, body.allowUnreviewed ?? false);
     } catch (error) {
-      if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
+      if (error instanceof GitWorkspaceError) {
+        return reply.code(409).send({ error: error.message, code: error.code, detail: error.causeText });
+      }
       throw error;
     }
   });

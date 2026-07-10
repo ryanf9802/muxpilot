@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
   GitInspection,
+  GitFinalizeOptions,
   GitFinalizeResponse,
   GitReviewFinding,
   GitRepositoryProbe,
@@ -27,6 +28,7 @@ import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 
 const execFileAsync = promisify(execFile);
+export const REVIEW_TIMEOUT_MS = 5 * 60_000;
 
 interface GitWorkspaceManagerOptions {
   worktreeRoot: string;
@@ -207,9 +209,10 @@ export class GitWorkspaceManager {
     })).summary;
   }
 
-  async finalizeWithToken(workspaceId: string, token: string): Promise<GitFinalizeResponse> {
+  async finalizeWithToken(workspaceId: string, token: string, options: GitFinalizeOptions = {}): Promise<GitFinalizeResponse> {
     const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
     if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    if (options.allowUnreviewed) return this.finalizeWithoutReview(workspace);
     const reviewed = await this.prepareReview(workspace);
     const result = parseStructuredReview(reviewed.summary.review?.report ?? "");
     if (result.verdict !== "pass" || result.findings.length > 0) {
@@ -217,11 +220,31 @@ export class GitWorkspaceManager {
     }
     const commitCount = reviewed.summary.aheadBy;
     const integrated = await this.withLock(workspaceLockKey(reviewed), () => this.integrate(reviewed));
-    const rotated = await this.withLock(workspaceLockKey(integrated), () => this.rotateGeneration(integrated, commitCount, result.summary));
+    const rotated = await this.withLock(workspaceLockKey(integrated), () =>
+      this.rotateGeneration(integrated, commitCount, result.summary, "passed")
+    );
     return {
       status: "integrated",
       targetSha: rotated.summary.targetSha,
       generation: rotated.summary.generation ?? 1,
+      reviewed: true,
+      workspace: rotated.summary
+    };
+  }
+
+  private async finalizeWithoutReview(workspace: StoredGitWorkspace): Promise<GitFinalizeResponse> {
+    const reviewFailure = workspace.summary.review?.report ?? "Independent review did not complete";
+    const commitCount = workspace.summary.aheadBy;
+    const integrated = await this.withLock(workspaceLockKey(workspace), () => this.integrate(workspace, true));
+    const reviewSummary = `Independent review bypassed after user approval. Review failure: ${reviewFailure}`;
+    const rotated = await this.withLock(workspaceLockKey(integrated), () =>
+      this.rotateGeneration(integrated, commitCount, reviewSummary, "bypassed")
+    );
+    return {
+      status: "integrated",
+      targetSha: rotated.summary.targetSha,
+      generation: rotated.summary.generation ?? 1,
+      reviewed: false,
       workspace: rotated.summary
     };
   }
@@ -305,9 +328,19 @@ export class GitWorkspaceManager {
     }
   }
 
-  private async integrate(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+  private async integrate(workspace: StoredGitWorkspace, allowUnreviewed = false): Promise<StoredGitWorkspace> {
     const current = await this.refresh(workspace);
-    if (!current.summary.reviewCurrent) {
+    const failedReviewIsCurrent =
+      current.summary.review?.status === "failed" &&
+      current.summary.review.targetSha === current.summary.targetSha &&
+      current.summary.review.headSha === current.summary.sessionHeadSha;
+    if (allowUnreviewed && !failedReviewIsCurrent) {
+      throw new GitWorkspaceError(
+        "Unreviewed integration requires a failed review for the exact current target and session head",
+        "review_bypass_unavailable"
+      );
+    }
+    if (!current.summary.reviewCurrent && !allowUnreviewed) {
       throw new GitWorkspaceError("A current review is required before integration", "review_required");
     }
     const integrating = await this.save(current, { ...current.summary, state: "integrating", lastError: null });
@@ -333,7 +366,12 @@ export class GitWorkspaceManager {
     }
   }
 
-  private async rotateGeneration(workspace: StoredGitWorkspace, commitCount: number, reviewSummary: string): Promise<StoredGitWorkspace> {
+  private async rotateGeneration(
+    workspace: StoredGitWorkspace,
+    commitCount: number,
+    reviewSummary: string,
+    reviewDisposition: "passed" | "bypassed"
+  ): Promise<StoredGitWorkspace> {
     const generation = (workspace.summary.generation ?? 1) + 1;
     const pending = await this.save(workspace, {
       ...workspace.summary,
@@ -343,7 +381,8 @@ export class GitWorkspaceManager {
         integratedSha: workspace.summary.targetSha,
         completedAt: nowIso(),
         commitCount,
-        reviewSummary
+        reviewSummary,
+        reviewDisposition
       },
       lastError: null
     });
@@ -531,7 +570,7 @@ async function runStructuredReview(worktreePath: string, targetSha: string, prom
     ]);
     await execFileAsync("codex", codexReviewArgs(worktreePath, `${prompt} The exact patch to review is at ${patchPath}. Begin with that patch and inspect repository context as needed.`, schemaPath, outputPath), {
       cwd: worktreePath,
-      timeout: 10 * 60_000,
+      timeout: REVIEW_TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024
     });
     return parseStructuredReview(await readFile(outputPath, "utf8"));

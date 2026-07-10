@@ -795,9 +795,9 @@ export class SessionManager {
     return summary;
   }
 
-  async finalizeGitWorkspaceByCapability(workspaceId: string, token: string) {
+  async finalizeGitWorkspaceByCapability(workspaceId: string, token: string, allowUnreviewed = false) {
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
-    const result = await this.gitWorkspaces.finalizeWithToken(workspaceId, token);
+    const result = await this.gitWorkspaces.finalizeWithToken(workspaceId, token, { allowUnreviewed });
     const workspace = await this.gitWorkspaces.get(workspaceId);
     if (workspace?.sessionId) {
       const session = await this.db.getSession(workspace.sessionId);
@@ -807,7 +807,10 @@ export class SessionManager {
         this.publish("session.updated", session.id, updated);
       }
     }
-    await this.db.addAudit("agent", "git_finalize", workspaceId, result.status, nowIso());
+    const auditResult = result.status === "integrated"
+      ? `integrated_${result.reviewed ? "reviewed" : "unreviewed"}`
+      : result.status;
+    await this.db.addAudit("agent", "git_finalize", workspaceId, auditResult, nowIso());
     return result;
   }
 

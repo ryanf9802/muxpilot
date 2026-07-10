@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview } from "../src/services/gitWorkspaceManager.js";
+import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview, REVIEW_TIMEOUT_MS } from "../src/services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus, syncMuxpilotGitWorkflowSkill } from "../src/services/bundledSkills.js";
 import { AppDatabase } from "../src/db/database.js";
 import { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
@@ -13,6 +16,10 @@ import { GitWorkspaceCoordinator } from "@muxpilot/git-workspaces";
 const execFileAsync = promisify(execFile);
 
 describe("codexReviewArgs", () => {
+  it("hard caps each independent review at five minutes", () => {
+    expect(REVIEW_TIMEOUT_MS).toBe(5 * 60_000);
+  });
+
   it("materializes the exact target-to-HEAD patch directly to disk without buffering its size", () => {
     expect(gitReviewDiffArgs("a".repeat(40), "/tmp/changes.patch")).toEqual([
       "diff",
@@ -54,6 +61,34 @@ describe("codexReviewArgs", () => {
   });
 });
 
+describe("muxpilot-git-finish", () => {
+  it("halts on incomplete review and requires explicit approval before the override", async () => {
+    const result = await runFinishHelper(
+      { error: "Independent Codex review failed", code: "review_failed", detail: "timed out awaiting response headers" },
+      409
+    );
+
+    expect(result.code).toBe(4);
+    expect(result.stdout).toContain("REVIEW_INCOMPLETE");
+    expect(result.stdout).toContain("timed out awaiting response headers");
+    expect(result.stdout).toContain("Ask whether integration should proceed without successful review");
+    expect(result.stdout).toContain("--integrate-without-review");
+    expect(result.requestBody).toEqual({ allowUnreviewed: false });
+  });
+
+  it("sends and reports the explicit unreviewed integration override", async () => {
+    const result = await runFinishHelper(
+      { status: "integrated", targetSha: "a".repeat(40), generation: 2, reviewed: false },
+      200,
+      ["--integrate-without-review"]
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("review=bypassed");
+    expect(result.requestBody).toEqual({ allowUnreviewed: true });
+  });
+});
+
 describe("syncMuxpilotGitWorkflowSkill", () => {
   it("detects, installs, and updates the bundled skill in CODEX_HOME", async () => {
     const home = await mkdtemp(join(tmpdir(), "muxpilot-codex-home-"));
@@ -67,6 +102,8 @@ describe("syncMuxpilotGitWorkflowSkill", () => {
     expect(skill).toContain("coordination tool, not a boundary");
     expect(skill).toContain("Never use the session worktree's state to claim that another checkout is clean or dirty");
     expect(skill).toContain("use the normal approval or escalation path instead of refusing it as out of scope");
+    expect(skill).toContain("REVIEW_INCOMPLETE");
+    expect(skill).toContain("--integrate-without-review");
 
     await writeFile(join(installed.path, "SKILL.md"), "modified");
     expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "outdated" });
@@ -123,12 +160,97 @@ describe("agent finalization", () => {
     pass = true;
     const integrated = await manager.finalizeWithToken(workspace.id, workspace.helperToken);
 
-    expect(integrated).toMatchObject({ status: "integrated", generation: 2 });
+    expect(integrated).toMatchObject({ status: "integrated", generation: 2, reviewed: true });
     expect(await git(root, ["rev-parse", "target"])).not.toBe(completedHead);
     expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
     expect(await git(workspace.summary.worktreePath, ["branch", "--show-current"])).toContain("/g2");
     expect(await git(workspace.summary.worktreePath, ["status", "--porcelain"])).toBe("");
     await expect(git(root, ["rev-parse", `${workspace.summary.sessionBranch}^{commit}`])).rejects.toBeTruthy();
+    await db.close();
+  });
+
+  it("integrates without review only after an exact-candidate review failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-review-bypass-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations"),
+      reviewRunner: async () => {
+        throw new Error("timed out awaiting response headers");
+      }
+    });
+    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
+    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "feature\n");
+    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
+    await git(workspace.summary.worktreePath, ["commit", "-qm", "feature"]);
+    const completedHead = await git(workspace.summary.worktreePath, ["rev-parse", "HEAD"]);
+
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
+      .rejects.toMatchObject({ code: "review_bypass_unavailable" });
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken))
+      .rejects.toMatchObject({ code: "review_failed", causeText: "timed out awaiting response headers" });
+    expect(await git(root, ["rev-parse", workspace.targetRef!])).not.toBe(completedHead);
+
+    const integrated = await manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true });
+    expect(integrated).toMatchObject({
+      status: "integrated",
+      reviewed: false,
+      generation: 2,
+      workspace: {
+        lastCompletion: {
+          reviewDisposition: "bypassed",
+          reviewSummary: expect.stringContaining("timed out awaiting response headers")
+        }
+      }
+    });
+    expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
+    await db.close();
+  });
+
+  it("rejects bypasses after findings or after the reviewed candidate changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-review-bypass-guard-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    let failReview = false;
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations"),
+      reviewRunner: async () => {
+        if (failReview) throw new Error("review transport unavailable");
+        return { verdict: "changes_requested", summary: "Fix it", findings: [{ title: "Bug", body: "Fix it", path: "feature.txt", line: 1 }] };
+      }
+    });
+    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
+    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "feature\n");
+    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
+    await git(workspace.summary.worktreePath, ["commit", "-qm", "feature"]);
+
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken)).resolves.toMatchObject({ status: "changes_requested" });
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
+      .rejects.toMatchObject({ code: "review_bypass_unavailable" });
+
+    failReview = true;
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken)).rejects.toMatchObject({ code: "review_failed" });
+    await writeFile(join(workspace.summary.worktreePath, "later.txt"), "later\n");
+    await git(workspace.summary.worktreePath, ["add", "later.txt"]);
+    await git(workspace.summary.worktreePath, ["commit", "-qm", "change candidate"]);
+    await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
+      .rejects.toMatchObject({ code: "review_bypass_unavailable" });
     await db.close();
   });
 
@@ -167,4 +289,44 @@ describe("agent finalization", () => {
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd });
   return stdout.trim();
+}
+
+async function runFinishHelper(
+  responseBody: object,
+  statusCode: number,
+  args: string[] = []
+): Promise<{ code: number; stdout: string; stderr: string; requestBody: unknown }> {
+  let requestBody: unknown;
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      requestBody = JSON.parse(body);
+      response.writeHead(statusCode, { "content-type": "application/json" });
+      response.end(JSON.stringify(responseBody));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (server.address() as AddressInfo).port;
+  const script = fileURLToPath(new URL("../../../skills/muxpilot-git-workflow/scripts/muxpilot-git-finish.mjs", import.meta.url));
+  try {
+    const { stdout, stderr } = await execFileAsync("node", [script, ...args], {
+      env: {
+        ...process.env,
+        MUXPILOT_GIT_HELPER_URL: `http://127.0.0.1:${port}`,
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-test",
+        MUXPILOT_GIT_HELPER_TOKEN: "token-test"
+      }
+    });
+    return { code: 0, stdout, stderr, requestBody };
+  } catch (error) {
+    const failure = error as Error & { code?: number; stdout?: string; stderr?: string };
+    return { code: failure.code ?? 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", requestBody };
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
