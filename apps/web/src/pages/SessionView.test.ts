@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ApprovalRequest, ChatMessage, ManagedSession, QuestionRequest, RepoMetadata, TranscriptItem } from "@muxpilot/core";
+import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, ManagedSession, QuestionRequest, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
   activeSkillToken,
   ApprovalBanner,
@@ -19,6 +19,7 @@ import {
   formatElapsedSeconds,
   groupEventStacks,
   groupStackableMessages,
+  GitWorkspacePanel,
   isDesktopVimAvailable,
   isPlanModeMessage,
   inputModeAction,
@@ -627,6 +628,60 @@ describe("SessionHeaderMeta", () => {
 
     expect(html).toContain('title="muxpilot · main · dirty"');
     expect(html).toContain('<span class="session-header-branch">main</span><span class="session-header-branch-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
+  });
+});
+
+describe("GitWorkspacePanel", () => {
+  it("renders the compact workspace summary as a modal", () => {
+    const html = renderToStaticMarkup(
+      createElement(GitWorkspacePanel, {
+        workspace: gitWorkspace(),
+        busy: null,
+        error: null,
+        onAction: () => undefined,
+        onClose: () => undefined
+      })
+    );
+
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain("Target branch");
+    expect(html).toContain("main");
+    expect(html).toContain("muxpilot/session-a");
+    expect(html).toContain("origin");
+    expect(html).toContain("2 ahead · 1 behind");
+    expect(html).toContain("Refresh");
+    expect(html).toContain("Push to origin");
+    expect(html).not.toContain("Last integrated");
+    expect(html).not.toContain("generation");
+  });
+
+  it("shows an unconfigured remote without a push action", () => {
+    const html = renderToStaticMarkup(
+      createElement(GitWorkspacePanel, {
+        workspace: gitWorkspace({ targetRemote: null, remoteSha: null }),
+        busy: null,
+        error: null,
+        onAction: () => undefined,
+        onClose: () => undefined
+      })
+    );
+
+    expect(html).toContain("Not configured");
+    expect(html).not.toContain("Push to");
+  });
+
+  it("disables push while the target branch is behind its remote", () => {
+    const html = renderToStaticMarkup(
+      createElement(GitWorkspacePanel, {
+        workspace: gitWorkspace({ remoteBehindBy: 2 }),
+        busy: null,
+        error: null,
+        onAction: () => undefined,
+        onClose: () => undefined
+      })
+    );
+    expect(html).toMatch(/<button[^>]*class="primary"[^>]*disabled=""[^>]*>/);
   });
 });
 
@@ -1961,6 +2016,35 @@ function message(
     timestamp,
     text,
     payload
+  };
+}
+
+function gitWorkspace(overrides: Partial<GitWorkspaceSummary> = {}): GitWorkspaceSummary {
+  return {
+    id: "workspace-a",
+    state: "active",
+    entryPath: "/workspace/muxpilot",
+    repoRoot: "/workspace/muxpilot",
+    targetBranch: "main",
+    targetRemote: "origin",
+    targetSource: null,
+    sourceSha: "1111111111111111111111111111111111111111",
+    targetSha: "2222222222222222222222222222222222222222",
+    sessionBranch: "muxpilot/session-a",
+    sessionHeadSha: "3333333333333333333333333333333333333333",
+    worktreePath: "/workspace/muxpilot-worktrees/session-a",
+    dirty: false,
+    aheadBy: 1,
+    targetCheckedOutAt: null,
+    review: null,
+    reviewCurrent: false,
+    inspections: [],
+    remoteSha: "4444444444444444444444444444444444444444",
+    remoteAheadBy: 2,
+    remoteBehindBy: 1,
+    lastError: null,
+    cleanupEligible: false,
+    ...overrides
   };
 }
 

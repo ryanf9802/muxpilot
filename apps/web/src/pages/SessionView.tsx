@@ -555,8 +555,25 @@ export function SessionView() {
   const vimPendingGRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
+  const gitWorkspaceButtonRef = useRef<HTMLButtonElement>(null);
   activeIdRef.current = id;
   promptHistoryPrefillTextRef.current = text;
+
+  const closeGitPanel = useCallback(() => {
+    setGitPanelOpen(false);
+    window.requestAnimationFrame(() => gitWorkspaceButtonRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!gitPanelOpen) return undefined;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeGitPanel();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [closeGitPanel, gitPanelOpen]);
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
@@ -1498,9 +1515,6 @@ export function SessionView() {
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
-        {gitPanelOpen && readySession.gitWorkspace ? (
-          <GitWorkspacePanel workspace={readySession.gitWorkspace} busy={gitActionBusy} error={gitActionError} onAction={(action) => void runGitAction(action)} />
-        ) : null}
       </div>
 
       <div className="actions">
@@ -1517,15 +1531,16 @@ export function SessionView() {
           </button>
           {readySession.gitWorkspace ? (
             <button
+              ref={gitWorkspaceButtonRef}
               className="git-workspace-chip"
               type="button"
               onClick={() => {
-                const opening = !gitPanelOpen;
-                setGitPanelOpen(opening);
-                if (opening) void runGitAction({ type: "refresh" });
+                setGitPanelOpen(true);
+                void runGitAction({ type: "refresh" });
               }}
+              aria-haspopup="dialog"
               aria-expanded={gitPanelOpen}
-              aria-label={`Toggle Git workspace controls for ${readySession.gitWorkspace.targetBranch}`}
+              aria-label={`Open Git workspace controls for ${readySession.gitWorkspace.targetBranch}`}
               title={`Git workspace: ${readySession.gitWorkspace.targetBranch}`}
             >
               <GitBranch size={14} />
@@ -1744,35 +1759,57 @@ export function SessionView() {
           </form>
         </div>
       )}
+      {gitPanelOpen && readySession.gitWorkspace ? (
+        <GitWorkspacePanel
+          workspace={readySession.gitWorkspace}
+          busy={gitActionBusy}
+          error={gitActionError}
+          onAction={(action) => void runGitAction(action)}
+          onClose={closeGitPanel}
+        />
+      ) : null}
     </section>
   );
 }
 
-function GitWorkspacePanel({
+export function GitWorkspacePanel({
   workspace,
   busy,
   error,
-  onAction
+  onAction,
+  onClose
 }: {
   workspace: GitWorkspaceSummary;
   busy: GitWorkspaceAction["type"] | null;
   error: string | null;
   onAction: (action: GitWorkspaceAction) => void;
+  onClose: () => void;
 }) {
   return (
-    <aside className="git-workspace-panel" role="region" aria-label="Git workspace status">
-      <div className="git-panel-summary">
-        <div><span>Target</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
-        <div><span>Status</span><strong>{workspace.state.replaceAll("_", " ")}</strong><small>generation {workspace.generation ?? 1}</small></div>
-        <div><span>Remote</span><strong>{workspace.targetRemote ?? "None"}</strong><small>{workspace.remoteSha ? `${workspace.remoteAheadBy} ahead · ${workspace.remoteBehindBy} behind` : "not pushed"}</small></div>
-        {workspace.lastCompletion ? <div><span>Last integrated</span><strong>{shortSha(workspace.lastCompletion.integratedSha)}</strong><small>{workspace.lastCompletion.commitCount} commit{workspace.lastCompletion.commitCount === 1 ? "" : "s"}</small></div> : null}
-      </div>
-      {workspace.lastError || error ? <p className="git-panel-error" role="alert">{error ?? workspace.lastError}</p> : null}
-      <div className="git-panel-actions">
-        <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "refresh" })}><RefreshCw className={busy === "refresh" ? "spin" : ""} size={16} /> Refresh</button>
-        {workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy) || workspace.remoteBehindBy > 0 || workspace.remoteSha === workspace.targetSha} onClick={() => onAction({ type: "push" })}><Upload size={16} /> Push to {workspace.targetRemote}</button> : null}
-      </div>
-    </aside>
+    <div className="dialog-backdrop git-panel-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
+      <section className="git-workspace-panel" role="dialog" aria-modal="true" aria-labelledby="git-workspace-dialog-title">
+        <div className="git-panel-head">
+          <h2 id="git-workspace-dialog-title"><GitBranch size={18} /> Git workspace</h2>
+          <button autoFocus type="button" className="icon-button" onClick={onClose} aria-label="Close Git workspace controls">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="git-panel-summary">
+          <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
+          <div><span>Worktree</span><strong title={workspace.worktreePath}>{workspace.sessionBranch}</strong></div>
+          <div>
+            <span>Remote</span>
+            <strong>{workspace.targetRemote ?? "Not configured"}</strong>
+            {workspace.targetRemote ? <small>{workspace.remoteSha ? `${workspace.remoteAheadBy} ahead · ${workspace.remoteBehindBy} behind` : "Target branch not pushed"}</small> : null}
+          </div>
+        </div>
+        {workspace.lastError || error ? <p className="git-panel-error" role="alert">{error ?? workspace.lastError}</p> : null}
+        <div className="git-panel-actions">
+          <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "refresh" })}><RefreshCw className={busy === "refresh" ? "spin" : ""} size={16} /> Refresh</button>
+          {workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy) || workspace.remoteBehindBy > 0 || workspace.remoteSha === workspace.targetSha} onClick={() => onAction({ type: "push" })}><Upload size={16} /> Push to {workspace.targetRemote}</button> : null}
+        </div>
+      </section>
+    </div>
   );
 }
 
