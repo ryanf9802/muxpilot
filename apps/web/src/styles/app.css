@@ -2034,14 +2034,10 @@ select:focus-visible {
 }
 
 .session-directory-suggestions {
-  position: absolute;
-  z-index: 70;
-  top: calc(100% + 6px);
-  right: 0;
-  left: 0;
   display: grid;
   gap: 4px;
   max-height: min(280px, 42vh);
+  margin-top: 6px;
   overflow-y: auto;
   padding: 6px;
   background: var(--color-surface-raised);
