@@ -24,7 +24,7 @@ describe("Codex pane model settings", () => {
 });
 
 describe("managed Codex launch instructions", () => {
-  it("presents isolation as default guardrails with narrow explicit user overrides", () => {
+  it("uses the worktree for coordination without restricting user-directed checkout work", () => {
     const options = managedCodexLaunchOptions({
       id: "workspace-1",
       targetBranch: "main",
@@ -33,10 +33,11 @@ describe("managed Codex launch instructions", () => {
     } as Parameters<typeof managedCodexLaunchOptions>[0], "token", "http://localhost/helper");
 
     expect(options.isolatedWorkspace).toBe(true);
-    expect(options.developerInstructions).toContain("default guardrails, not hard rules");
-    expect(options.developerInstructions).toContain("An explicit user instruction may override the specific constraint or working location it names");
-    expect(options.developerInstructions).toContain("keep all unrelated guardrails");
-    expect(options.developerInstructions).toContain("Skip managed finalization only when an explicit user exception makes it inapplicable");
+    expect(options.developerInstructions).toContain("not as a boundary on what you may inspect or do");
+    expect(options.developerInstructions).toContain("without requiring special override wording");
+    expect(options.developerInstructions).toContain("Never use the session worktree's state to claim that another checkout is clean or dirty");
+    expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
+    expect(options.developerInstructions).toContain("Skip managed finalization for work performed exclusively outside the managed integration path");
   });
 });
 

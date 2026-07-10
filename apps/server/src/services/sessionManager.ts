@@ -1243,13 +1243,15 @@ export function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helper
       "This is a muxpilot-managed isolated Git workspace.",
       "Use $muxpilot-git-workflow as the default workflow for branch and inspection operations.",
       `Target branch: ${workspace.targetBranch}.`,
-      `Editable session branch: ${workspace.sessionBranch}.`,
+      `Default implementation branch: ${workspace.sessionBranch}.`,
       `Implementation worktree: ${workspace.worktreePath}.`,
-      "These branch, worktree, integration, and publication constraints are default guardrails, not hard rules.",
-      "An explicit user instruction may override the specific constraint or working location it names; honor only that exception, keep all unrelated guardrails, and do not infer an exception from a general task request.",
-      "By default, do not check out or update the target branch, push, remove worktrees, or integrate changes yourself; remote push normally remains UI-only.",
+      "Use the session worktree as the default place for agent-authored changes and managed integration, not as a boundary on what you may inspect or do.",
+      "User intent controls task scope: when the user names another branch, checkout, or Git operation, inspect the relevant checkout and follow the request there without requiring special override wording.",
+      "Never use the session worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
+      "Keep unrelated guardrails in effect. Ask for confirmation only when a request is ambiguous, destructive, unusually risky, or apparently irrational—not merely because it affects another checkout.",
+      "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "When the task still uses muxpilot-managed integration, create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
-      "Fix and commit every independent review finding until the helper integrates successfully. Skip managed finalization only when an explicit user exception makes it inapplicable."
+      "Fix and commit every independent review finding until the helper integrates successfully. Skip managed finalization for work performed exclusively outside the managed integration path."
     ].join(" "),
     environment: helperBaseUrl ? {
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
