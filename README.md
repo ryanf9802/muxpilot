@@ -310,6 +310,8 @@ Use `pnpm app ...` for normal operation. The app runs on the host machine under 
 
 `pnpm dev` intentionally exits and points you to `pnpm app start dev`.
 
+Production startup automatically installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`). This synchronization also runs when production is already active, so rerunning `pnpm app start` is enough to refresh the skill after updating muxpilot.
+
 Development defaults:
 
 - Web UI: `http://127.0.0.1:5177`

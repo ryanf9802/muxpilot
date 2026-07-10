@@ -16,7 +16,7 @@ cp .env.example .env
 pnpm app start
 ```
 
-`pnpm app start` runs the production path. It builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits until both endpoints are healthy.
+`pnpm app start` runs the production path. It installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits until both endpoints are healthy. Skill synchronization also runs when production is already active.
 
 Production defaults:
 

@@ -39,7 +39,7 @@ import type { CodexUsageService } from "../services/codexUsage.js";
 import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 import type { NotificationService } from "../services/notifications.js";
 import { GitWorkspaceError } from "@muxpilot/git-workspaces";
-import { installMuxpilotGitWorkflowSkill, muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
+import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const inputBodySchema = z
@@ -198,12 +198,6 @@ export function registerRoutes(
     skills: await discoverCodexSkills(config.codexHome)
   }));
 
-  app.post("/api/codex/skills/muxpilot-git-workflow/install", { preHandler: access.requireAccess }, async () => {
-    const installed = await installMuxpilotGitWorkflowSkill(config.codexHome);
-    await db.addAudit("local", "install_skill", "muxpilot-git-workflow", installed.path, new Date().toISOString());
-    return installed;
-  });
-
   app.get("/api/codex/skills/muxpilot-git-workflow/status", { preHandler: access.requireAccess }, async (): Promise<MuxpilotGitSkillStatus> => {
     return muxpilotGitWorkflowSkillStatus(config.codexHome);
   });
@@ -323,7 +317,7 @@ export function registerRoutes(
     const body = createSessionSchema.parse(request.body) as CreateSessionRequest;
     try {
       if (body.workspace?.mode === "git" && (await muxpilotGitWorkflowSkillStatus(config.codexHome)).status !== "current") {
-        return reply.code(409).send({ error: "Install or update the muxpilot Git workflow skill before creating a Git session", code: "git_skill_required" });
+        return reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before creating a Git session", code: "git_skill_required" });
       }
       const session = await manager.createSession(body);
       return reply.code(201).send({ session });

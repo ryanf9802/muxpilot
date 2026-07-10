@@ -24,7 +24,7 @@ Open:
 http://127.0.0.1:12778
 ```
 
-`pnpm app start` builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
+`pnpm app start` installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
 
 Useful production commands:
 

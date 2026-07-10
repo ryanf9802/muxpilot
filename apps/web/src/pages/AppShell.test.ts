@@ -8,6 +8,7 @@ import {
   AppRecoveryPage,
   ConnectDeviceContent,
   DisconnectedNotice,
+  GitWorkflowSkillStatusCallout,
   SHELL_RECONNECT_INTERVAL_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
@@ -120,6 +121,22 @@ describe("shell connection state", () => {
     expect(html).toContain("Cannot reach muxpilot");
     expect(html).toContain("The app is open, but the backend is not responding.");
     expect(html).toContain("Retry now");
+  });
+});
+
+describe("GitWorkflowSkillStatusCallout", () => {
+  it("directs missing and outdated skills to production startup without a manual action", () => {
+    for (const status of ["missing", "outdated"] as const) {
+      const html = renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status, onRetry: () => undefined }));
+      expect(html).toContain("pnpm app start prod");
+      expect(html).not.toContain("<button");
+    }
+  });
+
+  it("renders checking and retry states while current status stays hidden", () => {
+    expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "checking", onRetry: () => undefined }))).toContain("Checking Codex skill");
+    expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "error", onRetry: () => undefined }))).toContain("Retry");
+    expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "current", onRetry: () => undefined }))).toBe("");
   });
 });
 

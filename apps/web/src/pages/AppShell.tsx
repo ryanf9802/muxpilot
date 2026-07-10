@@ -79,7 +79,6 @@ export function AppShell() {
   const [createSessionTargetStatus, setCreateSessionTargetStatus] = useState<"unverified" | "checking" | "existing" | "new" | "error">("unverified");
   const [createSessionTargetSource, setCreateSessionTargetSource] = useState("");
   const [createSessionAllowCachedRemote, setCreateSessionAllowCachedRemote] = useState(false);
-  const [gitSkillInstallBusy, setGitSkillInstallBusy] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
@@ -682,7 +681,7 @@ export function AppShell() {
       return;
     }
     if (createSessionGitProbe?.isGit && !gitWorkspaceFieldsAvailable) {
-      setCreateSessionError("Install or update the muxpilot Git workflow skill first.");
+      setCreateSessionError("Run pnpm app start prod to install or update the muxpilot Git workflow skill first.");
       return;
     }
     if (createSessionGitProbe?.isGit && !createSessionTargetBranch.trim()) {
@@ -742,20 +741,6 @@ export function AppShell() {
       }
     } catch {
       if (requestId === targetBranchCheckIdRef.current) setCreateSessionTargetStatus("error");
-    }
-  }
-
-  async function installGitWorkflowSkill() {
-    if (gitSkillInstallBusy) return;
-    setGitSkillInstallBusy(true);
-    try {
-      const result = await api.installGitWorkflowSkill();
-      setGitSkillStatus(result.status);
-      toast.success(gitSkillStatus === "outdated" ? "Muxpilot Git workflow skill updated" : "Muxpilot Git workflow skill installed");
-    } catch (error) {
-      setCreateSessionError(error instanceof Error ? error.message : "Could not install the workflow skill.");
-    } finally {
-      setGitSkillInstallBusy(false);
     }
   }
 
@@ -972,24 +957,10 @@ export function AppShell() {
                     <div className="session-git-fields-head">
                       <div><strong>Isolated Git workspace</strong><span>{createSessionGitProbe.repoName}</span></div>
                     </div>
-                    {gitSkillStatus === "checking" ? <p className="session-git-probe-note">Checking Codex skill…</p> : null}
-                    {gitSkillStatus === "missing" || gitSkillStatus === "outdated" ? (
-                      <div className="session-git-skill-callout">
-                        <p>{gitSkillStatus === "outdated" ? "Update the muxpilot Git workflow skill to use isolated Git sessions." : "Install the muxpilot Git workflow skill to use isolated Git sessions."}</p>
-                        <button type="button" className="primary" onClick={() => void installGitWorkflowSkill()} disabled={gitSkillInstallBusy}>
-                          {gitSkillInstallBusy ? (gitSkillStatus === "outdated" ? "Updating…" : "Installing…") : (gitSkillStatus === "outdated" ? "Update Codex skill" : "Install Codex skill")}
-                        </button>
-                      </div>
-                    ) : null}
-                    {gitSkillStatus === "error" ? (
-                      <div className="session-git-skill-callout">
-                        <p>Could not check the muxpilot Git workflow skill.</p>
-                        <button type="button" onClick={() => {
-                          setGitSkillStatus("checking");
-                          void api.gitWorkflowSkillStatus().then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
-                        }}>Retry</button>
-                      </div>
-                    ) : null}
+                    <GitWorkflowSkillStatusCallout status={gitSkillStatus} onRetry={() => {
+                      setGitSkillStatus("checking");
+                      void api.gitWorkflowSkillStatus().then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
+                    }} />
                     {gitWorkspaceFieldsAvailable ? (
                       <>
                         <GitRefCombobox
@@ -1212,6 +1183,32 @@ export function sessionNameValidationMessage(value: string): string | null {
   const name = normalizeSessionName(value);
   if (isValidSessionName(name) || name.length < SESSION_NAME_MIN_LENGTH) return null;
   return SESSION_NAME_VALIDATION_MESSAGE;
+}
+
+export function GitWorkflowSkillStatusCallout({
+  status,
+  onRetry
+}: {
+  status: MuxpilotGitSkillStatus["status"] | "checking" | "error" | null;
+  onRetry: () => void;
+}) {
+  if (status === "checking") return <p className="session-git-probe-note">Checking Codex skill…</p>;
+  if (status === "missing" || status === "outdated") {
+    return (
+      <div className="session-git-skill-callout">
+        <p>Run <code>pnpm app start prod</code> to {status === "missing" ? "install" : "update"} the muxpilot Git workflow skill.</p>
+      </div>
+    );
+  }
+  if (status === "error") {
+    return (
+      <div className="session-git-skill-callout">
+        <p>Could not check the muxpilot Git workflow skill.</p>
+        <button type="button" onClick={onRetry}>Retry</button>
+      </div>
+    );
+  }
+  return null;
 }
 
 export function filterSessionDirectorySuggestions(

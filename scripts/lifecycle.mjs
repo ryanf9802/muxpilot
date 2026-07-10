@@ -17,8 +17,10 @@ import {
 import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { syncMuxpilotGitWorkflowSkill } from "./bundled-skill.mjs";
 
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
 const START_TIMEOUT_MS = 30000;
@@ -66,6 +68,7 @@ export async function startMode(mode) {
   const { config, state, urls } = details;
 
   try {
+    await syncBundledSkillForMode(mode);
     cleanupStalePidFiles(state);
 
     const status = await inspectPreparedMode(details);
@@ -115,6 +118,19 @@ export async function startMode(mode) {
     printState(state);
   } finally {
     restoreEnv(details.envSnapshot);
+  }
+}
+
+export async function syncBundledSkillForMode(mode, codexHome = process.env.MUXPILOT_CODEX_HOME ?? join(homedir(), ".codex")) {
+  if (mode !== "prod") return null;
+  try {
+    const result = await syncMuxpilotGitWorkflowSkill(codexHome);
+    const verb = result.action === "unchanged" ? "is current" : `${result.action}`;
+    console.log(`Muxpilot Git workflow skill ${verb} at ${result.path}.`);
+    return result;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not synchronize the muxpilot Git workflow skill: ${message}`, { cause: error });
   }
 }
 

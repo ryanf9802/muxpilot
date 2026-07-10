@@ -105,7 +105,6 @@ export const api = {
     json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "DELETE", body: JSON.stringify({ endpoint }) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
   gitWorkflowSkillStatus: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/status"),
-  installGitWorkflowSkill: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/install", { method: "POST" }),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),

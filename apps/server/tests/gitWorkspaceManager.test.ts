@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview } from "../src/services/gitWorkspaceManager.js";
-import { installMuxpilotGitWorkflowSkill, muxpilotGitWorkflowSkillStatus } from "../src/services/bundledSkills.js";
+import { muxpilotGitWorkflowSkillStatus, syncMuxpilotGitWorkflowSkill } from "../src/services/bundledSkills.js";
 import { AppDatabase } from "../src/db/database.js";
 import { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
 import { GitWorkspaceCoordinator } from "@muxpilot/git-workspaces";
@@ -54,13 +54,14 @@ describe("codexReviewArgs", () => {
   });
 });
 
-describe("installMuxpilotGitWorkflowSkill", () => {
+describe("syncMuxpilotGitWorkflowSkill", () => {
   it("detects, installs, and updates the bundled skill in CODEX_HOME", async () => {
     const home = await mkdtemp(join(tmpdir(), "muxpilot-codex-home-"));
     expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "missing" });
 
-    const installed = await installMuxpilotGitWorkflowSkill(home);
+    const installed = await syncMuxpilotGitWorkflowSkill(home);
     expect(installed.status).toBe("current");
+    expect(installed.action).toBe("installed");
     const skill = await readFile(join(installed.path, "SKILL.md"), "utf8");
     expect(skill).toContain("name: muxpilot-git-workflow");
     expect(skill).toContain("coordination tool, not a boundary");
@@ -69,16 +70,20 @@ describe("installMuxpilotGitWorkflowSkill", () => {
 
     await writeFile(join(installed.path, "SKILL.md"), "modified");
     expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "outdated" });
-    expect((await installMuxpilotGitWorkflowSkill(home)).status).toBe("current");
+    expect(await syncMuxpilotGitWorkflowSkill(home)).toMatchObject({ status: "current", action: "updated" });
+    expect(await syncMuxpilotGitWorkflowSkill(home)).toMatchObject({ status: "current", action: "unchanged" });
   });
 
-  it("ignores extra user files when checking bundled skill freshness", async () => {
+  it("preserves extra user files while updating the bundled skill", async () => {
     const home = await mkdtemp(join(tmpdir(), "muxpilot-codex-home-"));
-    const installed = await installMuxpilotGitWorkflowSkill(home);
+    const installed = await syncMuxpilotGitWorkflowSkill(home);
+    const extraFile = join(installed.path, "notes", "local.txt");
     await mkdir(join(installed.path, "notes"), { recursive: true });
-    await writeFile(join(installed.path, "notes", "local.txt"), "keep me");
+    await writeFile(extraFile, "keep me");
+    await writeFile(join(installed.path, "SKILL.md"), "outdated");
 
-    expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "current" });
+    expect(await syncMuxpilotGitWorkflowSkill(home)).toMatchObject({ status: "current", action: "updated" });
+    expect(await readFile(extraFile, "utf8")).toBe("keep me");
   });
 });
 
