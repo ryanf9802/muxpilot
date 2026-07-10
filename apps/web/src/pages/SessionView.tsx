@@ -1495,17 +1495,6 @@ export function SessionView() {
           <SessionHeaderMeta session={readySession} />
         </div>
         <StatusPill status={readySession.status} />
-        {readySession.gitWorkspace ? (
-          <button className="git-workspace-chip" type="button" onClick={() => {
-            const opening = !gitPanelOpen;
-            setGitPanelOpen(opening);
-            if (opening) void runGitAction({ type: "refresh" });
-          }} title="Toggle Git workspace status" aria-expanded={gitPanelOpen}>
-            <GitBranch size={14} />
-            <span>{readySession.gitWorkspace.targetBranch}</span>
-            <i data-state={readySession.gitWorkspace.state}>{gitWorkspaceChipState(readySession.gitWorkspace)}</i>
-          </button>
-        ) : null}
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
@@ -1526,43 +1515,70 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
+          {readySession.gitWorkspace ? (
+            <button
+              className="git-workspace-chip"
+              type="button"
+              onClick={() => {
+                const opening = !gitPanelOpen;
+                setGitPanelOpen(opening);
+                if (opening) void runGitAction({ type: "refresh" });
+              }}
+              aria-expanded={gitPanelOpen}
+              aria-label={`Toggle Git workspace controls for ${readySession.gitWorkspace.targetBranch}`}
+              title={`Git workspace: ${readySession.gitWorkspace.targetBranch}`}
+            >
+              <GitBranch size={14} />
+              <span>{readySession.gitWorkspace.targetBranch}</span>
+              <i data-state={readySession.gitWorkspace.state}>{gitWorkspaceChipState(readySession.gitWorkspace)}</i>
+            </button>
+          ) : null}
           <button
             disabled={Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}
+            aria-label={actionBusy === "interrupt" ? "Interrupting session" : "Interrupt session"}
             data-busy={actionBusy === "interrupt" || undefined}
             onClick={() => runAction({ type: "interrupt" })}
             title="Interrupt"
           >
-            <Pause size={16} /> {actionBusy === "interrupt" ? "Interrupting" : "Interrupt"}
+            <Pause size={16} />
+            <span className="session-action-label">{actionBusy === "interrupt" ? "Interrupting" : "Interrupt"}</span>
           </button>
           <button
             className="danger"
             disabled={Boolean(actionBusy)}
             aria-busy={actionBusy === "kill"}
+            aria-label={actionBusy === "kill" ? "Killing session" : "Kill session"}
             data-busy={actionBusy === "kill" || undefined}
             onClick={killSession}
+            title="Kill session"
           >
-            <Skull size={16} /> {actionBusy === "kill" ? "Killing" : "Kill"}
+            <Skull size={16} />
+            <span className="session-action-label">{actionBusy === "kill" ? "Killing" : "Kill"}</span>
           </button>
         </div>
         <div className="actions-jump">
           <button
             disabled={Boolean(jumpBusy)}
             aria-busy={jumpBusy === "top"}
+            aria-label={jumpBusy === "top" ? "Loading top of chat" : "Jump to top of chat"}
             data-busy={jumpBusy === "top" || undefined}
             onClick={jumpToTop}
             title="Jump to top"
           >
-            <ArrowUpToLine size={16} /> {jumpBusy === "top" ? "Loading" : "Top"}
+            <ArrowUpToLine size={16} />
+            <span className="session-action-label">{jumpBusy === "top" ? "Loading" : "Top"}</span>
           </button>
           <button
             disabled={Boolean(jumpBusy)}
             aria-busy={jumpBusy === "bottom"}
+            aria-label={jumpBusy === "bottom" ? "Loading bottom of chat" : "Jump to bottom of chat"}
             data-busy={jumpBusy === "bottom" || undefined}
             onClick={jumpToBottom}
             title="Jump to bottom"
           >
-            <ArrowDownToLine size={16} /> {jumpBusy === "bottom" ? "Loading" : "Bottom"}
+            <ArrowDownToLine size={16} />
+            <span className="session-action-label">{jumpBusy === "bottom" ? "Loading" : "Bottom"}</span>
           </button>
         </div>
       </div>

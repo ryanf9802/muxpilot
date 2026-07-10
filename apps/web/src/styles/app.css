@@ -2598,6 +2598,14 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.actions .git-workspace-chip {
+  max-width: 220px;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-brand) 10%, var(--color-surface-raised));
+  border-color: color-mix(in srgb, var(--color-brand) 35%, var(--color-border));
+  border-radius: 999px;
+}
+
 .actions .danger {
   color: var(--color-error);
 }
@@ -3835,9 +3843,19 @@ select:focus-visible {
     gap: 7px;
   }
 
-  .git-workspace-chip {
-    order: 10;
-    max-width: min(180px, 48vw);
+  .actions .git-workspace-chip,
+  .actions-main > button,
+  .actions-jump > button {
+    width: 34px;
+    min-width: 34px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .actions .git-workspace-chip span,
+  .actions .git-workspace-chip i,
+  .session-action-label {
+    display: none;
   }
 
   .git-workspace-panel {
