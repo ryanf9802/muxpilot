@@ -2643,7 +2643,7 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.act(session.id, { type: "rename", name: "My Session!" });
 
-    expect((await harness.manager.getSession(session.id))?.tmux.windowName).toBe("my-session");
+    expect((await harness.manager.getSession(session.id))?.tmux.windowName).toBe("My-Session!");
     harness.db.close();
   });
 
@@ -2658,7 +2658,7 @@ describe("SessionManager transcript isolation", () => {
     expect(session).toBeDefined();
 
     await expect(harness.manager.act(session.id, { type: "rename", name: "!" })).rejects.toThrow(
-      "Session name must be 2-32 lowercase letters, numbers, or hyphens"
+      "Session name must be a 2-32 character Git-style name"
     );
     harness.db.close();
   });
@@ -2728,8 +2728,8 @@ describe("SessionManager transcript isolation", () => {
 
     const created = await harness.manager.createSessionInDirectory(repo, "My Session!");
 
-    expect(createCalls).toEqual([{ cwd: repo, name: "my-session" }]);
-    expect(created.tmux.windowName).toBe("my-session");
+    expect(createCalls).toEqual([{ cwd: repo, name: "My-Session!" }]);
+    expect(created.tmux.windowName).toBe("My-Session!");
     harness.db.close();
   });
 
@@ -2739,7 +2739,7 @@ describe("SessionManager transcript isolation", () => {
     await mkdir(repo);
 
     await expect(harness.manager.createSessionInDirectory(repo, "!")).rejects.toThrow(
-      "Session name must be 2-32 lowercase letters, numbers, or hyphens"
+      "Session name must be a 2-32 character Git-style name"
     );
     harness.db.close();
   });

@@ -212,6 +212,17 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/session-directories", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("checks target branch existence after target input is committed", async () => {
+    const fetchMock = mockJsonResponse({ exists: false });
+
+    await api.gitTargetBranchStatus("/repo", "Feature/API_v2");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/git/target-branch-status?cwd=%2Frepo&branch=Feature%2FAPI_v2",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("creates sessions from a cwd and name", async () => {
     const fetchMock = mockJsonResponse({ session: { id: "created-session" } });
 

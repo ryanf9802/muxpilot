@@ -17,7 +17,7 @@ import type {
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
-import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
+import { isValidGitStyleName, isValidSessionName, normalizeGitStyleName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
   CreateSessionError,
@@ -50,7 +50,7 @@ const sessionNameSchema = z
   .string()
   .max(4096)
   .transform((value) => normalizeSessionName(value))
-  .refine((value) => isValidSessionName(value), { message: "Session name must be 2-32 lowercase letters, numbers, or hyphens" });
+  .refine((value) => isValidSessionName(value), { message: "Session name must be a 2-32 character Git-style name" });
 const gitRevisionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("local_branch"), branch: z.string().trim().min(1).max(1024) }),
   z.object({ kind: z.literal("remote_branch"), remote: z.string().trim().min(1).max(255), branch: z.string().trim().min(1).max(1024) }),
@@ -65,7 +65,7 @@ const createSessionSchema = z.object({
     z.object({ mode: z.literal("directory") }),
     z.object({
       mode: z.literal("git"),
-      targetBranch: z.string().trim().min(1).max(1024),
+      targetBranch: z.string().transform(normalizeGitStyleName).refine(isValidGitStyleName, "Target branch must be a 2-32 character Git-style name"),
       targetRemote: z.string().trim().min(1).max(255).optional(),
       targetSource: gitRevisionSchema.optional(),
       inspections: z.array(gitRevisionSchema).max(10).optional(),
@@ -75,13 +75,7 @@ const createSessionSchema = z.object({
 });
 const gitWorkspaceActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("refresh") }),
-  z.object({ type: z.literal("addInspection"), revision: gitRevisionSchema, allowCachedRemote: z.boolean().optional() }),
-  z.object({ type: z.literal("materializeInspection"), inspectionId: z.string().min(6).max(80) }),
-  z.object({ type: z.literal("prepareReview") }),
-  z.object({ type: z.literal("integrate"), bypassReview: z.boolean().optional() }),
-  z.object({ type: z.literal("push") }),
-  z.object({ type: z.literal("abortRebase") }),
-  z.object({ type: z.literal("cleanup") })
+  z.object({ type: z.literal("push") })
 ]);
 const queuedInputSchema = inputBodySchema;
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
@@ -263,6 +257,14 @@ export function registerRoutes(
     return manager.probeGitRepository(cwd);
   });
 
+  app.get("/api/git/target-branch-status", { preHandler: access.requireAccess }, async (request) => {
+    const { cwd, branch } = z.object({
+      cwd: z.string().trim().min(1).max(4096),
+      branch: z.string().transform(normalizeGitStyleName).refine(isValidGitStyleName)
+    }).parse(request.query);
+    return { exists: await manager.targetGitBranchExists(cwd, branch) };
+  });
+
   app.post("/api/internal/git-workspaces/:workspaceId/inspections", async (request, reply) => {
     if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
     const { workspaceId } = request.params as { workspaceId: string };
@@ -274,6 +276,18 @@ export function registerRoutes(
       if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
         return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message });
       }
+      throw error;
+    }
+  });
+
+  app.post("/api/internal/git-workspaces/:workspaceId/finalize", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
+    const { workspaceId } = request.params as { workspaceId: string };
+    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
+    try {
+      return await manager.finalizeGitWorkspaceByCapability(workspaceId, token);
+    } catch (error) {
+      if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
       throw error;
     }
   });

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { GitInspection, GitRepositoryProbe, GitRevisionSpec } from "@muxpilot/core";
+import { isValidGitStyleName, type GitInspection, type GitRepositoryProbe, type GitRevisionSpec } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 
@@ -69,6 +69,12 @@ export interface GitWorkspaceStatus {
 export interface GitIntegrationResult {
   targetSha: string;
   cleanupPending: boolean;
+}
+
+export interface GitRotationResult {
+  sessionBranch: string;
+  targetSha: string;
+  sessionHeadSha: string;
 }
 
 export interface ResolvedRevision {
@@ -193,6 +199,7 @@ export class GitWorkspaceCoordinator {
 
   async provision(request: ProvisionGitWorkspaceRequest): Promise<ProvisionedGitWorkspace> {
     validateWorkspaceId(request.workspaceId);
+    if (!isValidGitStyleName(request.targetBranch)) throw new GitWorkspaceError("Target branch must be a 2-32 character Git-style name", "invalid_target_branch");
     await this.validateBranch(request.entryPath, request.targetBranch);
     const probe = await this.probe(request.entryPath);
     if (!probe.isGit) throw new GitWorkspaceError("Directory is not in a Git repository", "not_git");
@@ -237,7 +244,7 @@ export class GitWorkspaceCoordinator {
       targetSha = existingTarget;
     }
 
-    const sessionBranch = `muxpilot/${request.workspaceId}`;
+    const sessionBranch = `muxpilot/${request.workspaceId}/g1`;
     await this.validateBranch(repoRoot, sessionBranch);
     if (await this.tryResolveCommit(repoRoot, localBranchRef(sessionBranch))) {
       throw new GitWorkspaceError(`Session branch '${sessionBranch}' already exists`, "session_branch_exists");
@@ -266,6 +273,21 @@ export class GitWorkspaceCoordinator {
       sourceFreshness: source?.freshness ?? "local",
       compatibilityWarnings
     };
+  }
+
+  async targetBranchExists(entryPath: string, branch: string): Promise<boolean> {
+    if (!isValidGitStyleName(branch)) throw new GitWorkspaceError("Invalid target branch name", "invalid_target_branch");
+    const probe = await this.probe(entryPath);
+    if (!probe.isGit || !probe.repoRoot) throw new GitWorkspaceError("Directory is not in a Git repository", "not_git");
+    if (await this.tryResolveCommit(probe.repoRoot, localBranchRef(branch))) return true;
+    const remote = probe.defaultRemote;
+    if (!remote) return false;
+    try {
+      return Boolean(await this.output(probe.repoRoot, ["ls-remote", "--heads", remote, `refs/heads/${branch}`]));
+    } catch {
+      if (await this.tryResolveCommit(probe.repoRoot, remoteHeadCacheRef(remote, branch))) return true;
+      return Boolean(await this.tryResolveCommit(probe.repoRoot, `refs/remotes/${remote}/${branch}`));
+    }
   }
 
   async status(workspace: GitWorkspaceCoordinates): Promise<GitWorkspaceStatus> {
@@ -363,11 +385,6 @@ export class GitWorkspaceCoordinator {
     return this.status({ ...workspace, targetSha: current.targetSha });
   }
 
-  async abortRebase(workspace: GitWorkspaceCoordinates): Promise<GitWorkspaceStatus> {
-    await this.run(workspace.worktreePath, ["rebase", "--abort"]);
-    return this.status(workspace);
-  }
-
   async integrate(
     workspace: GitWorkspaceCoordinates,
     integrationRoot: string,
@@ -419,21 +436,48 @@ export class GitWorkspaceCoordinator {
     return { targetSha, remoteSha: targetSha };
   }
 
-  async cleanup(workspace: GitWorkspaceCoordinates, inspections: Array<{ worktreePath: string | null }>): Promise<void> {
-    const state = await this.status(workspace);
-    if (state.dirty || state.rebaseInProgress) throw new GitWorkspaceError("Dirty or conflicted worktree cannot be cleaned", "cleanup_blocked");
-    if (!(await this.isAncestor(workspace.repoRoot, state.sessionHeadSha, state.targetSha))) {
-      throw new GitWorkspaceError("Session commits are not reachable from the target branch", "cleanup_unintegrated");
+  async remoteStatus(workspace: GitWorkspaceCoordinates): Promise<{ remoteSha: string | null; ahead: number; behind: number }> {
+    if (!workspace.targetRemote) return { remoteSha: null, ahead: 0, behind: 0 };
+    const remote = await this.tryResolveRemoteBranch(workspace.repoRoot, workspace.targetRemote, workspace.targetBranch, false);
+    if (!remote) return { remoteSha: null, ahead: 0, behind: 0 };
+    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const counts = await this.compareCounts(workspace.repoRoot, remote.commitSha, targetSha);
+    return { remoteSha: remote.commitSha, ahead: counts.ahead, behind: counts.behind };
+  }
+
+  async rotate(
+    workspace: GitWorkspaceCoordinates,
+    inspections: Array<{ worktreePath: string | null }>,
+    generation: number,
+    recover = false
+  ): Promise<GitRotationResult> {
+    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const state = await this.status(workspace).catch((error) => {
+      if (recover) return null;
+      throw error;
+    });
+    if (state) {
+      if (state.dirty || state.rebaseInProgress) throw new GitWorkspaceError("Completed worktree is not clean", "rotation_blocked");
+      if (!(await this.isAncestor(workspace.repoRoot, state.sessionHeadSha, targetSha))) {
+        throw new GitWorkspaceError("Completed session commits are not reachable from the target", "rotation_unintegrated");
+      }
     }
     for (const inspection of inspections) {
       if (!inspection.worktreePath) continue;
       await this.run(workspace.repoRoot, ["worktree", "unlock", inspection.worktreePath]).catch(() => undefined);
-      await this.run(workspace.repoRoot, ["worktree", "remove", inspection.worktreePath]).catch(() => undefined);
+      await this.run(workspace.repoRoot, ["worktree", "remove", inspection.worktreePath]);
     }
     await this.run(workspace.repoRoot, ["worktree", "unlock", workspace.worktreePath]).catch(() => undefined);
-    await this.run(workspace.repoRoot, ["worktree", "remove", workspace.worktreePath]);
-    await this.run(workspace.repoRoot, ["update-ref", "-d", localBranchRef(workspace.sessionBranch), state.sessionHeadSha]);
+    const remove = this.run(workspace.repoRoot, ["worktree", "remove", workspace.worktreePath]);
+    if (recover) await remove.catch(() => undefined);
+    else await remove;
     await rm(workspace.worktreePath, { recursive: true, force: true }).catch(() => undefined);
+    await this.run(workspace.repoRoot, ["update-ref", "-d", localBranchRef(workspace.sessionBranch)]);
+    const sessionBranch = `muxpilot/${workspace.workspaceId}/g${generation}`;
+    await this.run(workspace.repoRoot, ["branch", "-D", sessionBranch]).catch(() => undefined);
+    await this.run(workspace.repoRoot, ["worktree", "add", "-b", sessionBranch, workspace.worktreePath, targetSha]);
+    await this.run(workspace.repoRoot, ["worktree", "lock", "--reason", `muxpilot:${workspace.workspaceId}:g${generation}`, workspace.worktreePath]);
+    return { sessionBranch, targetSha, sessionHeadSha: targetSha };
   }
 
   async recoverIntegrationWorktree(workspace: GitWorkspaceCoordinates, integrationRoot: string): Promise<boolean> {

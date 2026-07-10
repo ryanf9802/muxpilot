@@ -682,6 +682,12 @@ export class SessionManager {
     }));
   }
 
+  async targetGitBranchExists(path: string, branch: string): Promise<boolean> {
+    const directory = await requireExistingDirectory(path);
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    return this.gitWorkspaces.targetBranchExists(directory, branch);
+  }
+
   async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
@@ -787,6 +793,22 @@ export class SessionManager {
       }
     }
     return summary;
+  }
+
+  async finalizeGitWorkspaceByCapability(workspaceId: string, token: string) {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    const result = await this.gitWorkspaces.finalizeWithToken(workspaceId, token);
+    const workspace = await this.gitWorkspaces.get(workspaceId);
+    if (workspace?.sessionId) {
+      const session = await this.db.getSession(workspace.sessionId);
+      if (session) {
+        const updated = { ...session, gitWorkspace: result.workspace };
+        await this.db.upsertSession(updated, nowIso());
+        this.publish("session.updated", session.id, updated);
+      }
+    }
+    await this.db.addAudit("agent", "git_finalize", workspaceId, result.status, nowIso());
+    return result;
   }
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
@@ -1202,7 +1224,7 @@ function resolveSessionStatus(
 
 function requireSessionName(input: string): string {
   const name = normalizeSessionName(input);
-  if (!isValidSessionName(name)) throw new SessionNameError("Session name must be 2-32 lowercase letters, numbers, or hyphens");
+  if (!isValidSessionName(name)) throw new SessionNameError("Session name must be a 2-32 character Git-style name");
   return name;
 }
 
@@ -1224,7 +1246,8 @@ function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helperToken: 
       `Editable session branch: ${workspace.sessionBranch}.`,
       `Implementation worktree: ${workspace.worktreePath}.`,
       "Do not check out or update the target branch, push, remove worktrees, or integrate changes yourself.",
-      "Create clean atomic commits on the editable session branch and leave integration and push to the muxpilot Git panel."
+      "Create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
+      "Fix and commit every independent review finding until the helper integrates successfully. Remote push remains UI-only."
     ].join(" "),
     environment: helperBaseUrl ? {
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,

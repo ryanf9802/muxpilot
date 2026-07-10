@@ -21,7 +21,7 @@ import type {
   SessionEvent,
   SessionHistoryResult
 } from "@muxpilot/core";
-import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
+import { GIT_STYLE_NAME_MAX_LENGTH, isValidGitStyleName, normalizeGitStyleName, normalizeGitStyleNameInput, SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { credentialSuppressedField, noAutofillTextField, searchField } from "../utils/formFields.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
@@ -51,7 +51,7 @@ import {
 
 export type ShellConnectionState = "checking" | "connected" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
-export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
+export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
 const GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT = 96;
@@ -76,6 +76,7 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
+  const [createSessionTargetStatus, setCreateSessionTargetStatus] = useState<"unverified" | "checking" | "existing" | "new" | "error">("unverified");
   const [createSessionTargetSource, setCreateSessionTargetSource] = useState("");
   const [createSessionAllowCachedRemote, setCreateSessionAllowCachedRemote] = useState(false);
   const [gitSkillInstallBusy, setGitSkillInstallBusy] = useState(false);
@@ -113,6 +114,7 @@ export function AppShell() {
   const createSessionCwdPrefillRef = useRef<() => string>(() => "");
   const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
   const sessionHistoryRequestIdRef = useRef(0);
+  const targetBranchCheckIdRef = useRef(0);
   const connectionProbeRunningRef = useRef(false);
 
   useEffect(() => installCtrlWGuard(), []);
@@ -392,6 +394,7 @@ export function AppShell() {
   const createSessionNameInvalid = createSessionOpen && !isValidSessionName(normalizeSessionName(createSessionName));
   const createSessionTargetRemote = preferredGitRemote(createSessionGitProbe);
   const gitWorkspaceFieldsAvailable = gitSkillStatus === "current";
+  const targetBranchVerified = createSessionTargetStatus === "existing" || createSessionTargetStatus === "new";
   const visibleDirectorySuggestions = useMemo(
     () => filterSessionDirectorySuggestions(directorySuggestions, createSessionCwd),
     [createSessionCwd, directorySuggestions]
@@ -424,6 +427,7 @@ export function AppShell() {
     setCreateSessionName("");
     setCreateSessionGitProbe(null);
     setCreateSessionTargetBranch("");
+    setCreateSessionTargetStatus("unverified");
     setCreateSessionTargetSource("");
     setCreateSessionAllowCachedRemote(false);
     setGitSkillStatus(null);
@@ -574,6 +578,8 @@ export function AppShell() {
     setCreateSessionCwd(value);
     setCreateSessionError(null);
     setCreateSessionDirectorySelectedIndex(0);
+    setCreateSessionTargetStatus("unverified");
+    targetBranchCheckIdRef.current += 1;
   }
 
   function chooseCreateSessionDirectory(path: string) {
@@ -683,6 +689,10 @@ export function AppShell() {
       setCreateSessionError("Target branch is required for Git sessions.");
       return;
     }
+    if (createSessionGitProbe?.isGit && !targetBranchVerified) {
+      setCreateSessionError("Finish editing the target branch so muxpilot can check whether it exists.");
+      return;
+    }
 
     setCreateSessionBusy(true);
     setCreateSessionError(null);
@@ -692,8 +702,8 @@ export function AppShell() {
             mode: "git" as const,
             targetBranch: createSessionTargetBranch.trim(),
             targetRemote: createSessionTargetRemote ?? undefined,
-            targetSource: parseGitRevisionInput(createSessionTargetSource, createSessionTargetRemote),
-            allowCachedRemote: createSessionAllowCachedRemote || undefined
+            targetSource: createSessionTargetStatus === "new" ? parseGitRevisionInput(createSessionTargetSource, createSessionTargetRemote) : undefined,
+            allowCachedRemote: createSessionTargetStatus === "new" && createSessionAllowCachedRemote ? true : undefined
           } }
         : { cwd, name, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
@@ -704,6 +714,34 @@ export function AppShell() {
       setCreateSessionError(error instanceof Error ? error.message : "Could not create session.");
     } finally {
       setCreateSessionBusy(false);
+    }
+  }
+
+  function updateCreateSessionTargetBranch(value: string) {
+    setCreateSessionTargetBranch(normalizeGitStyleNameInput(value));
+    setCreateSessionTargetStatus("unverified");
+    targetBranchCheckIdRef.current += 1;
+  }
+
+  async function checkCreateSessionTargetBranch(candidate = createSessionTargetBranch) {
+    const branch = normalizeGitStyleName(candidate);
+    if (!createSessionGitProbe?.isGit || !isValidGitStyleName(branch)) {
+      setCreateSessionTargetStatus("unverified");
+      return;
+    }
+    if (branch !== createSessionTargetBranch) setCreateSessionTargetBranch(branch);
+    const requestId = ++targetBranchCheckIdRef.current;
+    setCreateSessionTargetStatus("checking");
+    try {
+      const result = await api.gitTargetBranchStatus(createSessionCwd.trim(), branch);
+      if (requestId !== targetBranchCheckIdRef.current) return;
+      setCreateSessionTargetStatus(result.exists ? "existing" : "new");
+      if (result.exists) {
+        setCreateSessionTargetSource("");
+        setCreateSessionAllowCachedRemote(false);
+      }
+    } catch {
+      if (requestId === targetBranchCheckIdRef.current) setCreateSessionTargetStatus("error");
     }
   }
 
@@ -958,12 +996,16 @@ export function AppShell() {
                           id="create-session-target-branch"
                           label="Target branch"
                           value={createSessionTargetBranch}
-                          onChange={setCreateSessionTargetBranch}
+                          onChange={updateCreateSessionTargetBranch}
+                          onCommit={(value) => void checkCreateSessionTargetBranch(value)}
                           suggestions={targetBranchSuggestions(createSessionGitProbe, createSessionTargetRemote ?? "")}
                           placeholder="tw-123"
                           disabled={createSessionBusy}
+                          maxLength={GIT_STYLE_NAME_MAX_LENGTH}
                         />
-                        <div className="session-git-source-row">
+                        {createSessionTargetStatus === "checking" ? <p className="session-git-probe-note">Checking target branch…</p> : null}
+                        {createSessionTargetStatus === "error" ? <button type="button" onClick={() => void checkCreateSessionTargetBranch()}>Retry target check</button> : null}
+                        {createSessionTargetStatus === "new" ? <div className="session-git-source-row">
                           <GitRefCombobox
                             id="create-session-target-source"
                             label="Source when target is new (optional)"
@@ -978,7 +1020,7 @@ export function AppShell() {
                             onChange={setCreateSessionAllowCachedRemote}
                             disabled={createSessionBusy}
                           />
-                        </div>
+                        </div> : null}
                         <p className="session-git-probe-note">The current checkout and its dirty files are not used as the session workspace.</p>
                       </>
                     ) : null}
@@ -1013,7 +1055,7 @@ export function AppShell() {
                   <button
                     className="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || Boolean(createSessionGitProbe?.isGit && !gitWorkspaceFieldsAvailable)}
+                    disabled={createSessionBusy || createSessionNameInvalid || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !targetBranchVerified))}
                     aria-busy={createSessionBusy}
                     data-busy={createSessionBusy || undefined}
                   >
@@ -1283,9 +1325,11 @@ export interface GitRefSuggestion {
 export function targetBranchSuggestions(probe: GitRepositoryProbe, selectedRemote: string): GitRefSuggestion[] {
   const suggestions = new Map<string, GitRefSuggestion>();
   for (const branch of probe.localBranches) {
+    if (!isValidGitStyleName(branch)) continue;
     suggestions.set(branch, { value: branch, label: branch, detail: "Local branch" });
   }
   for (const ref of probe.remoteBranches) {
+    if (!isValidGitStyleName(ref.branch)) continue;
     if (selectedRemote && ref.remote !== selectedRemote) continue;
     if (!suggestions.has(ref.branch)) {
       suggestions.set(ref.branch, { value: ref.branch, label: ref.branch, detail: `${ref.remote} remote branch` });
@@ -1325,17 +1369,21 @@ function GitRefCombobox({
   label,
   value,
   onChange,
+  onCommit,
   suggestions,
   placeholder,
-  disabled
+  disabled,
+  maxLength = 1024
 }: {
   id: string;
   label: string;
   value: string;
   onChange: (value: string) => void;
+  onCommit?: (value: string) => void;
   suggestions: GitRefSuggestion[];
   placeholder: string;
   disabled: boolean;
+  maxLength?: number;
 }) {
   const [focused, setFocused] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -1351,6 +1399,7 @@ function GitRefCombobox({
     onChange(suggestion.value);
     setFocused(false);
     setSelectedIndex(0);
+    onCommit?.(suggestion.value);
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
@@ -1380,10 +1429,13 @@ function GitRefCombobox({
             setSelectedIndex(0);
           }}
           onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
+          onBlur={() => {
+            setFocused(false);
+            onCommit?.(value);
+          }}
           onKeyDown={handleKeyDown}
           placeholder={placeholder}
-          maxLength={1024}
+          maxLength={maxLength}
           disabled={disabled}
           role="combobox"
           aria-autocomplete="list"

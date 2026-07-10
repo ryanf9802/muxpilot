@@ -35,7 +35,7 @@ describe("GitWorkspaceCoordinator", () => {
       targetBranch: "target"
     });
 
-    expect(workspace.sessionBranch).toBe("muxpilot/session_123456");
+    expect(workspace.sessionBranch).toBe("muxpilot/session_123456/g1");
     expect(await git(root, ["status", "--porcelain"])).toContain("tracked.txt");
     expect(await git(workspace.worktreePath, ["status", "--porcelain"])).toBe("");
   });
@@ -63,6 +63,10 @@ describe("GitWorkspaceCoordinator", () => {
 
     expect(await git(root, ["rev-parse", "target"])).toBe(result.targetSha);
     expect(result.cleanupPending).toBe(false);
+    const rotated = await coordinator.rotate(workspace, [], 2);
+    expect(rotated.sessionBranch).toBe("muxpilot/session_abcdef/g2");
+    expect(await git(workspace.worktreePath, ["rev-parse", "HEAD"])).toBe(result.targetSha);
+    await expect(git(root, ["rev-parse", "muxpilot/session_abcdef/g1"])).rejects.toBeTruthy();
   });
 
   it("defers when the target is checked out in another worktree", async () => {
@@ -124,6 +128,20 @@ describe("GitWorkspaceCoordinator", () => {
     await expect(coordinator.resolveRevision(root, revision)).rejects.toBeInstanceOf(GitWorkspaceError);
     const cached = await coordinator.resolveRevision(root, revision, true);
     expect(cached).toMatchObject({ commitSha: fresh.commitSha, freshness: "cached", fetchedAt: fresh.fetchedAt });
+  });
+
+  it("checks the current remote and silently falls back to remote-tracking refs", async () => {
+    const root = await repository();
+    const remote = await mkdtemp(join(tmpdir(), "muxpilot-git-status-remote-"));
+    await git(remote, ["init", "--bare", "-q"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-q", "origin", "HEAD:refs/heads/current-target"]);
+    const coordinator = new GitWorkspaceCoordinator();
+    expect(await coordinator.targetBranchExists(root, "current-target")).toBe(true);
+    await git(root, ["update-ref", "refs/remotes/origin/cached-target", "HEAD"]);
+    await git(root, ["remote", "set-url", "origin", join(remote, "missing")]);
+    expect(await coordinator.targetBranchExists(root, "cached-target")).toBe(true);
+    expect(await coordinator.targetBranchExists(root, "new-target")).toBe(false);
   });
 });
 

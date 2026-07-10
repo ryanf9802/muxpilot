@@ -50,7 +50,7 @@ export const DASHBOARD_SESSION_RECONCILE_INTERVAL_MS = SESSION_STATUS_RECONCILE_
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
 export const DASHBOARD_EVENT_DEBOUNCE_MS = SESSION_STATUS_EVENT_DEBOUNCE_MS;
 export const DASHBOARD_STATUSES = ["", "working", "planning", "waiting", "question", "plan_ready", "approval", "unknown", "missing"];
-export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be 2-32 lowercase letters, numbers, or hyphens.";
+export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
 export type DashboardStatusFilter =
   | { kind: "all"; selectValue: "" }

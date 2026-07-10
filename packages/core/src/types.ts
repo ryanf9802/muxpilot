@@ -110,6 +110,7 @@ export type GitWorkspaceState =
   | "ready_to_integrate"
   | "integrating"
   | "integrated"
+  | "rotation_pending"
   | "cleanup_pending"
   | "cleaned"
   | "error";
@@ -129,10 +130,18 @@ export interface GitReviewSummary {
   id: string;
   targetSha: string;
   headSha: string;
-  status: "queued" | "running" | "passed" | "failed" | "cancelled";
+  status: "queued" | "running" | "passed" | "changes_requested" | "failed" | "cancelled";
   report: string;
   createdAt: string;
   completedAt: string | null;
+}
+
+export interface GitCompletionSummary {
+  generation: number;
+  integratedSha: string;
+  completedAt: string;
+  commitCount: number;
+  reviewSummary: string;
 }
 
 export interface GitWorkspaceSummary {
@@ -162,7 +171,24 @@ export interface GitWorkspaceSummary {
   lastError: string | null;
   cleanupEligible: boolean;
   compatibilityWarnings?: string[];
+  generation?: number;
+  lastCompletion?: GitCompletionSummary | null;
 }
+
+export interface GitTargetBranchStatus {
+  exists: boolean;
+}
+
+export interface GitReviewFinding {
+  title: string;
+  body: string;
+  path: string | null;
+  line: number | null;
+}
+
+export type GitFinalizeResponse =
+  | { status: "changes_requested"; summary: string; findings: GitReviewFinding[]; workspace: GitWorkspaceSummary }
+  | { status: "integrated"; targetSha: string; generation: number; workspace: GitWorkspaceSummary };
 
 export interface ManagedSession {
   id: string;
@@ -460,13 +486,7 @@ export interface GitRepositoryProbe {
 
 export type GitWorkspaceAction =
   | { type: "refresh" }
-  | { type: "addInspection"; revision: GitRevisionSpec; allowCachedRemote?: boolean }
-  | { type: "materializeInspection"; inspectionId: string }
-  | { type: "prepareReview" }
-  | { type: "integrate"; bypassReview?: boolean }
-  | { type: "push" }
-  | { type: "abortRebase" }
-  | { type: "cleanup" };
+  | { type: "push" };
 
 export interface GitWorkspaceActionResponse {
   workspace: GitWorkspaceSummary;

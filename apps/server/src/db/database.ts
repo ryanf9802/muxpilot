@@ -2307,7 +2307,13 @@ export class SyncAppDatabase {
 
 function hydrateGitWorkspace(row: GitWorkspaceRow): StoredGitWorkspace {
   const workspace = JSON.parse(row.data_json) as StoredGitWorkspace;
-  return { ...workspace, helperToken: workspace.helperToken ?? "", sessionId: row.session_id, updatedAt: row.updated_at };
+  return {
+    ...workspace,
+    helperToken: workspace.helperToken ?? "",
+    sessionId: row.session_id,
+    updatedAt: row.updated_at,
+    summary: { ...workspace.summary, generation: workspace.summary.generation ?? 1, lastCompletion: workspace.summary.lastCompletion ?? null }
+  };
 }
 
 const NOTIFICATION_DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{8,80}$/;

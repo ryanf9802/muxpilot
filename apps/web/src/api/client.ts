@@ -8,6 +8,7 @@ import type {
   ConnectivityResponse,
   CreateSessionRequest,
   GitRepositoryProbe,
+  GitTargetBranchStatus,
   MuxpilotGitSkillStatus,
   GitWorkspaceAction,
   GitWorkspaceActionResponse,
@@ -113,6 +114,7 @@ export const api = {
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   gitRepositoryProbe: (cwd: string) => json<GitRepositoryProbe>(`/api/git/repository-probe?cwd=${encodeURIComponent(cwd)}`),
+  gitTargetBranchStatus: (cwd: string, branch: string) => json<GitTargetBranchStatus>(`/api/git/target-branch-status?cwd=${encodeURIComponent(cwd)}&branch=${encodeURIComponent(branch)}`),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),
