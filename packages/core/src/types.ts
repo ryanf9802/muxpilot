@@ -158,7 +158,7 @@ export interface GitTargetReconciliationSummary {
   remoteSha: string | null;
   remoteFreshness: "fresh" | "cached" | "local";
   worktreePath: string | null;
-  localSync: "current" | "pending" | "updated" | "dirty" | "diverged" | "missing";
+  localSync: "current" | "pending" | "created" | "updated" | "dirty" | "diverged" | "missing";
 }
 
 export interface GitFinalizeOperationSummary {

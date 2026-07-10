@@ -83,7 +83,7 @@ export interface GitTargetReconciliationResult {
   remoteSha: string | null;
   remoteFreshness: "fresh" | "cached" | "local";
   worktreePath: string | null;
-  localSync: "current" | "pending" | "updated" | "dirty" | "diverged" | "missing";
+  localSync: "current" | "pending" | "created" | "updated" | "dirty" | "diverged" | "missing";
 }
 
 export interface GitMaterializationResult {
@@ -202,8 +202,7 @@ export class GitWorkspaceCoordinator {
       "--format=%(refname)",
       "refs/heads",
       "refs/remotes",
-      "refs/tags",
-      "refs/muxpilot/targets"
+      "refs/tags"
     ]));
     const localBranches = new Set<string>();
     const remoteBranches: Array<{ remote: string; branch: string }> = [];
@@ -211,11 +210,6 @@ export class GitWorkspaceCoordinator {
     const longestRemotes = [...remotes].sort((left, right) => right.length - left.length);
     for (const ref of refs) {
       if (ref.startsWith("refs/heads/")) localBranches.add(ref.slice("refs/heads/".length));
-      else if (ref.startsWith("refs/muxpilot/targets/")) {
-        const marker = "/heads/";
-        const index = ref.indexOf(marker, "refs/muxpilot/targets/".length);
-        if (index >= 0) localBranches.add(ref.slice(index + marker.length));
-      }
       else if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
       else {
         const remote = longestRemotes.find((name) => ref.startsWith(`refs/remotes/${name}/`));
@@ -279,6 +273,7 @@ export class GitWorkspaceCoordinator {
     } else {
       targetSha = existingTarget;
     }
+    await this.ensureLocalTargetRef(repoRoot, request.targetBranch, targetSha);
 
     const workspaceName = `${request.sessionName}-${workspaceSuffix(request.workspaceId)}`;
     const implementationRoot = resolve(request.worktreeRoot, repoIdentity(commonGitDir), workspaceName);
@@ -674,7 +669,19 @@ export class GitWorkspaceCoordinator {
     const managedSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
     const localRef = localBranchRef(workspace.targetBranch);
     const localSha = await this.tryResolveCommit(workspace.repoRoot, localRef);
-    if (!localSha) return "missing";
+    if (!localSha) {
+      try {
+        await this.run(workspace.repoRoot, ["update-ref", localRef, managedSha, zeroOid(managedSha.length)]);
+        return "created";
+      } catch {
+        const raced = await this.tryResolveCommit(workspace.repoRoot, localRef);
+        if (!raced) throw new GitWorkspaceError(`Could not create local target '${workspace.targetBranch}'`, "target_create_failed");
+        if (raced === managedSha) return "current";
+        if (!(await this.isAncestor(workspace.repoRoot, raced, managedSha))) return "diverged";
+        await this.run(workspace.repoRoot, ["update-ref", localRef, managedSha, raced]);
+        return "updated";
+      }
+    }
     if (localSha === managedSha) return "current";
     if (!(await this.isAncestor(workspace.repoRoot, localSha, managedSha))) return "diverged";
     const worktrees = await this.output(workspace.repoRoot, ["worktree", "list", "--porcelain"]);
@@ -761,6 +768,20 @@ export class GitWorkspaceCoordinator {
       const raced = await this.tryResolveCommit(workspace.repoRoot, workspace.targetRef);
       if (raced) return raced;
       throw new GitWorkspaceError(`Could not recover managed target '${workspace.targetBranch}'`, "target_create_failed");
+    }
+  }
+
+  private async ensureLocalTargetRef(repoRoot: string, branch: string, targetSha: string): Promise<string> {
+    const ref = localBranchRef(branch);
+    const existing = await this.tryResolveCommit(repoRoot, ref);
+    if (existing) return existing;
+    try {
+      await this.run(repoRoot, ["update-ref", ref, targetSha, zeroOid(targetSha.length)]);
+      return targetSha;
+    } catch {
+      const raced = await this.tryResolveCommit(repoRoot, ref);
+      if (raced) return raced;
+      throw new GitWorkspaceError(`Could not create local target '${branch}'`, "target_create_failed");
     }
   }
 

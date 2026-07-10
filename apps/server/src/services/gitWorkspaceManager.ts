@@ -248,7 +248,7 @@ export class GitWorkspaceManager {
             ...workspace.summary,
             reconciliation: {
               ...workspace.summary.reconciliation,
-              localSha: localSync === "updated" || localSync === "current" ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
+              localSha: ["created", "updated", "current"].includes(localSync) ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
               localSync
             }
           });
@@ -591,7 +591,7 @@ export class GitWorkspaceManager {
       ...workspace.summary,
       reconciliation: workspace.summary.reconciliation ? {
         ...workspace.summary.reconciliation,
-        localSha: localSync === "updated" || localSync === "current" ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
+        localSha: ["created", "updated", "current"].includes(localSync) ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
         localSync
       } : workspace.summary.reconciliation,
       state: "cleanup_pending",

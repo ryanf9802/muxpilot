@@ -15,10 +15,12 @@ describe("GitWorkspaceCoordinator", () => {
     await git(root, ["remote", "add", "origin", root]);
     await git(root, ["update-ref", "refs/remotes/origin/stage", "HEAD"]);
     await git(root, ["tag", "v1.0.0"]);
+    await git(root, ["update-ref", "refs/muxpilot/targets/local/heads/managed-only", "HEAD"]);
 
     const probe = await new GitWorkspaceCoordinator().probe(root);
 
     expect(probe.localBranches).toContain("feature/local");
+    expect(probe.localBranches).not.toContain("managed-only");
     expect(probe.remoteBranches).toContainEqual({ remote: "origin", branch: "stage" });
     expect(probe.tags).toContain("v1.0.0");
   });
@@ -104,7 +106,7 @@ describe("GitWorkspaceCoordinator", () => {
     await expect(git(root, ["rev-parse", "refs/muxpilot/recovery/session_recover/g1"])).rejects.toBeTruthy();
   });
 
-  it("creates a managed target from a remote branch without creating a local branch", async () => {
+  it("creates a local target immediately from a remote branch without creating an implementation worktree", async () => {
     const root = await repository();
     const remote = await mkdtemp(join(tmpdir(), "muxpilot-git-remote-"));
     await git(remote, ["init", "--bare", "-q"]);
@@ -117,8 +119,29 @@ describe("GitWorkspaceCoordinator", () => {
     const workspace = await provision(coordinator, root, "session_remote", "remote-target", { targetRemote: "origin" });
     const advertised = (await git(root, ["ls-remote", "--heads", "origin", "refs/heads/remote-target"])).split(/\s+/)[0];
 
-    await expect(git(root, ["rev-parse", "refs/heads/remote-target"])).rejects.toBeTruthy();
+    expect(await git(root, ["rev-parse", "refs/heads/remote-target"])).toBe(advertised);
     expect(await git(root, ["rev-parse", workspace.targetRef])).toBe(advertised);
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(workspace.implementationRoot);
+    await expect(git(root, ["rev-parse", "muxpilot/change-task-session/g1"])).rejects.toBeTruthy();
+  });
+
+  it("creates a missing local target immediately from an explicit local source", async () => {
+    const root = await repository();
+    await git(root, ["branch", "stage"]);
+    const coordinator = new GitWorkspaceCoordinator();
+    const workspace = await coordinator.provision({
+      workspaceId: "session_new_target",
+      sessionName: "new-target",
+      entryPath: root,
+      worktreeRoot: join(root, "..", `${basename(root)}-worktrees`),
+      sessionRoot: join(root, "..", `${basename(root)}-sessions`),
+      targetBranch: "new-target",
+      targetSource: { kind: "local_branch", branch: "stage" }
+    });
+
+    expect(await git(root, ["rev-parse", "refs/heads/new-target"])).toBe(await git(root, ["rev-parse", "refs/heads/stage"]));
+    expect(await git(root, ["rev-parse", workspace.targetRef])).toBe(await git(root, ["rev-parse", "refs/heads/new-target"]));
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(workspace.implementationRoot);
   });
 
   it("rejects a stale candidate and lets it rebase onto the shared target", async () => {

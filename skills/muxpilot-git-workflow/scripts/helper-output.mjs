@@ -1,7 +1,7 @@
 export function formatWorkspaceStatus(workspace) {
   const reconciliation = workspace?.reconciliation;
   const finalization = workspace?.finalization;
-  const localContainsManaged = ["current", "updated"].includes(reconciliation?.localSync);
+  const localContainsManaged = ["current", "created", "updated"].includes(reconciliation?.localSync);
   const lines = [
     `WORKSPACE state=${workspace?.state ?? "unknown"} generation=${workspace?.generation ?? 0}`,
     `MANAGED ref=${reconciliation?.managedRef ?? "unknown"} sha=${workspace?.targetSha ?? reconciliation?.managedSha ?? "unknown"}`,

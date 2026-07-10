@@ -97,7 +97,7 @@ Supported actions include interrupt, input-mode switch, proposed-plan choice, re
 Managed Git session creation and integration:
 
 ```text
-entry directory + target/source -> fetch exact refs -> neutral tmux/Codex control directory
+entry directory + target/source -> fetch exact refs -> atomically create missing local target branch -> neutral tmux/Codex control directory
 change task -> reconcile managed + committed local + fetched/cached remote target -> private branch/worktree with manifest-aware dependency links -> commits -> agent finish capability -> reconcile again -> rebase onto current managed target ref
 five-minute structured ephemeral Codex review -> agent fixes findings, or halts for explicit user approval when review infrastructure fails
 reviewed head -> atomic compare-and-swap fast-forward of managed target -> synchronize clean local target checkout -> remove implementation worktree and private branch

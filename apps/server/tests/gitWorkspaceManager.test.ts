@@ -420,6 +420,37 @@ describe("agent finalization", () => {
     expect(await git(root, ["rev-parse", "refs/heads/target"])).toBe(localTarget);
     await db.close();
   });
+
+  it("recreates a missing local target for an active legacy session", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-legacy-local-target-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "new-target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations")
+    });
+    const workspace = await manager.provision({ sessionName: "legacy-active", entryPath: root, targetBranch: "new-target" });
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    await git(root, ["update-ref", "-d", "refs/heads/new-target"]);
+    await expect(git(root, ["rev-parse", "refs/heads/new-target"])).rejects.toBeTruthy();
+
+    await manager.recover();
+
+    expect(await git(root, ["rev-parse", "refs/heads/new-target"])).toBe(await git(root, ["rev-parse", workspace.targetRef!]));
+    expect((await manager.get(workspace.id))?.summary).toMatchObject({
+      worktreePath: active.worktreePath,
+      reconciliation: { localSync: "created" }
+    });
+    await db.close();
+  });
 });
 
 async function git(cwd: string, args: string[]): Promise<string> {
