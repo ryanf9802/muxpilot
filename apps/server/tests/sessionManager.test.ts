@@ -7,7 +7,7 @@ import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
-import { codexModelSettingsFromPaneText, SessionManager } from "../src/services/sessionManager.js";
+import { codexModelSettingsFromPaneText, managedCodexLaunchOptions, SessionManager } from "../src/services/sessionManager.js";
 import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
 
 describe("Codex pane model settings", () => {
@@ -20,6 +20,23 @@ describe("Codex pane model settings", () => {
 
   it("ignores model and effort text without Codex screen framing", () => {
     expect(codexModelSettingsFromPaneText("Try gpt-5.6-sol medium for this task.")).toBeNull();
+  });
+});
+
+describe("managed Codex launch instructions", () => {
+  it("presents isolation as default guardrails with narrow explicit user overrides", () => {
+    const options = managedCodexLaunchOptions({
+      id: "workspace-1",
+      targetBranch: "main",
+      sessionBranch: "muxpilot/workspace-1/g1",
+      worktreePath: "/tmp/worktree"
+    } as Parameters<typeof managedCodexLaunchOptions>[0], "token", "http://localhost/helper");
+
+    expect(options.isolatedWorkspace).toBe(true);
+    expect(options.developerInstructions).toContain("default guardrails, not hard rules");
+    expect(options.developerInstructions).toContain("An explicit user instruction may override the specific constraint or working location it names");
+    expect(options.developerInstructions).toContain("keep all unrelated guardrails");
+    expect(options.developerInstructions).toContain("Skip managed finalization only when an explicit user exception makes it inapplicable");
   });
 });
 

@@ -53,7 +53,11 @@ describe("installMuxpilotGitWorkflowSkill", () => {
 
     const installed = await installMuxpilotGitWorkflowSkill(home);
     expect(installed.status).toBe("current");
-    expect(await readFile(join(installed.path, "SKILL.md"), "utf8")).toContain("name: muxpilot-git-workflow");
+    const skill = await readFile(join(installed.path, "SKILL.md"), "utf8");
+    expect(skill).toContain("name: muxpilot-git-workflow");
+    expect(skill).toContain("guardrails, not hard rules");
+    expect(skill).toContain("explicit user exception makes that integration path inapplicable");
+    expect(skill).toContain("The user may explicitly request any of these operations");
 
     await writeFile(join(installed.path, "SKILL.md"), "modified");
     expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "outdated" });

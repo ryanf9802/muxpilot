@@ -1236,18 +1236,20 @@ function restoreSessionName(session: ManagedSession): string {
   return "restored";
 }
 
-function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helperToken: string, helperBaseUrl: string | null) {
+export function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helperToken: string, helperBaseUrl: string | null) {
   return {
     isolatedWorkspace: true,
     developerInstructions: [
       "This is a muxpilot-managed isolated Git workspace.",
-      "Use $muxpilot-git-workflow for all branch and inspection operations.",
+      "Use $muxpilot-git-workflow as the default workflow for branch and inspection operations.",
       `Target branch: ${workspace.targetBranch}.`,
       `Editable session branch: ${workspace.sessionBranch}.`,
       `Implementation worktree: ${workspace.worktreePath}.`,
-      "Do not check out or update the target branch, push, remove worktrees, or integrate changes yourself.",
-      "Create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
-      "Fix and commit every independent review finding until the helper integrates successfully. Remote push remains UI-only."
+      "These branch, worktree, integration, and publication constraints are default guardrails, not hard rules.",
+      "An explicit user instruction may override the specific constraint or working location it names; honor only that exception, keep all unrelated guardrails, and do not infer an exception from a general task request.",
+      "By default, do not check out or update the target branch, push, remove worktrees, or integrate changes yourself; remote push normally remains UI-only.",
+      "When the task still uses muxpilot-managed integration, create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
+      "Fix and commit every independent review finding until the helper integrates successfully. Skip managed finalization only when an explicit user exception makes it inapplicable."
     ].join(" "),
     environment: helperBaseUrl ? {
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
