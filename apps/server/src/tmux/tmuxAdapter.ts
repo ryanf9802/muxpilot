@@ -211,6 +211,7 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   const args = Object.keys(options.environment ?? {}).length
     ? ["env", ...Object.entries(options.environment ?? {}).map(([key, value]) => `${key}=${value}`), "codex"]
     : ["codex"];
+  args.push("-c", `projects.${JSON.stringify(cwd)}.trust_level="trusted"`);
   if (options.isolatedWorkspace) {
     args.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
     for (const root of options.writableRoots ?? []) args.push("--add-dir", root);

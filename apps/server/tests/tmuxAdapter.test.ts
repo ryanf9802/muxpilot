@@ -18,6 +18,8 @@ describe("codexCommandArgs", () => {
       "env",
       "MUXPILOT_GIT_WORKSPACE_ID=workspace-1",
       "codex",
+      "-c",
+      'projects."/tmp/control".trust_level="trusted"',
       "-C",
       "/tmp/control",
       "-s",
@@ -64,7 +66,7 @@ describe("tmuxPasteBufferArgs", () => {
 
 describe("tmuxNewCodexWindowArgs", () => {
   it("targets the shared session without requesting the active window index", () => {
-    const args = tmuxNewCodexWindowArgs("muxpilot", "/home/ryanf/workspace/teamweave", "make-warnings");
+    const args = tmuxNewCodexWindowArgs("muxpilot", "/home/dev/workspace/example", "make-warnings");
 
     expect(args).toEqual([
       "new-window",
@@ -76,13 +78,15 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-n",
       "make-warnings",
       "-c",
-      "/home/ryanf/workspace/teamweave",
-      "codex"
+      "/home/dev/workspace/example",
+      "codex",
+      "-c",
+      'projects."/home/dev/workspace/example".trust_level="trusted"'
     ]);
   });
 
   it("builds a Codex resume command for restorable sessions", () => {
-    const args = tmuxNewCodexResumeWindowArgs("muxpilot", "/home/ryanf/workspace/muxpilot", "old-work", "codex-session-id");
+    const args = tmuxNewCodexResumeWindowArgs("muxpilot", "/home/dev/workspace/example", "old-work", "codex-session-id");
 
     expect(args).toEqual([
       "new-window",
@@ -94,8 +98,10 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-n",
       "old-work",
       "-c",
-      "/home/ryanf/workspace/muxpilot",
+      "/home/dev/workspace/example",
       "codex",
+      "-c",
+      'projects."/home/dev/workspace/example".trust_level="trusted"',
       "resume",
       "codex-session-id"
     ]);

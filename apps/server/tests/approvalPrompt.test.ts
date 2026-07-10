@@ -104,11 +104,11 @@ describe("interactive Codex approval prompts", () => {
 
     expect(prompt).toMatchObject({
       kind: "command",
-      command: "node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+      command: "node /home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
       reason: "May I fetch the current official Codex manual to verify sandbox, skill, and resume guarantees for this architecture plan?",
       prefixRule: [
         "node",
-        "/home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
+        "/home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
       ]
     });
     expect(prompt?.options.map((option) => option.decision)).toEqual([
@@ -127,13 +127,13 @@ describe("interactive Codex approval prompts", () => {
       {
         decision: "approve_for_prefix",
         description:
-          "Yes, and don't ask again for commands that start with `node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs`"
+          "Yes, and don't ask again for commands that start with `node /home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs`"
       },
       { decision: "deny", description: "No, and tell Codex what to do differently" }
     ]);
     expect(prompt?.prefixRule).toEqual([
       "node",
-      "/home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
+      "/home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
     ]);
   });
 
@@ -224,7 +224,7 @@ function commandApprovalCapture(selected: number): string {
 
 function wrappedCommandApprovalCapture(): string {
   return [
-    "◦ Running node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+    "◦ Running node /home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
     "",
     "  Would you like to run the following command?",
     "",
@@ -233,10 +233,10 @@ function wrappedCommandApprovalCapture(): string {
     "  Reason: May I fetch the current official Codex manual to verify sandbox, skill, and resume guarantees for this",
     "  architecture plan?",
     "",
-    "  $ node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
+    "  $ node /home/dev/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs",
     "",
     "› 1. Yes, proceed (y)",
-    "  2. Yes, and don't ask again for commands that start with `node /home/ryanf/.codex/skills/.system/openai-docs/scripts/",
+    "  2. Yes, and don't ask again for commands that start with `node /home/dev/.codex/skills/.system/openai-docs/scripts/",
     "     fetch-codex-manual.mjs` (p)",
     "  3. No, and tell Codex what to do differently (esc)"
   ].join("\n");
