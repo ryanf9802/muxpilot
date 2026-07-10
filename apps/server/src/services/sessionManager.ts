@@ -1,5 +1,5 @@
 import { open, realpath, stat } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -88,7 +88,9 @@ export class SessionManager {
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
     private readonly codexProcessLookup: CodexProcessLookup | null = null,
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
-    private readonly gitHelperBaseUrl: string | null = null
+    private readonly gitHelperBaseUrl: string | null = null,
+    private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
+    private readonly gitIntegrationRoot: string | null = null
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -476,7 +478,7 @@ export class SessionManager {
       cwd,
       name,
       source.codexSessionId,
-      launchWorkspace ? managedCodexLaunchOptions(launchWorkspace, this.gitHelperBaseUrl) : {}
+      launchWorkspace ? managedCodexLaunchOptions(launchWorkspace, this.gitHelperBaseUrl, this.codexHome, this.gitIntegrationRoot) : {}
     );
     const session = await this.rebindRestoredSession(source, pane);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
@@ -803,7 +805,7 @@ export class SessionManager {
     const pane = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
-      managedCodexLaunchOptions(workspace, this.gitHelperBaseUrl)
+      managedCodexLaunchOptions(workspace, this.gitHelperBaseUrl, this.codexHome, this.gitIntegrationRoot)
     );
     const sessionId = tmuxPaneSessionId(pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
@@ -875,6 +877,16 @@ export class SessionManager {
       : result.status;
     await this.db.addAudit("agent", "git_finalize", workspaceId, auditResult, nowIso());
     return result;
+  }
+
+  async gitWorkspaceStatusByCapability(workspaceId: string, token: string): Promise<GitWorkspaceSummary> {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    return this.gitWorkspaces.statusWithToken(workspaceId, token);
+  }
+
+  async detachGitWorkspaceDependenciesByCapability(workspaceId: string, token: string, paths: string[] | null): Promise<GitWorkspaceSummary> {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    return this.gitWorkspaces.detachDependenciesWithToken(workspaceId, token, paths);
   }
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
@@ -1303,17 +1315,26 @@ function restoreSessionName(session: ManagedSession): string {
   return "restored";
 }
 
-export function managedCodexLaunchOptions(workspace: StoredGitWorkspace, helperBaseUrl: string | null) {
+export function managedCodexLaunchOptions(
+  workspace: StoredGitWorkspace,
+  helperBaseUrl: string | null,
+  codexHome: string | null = process.env.CODEX_HOME ?? null,
+  integrationRoot: string | null = null
+) {
   const summary = workspace.summary;
+  const helperDir = codexHome ? join(codexHome, "skills", "muxpilot-git-workflow", "scripts") : null;
   return {
     isolatedWorkspace: true,
-    writableRoots: [workspace.implementationRoot, workspace.commonGitDir].filter((value): value is string => Boolean(value)),
+    writableRoots: [workspace.implementationRoot, workspace.commonGitDir, integrationRoot].filter((value): value is string => Boolean(value)),
     developerInstructions: [
       "This is a muxpilot-managed Git session running from a neutral control directory.",
       "Use $muxpilot-git-workflow as the default workflow for branch and inspection operations.",
       `Repository entry path: ${summary.entryPath}.`,
       `Target branch: ${summary.targetBranch}.`,
       "No implementation worktree exists initially. For change or build tasks, announce the workflow action, run the skill's muxpilot-git-begin helper, and perform every repository write in the returned worktree path.",
+      helperDir
+        ? `Workflow helpers: begin with node ${JSON.stringify(join(helperDir, "muxpilot-git-begin.mjs"))}; inspect status with node ${JSON.stringify(join(helperDir, "muxpilot-git-status.mjs"))}; finalize with node ${JSON.stringify(join(helperDir, "muxpilot-git-finish.mjs"))}.`
+        : "Use the helper directory provided by the workflow environment.",
       "For answers, plans, reviews, and diagnosis, inspect the repository directly without creating a worktree. Resolve comparison revisions through the inspection helper, which returns an exact ref and commit without creating a checkout.",
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
       "User intent controls task scope: when the user names another branch, checkout, or Git operation, inspect the relevant checkout and follow the request there without requiring special override wording.",
@@ -1324,6 +1345,7 @@ export function managedCodexLaunchOptions(workspace: StoredGitWorkspace, helperB
       "Fix and commit every independent review finding until the helper integrates successfully. Skip managed finalization for work performed exclusively outside the managed integration path."
     ].join(" "),
     environment: helperBaseUrl ? {
+      ...(codexHome ? { CODEX_HOME: codexHome, MUXPILOT_GIT_HELPER_DIR: helperDir! } : {}),
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
       MUXPILOT_GIT_HELPER_TOKEN: workspace.helperToken,
       MUXPILOT_GIT_HELPER_URL: helperBaseUrl

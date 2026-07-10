@@ -75,7 +75,7 @@ const createSessionSchema = z.object({
 });
 const gitWorkspaceActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("refresh") }),
-  z.object({ type: z.literal("push") })
+  z.object({ type: z.literal("push"), expectedTargetSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) })
 ]);
 const queuedInputSchema = inputBodySchema;
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
@@ -298,6 +298,35 @@ export function registerRoutes(
     } catch (error) {
       if (error instanceof GitWorkspaceError) {
         return reply.code(409).send({ error: error.message, code: error.code, detail: error.causeText });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/internal/git-workspaces/:workspaceId/status", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
+    const { workspaceId } = request.params as { workspaceId: string };
+    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
+    try {
+      return { workspace: await manager.gitWorkspaceStatusByCapability(workspaceId, token) };
+    } catch (error) {
+      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
+        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/internal/git-workspaces/:workspaceId/dependencies/detach", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
+    const { workspaceId } = request.params as { workspaceId: string };
+    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
+    const body = z.object({ paths: z.array(z.string().min(1).max(2048)).max(100).nullable().optional() }).parse(request.body ?? {});
+    try {
+      return { workspace: await manager.detachGitWorkspaceDependenciesByCapability(workspaceId, token, body.paths ?? null) };
+    } catch (error) {
+      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
+        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
       }
       throw error;
     }

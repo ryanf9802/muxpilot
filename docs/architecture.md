@@ -98,13 +98,13 @@ Managed Git session creation and integration:
 
 ```text
 entry directory + target/source -> fetch exact refs -> neutral tmux/Codex control directory
-change task -> agent begin capability -> private branch/worktree -> commits -> agent finish capability -> rebase onto current managed target ref
+change task -> reconcile managed + committed local + fetched/cached remote target -> private branch/worktree with manifest-aware dependency links -> commits -> agent finish capability -> reconcile again -> rebase onto current managed target ref
 five-minute structured ephemeral Codex review -> agent fixes findings, or halts for explicit user approval when review infrastructure fails
-reviewed head -> atomic compare-and-swap fast-forward of managed target -> remove implementation worktree and private branch
-explicit inline Git-panel confirmation -> fetch remote target -> normal non-force push of managed target
+reviewed head -> atomic compare-and-swap fast-forward of managed target -> synchronize clean local target checkout -> remove implementation worktree and private branch
+explicit inline Git-panel confirmation of exact SHA -> fresh remote reconciliation -> renewed confirmation if target changed -> normal non-force push of managed target
 ```
 
-Each repository has one shared muxpilot-owned target ref per remote and branch. Final integration advances that ref atomically, so multiple sessions serialize without checking out or updating the developer's local branch. The entry checkout may remain on the named target with clean or dirty files; its HEAD, branch ref, index, and files are not changed. Remote publication remains a confirmed UI-only action and uses a normal non-force push.
+Each repository has one shared muxpilot-owned target ref per remote and branch. Final integration advances that ref atomically, so multiple sessions serialize. Muxpilot incorporates every committed managed, local-target, and remote-target head; clean divergence produces merge commits and conflicts are resolved in a durable target-scoped worktree. A clean local target checkout is fast-forwarded after integration. Dirty checkout files, index state, and branch position are never changed. Remote publication remains a confirmed UI-only action and uses a normal non-force push. Finalization is idempotent and exposes durable phase/status data so an interrupted helper can safely attach or report the prior result.
 
 Restorable session history:
 

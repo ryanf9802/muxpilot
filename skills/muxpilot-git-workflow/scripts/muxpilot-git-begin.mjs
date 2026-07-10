@@ -33,4 +33,5 @@ if (!workspace?.worktreePath || !workspace?.sessionBranch) {
 }
 const status = workspace.lastError ? "WORKTREE_RECOVERY_CONFLICT" : "WORKTREE_READY";
 process.stdout.write(`${status} ${workspace.worktreePath} branch=${workspace.sessionBranch} generation=${workspace.generation}\n`);
+for (const link of workspace.dependencyLinks ?? []) process.stdout.write(`DEPENDENCY_REUSED kind=${link.kind} path=${link.relativePath} source=${link.sourcePath}\n`);
 if (workspace.lastError) process.stdout.write(`${workspace.lastError}\nResolve the recovered changes in this worktree before finalizing.\n`);

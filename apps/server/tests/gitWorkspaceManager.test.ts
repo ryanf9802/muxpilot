@@ -105,6 +105,10 @@ describe("syncMuxpilotGitWorkflowSkill", () => {
     expect(skill).toContain("REVIEW_INCOMPLETE");
     expect(skill).toContain("--integrate-without-review");
     expect(skill).toContain("bypasses review regardless of whether review has not run, failed, or returned findings");
+    expect(skill).toContain("muxpilot-git-status.mjs");
+    expect(skill).toContain("MUXPILOT_GIT_HELPER_DIR");
+    expect(await readFile(join(installed.path, "scripts", "muxpilot-git-status.mjs"), "utf8")).toContain("formatWorkspaceStatus");
+    expect(await readFile(join(installed.path, "scripts", "muxpilot-git-deps.mjs"), "utf8")).toContain("dependencies/detach");
 
     await writeFile(join(installed.path, "SKILL.md"), "modified");
     expect(await muxpilotGitWorkflowSkillStatus(home)).toMatchObject({ status: "outdated" });
@@ -208,10 +212,56 @@ describe("agent finalization", () => {
     const integrated = await manager.finalizeWithToken(workspace.id, workspace.helperToken);
 
     expect(integrated).toMatchObject({ status: "integrated", generation: 1, reviewed: true, workspace: { state: "idle", worktreePath: null, sessionBranch: null } });
-    expect(await git(root, ["rev-parse", "target"])).not.toBe(completedHead);
+    expect(await git(root, ["rev-parse", "target"])).toBe(completedHead);
     expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
+    expect(integrated.workspace.reconciliation?.localSync).toBe("updated");
     expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath);
     await expect(git(root, ["rev-parse", `${active.sessionBranch}^{commit}`])).rejects.toBeTruthy();
+    await db.close();
+  });
+
+  it("attaches duplicate finish requests to one observable finalization", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-finalize-status-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    let releaseReview!: () => void;
+    const reviewGate = new Promise<void>((resolve) => { releaseReview = resolve; });
+    let reviewRuns = 0;
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations"),
+      reviewRunner: async () => {
+        reviewRuns += 1;
+        await reviewGate;
+        return { verdict: "pass", summary: "Clean", findings: [] };
+      }
+    });
+    const workspace = await manager.provision({ sessionName: "status", entryPath: root, targetBranch: "target" });
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    await writeFile(join(active.worktreePath!, "feature.txt"), "feature\n");
+    await git(active.worktreePath!, ["add", "feature.txt"]);
+    await git(active.worktreePath!, ["commit", "-qm", "feature"]);
+
+    const first = manager.finalizeWithToken(workspace.id, workspace.helperToken);
+    while (reviewRuns === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = manager.finalizeWithToken(workspace.id, workspace.helperToken);
+    expect(await manager.statusWithToken(workspace.id, workspace.helperToken)).toMatchObject({
+      finalization: { status: "reviewing" }
+    });
+    releaseReview();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult).toMatchObject({ status: "integrated" });
+    expect(secondResult).toMatchObject({ status: "integrated", targetSha: firstResult.targetSha });
+    expect(reviewRuns).toBe(1);
+    expect((await manager.statusWithToken(workspace.id, workspace.helperToken)).finalization).toMatchObject({ status: "completed" });
     await db.close();
   });
 
@@ -297,6 +347,45 @@ describe("agent finalization", () => {
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
       .resolves.toMatchObject({ status: "integrated", reviewed: false });
     expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
+    await db.close();
+  });
+
+  it("requires renewed confirmation when fresh push reconciliation changes the target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-push-confirmation-"));
+    const remote = await mkdtemp(join(tmpdir(), "muxpilot-push-confirmation-remote-"));
+    await git(remote, ["init", "--bare", "-q"]);
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "-M", "main"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-q", "origin", "main"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations")
+    });
+    const workspace = await manager.provision({ sessionName: "push", entryPath: root, targetBranch: "main", targetRemote: "origin" });
+    await manager.bind(workspace.id, "session-push");
+    await writeFile(join(root, "local.txt"), "local\n");
+    await git(root, ["add", "local.txt"]);
+    await git(root, ["commit", "-qm", "local target change"]);
+
+    const confirmation = await manager.action("session-push", { type: "push", expectedTargetSha: workspace.summary.targetSha });
+    expect(confirmation.lastError).toContain("confirm the refreshed target before pushing");
+    expect(confirmation.pushConfirmationRequired).toBe(true);
+    const refreshed = (await manager.get(workspace.id))!;
+    expect(refreshed.summary.targetSha).not.toBe(workspace.summary.targetSha);
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(workspace.summary.targetSha);
+
+    const pushed = await manager.action("session-push", { type: "push", expectedTargetSha: refreshed.summary.targetSha });
+    expect(pushed.remoteSha).toBe(pushed.targetSha);
+    expect(await git(remote, ["rev-parse", "refs/heads/main"])).toBe(pushed.targetSha);
     await db.close();
   });
 

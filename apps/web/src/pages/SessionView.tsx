@@ -1811,6 +1811,7 @@ export function GitWorkspacePanel({
         </div>
         <div className="git-panel-summary">
           <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
+          {workspace.reconciliation ? <div><span>Managed ref</span><strong title={workspace.reconciliation.managedRef}>{workspace.reconciliation.managedRef}</strong><small>{workspace.reconciliation.status} · local {workspace.reconciliation.localSync}</small></div> : null}
           {workspace.sessionBranch ? (
             <button
               type="button"
@@ -1831,10 +1832,13 @@ export function GitWorkspacePanel({
             {workspace.targetRemote ? <small>{workspace.remoteSha ? `${workspace.remoteAheadBy} ahead · ${workspace.remoteBehindBy} behind` : "Target branch not pushed"}</small> : null}
           </div>
         </div>
+        {workspace.finalization ? <p><strong>Finalization:</strong> {workspace.finalization.status} · <code>{shortSha(workspace.finalization.candidateSha)}</code></p> : null}
+        {workspace.reconciliation?.worktreePath ? <p><strong>Reconciliation worktree:</strong> <code>{workspace.reconciliation.worktreePath}</code></p> : null}
+        {(workspace.dependencyLinks?.length ?? 0) > 0 ? <p><strong>Shared dependencies:</strong> {workspace.dependencyLinks!.filter((link) => link.linked).map((link) => link.relativePath).join(", ") || "detached"}</p> : null}
         {workspace.lastError || error ? <p className="git-panel-error" role="alert">{error ?? workspace.lastError}</p> : null}
         <div className="git-panel-actions">
           <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "refresh" })}><RefreshCw className={busy === "refresh" ? "spin" : ""} size={16} /> Refresh</button>
-          {workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy) || workspace.remoteBehindBy > 0 || workspace.remoteSha === workspace.targetSha} onClick={() => onAction({ type: "push" })}><Upload size={16} /> Push to {workspace.targetRemote}</button> : null}
+          {workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy) || workspace.remoteSha === workspace.targetSha} onClick={() => onAction({ type: "push", expectedTargetSha: workspace.targetSha })}><Upload size={16} /> {workspace.pushConfirmationRequired ? "Confirm push" : "Push"} to {workspace.targetRemote}</button> : null}
         </div>
       </section>
     </div>

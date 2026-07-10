@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
@@ -146,6 +146,95 @@ describe("GitWorkspaceCoordinator", () => {
     const rebased = await coordinator.prepareIntegration(second);
     const integrated = await coordinator.integrate({ ...second, targetSha: rebased.targetSha }, rebased.targetSha, rebased.sessionHeadSha);
     expect(await git(root, ["rev-parse", second.targetRef])).toBe(integrated.targetSha);
+  });
+
+  it("reconciles divergent managed and local target commits and synchronizes a clean checkout", async () => {
+    const root = await repository();
+    await git(root, ["branch", "-M", "main"]);
+    const coordinator = new GitWorkspaceCoordinator();
+    const registered = await provision(coordinator, root, "session_reconcile", "main");
+    const materialized = await coordinator.materialize(coordinates(registered), registered.implementationRoot, "managed", 1);
+    const managed = coordinates(registered, materialized.sessionBranch, materialized.worktreePath);
+    await writeFile(join(materialized.worktreePath, "managed.txt"), "managed\n");
+    await git(materialized.worktreePath, ["add", "managed.txt"]);
+    await git(materialized.worktreePath, ["commit", "-qm", "managed change"]);
+    const prepared = await coordinator.prepareIntegration(managed);
+    await coordinator.integrate(managed, prepared.targetSha, prepared.sessionHeadSha);
+
+    await writeFile(join(root, "local.txt"), "local\n");
+    await git(root, ["add", "local.txt"]);
+    await git(root, ["commit", "-qm", "local change"]);
+    const localHead = await git(root, ["rev-parse", "HEAD"]);
+    const managedHead = await git(root, ["rev-parse", registered.targetRef]);
+    const integrationRoot = join(root, "..", `${basename(root)}-integrations`);
+
+    const reconciled = await coordinator.reconcileTarget(coordinates(registered), integrationRoot, true);
+    expect(reconciled.managedSha).not.toBe(localHead);
+    expect(await git(root, ["merge-base", "--is-ancestor", localHead, reconciled.managedSha]).then(() => true)).toBe(true);
+    expect(await git(root, ["merge-base", "--is-ancestor", managedHead, reconciled.managedSha]).then(() => true)).toBe(true);
+    expect(await coordinator.syncLocalTarget({ ...coordinates(registered), targetSha: reconciled.managedSha })).toBe("updated");
+    expect(await git(root, ["rev-parse", "main"])).toBe(reconciled.managedSha);
+    expect(await readFile(join(root, "managed.txt"), "utf8")).toBe("managed\n");
+    expect(await readFile(join(root, "local.txt"), "utf8")).toBe("local\n");
+  });
+
+  it("preserves a target reconciliation worktree for agent conflict resolution", async () => {
+    const root = await repository();
+    await git(root, ["branch", "-M", "main"]);
+    const coordinator = new GitWorkspaceCoordinator();
+    const registered = await provision(coordinator, root, "session_conflict", "main");
+    const materialized = await coordinator.materialize(coordinates(registered), registered.implementationRoot, "managed-conflict", 1);
+    const managed = coordinates(registered, materialized.sessionBranch, materialized.worktreePath);
+    await writeFile(join(materialized.worktreePath, "tracked.txt"), "managed\n");
+    await git(materialized.worktreePath, ["add", "tracked.txt"]);
+    await git(materialized.worktreePath, ["commit", "-qm", "managed change"]);
+    const prepared = await coordinator.prepareIntegration(managed);
+    await coordinator.integrate(managed, prepared.targetSha, prepared.sessionHeadSha);
+    const managedHead = await git(root, ["rev-parse", registered.targetRef]);
+
+    await writeFile(join(root, "tracked.txt"), "local\n");
+    await git(root, ["add", "tracked.txt"]);
+    await git(root, ["commit", "-qm", "local change"]);
+    const localHead = await git(root, ["rev-parse", "main"]);
+    const integrationRoot = join(root, "..", `${basename(root)}-conflict-integrations`);
+    let conflictPath = "";
+    try {
+      await coordinator.reconcileTarget(coordinates(registered), integrationRoot, true);
+      throw new Error("Expected reconciliation conflict");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "target_reconciliation_conflict" });
+      conflictPath = (error as GitWorkspaceError).causeText!.split("\n")[0]!;
+    }
+    expect(await readFile(join(conflictPath, "tracked.txt"), "utf8")).toContain("<<<<<<<");
+    await writeFile(join(conflictPath, "tracked.txt"), "managed and local\n");
+    await git(conflictPath, ["add", "tracked.txt"]);
+    await git(conflictPath, ["commit", "-qm", "resolve target reconciliation"]);
+
+    const reconciled = await coordinator.reconcileTarget(coordinates(registered), integrationRoot, true);
+    expect(await git(root, ["merge-base", "--is-ancestor", managedHead, reconciled.managedSha]).then(() => true)).toBe(true);
+    expect(await git(root, ["merge-base", "--is-ancestor", localHead, reconciled.managedSha]).then(() => true)).toBe(true);
+    await expect(lstat(conflictPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("reuses and detaches manifest-aware dependency installations", async () => {
+    const root = await repository();
+    await writeFile(join(root, "package.json"), "{}\n");
+    await git(root, ["add", "package.json"]);
+    await git(root, ["commit", "-qm", "add package"]);
+    await git(root, ["branch", "target"]);
+    await mkdir(join(root, "node_modules"));
+    await writeFile(join(root, "node_modules", "marker"), "shared\n");
+    const coordinator = new GitWorkspaceCoordinator();
+    const registered = await provision(coordinator, root, "session_dependencies", "target");
+    const materialized = await coordinator.materialize(coordinates(registered), registered.implementationRoot, "dependencies", 1);
+
+    const links = await coordinator.linkDependencies(root, materialized.worktreePath);
+    expect(links).toMatchObject([{ kind: "node", relativePath: "node_modules", linked: true }]);
+    expect((await lstat(join(materialized.worktreePath, "node_modules"))).isSymbolicLink()).toBe(true);
+    expect(await readlink(join(materialized.worktreePath, "node_modules"))).toBe(join(root, "node_modules"));
+    expect(await coordinator.detachDependencyLinks(materialized.worktreePath, ["node_modules"])).toEqual(["node_modules"]);
+    await expect(lstat(join(materialized.worktreePath, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(root, "node_modules", "marker"), "utf8")).toBe("shared\n");
   });
 
   it("requires an explicit cached override and reports fetch freshness", async () => {

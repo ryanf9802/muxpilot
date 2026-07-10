@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { isValidGitStyleName, type GitInspection, type GitRepositoryProbe, type GitRevisionSpec } from "@muxpilot/core";
+import { isValidGitStyleName, type GitDependencyLink, type GitInspection, type GitRepositoryProbe, type GitRevisionSpec } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 
@@ -71,6 +71,19 @@ export interface GitWorkspaceStatus {
 
 export interface GitIntegrationResult {
   targetSha: string;
+}
+
+export interface GitTargetReconciliationResult {
+  status: "current" | "cached" | "conflict";
+  managedRef: string;
+  managedSha: string;
+  localRef: string;
+  localSha: string | null;
+  remoteRef: string | null;
+  remoteSha: string | null;
+  remoteFreshness: "fresh" | "cached" | "local";
+  worktreePath: string | null;
+  localSync: "current" | "pending" | "updated" | "dirty" | "diverged" | "missing";
 }
 
 export interface GitMaterializationResult {
@@ -335,6 +348,63 @@ export class GitWorkspaceCoordinator {
     };
   }
 
+  async linkDependencies(repoRoot: string, worktreePath: string): Promise<GitDependencyLink[]> {
+    const manifestOutput = await this.run(repoRoot, [
+      "ls-files", "-z", "--",
+      "package.json", "**/package.json",
+      "pyproject.toml", "**/pyproject.toml",
+      "setup.py", "**/setup.py",
+      "requirements*.txt", "**/requirements*.txt",
+      "Pipfile", "**/Pipfile",
+      "composer.json", "**/composer.json",
+      "Gemfile", "**/Gemfile"
+    ]);
+    const manifests = manifestOutput.stdout.split("\0").filter(Boolean);
+    const candidates = new Map<string, GitDependencyLink["kind"]>();
+    for (const manifest of manifests) {
+      const directory = dirname(manifest) === "." ? "" : dirname(manifest);
+      const name = basename(manifest);
+      if (name === "package.json") candidates.set(join(directory, "node_modules"), "node");
+      else if (name === "composer.json") candidates.set(join(directory, "vendor"), "composer");
+      else if (name === "Gemfile") candidates.set(join(directory, "vendor", "bundle"), "bundler");
+      else {
+        for (const environment of [".venv", "venv"]) {
+          const relativePath = join(directory, environment);
+          if (await pathExists(join(repoRoot, relativePath))) candidates.set(relativePath, "python");
+        }
+      }
+    }
+    const links: GitDependencyLink[] = [];
+    for (const [relativePath, kind] of candidates) {
+      const sourcePath = join(repoRoot, relativePath);
+      const targetPath = join(worktreePath, relativePath);
+      if (!(await pathExists(sourcePath)) || await pathExists(targetPath)) continue;
+      if (await this.tryOutput(repoRoot, ["ls-files", "--", relativePath])) continue;
+      await mkdir(dirname(targetPath), { recursive: true });
+      await symlink(sourcePath, targetPath, "dir");
+      links.push({ kind, relativePath, sourcePath, linked: true });
+    }
+    return links;
+  }
+
+  async detachDependencyLinks(worktreePath: string, relativePaths: string[]): Promise<string[]> {
+    const detached: string[] = [];
+    for (const relativePath of relativePaths) {
+      if (!relativePath || relativePath.startsWith("/") || relativePath.split(/[\\/]+/).includes("..")) {
+        throw new GitWorkspaceError("Invalid dependency path", "invalid_dependency_path");
+      }
+      const targetPath = join(worktreePath, relativePath);
+      try {
+        if (!(await lstat(targetPath)).isSymbolicLink()) continue;
+        await unlink(targetPath);
+        detached.push(relativePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+    return detached;
+  }
+
   async deleteRef(repoRoot: string, ref: string): Promise<void> {
     await this.run(repoRoot, ["update-ref", "-d", ref]);
   }
@@ -526,6 +596,98 @@ export class GitWorkspaceCoordinator {
     return this.status({ ...active, targetSha: current.targetSha });
   }
 
+  async reconcileTarget(
+    workspace: GitWorkspaceCoordinates,
+    integrationRoot: string,
+    allowCachedRemote: boolean
+  ): Promise<GitTargetReconciliationResult> {
+    const managedSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
+    const localRef = localBranchRef(workspace.targetBranch);
+    const localSha = await this.tryResolveCommit(workspace.repoRoot, localRef);
+    const remote = workspace.targetRemote
+      ? await this.tryResolveRemoteBranch(workspace.repoRoot, workspace.targetRemote, workspace.targetBranch, allowCachedRemote)
+      : null;
+    const remoteRef = workspace.targetRemote ? `refs/heads/${workspace.targetBranch}` : null;
+    const worktreePath = resolve(
+      integrationRoot,
+      repoIdentity(workspace.commonGitDir),
+      branchKey(`${workspace.targetRemote ?? "local"}/${workspace.targetBranch}`)
+    );
+    const requiredHeads = [...new Set([managedSha, remote?.commitSha, localSha].filter((value): value is string => Boolean(value)))];
+
+    if (await pathExists(worktreePath)) {
+      const mergeHead = await this.tryResolveCommit(worktreePath, "MERGE_HEAD");
+      const dirty = await this.output(worktreePath, ["status", "--porcelain"]);
+      if (mergeHead || dirty) {
+        throw new GitWorkspaceError(
+          `Target reconciliation has conflicts in ${worktreePath}`,
+          "target_reconciliation_conflict",
+          worktreePath
+        );
+      }
+      const recoveredHead = await this.resolveCommit(worktreePath, "HEAD");
+      const containsAll = (await Promise.all(requiredHeads.map((head) => this.isAncestor(workspace.repoRoot, head, recoveredHead)))).every(Boolean);
+      if (containsAll) {
+        await this.run(workspace.repoRoot, ["update-ref", workspace.targetRef, recoveredHead, managedSha]);
+        await this.removeDetachedWorktree(workspace.repoRoot, worktreePath);
+        return this.reconciliationResult(workspace, recoveredHead, localSha, remoteRef, remote, null);
+      }
+      await this.removeDetachedWorktree(workspace.repoRoot, worktreePath);
+    }
+
+    const independent: string[] = [];
+    for (const head of requiredHeads) {
+      if ((await Promise.all(requiredHeads.filter((candidate) => candidate !== head).map((candidate) => this.isAncestor(workspace.repoRoot, head, candidate)))).some(Boolean)) continue;
+      independent.push(head);
+    }
+    if (independent.length === 1) {
+      const next = independent[0]!;
+      if (next !== managedSha) await this.run(workspace.repoRoot, ["update-ref", workspace.targetRef, next, managedSha]);
+      return this.reconciliationResult(workspace, next, localSha, remoteRef, remote, null);
+    }
+
+    await mkdir(dirname(worktreePath), { recursive: true });
+    await this.run(workspace.repoRoot, ["worktree", "add", "--detach", worktreePath, managedSha]);
+    try {
+      for (const head of [remote?.commitSha, localSha]) {
+        if (!head || await this.isAncestor(worktreePath, head, "HEAD")) continue;
+        await this.run(worktreePath, [
+          "-c", "user.name=Muxpilot",
+          "-c", "user.email=muxpilot@example.invalid",
+          "merge", "--no-edit", "--no-ff", head
+        ]);
+      }
+      const next = await this.resolveCommit(worktreePath, "HEAD");
+      await this.run(workspace.repoRoot, ["update-ref", workspace.targetRef, next, managedSha]);
+      await this.removeDetachedWorktree(workspace.repoRoot, worktreePath);
+      return this.reconciliationResult(workspace, next, localSha, remoteRef, remote, null);
+    } catch (error) {
+      throw new GitWorkspaceError(
+        `Target reconciliation stopped with conflicts in ${worktreePath}`,
+        "target_reconciliation_conflict",
+        `${worktreePath}\n${errorText(error)}`
+      );
+    }
+  }
+
+  async syncLocalTarget(workspace: GitWorkspaceCoordinates): Promise<GitTargetReconciliationResult["localSync"]> {
+    const managedSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
+    const localRef = localBranchRef(workspace.targetBranch);
+    const localSha = await this.tryResolveCommit(workspace.repoRoot, localRef);
+    if (!localSha) return "missing";
+    if (localSha === managedSha) return "current";
+    if (!(await this.isAncestor(workspace.repoRoot, localSha, managedSha))) return "diverged";
+    const worktrees = await this.output(workspace.repoRoot, ["worktree", "list", "--porcelain"]);
+    const checkoutPath = checkedOutBranchPath(worktrees, localRef);
+    if (checkoutPath) {
+      if (await this.output(checkoutPath, ["status", "--porcelain"])) return "dirty";
+      await this.run(checkoutPath, ["merge", "--ff-only", managedSha]);
+      return "updated";
+    }
+    await this.run(workspace.repoRoot, ["update-ref", localRef, managedSha, localSha]);
+    return "updated";
+  }
+
   async integrate(
     workspace: GitWorkspaceCoordinates,
     expectedTargetSha: string,
@@ -600,6 +762,33 @@ export class GitWorkspaceCoordinator {
       if (raced) return raced;
       throw new GitWorkspaceError(`Could not recover managed target '${workspace.targetBranch}'`, "target_create_failed");
     }
+  }
+
+  private reconciliationResult(
+    workspace: GitWorkspaceCoordinates,
+    managedSha: string,
+    localSha: string | null,
+    remoteRef: string | null,
+    remote: ResolvedRevision | null,
+    worktreePath: string | null
+  ): GitTargetReconciliationResult {
+    return {
+      status: remote?.freshness === "cached" ? "cached" : "current",
+      managedRef: workspace.targetRef,
+      managedSha,
+      localRef: localBranchRef(workspace.targetBranch),
+      localSha,
+      remoteRef,
+      remoteSha: remote?.commitSha ?? null,
+      remoteFreshness: remote?.freshness ?? "local",
+      worktreePath,
+      localSync: localSha === managedSha ? "current" : localSha ? "pending" : "missing"
+    };
+  }
+
+  private async removeDetachedWorktree(repoRoot: string, worktreePath: string): Promise<void> {
+    await this.run(repoRoot, ["worktree", "remove", worktreePath]);
+    await rm(worktreePath, { recursive: true, force: true }).catch(() => undefined);
   }
 
   async compareCounts(repoRoot: string, leftSha: string, rightSha: string): Promise<{ ahead: number; behind: number }> {
