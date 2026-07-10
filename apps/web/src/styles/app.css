@@ -223,6 +223,11 @@ select:focus-visible {
   font-weight: 800;
   line-height: 1;
   border: 1px solid transparent;
+  transition:
+    opacity 140ms ease,
+    filter 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
 }
 
 .session-stoplight-dot:hover:not(:disabled) {
@@ -232,9 +237,15 @@ select:focus-visible {
 
 .session-stoplight-dot[data-active] {
   box-shadow:
-    0 0 0 2px var(--color-background),
-    0 0 0 4px currentColor;
-  filter: brightness(1.1);
+    0 0 0 2px var(--color-bg),
+    0 0 0 4px var(--color-text);
+  filter: brightness(1.12);
+  transform: scale(1.08);
+}
+
+.session-stoplight[data-has-active] .session-stoplight-dot:not([data-active]) {
+  opacity: 0.42;
+  filter: saturate(0.5);
 }
 
 .session-stoplight-dot-red {

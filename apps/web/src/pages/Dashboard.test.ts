@@ -330,20 +330,11 @@ describe("repo collapsed state storage", () => {
 });
 
 describe("dashboard status filters", () => {
-  it("parses stoplight severity filters from URL search params", () => {
+  it("ignores legacy severity parameters and uses individual status filters", () => {
     expect(dashboardStatusFilterFromSearchParams(new URLSearchParams("statusSeverity=red"))).toEqual({
-      kind: "severity",
-      severity: "red",
-      selectValue: "severity:red"
+      kind: "all",
+      selectValue: ""
     });
-    expect(dashboardStatusFilterFromSearchParams(new URLSearchParams("statusSeverity=yellow"))).toEqual({
-      kind: "severity",
-      severity: "yellow",
-      selectValue: "severity:yellow"
-    });
-  });
-
-  it("rejects invalid severity filters and falls back to individual status filters", () => {
     expect(dashboardStatusFilterFromSearchParams(new URLSearchParams("statusSeverity=blue&status=waiting"))).toEqual({
       kind: "status",
       status: "waiting",

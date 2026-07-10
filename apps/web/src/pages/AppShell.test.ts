@@ -3,7 +3,6 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion } from "@muxpilot/core";
 import {
-  activeSessionStoplightSeverity,
   AppBrand,
   AppRecoveryPage,
   ConnectDeviceContent,
@@ -20,7 +19,8 @@ import {
   isPromptHistoryShortcut,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
-  nextSessionStoplightSearch,
+  nextSessionStoplightSeverity,
+  sessionStoplightSearch,
   parseGitRevisionInput,
   preferredGitRemote,
   sourceRevisionSuggestions,
@@ -548,6 +548,7 @@ describe("SessionStoplight", () => {
     expect(html).toContain('aria-pressed="false"');
     expect(html).toContain('aria-pressed="true"');
     expect(html).toContain('data-active="true"');
+    expect(html).toContain('data-has-active="true"');
     expect(html).toContain('<button type="button"');
     expect(html).toContain('aria-label="3 sessions need attention"');
     expect(html).toContain('aria-label="2 sessions working"');
@@ -566,34 +567,33 @@ describe("SessionStoplight", () => {
     expect(html).not.toContain(">0</button>");
     expect(html).toContain(">2</button>");
   });
+
+  it("keeps the selected counter available when its count falls to zero", () => {
+    const html = renderToStaticMarkup(createElement(SessionStoplight, { counts: { red: 0, yellow: 2, green: 0 }, activeSeverity: "red" }));
+
+    expect(html).toContain("session-stoplight-dot-red");
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain(">0</button>");
+  });
 });
 
-describe("nextSessionStoplightSearch", () => {
-  it("parses the active stoplight severity", () => {
-    expect(activeSessionStoplightSeverity("?statusSeverity=red")).toBe("red");
-    expect(activeSessionStoplightSeverity("?statusSeverity=blue")).toBeNull();
-    expect(activeSessionStoplightSeverity("")).toBeNull();
+describe("sessionStoplightSearch", () => {
+  it("removes persisted status filters without adding stoplight state to the URL", () => {
+    expect(sessionStoplightSearch("?status=waiting")).toBe("");
+    expect(sessionStoplightSearch("?statusSeverity=yellow")).toBe("");
   });
 
-  it("applies a stoplight severity when none is active", () => {
-    expect(nextSessionStoplightSearch("", "yellow")).toBe("?statusSeverity=yellow");
+  it("preserves unrelated query params", () => {
+    expect(sessionStoplightSearch("?q=session&statusSeverity=yellow")).toBe("?q=session");
+    expect(sessionStoplightSearch("?q=session")).toBe("?q=session");
   });
+});
 
-  it("clears the stoplight severity when the active severity is selected again", () => {
-    expect(nextSessionStoplightSearch("?statusSeverity=yellow", "yellow")).toBe("");
-  });
-
-  it("switches from the active severity to a different severity", () => {
-    expect(nextSessionStoplightSearch("?statusSeverity=yellow", "red")).toBe("?statusSeverity=red");
-  });
-
-  it("replaces individual status filters with the selected stoplight severity", () => {
-    expect(nextSessionStoplightSearch("?status=waiting", "red")).toBe("?statusSeverity=red");
-  });
-
-  it("preserves unrelated query params while toggling severity filters", () => {
-    expect(nextSessionStoplightSearch("?q=session&statusSeverity=yellow", "yellow")).toBe("?q=session");
-    expect(nextSessionStoplightSearch("?q=session", "green")).toBe("?q=session&statusSeverity=green");
+describe("nextSessionStoplightSeverity", () => {
+  it("selects, switches, and toggles off quick-view severities", () => {
+    expect(nextSessionStoplightSeverity(null, "yellow")).toBe("yellow");
+    expect(nextSessionStoplightSeverity("yellow", "red")).toBe("red");
+    expect(nextSessionStoplightSeverity("red", "red")).toBeNull();
   });
 });
 

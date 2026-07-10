@@ -29,7 +29,6 @@ import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
   countSessionStatuses,
-  isSessionStatusSeverity,
   shouldRefreshSessionsForEvent,
   type SessionStoplightCounts,
   type SessionStatusSeverity
@@ -94,6 +93,7 @@ export function AppShell() {
   const [sessionHistoryRestoreId, setSessionHistoryRestoreId] = useState<string | null>(null);
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
+  const [sessionStoplightSeverity, setSessionStoplightSeverity] = useState<SessionStatusSeverity | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
   const [notificationSettingsSubmenuOpen, setNotificationSettingsSubmenuOpen] = useState(false);
@@ -401,7 +401,11 @@ export function AppShell() {
   const showDirectorySuggestions = createSessionOpen && createSessionDirectoryFocused && visibleDirectorySuggestions.length > 0;
   const activeDirectorySuggestionId = showDirectorySuggestions ? sessionDirectorySuggestionOptionId(visibleDirectorySuggestions[createSessionDirectorySelectedIndex]?.path) : undefined;
   const contentClassName = location.pathname.startsWith("/sessions/") ? "content content-session" : "content";
-  const activeStoplightSeverity = activeSessionStoplightSeverity(location.search);
+  const activeStoplightSeverity = location.pathname === "/" ? sessionStoplightSeverity : null;
+
+  useEffect(() => {
+    if (location.pathname !== "/") setSessionStoplightSeverity(null);
+  }, [location.pathname]);
 
   useEffect(() => {
     if (!showDirectorySuggestions) {
@@ -745,7 +749,8 @@ export function AppShell() {
   }
 
   function selectSessionStoplightSeverity(severity: SessionStatusSeverity) {
-    navigate({ pathname: "/", search: nextSessionStoplightSearch(location.search, severity) });
+    setSessionStoplightSeverity((currentSeverity) => nextSessionStoplightSeverity(currentSeverity, severity));
+    navigate({ pathname: "/", search: sessionStoplightSearch(location.search) });
   }
 
   function openGlobalNotificationMenu(event: ReactMouseEvent<HTMLButtonElement>) {
@@ -871,6 +876,7 @@ export function AppShell() {
             {
               refreshSessionStoplight: loadSessions,
               syncSessionStoplight,
+              sessionStoplightSeverity,
               openCreateSession,
               registerCreateSessionCwdPrefill,
               registerPromptHistoryPrefill,
@@ -1099,6 +1105,7 @@ export { AppBrand };
 export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
   syncSessionStoplight: (session: ManagedSession) => void;
+  sessionStoplightSeverity: SessionStatusSeverity | null;
   openCreateSession: (cwd?: string) => void;
   registerCreateSessionCwdPrefill: (provider: () => string) => () => void;
   registerPromptHistoryPrefill: (provider: () => string) => () => void;
@@ -1500,21 +1507,19 @@ export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession
   return nextSessions;
 }
 
-export function nextSessionStoplightSearch(currentSearch: string, severity: SessionStatusSeverity): string {
+export function sessionStoplightSearch(currentSearch: string): string {
   const params = new URLSearchParams(currentSearch);
-  const currentSeverity = activeSessionStoplightSeverity(currentSearch);
   params.delete("status");
   params.delete("statusSeverity");
-  if (currentSeverity !== severity) {
-    params.set("statusSeverity", severity);
-  }
   const nextSearch = params.toString();
   return nextSearch ? `?${nextSearch}` : "";
 }
 
-export function activeSessionStoplightSeverity(search: string): SessionStatusSeverity | null {
-  const severity = new URLSearchParams(search).get("statusSeverity");
-  return isSessionStatusSeverity(severity) ? severity : null;
+export function nextSessionStoplightSeverity(
+  currentSeverity: SessionStatusSeverity | null,
+  selectedSeverity: SessionStatusSeverity
+): SessionStatusSeverity | null {
+  return currentSeverity === selectedSeverity ? null : selectedSeverity;
 }
 
 export function SessionStoplight({
@@ -1527,7 +1532,12 @@ export function SessionStoplight({
   onSelect?: (severity: SessionStatusSeverity) => void;
 }) {
   return (
-    <div className="session-stoplight" aria-label={sessionStoplightSummary(counts)} title={sessionStoplightSummary(counts)}>
+    <div
+      className="session-stoplight"
+      data-has-active={activeSeverity ? true : undefined}
+      aria-label={sessionStoplightSummary(counts)}
+      title={sessionStoplightSummary(counts)}
+    >
       <SessionStoplightDot
         severity="red"
         count={counts.red}
@@ -1566,7 +1576,7 @@ function SessionStoplightDot({
   active?: boolean;
   onSelect?: (severity: SessionStatusSeverity) => void;
 }) {
-  if (count === 0) return null;
+  if (count === 0 && !active) return null;
 
   return (
     <button

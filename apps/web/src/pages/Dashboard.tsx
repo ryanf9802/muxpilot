@@ -34,7 +34,6 @@ import { notificationRulesLabel, sessionNotificationRules } from "../utils/notif
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
-  isSessionStatusSeverity,
   sessionStatusSeverity,
   shouldRefreshSessionsForEvent,
   type SessionStatusSeverity
@@ -60,7 +59,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus } =
+  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
@@ -87,7 +86,14 @@ export function Dashboard() {
   const usageRequestIdRef = useRef(0);
   const codexUsageRequestIdRef = useRef(0);
   const optimisticallyRemovedSessionIdsRef = useRef(new Set<string>());
-  const statusFilter = useMemo(() => dashboardStatusFilterFromSearchParams(searchParams), [searchParams]);
+  const queryStatusFilter = useMemo(() => dashboardStatusFilterFromSearchParams(searchParams), [searchParams]);
+  const statusFilter = useMemo<DashboardStatusFilter>(
+    () =>
+      sessionStoplightSeverity
+        ? { kind: "severity", severity: sessionStoplightSeverity, selectValue: `severity:${sessionStoplightSeverity}` }
+        : queryStatusFilter,
+    [queryStatusFilter, sessionStoplightSeverity]
+  );
 
   const loadSessions = useCallback(async () => {
     const requestId = ++sessionRequestIdRef.current;
@@ -550,9 +556,6 @@ export function dashboardPreviewLines(
 }
 
 export function dashboardStatusFilterFromSearchParams(params: Pick<URLSearchParams, "get">): DashboardStatusFilter {
-  const severity = params.get("statusSeverity");
-  if (isSessionStatusSeverity(severity)) return { kind: "severity", severity, selectValue: `severity:${severity}` };
-
   const status = params.get("status");
   if (isDashboardStatus(status)) return { kind: "status", status, selectValue: status };
 
