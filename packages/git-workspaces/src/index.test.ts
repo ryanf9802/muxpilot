@@ -125,6 +125,39 @@ describe("GitWorkspaceCoordinator", () => {
     await expect(git(root, ["rev-parse", "muxpilot/change-task-session/g1"])).rejects.toBeTruthy();
   });
 
+  it("uses an existing local target without contacting the configured remote", async () => {
+    const root = await repository();
+    await git(root, ["branch", "local-target"]);
+    await git(root, ["remote", "add", "origin", join(root, "missing-remote")]);
+    const coordinator = new GitWorkspaceCoordinator();
+
+    const workspace = await provision(coordinator, root, "session_local", "local-target", { targetRemote: "origin" });
+    const localTarget = await git(root, ["rev-parse", "refs/heads/local-target"]);
+
+    expect(workspace.targetSha).toBe(localTarget);
+    expect(workspace.sourceFreshness).toBe("local");
+    expect(workspace.targetSource).toBeNull();
+    expect(await git(root, ["rev-parse", workspace.targetRef])).toBe(localTarget);
+  });
+
+  it("prefers an existing local target when its remote branch has diverged", async () => {
+    const root = await repository();
+    const remote = await mkdtemp(join(tmpdir(), "muxpilot-git-diverged-remote-"));
+    await git(remote, ["init", "--bare", "-q"]);
+    await git(root, ["remote", "add", "origin", remote]);
+    await git(root, ["push", "-q", "origin", "HEAD:refs/heads/target"]);
+    await writeFile(join(root, "local.txt"), "local\n");
+    await git(root, ["add", "local.txt"]);
+    await git(root, ["commit", "-qm", "local target"]);
+    await git(root, ["branch", "target"]);
+    const coordinator = new GitWorkspaceCoordinator();
+
+    const workspace = await provision(coordinator, root, "session_diverged", "target", { targetRemote: "origin" });
+
+    expect(workspace.targetSha).toBe(await git(root, ["rev-parse", "refs/heads/target"]));
+    expect(workspace.targetSha).not.toBe((await git(root, ["ls-remote", "--heads", "origin", "refs/heads/target"])).split(/\s+/)[0]);
+  });
+
   it("creates a missing local target immediately from an explicit local source", async () => {
     const root = await repository();
     await git(root, ["branch", "stage"]);

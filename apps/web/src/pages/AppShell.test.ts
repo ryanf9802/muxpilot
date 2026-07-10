@@ -73,7 +73,12 @@ describe("shell connection state", () => {
       tags: ["v1.0.0"]
     };
 
-    expect(targetBranchSuggestions(probe, "origin").map((item) => item.value)).toEqual(["local-only", "main", "muxpilot/feature", "stage"]);
+    expect(targetBranchSuggestions(probe, "origin")).toEqual([
+      { value: "local-only", label: "local-only", detail: "Local branch" },
+      { value: "main", label: "main", detail: "Local branch" },
+      { value: "muxpilot/feature", label: "muxpilot/feature", detail: "Local branch" },
+      { value: "stage", label: "stage", detail: "origin remote branch" }
+    ]);
     expect(sourceRevisionSuggestions(probe, "origin").map((item) => item.value)).toEqual([
       "origin/main",
       "origin/stage",

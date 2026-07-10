@@ -241,6 +241,11 @@ export class GitWorkspaceCoordinator {
     let targetExisted = Boolean(targetSha);
     let source: ResolvedRevision | null = null;
 
+    if (!targetSha) {
+      targetSha = await this.tryResolveCommit(repoRoot, localBranchRef(request.targetBranch));
+      targetExisted = Boolean(targetSha);
+    }
+
     if (!targetSha && targetRemote) {
       try {
         source = await this.tryResolveRemoteBranch(repoRoot, targetRemote, request.targetBranch, request.allowCachedRemote === true);
@@ -249,11 +254,6 @@ export class GitWorkspaceCoordinator {
       } catch (error) {
         if (!request.targetSource || revisionNeedsRemote(request.targetSource)) throw error;
       }
-    }
-
-    if (!targetSha) {
-      targetSha = await this.tryResolveCommit(repoRoot, localBranchRef(request.targetBranch));
-      targetExisted = Boolean(targetSha);
     }
 
     if (!targetSha) {
