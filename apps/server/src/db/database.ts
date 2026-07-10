@@ -32,6 +32,7 @@ import {
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
   normalizeSubagentNotificationText,
+  normalizeGitWorkspaceSummary,
   normalizeUserContextText,
   sessionHistoryIdentity
 } from "@muxpilot/core";
@@ -2050,7 +2051,7 @@ export class SyncAppDatabase {
       unreadCount: row.unread_count,
       pinned: session.pinned === true,
       archived: row.archived === 1,
-      gitWorkspace: session.gitWorkspace ?? null
+      gitWorkspace: normalizeGitWorkspaceSummary(session.gitWorkspace)
     };
   }
 
@@ -2425,6 +2426,7 @@ function sessionHistoryResultFromSession(
   matchedPrompts: SessionHistoryResult["matchedPrompts"],
   gitWorkspace: GitWorkspaceSummary | null
 ): SessionHistoryResult {
+  const workspace = normalizeGitWorkspaceSummary(gitWorkspace);
   return {
     sessionId: session.id,
     codexSessionId: session.codexSessionId ?? "",
@@ -2438,11 +2440,11 @@ function sessionHistoryResultFromSession(
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,
     matchedPrompts,
-    gitWorkspace: gitWorkspace ? {
-      id: gitWorkspace.id,
-      worktreePath: gitWorkspace.worktreePath,
-      sessionBranch: gitWorkspace.sessionBranch,
-      targetBranch: gitWorkspace.targetBranch
+    gitWorkspace: workspace ? {
+      id: workspace.id,
+      worktreePath: workspace.worktreePath,
+      sessionBranch: workspace.sessionBranch,
+      targetBranch: workspace.targetBranch
     } : null
   };
 }

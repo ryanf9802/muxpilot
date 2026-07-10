@@ -71,7 +71,7 @@ import type {
   TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, transcriptMessages } from "@muxpilot/core";
+import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
@@ -1480,6 +1480,7 @@ export function SessionView() {
   if (shouldShowSessionLoading(session, id, initialTranscriptSessionId, restoringSessionId)) return <SessionLoadingSkeleton />;
   const readySession = session;
   if (!readySession) return <SessionLoadingSkeleton />;
+  const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
 
   return (
     <section className={composerFocused ? "session-view session-view-composer-focused" : "session-view"}>
@@ -1509,7 +1510,7 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
-          {readySession.gitWorkspace ? (
+          {readyWorkspace ? (
             <button
               ref={gitWorkspaceButtonRef}
               className="git-workspace-chip"
@@ -1517,12 +1518,12 @@ export function SessionView() {
               onClick={() => setGitPanelOpen(true)}
               aria-haspopup="dialog"
               aria-expanded={gitPanelOpen}
-              aria-label={`Open Git workspace controls for ${readySession.gitWorkspace.targetBranch}`}
-              title={`Git workspace: ${readySession.gitWorkspace.targetBranch}`}
+              aria-label={`Open Git workspace controls for ${readyWorkspace.targetBranch}`}
+              title={`Git workspace: ${readyWorkspace.targetBranch}`}
             >
               <GitBranch size={14} />
-              <span>{readySession.gitWorkspace.targetBranch}</span>
-              <i data-state={readySession.gitWorkspace.state}>{gitWorkspaceChipState(readySession.gitWorkspace)}</i>
+              <span>{readyWorkspace.targetBranch}</span>
+              <i data-state={readyWorkspace.state}>{gitWorkspaceChipState(readyWorkspace)}</i>
             </button>
           ) : null}
           <button
@@ -1737,9 +1738,9 @@ export function SessionView() {
           </form>
         </div>
       )}
-      {gitPanelOpen && readySession.gitWorkspace ? (
+      {gitPanelOpen && readyWorkspace ? (
         <GitWorkspacePanel
-          workspace={readySession.gitWorkspace}
+          workspace={readyWorkspace}
           onClose={closeGitPanel}
         />
       ) : null}
@@ -1754,12 +1755,14 @@ export function GitWorkspacePanel({
   workspace: GitWorkspaceSummary;
   onClose: () => void;
 }) {
+  const current = normalizeGitWorkspaceSummary(workspace);
   const [worktreeCopied, setWorktreeCopied] = useState(false);
+  if (!current) return null;
 
   async function copyWorktreeName() {
-    if (!workspace.sessionBranch) return;
+    if (!current?.sessionBranch) return;
     try {
-      await copyText(workspace.sessionBranch);
+      await copyText(current.sessionBranch);
       setWorktreeCopied(true);
       window.setTimeout(() => setWorktreeCopied(false), 1600);
     } catch {
@@ -1777,33 +1780,34 @@ export function GitWorkspacePanel({
           </button>
         </div>
         <div className="git-panel-summary">
-          <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
-          {workspace.sessionBranch ? (
+          <div><span>Target branch</span><strong>{current.targetBranch}</strong>{current.targetSha ? <code>{shortSha(current.targetSha)}</code> : null}</div>
+          {current.sessionBranch ? (
             <button
               type="button"
               className="git-worktree-copy"
               data-copied={worktreeCopied || undefined}
               onClick={() => void copyWorktreeName()}
-              aria-label={worktreeCopied ? `Copied worktree name ${workspace.sessionBranch}` : `Copy worktree name ${workspace.sessionBranch}`}
-              title={`Copy ${workspace.sessionBranch}`}
+              aria-label={worktreeCopied ? `Copied worktree name ${current.sessionBranch}` : `Copy worktree name ${current.sessionBranch}`}
+              title={`Copy ${current.sessionBranch}`}
             >
               <span>Worktree</span>
-              <strong title={workspace.worktreePath ?? undefined}>{workspace.sessionBranch}</strong>
+              <strong title={current.worktreePath ?? undefined}>{current.sessionBranch}</strong>
               <small aria-live="polite">{worktreeCopied ? <><Check size={14} aria-hidden="true" /> Copied</> : <><Copy size={14} aria-hidden="true" /> Copy worktree name</>}</small>
             </button>
           ) : <div><span>Worktree</span><strong>No implementation worktree</strong></div>}
-          <div><span>State</span><strong>{gitWorkspaceChipState(workspace)}</strong><small>{workspace.updatedAt}</small></div>
+          <div><span>State</span><strong>{gitWorkspaceChipState(current)}</strong>{current.updatedAt ? <small>{current.updatedAt}</small> : null}</div>
         </div>
-        {workspace.lastError ? <p className="git-panel-error" role="alert">{workspace.lastError}</p> : null}
+        {current.lastError ? <p className="git-panel-error" role="alert">{current.lastError}</p> : null}
       </section>
     </div>
   );
 }
 
 export function gitWorkspaceChipState(workspace: GitWorkspaceSummary): string {
-  if (workspace.state === "idle") return "idle";
-  if (workspace.state === "worktree") return "isolated";
-  return workspace.state;
+  const current = normalizeGitWorkspaceSummary(workspace);
+  if (!current || current.state === "idle") return "idle";
+  if (current.state === "worktree") return "isolated";
+  return current.state;
 }
 
 function shortSha(value: string): string {
@@ -2350,8 +2354,9 @@ export function SkillTextArea({
 }
 
 export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace"> }) {
-  const branch = session.gitWorkspace?.targetBranch ?? session.repo.branch ?? "no branch";
-  const dirty = session.gitWorkspace?.state === "worktree" || session.repo.dirty;
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+  const branch = workspace?.targetBranch ?? session.repo.branch ?? "no branch";
+  const dirty = workspace?.state === "worktree" || session.repo.dirty;
   const dirtyLabel = dirty ? " · dirty" : "";
   const title = `${session.repo.name} · ${branch}${dirtyLabel}`;
 

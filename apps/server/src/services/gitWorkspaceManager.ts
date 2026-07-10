@@ -89,6 +89,7 @@ export class GitWorkspaceManager {
     const dependencyLinks = await discoverDependencies(probe.repoRoot);
     const createdAt = nowIso();
     const summary: GitWorkspaceSummary = {
+      workflowVersion: 1,
       id,
       state: "idle",
       entryPath: await realpath(request.entryPath),
@@ -139,24 +140,50 @@ export class GitWorkspaceManager {
   }
 
   async refresh(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
-    let summary = workspace.summary;
+    const previous = workspace.summary as GitWorkspaceSummary & { workflowVersion?: number };
+    const legacy = previous.workflowVersion !== 1;
+    let observed: StatusFile | null = null;
     try {
       const raw = await readFile(statusPath(workspace), "utf8");
       const status = JSON.parse(raw) as Partial<StatusFile>;
-      if (validStatus(status, summary.targetBranch)) {
-        summary = { ...summary, ...status };
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        summary = { ...summary, lastError: "Could not read the local Git workflow status", updatedAt: nowIso() };
-      }
+      if (validStatus(status, previous.targetBranch)) observed = status;
+    } catch {
+      // Status is observational. Missing, malformed, or unreadable files fall
+      // back to local Git/worktree state instead of becoming UI errors.
     }
-    const targetSha = await git(summary.repoRoot, ["rev-parse", `refs/heads/${summary.targetBranch}^{commit}`]).catch(() => summary.targetSha);
-    const next = { ...workspace, summary: { ...summary, targetSha } };
+    const survivingWorktree = !observed && await activeWorktree(previous);
+    const targetSha = await git(previous.repoRoot, ["rev-parse", `refs/heads/${previous.targetBranch}^{commit}`]).catch(() => null);
+    const missingCurrentTarget = !targetSha && !legacy;
+    const state = missingCurrentTarget
+      ? "failed"
+      : observed?.state ?? (survivingWorktree ? "worktree" : "idle");
+    const summary: GitWorkspaceSummary = {
+      workflowVersion: 1,
+      id: previous.id,
+      state,
+      entryPath: previous.entryPath,
+      repoRoot: previous.repoRoot,
+      targetBranch: previous.targetBranch,
+      targetSha: targetSha ?? previous.targetSha ?? "",
+      sessionBranch: observed?.sessionBranch ?? (survivingWorktree ? previous.sessionBranch : null),
+      worktreePath: observed?.worktreePath ?? (survivingWorktree ? previous.worktreePath : null),
+      lastError: missingCurrentTarget
+        ? `Local target branch '${previous.targetBranch}' no longer exists`
+        : observed && ["blocked", "failed"].includes(observed.state) ? observed.lastError : null,
+      updatedAt: observed?.updatedAt ?? (legacy ? "" : workspace.updatedAt),
+      dependencyLinks: Array.isArray(previous.dependencyLinks) ? previous.dependencyLinks : []
+    };
+    const next = { ...workspace, summary };
     if (JSON.stringify(next.summary) !== JSON.stringify(workspace.summary)) await this.db.upsertGitWorkspace(next, nowIso());
     return next;
   }
 
+}
+
+async function activeWorktree(summary: GitWorkspaceSummary & { workflowVersion?: number }): Promise<boolean> {
+  if (!summary.worktreePath || !summary.sessionBranch || !(await isDirectory(summary.worktreePath))) return false;
+  const branch = await git(summary.worktreePath, ["branch", "--show-current"]).catch(() => "");
+  return branch === summary.sessionBranch;
 }
 
 export class GitWorkspaceError extends Error {

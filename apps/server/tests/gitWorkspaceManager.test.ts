@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -35,6 +35,45 @@ describe("lightweight Git workspace metadata", () => {
     const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
     await expect(manager.provision({ sessionName: "task", entryPath: root, targetBranch: "missing" }))
       .rejects.toThrow("Local target branch 'missing' does not exist");
+    db.close();
+  });
+
+  it("converts legacy errors to observed local worktree state", async () => {
+    const root = await repository();
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "main" });
+    const worktree = join(root, "legacy-worktree");
+    await git(root, ["worktree", "add", "-b", "legacy-task", worktree, "main"]);
+    const legacy = {
+      ...workspace,
+      summary: {
+        ...workspace.summary,
+        workflowVersion: undefined,
+        state: "error",
+        sessionBranch: "legacy-task",
+        worktreePath: worktree,
+        lastError: "Obsolete finalization error"
+      }
+    } as typeof workspace;
+
+    const refreshed = await manager.refresh(legacy);
+    expect(refreshed.summary).toMatchObject({ workflowVersion: 1, state: "worktree", sessionBranch: "legacy-task", lastError: null });
+    db.close();
+  });
+
+  it("treats malformed status as neutral and reports a deleted current target", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "feature" });
+    await mkdir(workspace.controlPath!, { recursive: true });
+    await writeFile(join(workspace.controlPath!, "git-workflow-status.json"), "not json");
+    expect((await manager.refresh(workspace)).summary).toMatchObject({ state: "idle", lastError: null });
+
+    await git(root, ["branch", "-D", "feature"]);
+    expect((await manager.refresh(workspace)).summary).toMatchObject({ state: "failed", lastError: "Local target branch 'feature' no longer exists" });
     db.close();
   });
 });

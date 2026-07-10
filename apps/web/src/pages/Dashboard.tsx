@@ -21,7 +21,7 @@ import type {
   SessionEvent,
   SessionStatus
 } from "@muxpilot/core";
-import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, eventSocket, notificationDeviceId } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { StatusPill } from "../components/StatusPill.js";
@@ -626,6 +626,7 @@ export function SessionCard({
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(session, onOpenMenu);
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const cardClassName = `session-card${session.pinned ? " session-card-pinned" : ""}${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function handleClick() {
@@ -644,7 +645,7 @@ export function SessionCard({
         <div className="card-head">
           <div>
             <h2>{displayName}</h2>
-            {session.gitWorkspace ? <p>{session.gitWorkspace.targetBranch} · {session.gitWorkspace.state.replaceAll("_", " ")}</p> : null}
+            {workspace ? <p>{workspace.targetBranch} · {workspace.state === "worktree" ? "isolated" : workspace.state}</p> : null}
           </div>
           <span className="session-card-head-actions">
             {session.pinned ? (
@@ -764,23 +765,24 @@ export function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGrou
   const groupByKey = new Map<string, RepoSessionGroup>();
 
   for (const session of sessions) {
-    const repoRoot = session.gitWorkspace?.repoRoot ?? session.repo.root;
+    const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+    const repoRoot = workspace?.repoRoot || session.repo.root;
     const key = repoRoot ?? `name:${session.repo.name}`;
     let group = groupByKey.get(key);
     if (!group) {
       group = {
         key,
-        repoName: session.gitWorkspace ? dashboardPathBaseName(session.gitWorkspace.repoRoot) : session.repo.name,
+        repoName: workspace?.repoRoot ? dashboardPathBaseName(workspace.repoRoot) : session.repo.name,
         repoRoot,
-        branch: session.gitWorkspace?.targetBranch ?? session.repo.branch,
-        dirty: session.gitWorkspace?.state === "worktree" || session.repo.dirty,
+        branch: workspace?.targetBranch ?? session.repo.branch,
+        dirty: workspace?.state === "worktree" || session.repo.dirty,
         sessions: []
       };
       groupByKey.set(key, group);
       groups.push(group);
     }
 
-    group.dirty = group.dirty || session.gitWorkspace?.state === "worktree" || session.repo.dirty;
+    group.dirty = group.dirty || workspace?.state === "worktree" || session.repo.dirty;
     group.sessions.push(session);
   }
 

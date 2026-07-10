@@ -112,6 +112,25 @@ describe("SessionCard", () => {
     expect(html).not.toContain("dirty");
   });
 
+  it("renders obsolete workspace errors as a neutral target state", () => {
+    const session = testSession({
+      id: "legacy",
+      paneId: "%119",
+      windowName: "legacy",
+      gitWorkspace: {
+        id: "legacy-workspace",
+        state: "error",
+        targetBranch: "main",
+        lastError: "Obsolete finalization error"
+      } as unknown as ManagedSession["gitWorkspace"]
+    });
+
+    const html = renderSessionCard(session);
+    expect(html).toContain("main · idle");
+    expect(html).not.toContain("error");
+    expect(html).not.toContain("Obsolete finalization error");
+  });
+
   it("renders session notification state without global-only rules", () => {
     const session = testSession({ id: "a", paneId: "%111", windowName: "notify" });
 
@@ -472,7 +491,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "pinned">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "pinned" | "gitWorkspace">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -508,6 +527,7 @@ function testSession(
     transcriptSize: 0,
     unreadCount: 0,
     pinned: input.pinned ?? false,
-    archived: false
+    archived: false,
+    gitWorkspace: input.gitWorkspace ?? null
   };
 }

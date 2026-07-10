@@ -1306,6 +1306,7 @@ function testGitWorkspace(sessionId: string, workspaceId = "workspace-rekey"): S
     createdAt: timestamp,
     updatedAt: timestamp,
     summary: {
+      workflowVersion: 1,
       id: workspaceId,
       state: "worktree",
       entryPath: "/repo",

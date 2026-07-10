@@ -675,6 +675,22 @@ describe("GitWorkspacePanel", () => {
     expect(html).toContain("Target checkout is dirty");
     expect(html).toContain("blocked");
   });
+
+  it("renders legacy workspace errors as a neutral target state", () => {
+    const legacy = {
+      ...gitWorkspace(),
+      workflowVersion: undefined,
+      state: "error",
+      lastError: "Revision HEAD does not resolve"
+    } as unknown as GitWorkspaceSummary;
+    const html = renderToStaticMarkup(createElement(GitWorkspacePanel, { workspace: legacy, onClose: () => undefined }));
+
+    expect(html).toContain("main");
+    expect(html).toContain("idle");
+    expect(html).toContain("No implementation worktree");
+    expect(html).not.toContain("Revision HEAD does not resolve");
+    expect(html).not.toContain('role="alert"');
+  });
 });
 
 describe("appendUniqueMessages", () => {
@@ -2021,6 +2037,7 @@ function message(
 
 function gitWorkspace(overrides: Partial<GitWorkspaceSummary> = {}): GitWorkspaceSummary {
   return {
+    workflowVersion: 1,
     id: "workspace-a",
     state: "worktree",
     entryPath: "/workspace/muxpilot",

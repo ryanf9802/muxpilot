@@ -105,6 +105,7 @@ export interface GitDependencyLink {
 export type GitWorkspaceState = "idle" | "worktree" | "integrating" | "blocked" | "failed";
 
 export interface GitWorkspaceSummary {
+  workflowVersion: 1;
   id: string;
   state: GitWorkspaceState;
   entryPath: string;
@@ -116,6 +117,36 @@ export interface GitWorkspaceSummary {
   lastError: string | null;
   updatedAt: string;
   dependencyLinks: GitDependencyLink[];
+}
+
+const GIT_WORKSPACE_STATES: readonly GitWorkspaceState[] = ["idle", "worktree", "integrating", "blocked", "failed"];
+
+/** Converts persisted or historical workspace data into the UI-safe local workflow shape. */
+export function normalizeGitWorkspaceSummary(value: unknown): GitWorkspaceSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const workspace = value as Record<string, unknown>;
+  if (typeof workspace.id !== "string" || typeof workspace.targetBranch !== "string") return null;
+  const current = workspace.workflowVersion === 1;
+  const state = current && GIT_WORKSPACE_STATES.includes(workspace.state as GitWorkspaceState)
+    ? workspace.state as GitWorkspaceState
+    : "idle";
+  const errorState = state === "blocked" || state === "failed";
+  return {
+    workflowVersion: 1,
+    id: workspace.id,
+    state,
+    entryPath: typeof workspace.entryPath === "string" ? workspace.entryPath : "",
+    repoRoot: typeof workspace.repoRoot === "string" ? workspace.repoRoot : "",
+    targetBranch: workspace.targetBranch,
+    targetSha: typeof workspace.targetSha === "string" ? workspace.targetSha : "",
+    sessionBranch: current && typeof workspace.sessionBranch === "string" ? workspace.sessionBranch : null,
+    worktreePath: current && typeof workspace.worktreePath === "string" ? workspace.worktreePath : null,
+    lastError: current && errorState && typeof workspace.lastError === "string" ? workspace.lastError : null,
+    updatedAt: current && typeof workspace.updatedAt === "string" ? workspace.updatedAt : "",
+    dependencyLinks: current && Array.isArray(workspace.dependencyLinks)
+      ? workspace.dependencyLinks as GitDependencyLink[]
+      : []
+  };
 }
 
 
