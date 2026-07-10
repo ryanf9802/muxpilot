@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   ChatMessage,
   CollaborationMode,
+  GitWorkspaceSummary,
   NotificationDeliveryChannel,
   NotificationDeliverySettings,
   ManagedSession,
@@ -156,6 +157,23 @@ interface SessionRepositoryRow {
   updated_at: string;
 }
 
+interface GitWorkspaceRow {
+  id: string;
+  session_id: string | null;
+  data_json: string;
+  updated_at: string;
+}
+
+export interface StoredGitWorkspace {
+  id: string;
+  sessionId: string | null;
+  commonGitDir: string;
+  helperToken: string;
+  summary: GitWorkspaceSummary;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type TouchedSessionRepository = Omit<SessionDirectorySuggestion, "source">;
 
 export interface PushVapidKeys {
@@ -285,6 +303,26 @@ export class AppDatabase {
 
   getSession(sessionId: string): Promise<ManagedSession | null> {
     return this.call("getSession", sessionId) as Promise<ManagedSession | null>;
+  }
+
+  upsertGitWorkspace(workspace: StoredGitWorkspace, updatedAt: string): Promise<void> {
+    return this.call("upsertGitWorkspace", workspace, updatedAt) as Promise<void>;
+  }
+
+  bindGitWorkspace(workspaceId: string, sessionId: string, updatedAt: string): Promise<void> {
+    return this.call("bindGitWorkspace", workspaceId, sessionId, updatedAt) as Promise<void>;
+  }
+
+  getGitWorkspace(workspaceId: string): Promise<StoredGitWorkspace | null> {
+    return this.call("getGitWorkspace", workspaceId) as Promise<StoredGitWorkspace | null>;
+  }
+
+  getGitWorkspaceBySession(sessionId: string): Promise<StoredGitWorkspace | null> {
+    return this.call("getGitWorkspaceBySession", sessionId) as Promise<StoredGitWorkspace | null>;
+  }
+
+  listGitWorkspaces(): Promise<StoredGitWorkspace[]> {
+    return this.call("listGitWorkspaces") as Promise<StoredGitWorkspace[]>;
   }
 
   upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): Promise<void> {
@@ -669,6 +707,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE notification_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE notification_device_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE events SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE git_workspaces SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
   }
 
   setSessionStatus(sessionId: string, status: SessionStatus, updatedAt: string): void {
@@ -747,6 +786,39 @@ export class SyncAppDatabase {
     return this.hydrateSession(row);
   }
 
+  upsertGitWorkspace(workspace: StoredGitWorkspace, updatedAt: string): void {
+    const next = { ...workspace, updatedAt };
+    this.db
+      .prepare(
+        `INSERT INTO git_workspaces (id, session_id, data_json, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           session_id=excluded.session_id,
+           data_json=excluded.data_json,
+           updated_at=excluded.updated_at`
+      )
+      .run(next.id, next.sessionId, JSON.stringify(next), updatedAt);
+  }
+
+  bindGitWorkspace(workspaceId: string, sessionId: string, updatedAt: string): void {
+    const workspace = this.getGitWorkspace(workspaceId);
+    if (workspace) this.upsertGitWorkspace({ ...workspace, sessionId }, updatedAt);
+  }
+
+  getGitWorkspace(workspaceId: string): StoredGitWorkspace | null {
+    const row = this.db.prepare("SELECT * FROM git_workspaces WHERE id = ?").get(workspaceId) as GitWorkspaceRow | undefined;
+    return row ? hydrateGitWorkspace(row) : null;
+  }
+
+  getGitWorkspaceBySession(sessionId: string): StoredGitWorkspace | null {
+    const row = this.db.prepare("SELECT * FROM git_workspaces WHERE session_id = ?").get(sessionId) as GitWorkspaceRow | undefined;
+    return row ? hydrateGitWorkspace(row) : null;
+  }
+
+  listGitWorkspaces(): StoredGitWorkspace[] {
+    return (this.db.prepare("SELECT * FROM git_workspaces ORDER BY updated_at DESC").all() as unknown as GitWorkspaceRow[]).map(hydrateGitWorkspace);
+  }
+
   upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): void {
     this.db
       .prepare(
@@ -802,7 +874,8 @@ export class SyncAppDatabase {
       .prepare(
         `INSERT OR IGNORE INTO messages
           (id, session_id, sequence, type, role, timestamp, text, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (SELECT 1 FROM managed_sessions WHERE id = ?)`
       )
       .run(
         message.id,
@@ -812,7 +885,8 @@ export class SyncAppDatabase {
         message.role,
         message.timestamp,
         message.text,
-        JSON.stringify(message.payload)
+        JSON.stringify(message.payload),
+        message.sessionId
       );
 
     if (Number(result.changes) > 0) {
@@ -1961,7 +2035,8 @@ export class SyncAppDatabase {
       transcriptSize: this.messageCount(row.id),
       unreadCount: row.unread_count,
       pinned: session.pinned === true,
-      archived: row.archived === 1
+      archived: row.archived === 1,
+      gitWorkspace: session.gitWorkspace ?? null
     };
   }
 
@@ -2158,6 +2233,13 @@ export class SyncAppDatabase {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS git_workspaces (
+        id TEXT PRIMARY KEY,
+        session_id TEXT UNIQUE,
+        data_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence);
       CREATE INDEX IF NOT EXISTS idx_messages_role_timestamp ON messages(role, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_activity ON managed_sessions(last_activity_at);
@@ -2168,6 +2250,7 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_notification_device_rules_session ON notification_device_rules(session_id);
       CREATE INDEX IF NOT EXISTS idx_notification_push_subscriptions_endpoint ON notification_push_subscriptions(endpoint);
       CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
+      CREATE INDEX IF NOT EXISTS idx_git_workspaces_session ON git_workspaces(session_id);
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.backfillPromptIndexIfNeeded();
@@ -2220,6 +2303,11 @@ export class SyncAppDatabase {
     if (rows.some((row) => row.name === column)) return;
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+function hydrateGitWorkspace(row: GitWorkspaceRow): StoredGitWorkspace {
+  const workspace = JSON.parse(row.data_json) as StoredGitWorkspace;
+  return { ...workspace, helperToken: workspace.helperToken ?? "", sessionId: row.session_id, updatedAt: row.updated_at };
 }
 
 const NOTIFICATION_DEVICE_ID_PATTERN = /^[a-zA-Z0-9_-]{8,80}$/;

@@ -82,10 +82,14 @@ The Create tab asks for:
 
 - Directory: the repo or working directory where Codex should start.
 - Name: the tmux window name for the new Codex session.
+- Target branch: required for Git repositories and used as the local integration destination.
+- Target remote and optional source: used to resolve current remote state and create a missing target without consulting the entry checkout.
 
 Directory suggestions come from active sessions and recently touched repositories. Session names are normalized and must be 2-32 lowercase letters, numbers, or hyphens.
 
-When a session is created, muxpilot runs `codex` in a tmux window inside the shared `muxpilot` tmux session. If that tmux session does not exist, muxpilot creates it.
+For Git repositories, muxpilot creates a private session branch and worktree first, then runs `codex` there. The original checkout may remain on any branch and may be dirty. Each managed session exposes a Git panel for exact-revision inspections, separate Codex review, rebase/fast-forward integration, explicit push, and cleanup. Push is never automatic and is available only as a confirmed UI action.
+
+Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into another working directory. Non-Git directories retain the direct-directory session flow.
 
 The History tab searches restorable sessions that muxpilot has managed before. Search matches only submitted user prompts, not assistant replies, tool output, or command output. Selecting a live result opens the existing pane; selecting a missing or archived result starts a new tmux window with `codex resume <session-id>` and opens the resumed session.
 

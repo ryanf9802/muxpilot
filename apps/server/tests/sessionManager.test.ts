@@ -7,8 +7,21 @@ import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
-import { SessionManager } from "../src/services/sessionManager.js";
+import { codexModelSettingsFromPaneText, SessionManager } from "../src/services/sessionManager.js";
 import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
+
+describe("Codex pane model settings", () => {
+  it("reads the persistent status line", () => {
+    expect(codexModelSettingsFromPaneText("  gpt-5.6-sol xhigh · ~/workspace/muxpilot")).toEqual({
+      model: "gpt-5.6-sol",
+      reasoningEffort: "xhigh"
+    });
+  });
+
+  it("ignores model and effort text without Codex screen framing", () => {
+    expect(codexModelSettingsFromPaneText("Try gpt-5.6-sol medium for this task.")).toBeNull();
+  });
+});
 
 describe("SessionManager transcript isolation", () => {
   it("clears stale messages when a tmux pane binds to a new Codex session file", async () => {
@@ -466,7 +479,13 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
     expect(session?.status).toBe("waiting");
-    capture = `Working (20s • esc to interrupt)\n${commandApprovalCapture(1)}`;
+    capture = [
+      "Working (20s • esc to interrupt)",
+      commandApprovalCapture(1).replace(
+        "  $ pnpm app restart prod",
+        ["  $ pnpm app restart prod", ...Array.from({ length: 35 }, (_, index) => `  command detail ${index + 1}`)].join("\n")
+      )
+    ].join("\n");
     await harness.manager.ingest();
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
@@ -1346,6 +1365,31 @@ describe("SessionManager transcript isolation", () => {
     expect(session).toBeDefined();
     expect(session.models).toEqual({
       default: { model: "gpt-5.5", reasoningEffort: "high" },
+      plan: { model: null, reasoningEffort: null }
+    });
+    harness.db.close();
+  });
+
+  it("hydrates model selections from the Codex screen before the first turn", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => [
+      "  gpt-5.6-sol medium · ~/workspace/muxpilot",
+      "",
+      "╭──────────────────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.144.0)                       │",
+      "│ model:     gpt-5.6-sol medium   /model to change │",
+      "╰──────────────────────────────────────────────────╯",
+      "",
+      "› "
+    ].join("\n");
+
+    await harness.manager.discover();
+
+    expect(harness.manager.listSessions(true)[0]?.models).toEqual({
+      default: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
       plan: { model: null, reasoningEffort: null }
     });
     harness.db.close();
@@ -2812,6 +2856,78 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("does not crash or lose transcript progress when restore races an ingest tick", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sourcePath = join(harness.codexHome, "sessions", "restore-race.jsonl");
+    await writeCodexSession(harness.codexHome, "restore-race.jsonl", {
+      sessionId: "codex-restore-race",
+      cwd: repo,
+      user: "restore race prompt",
+      assistant: "restore race answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    let panes: TmuxPane[] = [testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "restore-race" })];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const original = (await harness.manager.listSessions(true))[0];
+    expect(original).toBeDefined();
+
+    panes = [];
+    await harness.manager.discover();
+    await appendFile(
+      sourcePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:03.000Z",
+          type: "event_msg",
+          payload: { type: "agent_message", message: "arrived during restore" }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const appendMessage = harness.db.appendMessage.bind(harness.db);
+    let releaseAppend: (() => void) | null = null;
+    let markAppendStarted: (() => void) | null = null;
+    const appendStarted = new Promise<void>((resolve) => {
+      markAppendStarted = resolve;
+    });
+    const appendRelease = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    harness.db.appendMessage = async (message) => {
+      if (message.sessionId === original!.id && message.text === "arrived during restore") {
+        markAppendStarted?.();
+        await appendRelease;
+      }
+      return await appendMessage(message);
+    };
+
+    const ingest = harness.manager.ingest();
+    await appendStarted;
+    harness.tmux.createCodexResumeWindowInMuxpilotSession = async (cwd) => {
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: "restore-race", pid: 456, sessionName: "muxpilot" });
+      panes = [pane];
+      return pane;
+    };
+
+    const restored = await harness.manager.restoreSession(original!.id);
+    releaseAppend?.();
+    await expect(ingest).resolves.toBeUndefined();
+    await harness.manager.ingest();
+
+    expect(harness.manager.listMessages(restored.session.id, 0).map((message) => message.text)).toEqual([
+      "restore race prompt",
+      "restore race answer",
+      "arrived during restore"
+    ]);
+    harness.db.close();
+  });
+
   it("lists active and touched existing directories for new session suggestions", async () => {
     const harness = await createHarness();
     const activeRepo = join(harness.dir, "active");
@@ -3043,7 +3159,9 @@ function commandApprovalCapture(selected: number): string {
     "",
     option(1, "Yes, proceed (y)"),
     option(2, "Yes, and don't ask again for commands that start with `pnpm app restart prod` (p)"),
-    option(3, "No, and tell Codex what to do differently (esc)")
+    option(3, "No, and tell Codex what to do differently (esc)"),
+    "",
+    "  Press enter to confirm or esc to cancel"
   ].join("\n");
 }
 

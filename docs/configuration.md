@@ -81,3 +81,12 @@ These are available for unusual local setups but are not needed for normal deskt
 ```
 
 The built-in pricing table covers `gpt-4.1`, `gpt-4.1-mini`, and `gpt-4.1-nano` family names used by the summary feature. Unknown models are recorded as unpriced instead of failing.
+## Git Workspace Storage
+
+Managed Git session worktrees live outside the repository entry checkout by default:
+
+- `MUXPILOT_GIT_WORKTREE_ROOT` defaults to `~/.muxpilot/worktrees`.
+- `MUXPILOT_GIT_INSPECTION_ROOT` defaults to `~/.muxpilot/inspections`.
+- `MUXPILOT_GIT_INTEGRATION_ROOT` defaults to `~/.muxpilot/integrations`.
+
+These paths may be overridden when worktrees need to live on a particular filesystem. Do not point them inside a repository working tree.

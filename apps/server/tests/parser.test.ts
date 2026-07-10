@@ -170,6 +170,48 @@ describe("parseCodexJsonl", () => {
     expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
   });
 
+  it("maps escalated wrapped calls with quoted keys and a dynamic command into approval requests", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-dynamic-approval",
+            input: [
+              "const cmd = `UV_PROJECT_ENVIRONMENT=/tmp/control-api make lint`;",
+              "const r = await tools.exec_command({",
+              "  \"cmd\": cmd,",
+              "  \"workdir\": \"/repo\",",
+              "  \"sandbox_permissions\": \"require_escalated\",",
+              "  \"justification\": \"Run the lint suite\",",
+              "  \"prefix_rule\": [\"make\", \"lint\"]",
+              "});"
+            ].join("\n")
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({ type: "approval_request", role: "system" });
+    expect(result.messages[0]?.payload.approval).toMatchObject({
+      id: "call-dynamic-approval",
+      command: null,
+      cwd: "/repo",
+      reason: "Run the lint suite",
+      prefixRule: ["make", "lint"]
+    });
+  });
+
   it("maps request_user_input calls into question requests", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
@@ -491,6 +533,15 @@ describe("parseCodexJsonl", () => {
             type: "message",
             role: "user",
             content: [
+              {
+                type: "input_text",
+                text: [
+                  "<recommended_plugins>",
+                  "Here is a list of plugins that are available but not installed.",
+                  "- Google Drive (google-drive@openai-curated-remote)",
+                  "</recommended_plugins>"
+                ].join("\n")
+              },
               {
                 type: "input_text",
                 text: [

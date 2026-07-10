@@ -29,6 +29,9 @@ importers:
       '@muxpilot/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@muxpilot/git-workspaces':
+        specifier: workspace:*
+        version: link:../../packages/git-workspaces
       dotenv:
         specifier: ^17.0.1
         version: 17.4.2
@@ -132,6 +135,16 @@ importers:
         version: 3.2.7(@types/debug@4.1.13)(@types/node@24.13.2)(tsx@4.23.0)
 
   packages/core:
+    devDependencies:
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@24.13.2)(tsx@4.23.0)
+
+  packages/git-workspaces:
+    dependencies:
+      '@muxpilot/core':
+        specifier: workspace:*
+        version: link:../core
     devDependencies:
       vitest:
         specifier: ^3.2.4

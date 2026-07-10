@@ -19,7 +19,48 @@ describe("user context normalization", () => {
       text: expect.stringContaining("Subagent completed: 019f428a-0df4-7ef3-acd5-ec042babc237")
     });
   });
+
+  it("hides recommended plugin context without hiding adjacent user text", () => {
+    const context = recommendedPluginsContext();
+
+    expect(normalizeUserContextText(context)).toEqual({ kind: "hidden", text: "", skillNames: [] });
+    expect(normalizeUserContextText(`${context}\n\nExplain the deployment failure`)).toMatchObject({
+      kind: "message",
+      text: "Explain the deployment failure"
+    });
+  });
+
+  it("compacts AGENTS instructions when recommended plugins precede them", () => {
+    const text = [
+      recommendedPluginsContext(),
+      "",
+      "# AGENTS.md instructions for /home/dev/workspace/teamweave",
+      "",
+      "<INSTRUCTIONS>",
+      "# Repository Guidelines",
+      "</INSTRUCTIONS>",
+      "",
+      "<environment_context>",
+      "  <cwd>/home/dev/workspace/teamweave</cwd>",
+      "</environment_context>"
+    ].join("\n");
+
+    expect(normalizeUserContextText(text)).toEqual({
+      kind: "action",
+      text: "Loaded AGENTS.md instructions for /home/dev/workspace/teamweave",
+      skillNames: []
+    });
+  });
 });
+
+function recommendedPluginsContext(): string {
+  return [
+    "<recommended_plugins>",
+    "Here is a list of plugins that are available but not installed.",
+    "- Google Drive (google-drive@openai-curated-remote)",
+    "</recommended_plugins>"
+  ].join("\n");
+}
 
 function subagentNotificationContext(): string {
   return [

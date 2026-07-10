@@ -246,7 +246,7 @@ function approvalFromCustomToolCall(event: RawEvent, timestamp: string): ParsedA
   if (event.payload?.name !== "exec") return null;
   const input = stringValue(event.payload.input);
   if (!input || !/tools\.exec_command\s*\(/.test(input)) return null;
-  if (!/sandbox_permissions\s*:\s*["']require_escalated["']/.test(input)) return null;
+  if (!/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return null;
 
   const command = quotedJsProperty(input, "cmd") ?? quotedJsProperty(input, "command");
   const prefixRule = quotedJsArrayProperty(input, "prefix_rule");
@@ -265,13 +265,15 @@ function approvalFromCustomToolCall(event: RawEvent, timestamp: string): ParsedA
 }
 
 function quotedJsProperty(input: string, name: string): string | null {
-  const match = input.match(new RegExp(`(?:^|[,{]\\s*)${name}\\s*:\\s*(["'])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1`));
+  const match = input.match(
+    new RegExp(`(?:^|[,{]\\s*)["']?${name}["']?\\s*:\\s*(["'])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1`)
+  );
   if (!match?.[2]) return null;
   return match[2].replace(/\\([\\'"`])/g, "$1");
 }
 
 function quotedJsArrayProperty(input: string, name: string): string[] | null {
-  const match = input.match(new RegExp(`(?:^|[,{]\\s*)${name}\\s*:\\s*\\[([^\\]]*)\\]`, "s"));
+  const match = input.match(new RegExp(`(?:^|[,{]\\s*)["']?${name}["']?\\s*:\\s*\\[([^\\]]*)\\]`, "s"));
   if (!match?.[1]) return null;
   const values = [...match[1].matchAll(/(["'])((?:\\.|(?!\1)[\s\S])*?)\1/g)]
     .map((item) => item[2]?.replace(/\\([\\'"`])/g, "$1") ?? "")

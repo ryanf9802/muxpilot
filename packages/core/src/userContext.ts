@@ -16,6 +16,7 @@ interface CompactedSkillContext {
 const SKILL_BLOCK_PATTERN = /<skill>\s*[\s\S]*?<\/skill>/gi;
 const SKILL_NAME_PATTERN = /<name>\s*([^<]+?)\s*<\/name>/i;
 const SKILL_PATH_PATTERN = /<path>\s*([^<]+?)\s*<\/path>/i;
+const RECOMMENDED_PLUGINS_BLOCK_PATTERN = /<recommended_plugins>\s*[\s\S]*?<\/recommended_plugins>/gi;
 const ENVIRONMENT_CONTEXT_BLOCK_PATTERN = /<environment_context>\s*[\s\S]*?<\/environment_context>/gi;
 const TURN_ABORTED_CONTEXT_PATTERN = /^<turn_aborted>\s*[\s\S]*?<\/turn_aborted>$/i;
 const INSTRUCTIONS_CONTEXT_PATTERN =
@@ -25,7 +26,9 @@ const COMPACTED_SKILLS_PATTERN = /\n\nSkills:\s*([^\n]+)\s*$/;
 const SUBAGENT_NOTIFICATION_PATTERN = /^<subagent_notification>\s*([\s\S]*?)\s*<\/subagent_notification>$/i;
 
 export function normalizeUserContextText(text: string): NormalizedUserContext {
-  const withoutEnvironment = cleanText(text.replace(ENVIRONMENT_CONTEXT_BLOCK_PATTERN, ""));
+  const withoutEnvironment = cleanText(
+    text.replace(RECOMMENDED_PLUGINS_BLOCK_PATTERN, "").replace(ENVIRONMENT_CONTEXT_BLOCK_PATTERN, "")
+  );
   if (!withoutEnvironment) return { kind: "hidden", text: "", skillNames: [] };
 
   if (TURN_ABORTED_CONTEXT_PATTERN.test(withoutEnvironment)) {

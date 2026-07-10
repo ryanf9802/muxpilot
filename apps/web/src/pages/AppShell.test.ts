@@ -19,6 +19,10 @@ import {
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSearch,
+  parseGitRevisionInput,
+  preferredGitRemote,
+  sourceRevisionSuggestions,
+  targetBranchSuggestions,
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
@@ -34,6 +38,46 @@ import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
+  it("parses explicit and default-remote revision inputs without using the current checkout", () => {
+    expect(parseGitRevisionInput("origin/stage", "origin")).toEqual({ kind: "remote_branch", remote: "origin", branch: "stage" });
+    expect(parseGitRevisionInput("main", "origin")).toEqual({ kind: "remote_branch", remote: "origin", branch: "main" });
+    expect(parseGitRevisionInput("local:release", "origin")).toEqual({ kind: "local_branch", branch: "release" });
+  });
+  it("formats target and source autocomplete values without collapsing revision concepts", () => {
+    const probe = {
+      isGit: true,
+      bare: false,
+      incompatibleReason: null,
+      repoRoot: "/repo",
+      repoName: "repo",
+      currentBranch: "main",
+      dirty: false,
+      remotes: ["origin", "upstream"],
+      defaultRemote: "origin",
+      localBranches: ["main", "local-only"],
+      remoteBranches: [
+        { remote: "origin", branch: "main" },
+        { remote: "origin", branch: "stage" },
+        { remote: "upstream", branch: "release" }
+      ],
+      tags: ["v1.0.0"]
+    };
+
+    expect(targetBranchSuggestions(probe, "origin").map((item) => item.value)).toEqual(["local-only", "main", "stage"]);
+    expect(sourceRevisionSuggestions(probe, "origin").map((item) => item.value)).toEqual([
+      "origin/main",
+      "origin/stage",
+      "local:local-only",
+      "local:main",
+      "upstream/release",
+      "tag:v1.0.0"
+    ]);
+  });
+  it("selects origin automatically, then the first available remote", () => {
+    expect(preferredGitRemote({ remotes: ["upstream", "origin"] })).toBe("origin");
+    expect(preferredGitRemote({ remotes: ["upstream", "backup"] })).toBe("upstream");
+    expect(preferredGitRemote({ remotes: [] })).toBeNull();
+  });
   it("renders the app logo next to the wordmark", () => {
     const html = renderToStaticMarkup(createElement(AppBrand));
 

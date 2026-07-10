@@ -47,7 +47,8 @@ function parseAppPermissionPrompt(text: string): InteractiveApprovalPrompt | nul
 
 function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | null {
   const lines = text.split("\n");
-  if (!parseCommandApprovalOption(lastNonEmptyLine(lines))) return null;
+  const lastLine = lastNonEmptyLine(lines);
+  if (!parseCommandApprovalOption(lastLine) && !isCommandApprovalFooter(lastLine)) return null;
   const titleIndex = lastLineIndex(lines, (line) => /^\s*Would you like to run the following command\?\s*$/i.test(line));
   if (titleIndex < 0) return null;
 
@@ -82,10 +83,16 @@ function commandApprovalOptionLines(lines: string[]): string[] {
       continue;
     }
     if (options.length === 0 || !line.trim()) continue;
-    if (/^\s*(?:Environment|Reason):|^\s*\$\s+/.test(line)) continue;
-    options[options.length - 1] = `${options[options.length - 1]} ${line.trim()}`;
+    if (/^\s*(?:Environment|Reason):|^\s*\$\s+/.test(line) || isCommandApprovalFooter(line)) continue;
+    const previous = options[options.length - 1] ?? "";
+    const separator = previous.endsWith("/") ? "" : " ";
+    options[options.length - 1] = `${previous}${separator}${line.trim()}`;
   }
   return options;
+}
+
+function isCommandApprovalFooter(line: string): boolean {
+  return /^\s*Press enter to confirm or esc to cancel\s*$/i.test(line);
 }
 
 function lastLineIndex(lines: string[], predicate: (line: string) => boolean): number {

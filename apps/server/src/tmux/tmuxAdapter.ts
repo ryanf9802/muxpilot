@@ -22,6 +22,12 @@ const PANE_FORMAT = [
   "#{pane_width}x#{pane_height}"
 ].join(SEP);
 
+export interface CodexLaunchOptions {
+  isolatedWorkspace?: boolean;
+  developerInstructions?: string;
+  environment?: Record<string, string>;
+}
+
 export class TmuxAdapter {
   constructor(private readonly inputSubmitKeys: string[] = ["Enter"]) {}
 
@@ -34,31 +40,31 @@ export class TmuxAdapter {
       .map(parsePaneLine);
   }
 
-  async createCodexWindowInMuxpilotSession(cwd: string, name: string): Promise<TmuxPane> {
-    if (await this.hasSession("muxpilot")) return this.createCodexWindow("muxpilot", cwd, name);
-    return this.createMuxpilotSession(cwd, name);
+  async createCodexWindowInMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions = {}): Promise<TmuxPane> {
+    if (await this.hasSession("muxpilot")) return this.createCodexWindow("muxpilot", cwd, name, options);
+    return this.createMuxpilotSession(cwd, name, options);
   }
 
-  async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
-    if (await this.hasSession("muxpilot")) return this.createCodexResumeWindow("muxpilot", cwd, name, codexSessionId);
-    return this.createMuxpilotResumeSession(cwd, name, codexSessionId);
+  async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): Promise<TmuxPane> {
+    if (await this.hasSession("muxpilot")) return this.createCodexResumeWindow("muxpilot", cwd, name, codexSessionId, options);
+    return this.createMuxpilotResumeSession(cwd, name, codexSessionId, options);
   }
 
-  private async createCodexWindow(targetSessionId: string, cwd: string, name: string): Promise<TmuxPane> {
-    const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name));
+  private async createCodexWindow(targetSessionId: string, cwd: string, name: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+    const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
     return parsePaneLine(line);
   }
 
-  private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
-    const { stdout } = await execFileAsync("tmux", tmuxNewCodexResumeWindowArgs(targetSessionId, cwd, name, codexSessionId));
+  private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+    const { stdout } = await execFileAsync("tmux", tmuxNewCodexResumeWindowArgs(targetSessionId, cwd, name, codexSessionId, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex window");
     return parsePaneLine(line);
   }
 
-  private async createMuxpilotSession(cwd: string, name: string): Promise<TmuxPane> {
+  private async createMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions): Promise<TmuxPane> {
     const { stdout } = await execFileAsync("tmux", [
       "new-session",
       "-d",
@@ -71,14 +77,14 @@ export class TmuxAdapter {
       name,
       "-c",
       cwd,
-      "codex"
+      ...codexCommandArgs(cwd, options)
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex session");
     return parsePaneLine(line);
   }
 
-  private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string): Promise<TmuxPane> {
+  private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
     const { stdout } = await execFileAsync("tmux", [
       "new-session",
       "-d",
@@ -91,9 +97,7 @@ export class TmuxAdapter {
       name,
       "-c",
       cwd,
-      "codex",
-      "resume",
-      codexSessionId
+      ...codexCommandArgs(cwd, options, codexSessionId)
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex session");
@@ -126,7 +130,7 @@ export class TmuxAdapter {
     const bufferName = `muxpilot-${Date.now()}`;
     await this.loadBuffer(bufferName, text);
     try {
-      await execFileAsync("tmux", ["paste-buffer", "-d", "-b", bufferName, "-t", paneId]);
+      await execFileAsync("tmux", tmuxPasteBufferArgs(bufferName, paneId));
     } finally {
       await execFileAsync("tmux", ["delete-buffer", "-b", bufferName]).catch(() => undefined);
     }
@@ -166,7 +170,11 @@ export function inputSubmitDelayMs(text: string): number {
   return Math.min(MAX_INPUT_SUBMIT_DELAY_MS, MIN_INPUT_SUBMIT_DELAY_MS + Math.floor(text.length / 8));
 }
 
-export function tmuxNewCodexWindowArgs(targetSessionId: string, cwd: string, name: string): string[] {
+export function tmuxPasteBufferArgs(bufferName: string, paneId: string): string[] {
+  return ["paste-buffer", "-d", "-p", "-r", "-b", bufferName, "-t", paneId];
+}
+
+export function tmuxNewCodexWindowArgs(targetSessionId: string, cwd: string, name: string, options: CodexLaunchOptions = {}): string[] {
   return [
     "new-window",
     "-P",
@@ -178,11 +186,11 @@ export function tmuxNewCodexWindowArgs(targetSessionId: string, cwd: string, nam
     name,
     "-c",
     cwd,
-    "codex"
+    ...codexCommandArgs(cwd, options)
   ];
 }
 
-export function tmuxNewCodexResumeWindowArgs(targetSessionId: string, cwd: string, name: string, codexSessionId: string): string[] {
+export function tmuxNewCodexResumeWindowArgs(targetSessionId: string, cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): string[] {
   return [
     "new-window",
     "-P",
@@ -194,10 +202,18 @@ export function tmuxNewCodexResumeWindowArgs(targetSessionId: string, cwd: strin
     name,
     "-c",
     cwd,
-    "codex",
-    "resume",
-    codexSessionId
+    ...codexCommandArgs(cwd, options, codexSessionId)
   ];
+}
+
+export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, resumeSessionId?: string): string[] {
+  const args = Object.keys(options.environment ?? {}).length
+    ? ["env", ...Object.entries(options.environment ?? {}).map(([key, value]) => `${key}=${value}`), "codex"]
+    : ["codex"];
+  if (options.isolatedWorkspace) args.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
+  if (options.developerInstructions) args.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
+  if (resumeSessionId) args.push("resume", resumeSessionId);
+  return args;
 }
 
 function delay(ms: number): Promise<void> {

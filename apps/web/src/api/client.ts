@@ -7,6 +7,10 @@ import type {
   AccessResponse,
   ConnectivityResponse,
   CreateSessionRequest,
+  GitRepositoryProbe,
+  MuxpilotGitSkillStatus,
+  GitWorkspaceAction,
+  GitWorkspaceActionResponse,
   ManagedSession,
   MeResponse,
   NotificationSettings,
@@ -99,6 +103,8 @@ export const api = {
   deletePushSubscription: (endpoint: string) =>
     json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "DELETE", body: JSON.stringify({ endpoint }) }),
   codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
+  gitWorkflowSkillStatus: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/status"),
+  installGitWorkflowSkill: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/install", { method: "POST" }),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
@@ -106,6 +112,7 @@ export const api = {
   restoreSession: (id: string) =>
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
+  gitRepositoryProbe: (cwd: string) => json<GitRepositoryProbe>(`/api/git/repository-probe?cwd=${encodeURIComponent(cwd)}`),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),
@@ -141,7 +148,9 @@ export const api = {
   send: (id: string, text: string, mode?: CollaborationMode) =>
     json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode }) }),
   action: (id: string, action: SessionAction) =>
-    json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) })
+    json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) }),
+  gitAction: (id: string, action: GitWorkspaceAction) =>
+    json<GitWorkspaceActionResponse>(`/api/sessions/${id}/git/actions`, { method: "POST", body: JSON.stringify(action) })
 };
 
 function messageQueryString(query: MessageQuery): string {

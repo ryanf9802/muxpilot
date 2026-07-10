@@ -641,6 +641,7 @@ export function SessionCard({
         <div className="card-head">
           <div>
             <h2>{displayName}</h2>
+            {session.gitWorkspace ? <p>{session.gitWorkspace.targetBranch} · {session.gitWorkspace.state.replaceAll("_", " ")}</p> : null}
           </div>
           <span className="session-card-head-actions">
             {session.pinned ? (
@@ -760,22 +761,23 @@ export function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGrou
   const groupByKey = new Map<string, RepoSessionGroup>();
 
   for (const session of sessions) {
-    const key = session.repo.root ?? `name:${session.repo.name}`;
+    const repoRoot = session.gitWorkspace?.repoRoot ?? session.repo.root;
+    const key = repoRoot ?? `name:${session.repo.name}`;
     let group = groupByKey.get(key);
     if (!group) {
       group = {
         key,
-        repoName: session.repo.name,
-        repoRoot: session.repo.root,
-        branch: session.repo.branch,
-        dirty: session.repo.dirty,
+        repoName: session.gitWorkspace ? dashboardPathBaseName(session.gitWorkspace.repoRoot) : session.repo.name,
+        repoRoot,
+        branch: session.gitWorkspace?.targetBranch ?? session.repo.branch,
+        dirty: session.gitWorkspace?.dirty ?? session.repo.dirty,
         sessions: []
       };
       groupByKey.set(key, group);
       groups.push(group);
     }
 
-    group.dirty = group.dirty || session.repo.dirty;
+    group.dirty = group.dirty || (session.gitWorkspace?.dirty ?? session.repo.dirty);
     group.sessions.push(session);
   }
 
@@ -791,6 +793,10 @@ export function orderSessionsWithinRepo(sessions: ManagedSession[]): ManagedSess
     .map((session, index) => ({ session, index }))
     .sort((first, second) => Number(second.session.pinned) - Number(first.session.pinned) || first.index - second.index)
     .map(({ session }) => session);
+}
+
+function dashboardPathBaseName(path: string): string {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
 }
 
 function loadStoredCollapsedRepoKeys(): string[] {

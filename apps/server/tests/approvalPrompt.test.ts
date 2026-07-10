@@ -119,6 +119,49 @@ describe("interactive Codex approval prompts", () => {
     expect(interactiveApprovalKeys(prompt!, "approve_for_prefix")).toEqual(["Down", "Enter"]);
   });
 
+  it("parses command approvals with the current confirmation footer", () => {
+    const prompt = parseInteractiveApprovalPrompt(`${wrappedCommandApprovalCapture()}\n\n  Press enter to confirm or esc to cancel`);
+
+    expect(prompt?.options.map((option) => ({ decision: option.decision, description: option.description }))).toEqual([
+      { decision: "approve_once", description: "Yes, proceed" },
+      {
+        decision: "approve_for_prefix",
+        description:
+          "Yes, and don't ask again for commands that start with `node /home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs`"
+      },
+      { decision: "deny", description: "No, and tell Codex what to do differently" }
+    ]);
+    expect(prompt?.prefixRule).toEqual([
+      "node",
+      "/home/ryanf/.codex/skills/.system/openai-docs/scripts/fetch-codex-manual.mjs"
+    ]);
+  });
+
+  it("parses environment-prefixed commands with the confirmation footer", () => {
+    const prompt = parseInteractiveApprovalPrompt([
+      "  Would you like to run the following command?",
+      "",
+      "  Environment: local",
+      "",
+      "  Reason: May I let pnpm recreate workspace links non-interactively and update the lockfile for the new internal",
+      "  package?",
+      "",
+      "  $ CI=true pnpm install --offline",
+      "",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again for commands that start with `CI=true pnpm install --offline` (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+      "",
+      "  Press enter to confirm or esc to cancel"
+    ].join("\n"));
+
+    expect(prompt).toMatchObject({
+      command: "CI=true pnpm install --offline",
+      reason: "May I let pnpm recreate workspace links non-interactively and update the lockfile for the new internal package?",
+      prefixRule: ["CI=true", "pnpm", "install", "--offline"]
+    });
+  });
+
   it("uses the newest approval form when the capture includes an older gate", () => {
     const prompt = parseInteractiveApprovalPrompt(`${githubApprovalCapture(1)}\n${commandApprovalCapture(2)}`);
 

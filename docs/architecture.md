@@ -29,6 +29,8 @@ Codex JSONL files under `~/.codex/sessions` are the preferred transcript source 
 
 SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
+Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, local target, conditional source, private session branch/worktree, exact inspection revisions, review pair, integration attempts, remote publication state, and cleanup status.
+
 ## Components
 
 - React Web UI: operator access screen, dashboard, session transcript, composer, queued input controls, pending approval/question banners, skill suggestions, raw terminal panel, and LAN connection details.
@@ -40,6 +42,7 @@ SQLite stores application state: parsed messages, parser offsets, unread counts,
 - Activity summarizer: optional OpenAI-backed, prompt-only session summaries and usage/cost recording.
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
+- Git workspace coordinator: provisions private branches/worktrees, fetches remote revisions into `refs/muxpilot/*`, prepares rebases, acquires the target through a temporary integration worktree, performs fast-forward integration, and cleans only preserved work.
 
 ## Operator Access
 
@@ -90,6 +93,17 @@ React action button -> POST /api/sessions/:id/actions -> SessionManager -> TmuxA
 ```
 
 Supported actions include interrupt, input-mode switch, proposed-plan choice, rename, detach notice, kill pane, and archive transcript.
+
+Managed Git session creation and integration:
+
+```text
+entry directory + target/source -> fetch exact refs -> private branch/worktree -> tmux/Codex -C worktree
+private commits -> rebase onto current local target -> ephemeral read-only Codex review
+reviewed head -> temporary target worktree -> fast-forward target
+explicit Git-panel confirmation -> fetch remote target -> normal non-force push
+```
+
+The target branch is never checked out in an implementation worktree. Final integration temporarily checks it out in a coordinator-owned worktree, allowing Git's normal one-branch-per-worktree rule to serialize ownership and safely defer when the developer has the target checked out elsewhere.
 
 Restorable session history:
 

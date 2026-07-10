@@ -18,6 +18,8 @@ import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
+import { GitWorkspaceCoordinator } from "@muxpilot/git-workspaces";
+import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -28,6 +30,11 @@ const codexProcessResolver = new CodexProcessResolver();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
+const gitWorkspaces = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+  worktreeRoot: config.gitWorktreeRoot,
+  inspectionRoot: config.gitInspectionRoot,
+  integrationRoot: config.gitIntegrationRoot
+});
 const notifications = new NotificationService(db, events, app.log);
 const summaryClient = config.openaiApiKey
   ? new OpenAIActivitySummaryClient(config.openaiApiKey, config.summaryModel)
@@ -67,7 +74,9 @@ const manager = new SessionManager(
   config.approvalKeys,
   config.inputModeCycleKeys,
   activitySummarizer,
-  codexProcessResolver
+  codexProcessResolver,
+  gitWorkspaces,
+  `http://127.0.0.1:${config.port}`
 );
 const access = createAccessControl(config, {
   unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()
@@ -93,6 +102,7 @@ app.get("/healthz", async () => ({ ok: true }));
 
 let closing = false;
 
+await gitWorkspaces.recover();
 await manager.discoverNow();
 manager.start({ runInitialTick: false });
 pwaTrustServer.start();

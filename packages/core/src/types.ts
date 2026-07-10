@@ -37,6 +37,11 @@ export interface CodexSkillsResponse {
   skills: CodexSkill[];
 }
 
+export interface MuxpilotGitSkillStatus {
+  status: "missing" | "outdated" | "current";
+  path: string;
+}
+
 export interface CodexModel {
   id: string;
   model: string;
@@ -90,6 +95,75 @@ export interface RepoMetadata {
   worktree: string | null;
 }
 
+export type GitRevisionSpec =
+  | { kind: "local_branch"; branch: string }
+  | { kind: "remote_branch"; remote: string; branch: string }
+  | { kind: "local_tag"; tag: string }
+  | { kind: "remote_tag"; remote: string; tag: string }
+  | { kind: "commit"; oid: string; remote?: string };
+
+export type GitWorkspaceState =
+  | "provisioning"
+  | "active"
+  | "integration_conflict"
+  | "reviewing"
+  | "ready_to_integrate"
+  | "integrating"
+  | "integrated"
+  | "cleanup_pending"
+  | "cleaned"
+  | "error";
+
+export interface GitInspection {
+  id: string;
+  requested: GitRevisionSpec;
+  resolvedRef: string;
+  commitSha: string;
+  worktreePath: string | null;
+  fetchedAt: string | null;
+  freshness: "fresh" | "cached" | "local";
+  error: string | null;
+}
+
+export interface GitReviewSummary {
+  id: string;
+  targetSha: string;
+  headSha: string;
+  status: "queued" | "running" | "passed" | "failed" | "cancelled";
+  report: string;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface GitWorkspaceSummary {
+  id: string;
+  state: GitWorkspaceState;
+  entryPath: string;
+  repoRoot: string;
+  targetBranch: string;
+  targetRemote: string | null;
+  targetSource: GitRevisionSpec | null;
+  sourceSha: string;
+  sourceFetchedAt?: string | null;
+  sourceFreshness?: "fresh" | "cached" | "local";
+  targetSha: string;
+  sessionBranch: string;
+  sessionHeadSha: string;
+  worktreePath: string;
+  dirty: boolean;
+  aheadBy: number;
+  targetCheckedOutAt: string | null;
+  review: GitReviewSummary | null;
+  reviewCurrent: boolean;
+  inspections: GitInspection[];
+  remoteSha: string | null;
+  remoteAheadBy: number;
+  remoteBehindBy: number;
+  lastError: string | null;
+  cleanupEligible: boolean;
+  compatibilityWarnings?: string[];
+}
+
 export interface ManagedSession {
   id: string;
   tmux: TmuxPane;
@@ -110,6 +184,7 @@ export interface ManagedSession {
   unreadCount: number;
   pinned: boolean;
   archived: boolean;
+  gitWorkspace?: GitWorkspaceSummary | null;
 }
 
 export interface ChatMessage {
@@ -353,9 +428,48 @@ export interface SendInputRequest {
   mode?: CollaborationMode;
 }
 
-export interface CreateSessionRequest {
-  cwd: string;
-  name: string;
+export type CreateSessionRequest =
+  | {
+      cwd: string;
+      name: string;
+      workspace: {
+        mode: "git";
+        targetBranch: string;
+        targetRemote?: string;
+        targetSource?: GitRevisionSpec;
+        inspections?: GitRevisionSpec[];
+        allowCachedRemote?: boolean;
+      };
+    }
+  | { cwd: string; name: string; workspace?: { mode: "directory" } };
+
+export interface GitRepositoryProbe {
+  isGit: boolean;
+  bare: boolean;
+  incompatibleReason: string | null;
+  repoRoot: string | null;
+  repoName: string;
+  currentBranch: string | null;
+  dirty: boolean;
+  remotes: string[];
+  defaultRemote: string | null;
+  localBranches: string[];
+  remoteBranches: Array<{ remote: string; branch: string }>;
+  tags: string[];
+}
+
+export type GitWorkspaceAction =
+  | { type: "refresh" }
+  | { type: "addInspection"; revision: GitRevisionSpec; allowCachedRemote?: boolean }
+  | { type: "materializeInspection"; inspectionId: string }
+  | { type: "prepareReview" }
+  | { type: "integrate"; bypassReview?: boolean }
+  | { type: "push" }
+  | { type: "abortRebase" }
+  | { type: "cleanup" };
+
+export interface GitWorkspaceActionResponse {
+  workspace: GitWorkspaceSummary;
 }
 
 export interface SessionHistoryPromptMatch {

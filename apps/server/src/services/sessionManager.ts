@@ -5,6 +5,10 @@ import type {
   ApprovalRequest,
   ChatMessage,
   CollaborationMode,
+  CreateSessionRequest,
+  GitRevisionSpec,
+  GitWorkspaceAction,
+  GitWorkspaceSummary,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -36,6 +40,7 @@ import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
+import type { GitWorkspaceManager } from "./gitWorkspaceManager.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -80,16 +85,24 @@ export class SessionManager {
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null
+    private readonly codexProcessLookup: CodexProcessLookup | null = null,
+    private readonly gitWorkspaces: GitWorkspaceManager | null = null,
+    private readonly gitHelperBaseUrl: string | null = null
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
     if (options.runInitialTick ?? true) {
-      void this.runDiscoverTick();
-      void this.runIngestTick();
+      this.runBackgroundTask("discovery", () => this.runDiscoverTick());
+      this.runBackgroundTask("ingest", () => this.runIngestTick());
     }
-    this.discoveryTimer = setInterval(() => void this.runDiscoverTick(), this.discoveryIntervalMs);
-    this.parserTimer = setInterval(() => void this.runIngestTick(), this.parserIntervalMs);
+    this.discoveryTimer = setInterval(
+      () => this.runBackgroundTask("discovery", () => this.runDiscoverTick()),
+      this.discoveryIntervalMs
+    );
+    this.parserTimer = setInterval(
+      () => this.runBackgroundTask("ingest", () => this.runIngestTick()),
+      this.parserIntervalMs
+    );
   }
 
   async reconcileNow(): Promise<void> {
@@ -196,8 +209,15 @@ export class SessionManager {
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
       );
-      const liveModelSettings =
+      const jsonlModelSettings =
         nextCodexJsonlPath ? await readLatestCodexModelSettings(nextCodexJsonlPath) : null;
+      const paneModelSettings = await readLiveCodexModelSettings(
+        pane,
+        (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
+      );
+      const liveModelSettings = mergeModelSettings(jsonlModelSettings, paneModelSettings);
+      const storedGitWorkspace = await this.gitWorkspaces?.getBySession(existingId) ?? null;
+      const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
       const session: ManagedSession = {
         id: existingId,
         tmux: pane,
@@ -217,7 +237,8 @@ export class SessionManager {
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         pinned: existing?.pinned ?? false,
-        archived: existing?.archived ?? false
+        archived: existing?.archived ?? false,
+        gitWorkspace: refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null
       };
 
       if (status === "approval" && liveApprovalPrompt) {
@@ -267,6 +288,12 @@ export class SessionManager {
     } finally {
       this.ingestRunning = false;
     }
+  }
+
+  private runBackgroundTask(name: "discovery" | "ingest", task: () => Promise<void>): void {
+    void task().catch((error) => {
+      console.error(`Muxpilot ${name} background task failed`, error);
+    });
   }
 
   private async listIngestSessions(options: { recentFirst?: boolean } = {}): Promise<ManagedSession[]> {
@@ -341,9 +368,17 @@ export class SessionManager {
         this.publish("queue.updated", session.id, { queuedInputs: await this.db.listQueuedInputs(session.id) });
       }
       await this.processQueuedInputs(session.id);
+      const currentSession = await this.db.getSession(session.id);
+      if (!currentSession || currentSession.codexJsonlPath !== source) {
+        return { incomplete: false, progressed: false };
+      }
       await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
       return { incomplete: !result.complete, progressed: result.nextOffset > offset };
     } catch (error) {
+      const currentSession = await this.db.getSession(session.id);
+      if (!currentSession || currentSession.codexJsonlPath !== source) {
+        return { incomplete: false, progressed: false };
+      }
       const text = error instanceof Error ? error.message : String(error);
       const message: ChatMessage = {
         id: stableId(`${session.id}:parser:${text}:${Date.now()}`),
@@ -390,9 +425,15 @@ export class SessionManager {
       return { session, restored: false };
     }
 
-    const cwd = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
+    const storedGitWorkspace = await this.gitWorkspaces?.getBySession(source.id) ?? null;
+    const cwd = await requireExistingDirectory(storedGitWorkspace?.summary.worktreePath ?? source.repo.root ?? source.tmux.cwd);
     const name = restoreSessionName(source);
-    const pane = await this.tmux.createCodexResumeWindowInMuxpilotSession(cwd, name, source.codexSessionId);
+    const pane = await this.tmux.createCodexResumeWindowInMuxpilotSession(
+      cwd,
+      name,
+      source.codexSessionId,
+      storedGitWorkspace ? managedCodexLaunchOptions(storedGitWorkspace.summary, storedGitWorkspace.helperToken, this.gitHelperBaseUrl) : {}
+    );
     const session = await this.rebindRestoredSession(source, pane);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
@@ -606,7 +647,7 @@ export class SessionManager {
 
     for (const session of await this.db.listSessions(false)) {
       if (session.status === "missing") continue;
-      const candidate = session.repo.root ?? session.tmux.cwd;
+      const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
       const next = await directorySuggestionFromPath(candidate, "active", session.lastActivityAt, {
         label: session.repo.name,
         repoRoot: session.repo.root,
@@ -621,6 +662,24 @@ export class SessionManager {
     }
 
     return [...suggestions.values()].sort(compareDirectorySuggestions);
+  }
+
+  async probeGitRepository(path: string) {
+    const directory = await requireExistingDirectory(path);
+    return this.gitWorkspaces?.probe(directory) ?? loadRepoMetadata(directory).then((repo) => ({
+      isGit: Boolean(repo.root),
+      bare: false,
+      incompatibleReason: null,
+      repoRoot: repo.root,
+      repoName: repo.name,
+      currentBranch: repo.branch,
+      dirty: repo.dirty,
+      remotes: [],
+      defaultRemote: null,
+      localBranches: [],
+      remoteBranches: [],
+      tags: []
+    }));
   }
 
   async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
@@ -658,13 +717,76 @@ export class SessionManager {
       transcriptSize: 0,
       unreadCount: 0,
       pinned: false,
-      archived: false
+      archived: false,
+      gitWorkspace: null
     };
     await this.db.upsertSession(session, now);
     await this.recordTouchedRepository(session, now);
     await this.db.addAudit("local", "create_session", session.id, "ok", now);
     this.publish("session.updated", session.id, session);
     return session;
+  }
+
+  async createSession(request: CreateSessionRequest): Promise<ManagedSession> {
+    const directory = await requireExistingDirectory(request.cwd);
+    const sessionName = requireSessionName(request.name);
+    const probe = await this.gitWorkspaces?.probe(directory) ?? null;
+    if (probe?.isGit && request.workspace?.mode !== "git") {
+      throw new CreateSessionError("Target branch is required for new Git sessions", 400);
+    }
+    if (request.workspace?.mode !== "git") return this.createSessionInDirectory(directory, sessionName);
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+
+    let workspace = await this.gitWorkspaces.provision({
+      entryPath: directory,
+      targetBranch: request.workspace.targetBranch,
+      targetRemote: request.workspace.targetRemote,
+      targetSource: request.workspace.targetSource,
+      allowCachedRemote: request.workspace.allowCachedRemote
+    });
+    for (const inspection of request.workspace.inspections ?? []) {
+      workspace = await this.gitWorkspaces.addInspection(workspace, inspection, request.workspace.allowCachedRemote === true);
+    }
+    const pane = await this.tmux.createCodexWindowInMuxpilotSession(
+      workspace.summary.worktreePath,
+      sessionName,
+      managedCodexLaunchOptions(workspace.summary, workspace.helperToken, this.gitHelperBaseUrl)
+    );
+    const sessionId = tmuxPaneSessionId(pane);
+    await this.gitWorkspaces.bind(workspace.id, sessionId);
+    await this.discover();
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new CreateSessionError("Managed session was created but could not be discovered", 500);
+    await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
+    return session;
+  }
+
+  async actOnGitWorkspace(sessionId: string, action: GitWorkspaceAction): Promise<GitWorkspaceSummary> {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    const summary = await this.gitWorkspaces.action(sessionId, action);
+    const session = await this.db.getSession(sessionId);
+    if (session) {
+      const updated = { ...session, gitWorkspace: summary };
+      await this.db.upsertSession(updated, nowIso());
+      this.publish("session.updated", sessionId, updated);
+    }
+    await this.db.addAudit("local", `git_${action.type}`, sessionId, "ok", nowIso());
+    return summary;
+  }
+
+  async addGitInspectionByCapability(workspaceId: string, token: string, revision: GitRevisionSpec): Promise<GitWorkspaceSummary> {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    const summary = await this.gitWorkspaces.addInspectionWithToken(workspaceId, token, revision);
+    const workspace = await this.gitWorkspaces.get(workspaceId);
+    if (workspace?.sessionId) {
+      const session = await this.db.getSession(workspace.sessionId);
+      if (session) {
+        const updated = { ...session, gitWorkspace: summary };
+        await this.db.upsertSession(updated, nowIso());
+        this.publish("session.updated", session.id, updated);
+      }
+    }
+    return summary;
   }
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
@@ -926,7 +1048,8 @@ export class SessionManager {
       transcriptSize: source.transcriptSize,
       unreadCount: source.unreadCount,
       pinned: source.pinned,
-      archived: false
+      archived: false,
+      gitWorkspace: source.gitWorkspace ?? null
     };
     const rebound = await this.db.rekeySession(source.id, session, parserOffsetMove, now);
     if (!rebound) throw new SessionRestoreError("Session not found");
@@ -942,7 +1065,7 @@ export class SessionManager {
   }
 
   private async recordTouchedRepository(session: ManagedSession, updatedAt: string): Promise<void> {
-    const candidate = session.repo.root ?? session.tmux.cwd;
+    const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
     const path = await existingDirectoryPath(candidate);
     if (!path) return;
     await this.db.upsertTouchedRepository(
@@ -1089,6 +1212,26 @@ function restoreSessionName(session: ManagedSession): string {
     if (isValidSessionName(name)) return name;
   }
   return "restored";
+}
+
+function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helperToken: string, helperBaseUrl: string | null) {
+  return {
+    isolatedWorkspace: true,
+    developerInstructions: [
+      "This is a muxpilot-managed isolated Git workspace.",
+      "Use $muxpilot-git-workflow for all branch and inspection operations.",
+      `Target branch: ${workspace.targetBranch}.`,
+      `Editable session branch: ${workspace.sessionBranch}.`,
+      `Implementation worktree: ${workspace.worktreePath}.`,
+      "Do not check out or update the target branch, push, remove worktrees, or integrate changes yourself.",
+      "Create clean atomic commits on the editable session branch and leave integration and push to the muxpilot Git panel."
+    ].join(" "),
+    environment: helperBaseUrl ? {
+      MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
+      MUXPILOT_GIT_HELPER_TOKEN: helperToken,
+      MUXPILOT_GIT_HELPER_URL: helperBaseUrl
+    } : undefined
+  };
 }
 
 function collapseHistoryByCodexSession(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
@@ -1398,6 +1541,40 @@ async function readLatestCodexModelSettings(path: string): Promise<SessionModelS
   }
 }
 
+async function readLiveCodexModelSettings(
+  pane: TmuxPane,
+  capturePane: (paneId: string, lines: number) => Promise<string>
+): Promise<SessionModelSettings | null> {
+  try {
+    return codexModelSettingsFromPaneText(await capturePane(pane.paneId, 40));
+  } catch {
+    return null;
+  }
+}
+
+export function codexModelSettingsFromPaneText(text: string): SessionModelSettings | null {
+  let latest: SessionModelSettings | null = null;
+  const effortPattern = "minimal|low|medium|high|xhigh|none";
+  const bannerPattern = new RegExp(
+    `^\\s*[│┃|]?\\s*model:\\s+([a-z0-9][a-z0-9._-]*)\\s+(${effortPattern})\\b.*\\/model\\b`,
+    "i"
+  );
+  const statusLinePattern = new RegExp(
+    `^\\s*([a-z0-9][a-z0-9._-]*)\\s+(${effortPattern})\\s*[·•]\\s*(?:~|/|[a-z]:[\\\\/])`,
+    "i"
+  );
+
+  for (const line of text.split("\n")) {
+    const match = bannerPattern.exec(line) ?? statusLinePattern.exec(line);
+    if (!match) continue;
+    const model = match[1];
+    const reasoningEffort = match[2];
+    if (!model || !reasoningEffort) continue;
+    latest = { model, reasoningEffort: reasoningEffort.toLowerCase() };
+  }
+  return latest;
+}
+
 function latestCodexModelSettingsFromText(text: string): SessionModelSettings | null {
   let latest: SessionModelSettings | null = null;
   for (const line of text.split("\n")) {
@@ -1553,6 +1730,17 @@ function mergeSessionModels(
   };
 }
 
+function mergeModelSettings(
+  fallback: SessionModelSettings | null,
+  current: SessionModelSettings | null
+): SessionModelSettings | null {
+  if (!fallback && !current) return null;
+  return {
+    model: current?.model ?? fallback?.model ?? null,
+    reasoningEffort: current?.reasoningEffort ?? fallback?.reasoningEffort ?? null
+  };
+}
+
 function detectCollaborationModeFromPane(pane: TmuxPane): CollaborationMode | null {
   return detectCollaborationModeFromText(`${pane.title}\n${pane.windowName}`);
 }
@@ -1662,7 +1850,7 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
 function inferStatusFromScreen(capture: string): SessionStatus | null {
   const visible = visibleTail(capture);
   const haystack = visible.toLowerCase();
-  if (parseInteractiveApprovalPrompt(visible)) return "approval";
+  if (parseInteractiveApprovalPrompt(capture)) return "approval";
   if (haystack.includes("working (") || haystack.includes("esc to interrupt")) return "working";
   const footer = visible.split("\n").slice(-6).join("\n");
   if (/(^|\n)\s*›(?!\s*\d+\.)/m.test(footer)) return "waiting";

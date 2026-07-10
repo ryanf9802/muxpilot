@@ -6,6 +6,9 @@ import {
   Check,
   Copy,
   HelpCircle,
+  GitBranch,
+  GitMerge,
+  FolderSearch,
   ListChecks,
   LoaderCircle,
   MessageSquare,
@@ -17,6 +20,8 @@ import {
   ShieldCheck,
   Skull,
   Trash2,
+  Upload,
+  RefreshCw,
   X
 } from "lucide-react";
 import { cursorLineDown, insertNewlineAndIndent } from "@codemirror/commands";
@@ -50,13 +55,16 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
-import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
+import { parseGitRevisionInput, type AppShellOutletContext, type PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
   CodexSkill,
   CollaborationMode,
+  GitRevisionSpec,
+  GitWorkspaceAction,
+  GitWorkspaceSummary,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -446,8 +454,8 @@ export function sessionTranscriptSource(session: ManagedSession): TranscriptSour
   };
 }
 
-export function sessionCreateSessionCwd(session: { repo: Pick<ManagedSession["repo"], "root">; tmux: Pick<ManagedSession["tmux"], "cwd"> }): string {
-  return session.repo.root ?? session.tmux.cwd;
+export function sessionCreateSessionCwd(session: { repo: Pick<ManagedSession["repo"], "root">; tmux: Pick<ManagedSession["tmux"], "cwd">; gitWorkspace?: Pick<GitWorkspaceSummary, "entryPath"> | null }): string {
+  return session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
 }
 
 export function shouldReplaceTranscriptForSource(currentSourceKey: string | null, nextSourceKey: string): boolean {
@@ -495,6 +503,9 @@ export function SessionView() {
   const [planActionError, setPlanActionError] = useState("");
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
+  const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [gitActionBusy, setGitActionBusy] = useState<GitWorkspaceAction["type"] | null>(null);
+  const [gitActionError, setGitActionError] = useState<string | null>(null);
   const [inputModeError, setInputModeError] = useState("");
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
@@ -1327,6 +1338,24 @@ export function SessionView() {
     }
   }
 
+  async function runGitAction(action: GitWorkspaceAction) {
+    if (!session?.gitWorkspace || gitActionBusy) return;
+    if (action.type === "push" && !confirm(`Push ${session.gitWorkspace.targetBranch} to ${session.gitWorkspace.targetRemote ?? "its remote"}?`)) return;
+    if (action.type === "integrate" && !confirm(`Integrate committed changes into ${session.gitWorkspace.targetBranch}?`)) return;
+    if (action.type === "cleanup" && !confirm("Remove this clean integrated worktree and its inspection worktrees?")) return;
+    if (action.type === "abortRebase" && !confirm("Abort the integration rebase and restore the session branch?")) return;
+    setGitActionBusy(action.type);
+    setGitActionError(null);
+    try {
+      const response = await api.gitAction(session.id, action);
+      setSession((current) => current ? { ...current, gitWorkspace: response.workspace } : current);
+    } catch (error) {
+      setGitActionError(error instanceof Error ? error.message : "Git operation failed.");
+    } finally {
+      setGitActionBusy(null);
+    }
+  }
+
   function killSession() {
     if (actionBusy || !confirm("Kill this tmux pane?")) return;
     const targetId = id;
@@ -1471,6 +1500,13 @@ export function SessionView() {
           <SessionHeaderMeta session={readySession} />
         </div>
         <StatusPill status={readySession.status} />
+        {readySession.gitWorkspace ? (
+          <button className="git-workspace-chip" type="button" onClick={() => setGitPanelOpen(true)} title="Open Git workspace controls">
+            <GitBranch size={14} />
+            <span>{readySession.gitWorkspace.targetBranch}</span>
+            <i data-state={readySession.gitWorkspace.state}>{gitWorkspaceChipState(readySession.gitWorkspace)}</i>
+          </button>
+        ) : null}
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
@@ -1690,8 +1726,137 @@ export function SessionView() {
           </form>
         </div>
       )}
+      {gitPanelOpen && readySession.gitWorkspace ? (
+        <GitWorkspacePanel
+          workspace={readySession.gitWorkspace}
+          busy={gitActionBusy}
+          error={gitActionError}
+          onAction={(action) => void runGitAction(action)}
+          onClose={() => setGitPanelOpen(false)}
+        />
+      ) : null}
     </section>
   );
+}
+
+function GitWorkspacePanel({
+  workspace,
+  busy,
+  error,
+  onAction,
+  onClose
+}: {
+  workspace: GitWorkspaceSummary;
+  busy: GitWorkspaceAction["type"] | null;
+  error: string | null;
+  onAction: (action: GitWorkspaceAction) => void;
+  onClose: () => void;
+}) {
+  const [inspection, setInspection] = useState("");
+
+  function addInspection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const revision = parseGitRevisionInput(inspection, workspace.targetRemote);
+    if (!revision) return;
+    onAction({ type: "addInspection", revision });
+    setInspection("");
+  }
+
+  return (
+    <div className="git-panel-backdrop" role="presentation" onPointerDown={(event) => event.target === event.currentTarget && onClose()}>
+      <aside className="git-workspace-panel" role="dialog" aria-modal="true" aria-labelledby="git-workspace-title">
+        <div className="git-panel-head">
+          <div>
+            <h2 id="git-workspace-title"><GitBranch size={18} /> {workspace.targetBranch}</h2>
+            <p>{workspace.state.replaceAll("_", " ")}</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close Git workspace controls"><X size={18} /></button>
+        </div>
+
+        <section className="git-panel-section">
+          <h3>Workspace</h3>
+          <dl className="git-panel-details">
+            <div><dt>Target</dt><dd>{workspace.targetBranch} <code>{shortSha(workspace.targetSha)}</code></dd></div>
+            <div><dt>Session branch</dt><dd>{workspace.sessionBranch}</dd></div>
+            <div><dt>Session head</dt><dd><code>{shortSha(workspace.sessionHeadSha)}</code></dd></div>
+            <div><dt>Created from</dt><dd><code>{shortSha(workspace.sourceSha)}</code>{workspace.sourceFreshness ? ` · ${workspace.sourceFreshness}` : ""}{workspace.sourceFetchedAt ? ` · ${new Date(workspace.sourceFetchedAt).toLocaleString()}` : ""}</dd></div>
+            <div><dt>Changes</dt><dd>{workspace.dirty ? "uncommitted changes" : `${workspace.aheadBy} commit${workspace.aheadBy === 1 ? "" : "s"} ahead`}</dd></div>
+            <div><dt>Worktree</dt><dd title={workspace.worktreePath}>{workspace.worktreePath}</dd></div>
+            {workspace.targetCheckedOutAt ? <div><dt>Integration</dt><dd className="warning">Target checked out at {workspace.targetCheckedOutAt}</dd></div> : null}
+          </dl>
+          {workspace.compatibilityWarnings?.length ? (
+            <ul className="git-compatibility-warnings">
+              {workspace.compatibilityWarnings.map((warning) => <li key={warning}>{warning}</li>)}
+            </ul>
+          ) : null}
+        </section>
+
+        <section className="git-panel-section">
+          <h3><FolderSearch size={16} /> Inspections</h3>
+          {workspace.inspections.length ? (
+            <ul className="git-inspection-list">
+              {workspace.inspections.map((item) => (
+                <li key={item.id}>
+                  <div><strong>{gitRevisionLabel(item.requested)}</strong><span><code>{shortSha(item.commitSha)}</code> · {item.freshness}</span></div>
+                  {!item.worktreePath ? <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "materializeInspection", inspectionId: item.id })}>Materialize</button> : <span title={item.worktreePath}>ready</span>}
+                </li>
+              ))}
+            </ul>
+          ) : <p className="git-panel-muted">No inspection revisions pinned.</p>}
+          <form className="git-inspection-form" onSubmit={addInspection}>
+            <input value={inspection} onChange={(event) => setInspection(event.target.value)} placeholder={workspace.targetRemote ? `${workspace.targetRemote}/main` : "local:main or commit SHA"} disabled={Boolean(busy)} />
+            <button type="submit" disabled={Boolean(busy) || !inspection.trim()}><Plus size={15} /> Add</button>
+          </form>
+        </section>
+
+        <section className="git-panel-section">
+          <h3><ListChecks size={16} /> Review</h3>
+          {workspace.review ? (
+            <details className="git-review" open={workspace.review.status === "failed"}>
+              <summary>{workspace.review.status} · {shortSha(workspace.review.targetSha)} → {shortSha(workspace.review.headSha)}{workspace.reviewCurrent ? " · current" : " · stale"}</summary>
+              <pre>{workspace.review.report || "Review is still running."}</pre>
+            </details>
+          ) : <p className="git-panel-muted">No review has run for the current committed changes.</p>}
+        </section>
+
+        {workspace.lastError || error ? <p className="git-panel-error" role="alert">{error ?? workspace.lastError}</p> : null}
+
+        <div className="git-panel-actions">
+          <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "refresh" })}><RefreshCw className={busy === "refresh" ? "spin" : ""} size={16} /> Refresh</button>
+          {workspace.state === "integration_conflict" ? <button type="button" className="danger" disabled={Boolean(busy)} onClick={() => onAction({ type: "abortRebase" })}>Abort rebase</button> : null}
+          {workspace.state !== "integrated" && workspace.state !== "cleaned" ? (
+            <button type="button" className="primary" disabled={Boolean(busy) || workspace.dirty || workspace.aheadBy === 0} onClick={() => onAction({ type: "prepareReview" })}>
+              <ListChecks size={16} /> {busy === "prepareReview" ? "Reviewing" : "Prepare & review"}
+            </button>
+          ) : null}
+          {workspace.reviewCurrent ? <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => onAction({ type: "integrate" })}><GitMerge size={16} /> Integrate</button> : null}
+          {!workspace.reviewCurrent && workspace.aheadBy > 0 && !workspace.dirty ? <button type="button" className="git-review-override" disabled={Boolean(busy)} onClick={() => onAction({ type: "integrate", bypassReview: true })}>Integrate without review</button> : null}
+          {workspace.cleanupEligible && workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy)} onClick={() => onAction({ type: "push" })}><Upload size={16} /> Push to {workspace.targetRemote}</button> : null}
+          {workspace.cleanupEligible ? <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "cleanup" })}><Trash2 size={16} /> Cleanup</button> : null}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+export function gitWorkspaceChipState(workspace: GitWorkspaceSummary): string {
+  if (workspace.state === "integration_conflict") return "conflict";
+  if (workspace.dirty) return "dirty";
+  if (workspace.state === "integrated") return "integrated";
+  if (workspace.reviewCurrent) return "reviewed";
+  return `${workspace.aheadBy}↑`;
+}
+
+function shortSha(value: string): string {
+  return value.slice(0, 8);
+}
+
+function gitRevisionLabel(revision: GitRevisionSpec): string {
+  if (revision.kind === "local_branch") return `local:${revision.branch}`;
+  if (revision.kind === "remote_branch") return `${revision.remote}/${revision.branch}`;
+  if (revision.kind === "local_tag") return `tag:${revision.tag}`;
+  if (revision.kind === "remote_tag") return `${revision.remote}/tag:${revision.tag}`;
+  return shortSha(revision.oid);
 }
 
 export function shouldSubmitComposer(event: Pick<KeyboardEvent<HTMLTextAreaElement>, "ctrlKey" | "key">): boolean {
@@ -2233,9 +2398,10 @@ export function SkillTextArea({
   );
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo"> }) {
-  const branch = session.repo.branch ?? "no branch";
-  const dirtyLabel = session.repo.dirty ? " · dirty" : "";
+export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace"> }) {
+  const branch = session.gitWorkspace?.targetBranch ?? session.repo.branch ?? "no branch";
+  const dirty = session.gitWorkspace?.dirty ?? session.repo.dirty;
+  const dirtyLabel = dirty ? " · dirty" : "";
   const title = `${session.repo.name} · ${branch}${dirtyLabel}`;
 
   return (
@@ -2245,7 +2411,7 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
         ·
       </span>
       <span className="session-header-branch">{branch}</span>
-      {session.repo.dirty ? (
+      {dirty ? (
         <>
           <span className="session-header-branch-separator" aria-hidden="true">
             ·

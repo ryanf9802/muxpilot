@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ManagedSession, QueuedInput, TranscriptPageResponse } from "@muxpilot/core";
-import { AppDatabase } from "../src/db/database.js";
+import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase activity summaries", () => {
   it("hydrates persisted activity summary metadata onto sessions", async () => {
@@ -144,6 +144,7 @@ describe("AppDatabase activity summaries", () => {
     db.upsertActivitySummary(oldSession.id, "Existing summary", "2026-07-07T00:00:03.000Z", 2);
     db.setNotificationRule("device-rekey", "session", oldSession.id, "done_task", true, "2026-07-07T00:00:04.000Z");
     db.setParserOffset("old-offset", 1234, "parser-test", "2026-07-07T00:00:05.000Z");
+    db.upsertGitWorkspace(testGitWorkspace(oldSession.id), "2026-07-07T00:00:05.000Z");
 
     const rebound = db.rekeySession(oldSession.id, newSession, { from: "old-offset", to: "new-offset" }, "2026-07-07T00:00:06.000Z");
 
@@ -156,6 +157,10 @@ describe("AppDatabase activity summaries", () => {
     expect(db.getNotificationSettings("device-rekey").sessionRules[newSession.id]).toEqual(["done_task"]);
     expect(db.getParserOffset("old-offset")).toBe(0);
     expect(db.getParserOffset("new-offset")).toBe(1234);
+    expect(db.getGitWorkspaceBySession(newSession.id)?.id).toBe("workspace-rekey");
+    expect(db.getGitWorkspaceBySession(oldSession.id)).toBeNull();
+    expect(db.appendMessage(testMessage(oldSession.id, 3, "assistant", "Stale parser write"))).toBe(false);
+    expect(db.listMessages(newSession.id, 0).map((message) => message.text)).toEqual(["Rekey searchable prompt", "Rekey answer"]);
     db.close();
   });
 
@@ -1252,6 +1257,43 @@ function testQueuedInput(sessionId: string, input: Partial<QueuedInput> & Pick<Q
     updatedAt: "2026-07-07T00:00:01.000Z",
     sentAt: null,
     ...input
+  };
+}
+
+function testGitWorkspace(sessionId: string): StoredGitWorkspace {
+  const timestamp = "2026-07-07T00:00:05.000Z";
+  return {
+    id: "workspace-rekey",
+    sessionId,
+    commonGitDir: "/repo/.git",
+    helperToken: "test-helper-token",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    summary: {
+      id: "workspace-rekey",
+      state: "active",
+      entryPath: "/repo",
+      repoRoot: "/repo",
+      targetBranch: "main",
+      targetRemote: "origin",
+      targetSource: null,
+      sourceSha: "a".repeat(40),
+      targetSha: "a".repeat(40),
+      sessionBranch: "muxpilot/workspace-rekey",
+      sessionHeadSha: "a".repeat(40),
+      worktreePath: "/tmp/workspace-rekey",
+      dirty: false,
+      aheadBy: 0,
+      targetCheckedOutAt: null,
+      review: null,
+      reviewCurrent: false,
+      inspections: [],
+      remoteSha: null,
+      remoteAheadBy: 0,
+      remoteBehindBy: 0,
+      lastError: null,
+      cleanupEligible: false
+    }
   };
 }
 

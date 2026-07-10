@@ -180,6 +180,22 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/codex/skills", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("checks and installs the muxpilot Git workflow skill", async () => {
+    const fetchMock = mockJsonResponse({ status: "current", path: "/home/user/.codex/skills/muxpilot-git-workflow" });
+
+    await api.gitWorkflowSkillStatus();
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/codex/skills/muxpilot-git-workflow/status",
+      expect.objectContaining({ credentials: "include" })
+    );
+
+    await api.installGitWorkflowSkill();
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/codex/skills/muxpilot-git-workflow/install",
+      expect.objectContaining({ method: "POST", credentials: "include" })
+    );
+  });
+
   it("fetches session-scoped Codex skills", async () => {
     const fetchMock = mockJsonResponse({ skills: [] });
 

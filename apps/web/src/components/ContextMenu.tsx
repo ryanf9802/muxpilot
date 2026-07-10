@@ -12,6 +12,7 @@ import {
 import { Check } from "lucide-react";
 
 const CONTEXT_MENU_HAPTIC_MS = 20;
+const LONG_PRESS_FEEDBACK_DELAY_MS = 200;
 const LONG_PRESS_ACTIVE_ATTRIBUTE = "data-context-menu-long-press";
 
 interface VibrationTarget {
@@ -161,6 +162,7 @@ export function useContextMenuTrigger<T>(
   options: { longPressMs?: number; moveTolerancePx?: number; disabled?: boolean } = {}
 ) {
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointerStartRef = useRef<ContextMenuPosition | null>(null);
   const pointerTargetRef = useRef<HTMLElement | null>(null);
   const suppressClickRef = useRef(false);
@@ -179,6 +181,10 @@ export function useContextMenuTrigger<T>(
       clearTimeout(longPressTimerRef.current);
       longPressTimerRef.current = null;
     }
+    if (feedbackTimerRef.current) {
+      clearTimeout(feedbackTimerRef.current);
+      feedbackTimerRef.current = null;
+    }
     pointerStartRef.current = null;
     clearLongPressFeedback();
   }
@@ -188,8 +194,11 @@ export function useContextMenuTrigger<T>(
   function openFromLongPress(x: number, y: number) {
     suppressClickRef.current = true;
     if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     longPressTimerRef.current = null;
+    feedbackTimerRef.current = null;
     pointerStartRef.current = null;
+    pointerTargetRef.current?.setAttribute(LONG_PRESS_ACTIVE_ATTRIBUTE, "");
     requestContextMenuHaptic();
     onOpen(value, x, y);
   }
@@ -208,7 +217,10 @@ export function useContextMenuTrigger<T>(
           clearLongPress();
           pointerStartRef.current = { x: event.clientX, y: event.clientY };
           pointerTargetRef.current = event.currentTarget;
-          event.currentTarget.setAttribute(LONG_PRESS_ACTIVE_ATTRIBUTE, "");
+          feedbackTimerRef.current = setTimeout(() => {
+            feedbackTimerRef.current = null;
+            pointerTargetRef.current?.setAttribute(LONG_PRESS_ACTIVE_ATTRIBUTE, "");
+          }, Math.min(LONG_PRESS_FEEDBACK_DELAY_MS, longPressMs));
           longPressTimerRef.current = setTimeout(() => openFromLongPress(event.clientX, event.clientY), longPressMs);
         },
         onPointerMove(event: ReactPointerEvent<HTMLElement>) {

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Muxpilot Git Workflow"
+  short_description: "Work safely in muxpilot Git worktrees"
+  default_prompt: "Use $muxpilot-git-workflow to work in this managed Git session."
