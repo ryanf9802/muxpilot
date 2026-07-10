@@ -525,13 +525,9 @@ async function runStructuredReview(worktreePath: string, targetSha: string, prom
   const patchPath = join(temp, "changes.patch");
   const outputPath = join(temp, "result.json");
   try {
-    const { stdout: patch } = await execFileAsync("git", gitReviewDiffArgs(targetSha), {
-      cwd: worktreePath,
-      maxBuffer: 64 * 1024 * 1024
-    });
     await Promise.all([
-      writeFile(schemaPath, JSON.stringify(REVIEW_SCHEMA)),
-      writeFile(patchPath, patch)
+      execFileAsync("git", gitReviewDiffArgs(targetSha, patchPath), { cwd: worktreePath }),
+      writeFile(schemaPath, JSON.stringify(REVIEW_SCHEMA))
     ]);
     await execFileAsync("codex", codexReviewArgs(worktreePath, `${prompt} The exact patch to review is at ${patchPath}. Begin with that patch and inspect repository context as needed.`, schemaPath, outputPath), {
       cwd: worktreePath,
@@ -544,8 +540,8 @@ async function runStructuredReview(worktreePath: string, targetSha: string, prom
   }
 }
 
-export function gitReviewDiffArgs(targetSha: string): string[] {
-  return ["diff", "--binary", targetSha, "HEAD", "--"];
+export function gitReviewDiffArgs(targetSha: string, patchPath: string): string[] {
+  return ["diff", "--binary", `--output=${patchPath}`, targetSha, "HEAD", "--"];
 }
 
 export function parseStructuredReview(value: string): StructuredReview {

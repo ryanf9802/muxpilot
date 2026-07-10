@@ -13,8 +13,15 @@ import { GitWorkspaceCoordinator } from "@muxpilot/git-workspaces";
 const execFileAsync = promisify(execFile);
 
 describe("codexReviewArgs", () => {
-  it("materializes the exact target-to-HEAD patch", () => {
-    expect(gitReviewDiffArgs("a".repeat(40))).toEqual(["diff", "--binary", "a".repeat(40), "HEAD", "--"]);
+  it("materializes the exact target-to-HEAD patch directly to disk without buffering its size", () => {
+    expect(gitReviewDiffArgs("a".repeat(40), "/tmp/changes.patch")).toEqual([
+      "diff",
+      "--binary",
+      "--output=/tmp/changes.patch",
+      "a".repeat(40),
+      "HEAD",
+      "--"
+    ]);
   });
 
   it("runs a separate ephemeral read-only review with the materialized patch prompt", () => {
