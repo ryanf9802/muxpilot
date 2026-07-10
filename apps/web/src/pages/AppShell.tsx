@@ -924,34 +924,30 @@ export function AppShell() {
                 </label>
                 {createSessionGitProbeBusy ? <p className="session-git-probe-note">Inspecting repository…</p> : null}
                 {createSessionGitProbe?.isGit ? (
-                  <section className="session-git-fields" aria-label="Git workspace">
-                    <div className="session-git-fields-head">
-                      <div><strong>Isolated Git workspace</strong><span>{createSessionGitProbe.repoName}</span></div>
-                    </div>
+                  <>
+                    {gitWorkspaceFieldsAvailable ? (
+                      <label className="rename-field" htmlFor="create-session-target-branch">
+                        <span>Target branch</span>
+                        <select
+                          id="create-session-target-branch"
+                          value={createSessionTargetBranch}
+                          onChange={(event) => updateCreateSessionTargetBranch(event.target.value)}
+                          disabled={createSessionBusy || createSessionGitProbe.localBranches.length === 0}
+                        >
+                          {targetBranchSuggestions(createSessionGitProbe).map((suggestion) => (
+                            <option key={suggestion.value} value={suggestion.value}>{suggestion.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
                     <GitWorkflowSkillStatusCallout status={gitSkillStatus} onRetry={() => {
                       setGitSkillStatus("checking");
                       void api.gitWorkflowSkillStatus().then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
                     }} />
-                    {gitWorkspaceFieldsAvailable ? (
-                      <>
-                        <label className="rename-field" htmlFor="create-session-target-branch">
-                          <span>Target branch</span>
-                          <select
-                            id="create-session-target-branch"
-                            value={createSessionTargetBranch}
-                            onChange={(event) => updateCreateSessionTargetBranch(event.target.value)}
-                            disabled={createSessionBusy || createSessionGitProbe.localBranches.length === 0}
-                          >
-                            {targetBranchSuggestions(createSessionGitProbe).map((suggestion) => (
-                              <option key={suggestion.value} value={suggestion.value}>{suggestion.label}</option>
-                            ))}
-                          </select>
-                        </label>
-                        {createSessionGitProbe.localBranches.length === 0 ? <p className="session-git-probe-note">This repository has no local branches.</p> : null}
-                        <p className="session-git-probe-note">The current checkout and its dirty files are not used as the session workspace.</p>
-                      </>
-                    ) : null}
-                  </section>
+                    {gitWorkspaceFieldsAvailable && createSessionGitProbe.localBranches.length === 0
+                      ? <p className="session-git-probe-note">This repository has no local branches.</p>
+                      : null}
+                  </>
                 ) : null}
                 <label className="rename-field">
                   <span>Name</span>

@@ -1426,33 +1426,6 @@ select:focus-visible {
   overflow-y: auto;
 }
 
-.session-git-fields {
-  display: grid;
-  gap: 12px;
-  padding: 12px;
-  background: color-mix(in srgb, var(--color-brand) 7%, var(--color-surface-raised));
-  border: 1px solid color-mix(in srgb, var(--color-brand) 32%, var(--color-border));
-  border-radius: 8px;
-}
-
-.session-git-fields-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.session-git-fields-head > div {
-  display: grid;
-  gap: 2px;
-}
-
-.session-git-fields-head button {
-  min-height: 32px;
-  padding: 0 9px;
-  white-space: nowrap;
-}
-
-.session-git-fields-head span,
 .session-git-probe-note {
   color: var(--color-text-muted);
   font-size: 12px;
