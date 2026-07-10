@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { codexReviewArgs, parseStructuredReview } from "../src/services/gitWorkspaceManager.js";
+import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview } from "../src/services/gitWorkspaceManager.js";
 import { installMuxpilotGitWorkflowSkill, muxpilotGitWorkflowSkillStatus } from "../src/services/bundledSkills.js";
 import { AppDatabase } from "../src/db/database.js";
 import { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
@@ -13,8 +13,12 @@ import { GitWorkspaceCoordinator } from "@muxpilot/git-workspaces";
 const execFileAsync = promisify(execFile);
 
 describe("codexReviewArgs", () => {
-  it("runs a separate ephemeral read-only review against the exact target SHA", () => {
-    expect(codexReviewArgs("/tmp/session-worktree", "a".repeat(40), "Review committed changes.", "/tmp/schema.json", "/tmp/result.json")).toEqual([
+  it("materializes the exact target-to-HEAD patch", () => {
+    expect(gitReviewDiffArgs("a".repeat(40))).toEqual(["diff", "--binary", "a".repeat(40), "HEAD", "--"]);
+  });
+
+  it("runs a separate ephemeral read-only review with the materialized patch prompt", () => {
+    expect(codexReviewArgs("/tmp/session-worktree", "Review the exact patch at /tmp/changes.patch.", "/tmp/schema.json", "/tmp/result.json")).toEqual([
       "-C",
       "/tmp/session-worktree",
       "-s",
@@ -27,10 +31,7 @@ describe("codexReviewArgs", () => {
       "/tmp/schema.json",
       "--output-last-message",
       "/tmp/result.json",
-      "review",
-      "--base",
-      "a".repeat(40),
-      "Review committed changes."
+      "Review the exact patch at /tmp/changes.patch."
     ]);
   });
 

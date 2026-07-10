@@ -522,10 +522,18 @@ const REVIEW_SCHEMA = {
 async function runStructuredReview(worktreePath: string, targetSha: string, prompt: string): Promise<StructuredReview> {
   const temp = await mkdtemp(join(tmpdir(), "muxpilot-review-"));
   const schemaPath = join(temp, "schema.json");
+  const patchPath = join(temp, "changes.patch");
   const outputPath = join(temp, "result.json");
   try {
-    await writeFile(schemaPath, JSON.stringify(REVIEW_SCHEMA));
-    await execFileAsync("codex", codexReviewArgs(worktreePath, targetSha, prompt, schemaPath, outputPath), {
+    const { stdout: patch } = await execFileAsync("git", gitReviewDiffArgs(targetSha), {
+      cwd: worktreePath,
+      maxBuffer: 64 * 1024 * 1024
+    });
+    await Promise.all([
+      writeFile(schemaPath, JSON.stringify(REVIEW_SCHEMA)),
+      writeFile(patchPath, patch)
+    ]);
+    await execFileAsync("codex", codexReviewArgs(worktreePath, `${prompt} The exact patch to review is at ${patchPath}. Begin with that patch and inspect repository context as needed.`, schemaPath, outputPath), {
       cwd: worktreePath,
       timeout: 10 * 60_000,
       maxBuffer: 8 * 1024 * 1024
@@ -534,6 +542,10 @@ async function runStructuredReview(worktreePath: string, targetSha: string, prom
   } finally {
     await rm(temp, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+export function gitReviewDiffArgs(targetSha: string): string[] {
+  return ["diff", "--binary", targetSha, "HEAD", "--"];
 }
 
 export function parseStructuredReview(value: string): StructuredReview {
@@ -553,7 +565,7 @@ function validFinding(value: unknown): value is GitReviewFinding {
     (finding.line === null || Number.isInteger(finding.line));
 }
 
-export function codexReviewArgs(worktreePath: string, targetSha: string, prompt: string, schemaPath: string, outputPath: string): string[] {
+export function codexReviewArgs(worktreePath: string, prompt: string, schemaPath: string, outputPath: string): string[] {
   return [
     "-C",
     worktreePath,
@@ -567,9 +579,6 @@ export function codexReviewArgs(worktreePath: string, targetSha: string, prompt:
     schemaPath,
     "--output-last-message",
     outputPath,
-    "review",
-    "--base",
-    targetSha,
     prompt
   ];
 }
