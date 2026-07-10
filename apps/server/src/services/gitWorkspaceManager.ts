@@ -17,6 +17,7 @@ import type {
 import {
   GitWorkspaceCoordinator,
   GitWorkspaceError,
+  managedTargetRef,
   type GitRotationResult,
   type GitWorkspaceCoordinates,
   type ProvisionGitWorkspaceRequest
@@ -93,6 +94,7 @@ export class GitWorkspaceManager {
       id,
       sessionId: null,
       commonGitDir: provisioned.commonGitDir,
+      targetRef: provisioned.targetRef,
       helperToken: randomBytes(24).toString("base64url"),
       summary,
       createdAt,
@@ -116,9 +118,11 @@ export class GitWorkspaceManager {
   }
 
   async recover(): Promise<void> {
-    for (const workspace of await this.db.listGitWorkspaces()) {
-      if (workspace.summary.state === "cleaned") continue;
+    for (const stored of await this.db.listGitWorkspaces()) {
+      if (stored.summary.state === "cleaned") continue;
+      let workspace = stored;
       try {
+        workspace = await this.ensureManagedTarget(workspace);
         await this.coordinator.recoverIntegrationWorktree(coordinates(workspace), this.options.integrationRoot);
         if (workspace.summary.state === "rotation_pending") {
           const generation = (workspace.summary.generation ?? 1) + 1;
@@ -310,19 +314,18 @@ export class GitWorkspaceManager {
     try {
       const result = await this.coordinator.integrate(
         coordinates(integrating),
-        this.options.integrationRoot,
         integrating.summary.targetSha,
         integrating.summary.sessionHeadSha
       );
       return this.save(integrating, {
         ...integrating.summary,
-        state: result.cleanupPending ? "cleanup_pending" : "integrated",
+        state: "integrated",
         targetSha: result.targetSha,
         sessionHeadSha: result.targetSha,
         dirty: false,
         aheadBy: 0,
         cleanupEligible: true,
-        lastError: result.cleanupPending ? "Integration succeeded, but its temporary worktree still needs cleanup" : null
+        lastError: null
       });
     } catch (error) {
       await this.save(integrating, { ...integrating.summary, state: "active", reviewCurrent: false, lastError: errorMessage(error) });
@@ -377,6 +380,14 @@ export class GitWorkspaceManager {
     return next;
   }
 
+  private async ensureManagedTarget(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+    const targetRef = workspace.targetRef ?? managedTargetRef(workspace.summary.targetRemote, workspace.summary.targetBranch);
+    const current = { ...workspace, targetRef };
+    const targetSha = await this.coordinator.ensureManagedTargetRef(coordinates(current));
+    if (workspace.targetRef === targetRef && workspace.summary.targetSha === targetSha) return workspace;
+    return this.save(current, { ...workspace.summary, targetSha });
+  }
+
   private async withLock<T>(key: string, task: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
@@ -405,6 +416,7 @@ function coordinates(workspace: StoredGitWorkspace): GitWorkspaceCoordinates {
     commonGitDir: workspace.commonGitDir,
     targetBranch: summary.targetBranch,
     targetRemote: summary.targetRemote,
+    targetRef: workspace.targetRef ?? managedTargetRef(summary.targetRemote, summary.targetBranch),
     sourceSha: summary.sourceSha,
     targetSha: summary.targetSha,
     sessionBranch: summary.sessionBranch,
@@ -474,7 +486,7 @@ function validToken(expected: string, actual: string): boolean {
 }
 
 function workspaceLockKey(workspace: StoredGitWorkspace): string {
-  return `${workspace.commonGitDir}\0${workspace.summary.targetBranch}`;
+  return `${workspace.commonGitDir}\0${workspace.targetRef ?? managedTargetRef(workspace.summary.targetRemote, workspace.summary.targetBranch)}`;
 }
 
 export interface StructuredReview {

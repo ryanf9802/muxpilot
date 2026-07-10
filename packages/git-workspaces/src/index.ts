@@ -33,6 +33,7 @@ export interface ProvisionedGitWorkspace {
   commonGitDir: string;
   targetBranch: string;
   targetRemote: string | null;
+  targetRef: string;
   targetSource: GitRevisionSpec | null;
   sourceSha: string;
   targetSha: string;
@@ -51,6 +52,7 @@ export interface GitWorkspaceCoordinates {
   commonGitDir: string;
   targetBranch: string;
   targetRemote: string | null;
+  targetRef: string;
   sourceSha: string;
   targetSha: string;
   sessionBranch: string;
@@ -68,7 +70,6 @@ export interface GitWorkspaceStatus {
 
 export interface GitIntegrationResult {
   targetSha: string;
-  cleanupPending: boolean;
 }
 
 export interface GitRotationResult {
@@ -178,14 +179,20 @@ export class GitWorkspaceCoordinator {
       "--format=%(refname)",
       "refs/heads",
       "refs/remotes",
-      "refs/tags"
+      "refs/tags",
+      "refs/muxpilot/targets"
     ]));
-    const localBranches: string[] = [];
+    const localBranches = new Set<string>();
     const remoteBranches: Array<{ remote: string; branch: string }> = [];
     const tags: string[] = [];
     const longestRemotes = [...remotes].sort((left, right) => right.length - left.length);
     for (const ref of refs) {
-      if (ref.startsWith("refs/heads/")) localBranches.push(ref.slice("refs/heads/".length));
+      if (ref.startsWith("refs/heads/")) localBranches.add(ref.slice("refs/heads/".length));
+      else if (ref.startsWith("refs/muxpilot/targets/")) {
+        const marker = "/heads/";
+        const index = ref.indexOf(marker, "refs/muxpilot/targets/".length);
+        if (index >= 0) localBranches.add(ref.slice(index + marker.length));
+      }
       else if (ref.startsWith("refs/tags/")) tags.push(ref.slice("refs/tags/".length));
       else {
         const remote = longestRemotes.find((name) => ref.startsWith(`refs/remotes/${name}/`));
@@ -194,7 +201,7 @@ export class GitWorkspaceCoordinator {
         if (branch && branch !== "HEAD") remoteBranches.push({ remote, branch });
       }
     }
-    return { localBranches, remoteBranches, tags };
+    return { localBranches: [...localBranches], remoteBranches, tags };
   }
 
   async provision(request: ProvisionGitWorkspaceRequest): Promise<ProvisionedGitWorkspace> {
@@ -211,18 +218,24 @@ export class GitWorkspaceCoordinator {
       throw new GitWorkspaceError(`Remote '${request.targetRemote}' does not exist`, "missing_remote");
     }
 
-    const targetRef = localBranchRef(request.targetBranch);
+    const targetRef = managedTargetRef(targetRemote ?? null, request.targetBranch);
     let targetSha = await this.tryResolveCommit(repoRoot, targetRef);
-    const targetExistedLocally = Boolean(targetSha);
+    let targetExisted = Boolean(targetSha);
     let source: ResolvedRevision | null = null;
 
     if (!targetSha && targetRemote) {
       try {
         source = await this.tryResolveRemoteBranch(repoRoot, targetRemote, request.targetBranch, request.allowCachedRemote === true);
         targetSha = source?.commitSha ?? null;
+        targetExisted = Boolean(targetSha);
       } catch (error) {
         if (!request.targetSource || revisionNeedsRemote(request.targetSource)) throw error;
       }
+    }
+
+    if (!targetSha) {
+      targetSha = await this.tryResolveCommit(repoRoot, localBranchRef(request.targetBranch));
+      targetExisted = Boolean(targetSha);
     }
 
     if (!targetSha) {
@@ -237,7 +250,7 @@ export class GitWorkspaceCoordinator {
         await this.run(repoRoot, ["update-ref", targetRef, targetSha, zeroOid(targetSha.length)]);
       } catch {
         const raced = await this.tryResolveCommit(repoRoot, targetRef);
-        if (!raced) throw new GitWorkspaceError(`Could not create target branch '${request.targetBranch}'`, "target_create_failed");
+        if (!raced) throw new GitWorkspaceError(`Could not initialize managed target '${request.targetBranch}'`, "target_create_failed");
         targetSha = raced;
       }
     } else {
@@ -262,7 +275,8 @@ export class GitWorkspaceCoordinator {
       commonGitDir,
       targetBranch: request.targetBranch,
       targetRemote: targetRemote ?? null,
-      targetSource: targetExistedLocally ? null : request.targetSource ?? source?.requested ?? null,
+      targetRef,
+      targetSource: targetExisted ? null : request.targetSource ?? source?.requested ?? null,
       sourceSha: source?.commitSha ?? targetSha,
       targetSha,
       sessionBranch,
@@ -279,7 +293,7 @@ export class GitWorkspaceCoordinator {
     if (!isValidGitStyleName(branch)) throw new GitWorkspaceError("Invalid target branch name", "invalid_target_branch");
     const probe = await this.probe(entryPath);
     if (!probe.isGit || !probe.repoRoot) throw new GitWorkspaceError("Directory is not in a Git repository", "not_git");
-    if (await this.tryResolveCommit(probe.repoRoot, localBranchRef(branch))) return true;
+    if (probe.localBranches.includes(branch)) return true;
     const remote = probe.defaultRemote;
     if (!remote) return false;
     try {
@@ -291,7 +305,7 @@ export class GitWorkspaceCoordinator {
   }
 
   async status(workspace: GitWorkspaceCoordinates): Promise<GitWorkspaceStatus> {
-    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const targetSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
     const sessionHeadSha = await this.resolveCommit(workspace.worktreePath, "HEAD");
     const [porcelain, ahead, worktrees, mergePath, applyPath] = await Promise.all([
       this.output(workspace.worktreePath, ["status", "--porcelain"]),
@@ -387,7 +401,6 @@ export class GitWorkspaceCoordinator {
 
   async integrate(
     workspace: GitWorkspaceCoordinates,
-    integrationRoot: string,
     expectedTargetSha: string,
     expectedHeadSha: string
   ): Promise<GitIntegrationResult> {
@@ -396,42 +409,34 @@ export class GitWorkspaceCoordinator {
     if (current.targetSha !== expectedTargetSha || current.sessionHeadSha !== expectedHeadSha) {
       throw new GitWorkspaceError("Target or session head changed; prepare and review again", "stale_candidate");
     }
-    if (current.targetCheckedOutAt) {
-      throw new GitWorkspaceError(`Target branch is checked out at ${current.targetCheckedOutAt}`, "target_checked_out");
+    if (!(await this.isAncestor(workspace.repoRoot, expectedTargetSha, expectedHeadSha))) {
+      throw new GitWorkspaceError("Reviewed session head is not a fast-forward of the managed target", "not_fast_forward");
     }
-    const path = resolve(integrationRoot, repoIdentity(workspace.commonGitDir), branchKey(workspace.targetBranch));
-    await mkdir(dirname(path), { recursive: true });
-    await this.run(workspace.repoRoot, ["worktree", "add", path, workspace.targetBranch]);
-    let targetSha: string;
     try {
-      const checked = await this.resolveCommit(path, "HEAD");
-      if (checked !== expectedTargetSha) throw new GitWorkspaceError("Target changed while acquiring its integration worktree", "stale_candidate");
-      await this.run(path, ["merge", "--ff-only", expectedHeadSha]);
-      targetSha = await this.resolveCommit(path, "HEAD");
+      await this.run(workspace.repoRoot, ["update-ref", workspace.targetRef, expectedHeadSha, expectedTargetSha]);
     } catch (error) {
-      await this.run(workspace.repoRoot, ["worktree", "remove", path]).catch(() => undefined);
+      const actual = await this.tryResolveCommit(workspace.repoRoot, workspace.targetRef);
+      if (actual !== expectedTargetSha) {
+        throw new GitWorkspaceError("Target changed during integration; prepare and review again", "stale_candidate");
+      }
       throw error;
     }
-    const cleanupPending = !(await this.run(workspace.repoRoot, ["worktree", "remove", path]).then(
-      () => true,
-      () => false
-    ));
-    return { targetSha, cleanupPending };
+    return { targetSha: expectedHeadSha };
   }
 
   async push(workspace: GitWorkspaceCoordinates): Promise<{ targetSha: string; remoteSha: string }> {
     if (!workspace.targetRemote) throw new GitWorkspaceError("No target remote is configured", "missing_remote");
-    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const targetSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
     const remote = await this.tryResolveRemoteBranch(workspace.repoRoot, workspace.targetRemote, workspace.targetBranch, false);
     if (remote) {
       const fastForward = await this.isAncestor(workspace.repoRoot, remote.commitSha, targetSha);
-      if (!fastForward) throw new GitWorkspaceError("Remote target is not an ancestor of the local target", "non_fast_forward");
+      if (!fastForward) throw new GitWorkspaceError("Remote target is not an ancestor of the managed target", "non_fast_forward");
     }
     await this.run(workspace.repoRoot, [
       "push",
       "--porcelain",
       workspace.targetRemote,
-      `${localBranchRef(workspace.targetBranch)}:refs/heads/${workspace.targetBranch}`
+      `${workspace.targetRef}:refs/heads/${workspace.targetBranch}`
     ]);
     return { targetSha, remoteSha: targetSha };
   }
@@ -440,7 +445,7 @@ export class GitWorkspaceCoordinator {
     if (!workspace.targetRemote) return { remoteSha: null, ahead: 0, behind: 0 };
     const remote = await this.tryResolveRemoteBranch(workspace.repoRoot, workspace.targetRemote, workspace.targetBranch, false);
     if (!remote) return { remoteSha: null, ahead: 0, behind: 0 };
-    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const targetSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
     const counts = await this.compareCounts(workspace.repoRoot, remote.commitSha, targetSha);
     return { remoteSha: remote.commitSha, ahead: counts.ahead, behind: counts.behind };
   }
@@ -451,7 +456,7 @@ export class GitWorkspaceCoordinator {
     generation: number,
     recover = false
   ): Promise<GitRotationResult> {
-    const targetSha = await this.resolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const targetSha = await this.resolveCommit(workspace.repoRoot, workspace.targetRef);
     const state = await this.status(workspace).catch((error) => {
       if (recover) return null;
       throw error;
@@ -488,6 +493,21 @@ export class GitWorkspaceCoordinator {
     if (dirty) throw new GitWorkspaceError(`Managed integration worktree is dirty at ${path}`, "dirty_integration_worktree");
     await this.run(workspace.repoRoot, ["worktree", "remove", path]);
     return true;
+  }
+
+  async ensureManagedTargetRef(workspace: GitWorkspaceCoordinates): Promise<string> {
+    const existing = await this.tryResolveCommit(workspace.repoRoot, workspace.targetRef);
+    if (existing) return existing;
+    const local = await this.tryResolveCommit(workspace.repoRoot, localBranchRef(workspace.targetBranch));
+    const seed = local ?? await this.resolveCommit(workspace.repoRoot, workspace.targetSha);
+    try {
+      await this.run(workspace.repoRoot, ["update-ref", workspace.targetRef, seed, zeroOid(seed.length)]);
+      return seed;
+    } catch {
+      const raced = await this.tryResolveCommit(workspace.repoRoot, workspace.targetRef);
+      if (raced) return raced;
+      throw new GitWorkspaceError(`Could not recover managed target '${workspace.targetBranch}'`, "target_create_failed");
+    }
   }
 
   async compareCounts(repoRoot: string, leftSha: string, rightSha: string): Promise<{ ahead: number; behind: number }> {
@@ -630,6 +650,10 @@ export class GitWorkspaceCoordinator {
 
 function localBranchRef(branch: string): string {
   return `refs/heads/${branch}`;
+}
+
+export function managedTargetRef(remote: string | null, branch: string): string {
+  return `refs/muxpilot/targets/${remote ? remoteKey(remote) : "local"}/heads/${branch}`;
 }
 
 function remoteHeadCacheRef(remote: string, branch: string): string {

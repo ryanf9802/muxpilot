@@ -107,10 +107,42 @@ describe("agent finalization", () => {
     const integrated = await manager.finalizeWithToken(workspace.id, workspace.helperToken);
 
     expect(integrated).toMatchObject({ status: "integrated", generation: 2 });
-    expect(await git(root, ["rev-parse", "target"])).toBe(completedHead);
+    expect(await git(root, ["rev-parse", "target"])).not.toBe(completedHead);
+    expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
     expect(await git(workspace.summary.worktreePath, ["branch", "--show-current"])).toContain("/g2");
     expect(await git(workspace.summary.worktreePath, ["status", "--porcelain"])).toBe("");
     await expect(git(root, ["rev-parse", `${workspace.summary.sessionBranch}^{commit}`])).rejects.toBeTruthy();
+    await db.close();
+  });
+
+  it("recovers a legacy workspace into a managed target ref without moving its local target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-legacy-target-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "target"]);
+    const localTarget = await git(root, ["rev-parse", "refs/heads/target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    const coordinator = new GitWorkspaceCoordinator();
+    const manager = new GitWorkspaceManager(db, coordinator, {
+      worktreeRoot: join(root, "worktrees"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations")
+    });
+    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
+    await git(root, ["update-ref", "-d", workspace.targetRef!]);
+    const legacy = { ...workspace };
+    delete legacy.targetRef;
+    await db.upsertGitWorkspace(legacy, legacy.updatedAt);
+
+    await manager.recover();
+    const recovered = await manager.get(workspace.id);
+    expect(recovered?.targetRef).toBe(workspace.targetRef);
+    expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(localTarget);
+    expect(await git(root, ["rev-parse", "refs/heads/target"])).toBe(localTarget);
     await db.close();
   });
 });

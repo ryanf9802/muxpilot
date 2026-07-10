@@ -168,6 +168,7 @@ export interface StoredGitWorkspace {
   id: string;
   sessionId: string | null;
   commonGitDir: string;
+  targetRef?: string;
   helperToken: string;
   summary: GitWorkspaceSummary;
   createdAt: string;

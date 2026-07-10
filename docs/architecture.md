@@ -29,7 +29,7 @@ Codex JSONL files under `~/.codex/sessions` are the preferred transcript source 
 
 SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
-Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, local target, conditional source, current private worktree generation, exact inspection revisions, structured review pair, last completion, rotation recovery state, and remote publication state.
+Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, named target and shared managed target ref, conditional source, current private worktree generation, exact inspection revisions, structured review pair, last completion, rotation recovery state, and remote publication state.
 
 ## Components
 
@@ -98,13 +98,13 @@ Managed Git session creation and integration:
 
 ```text
 entry directory + target/source -> fetch exact refs -> private branch/worktree -> tmux/Codex -C worktree
-private commits -> agent finish capability -> rebase onto current local target
+private commits -> agent finish capability -> rebase onto current managed target ref
 structured ephemeral Codex review -> agent fixes and recommits until zero findings
-reviewed head -> temporary target worktree -> fast-forward target -> fresh worktree generation
-explicit inline Git-panel confirmation -> fetch remote target -> normal non-force push
+reviewed head -> atomic compare-and-swap fast-forward of managed target -> fresh worktree generation
+explicit inline Git-panel confirmation -> fetch remote target -> normal non-force push of managed target
 ```
 
-The target branch is never checked out in an implementation worktree. Final integration temporarily checks it out in a coordinator-owned worktree, allowing Git's normal one-branch-per-worktree rule to serialize ownership and safely defer when the developer has the target checked out elsewhere.
+Each repository has one shared muxpilot-owned target ref per remote and branch. Final integration advances that ref atomically, so multiple sessions serialize without checking out or updating the developer's local branch. The entry checkout may remain on the named target with clean or dirty files; its HEAD, branch ref, index, and files are not changed. Remote publication remains a confirmed UI-only action and uses a normal non-force push.
 
 Restorable session history:
 
