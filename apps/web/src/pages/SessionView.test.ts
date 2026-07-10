@@ -648,6 +648,8 @@ describe("GitWorkspacePanel", () => {
     expect(html).toContain("Target branch");
     expect(html).toContain("main");
     expect(html).toContain("muxpilot/session-a");
+    expect(html).toContain('aria-label="Copy worktree name muxpilot/session-a"');
+    expect(html).toContain("Copy worktree name");
     expect(html).toContain("origin");
     expect(html).toContain("2 ahead · 1 behind");
     expect(html).toContain("Refresh");

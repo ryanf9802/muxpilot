@@ -2276,9 +2276,14 @@ select:focus-visible {
 }
 
 .git-panel-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; min-width: 0; }
-.git-panel-summary > div { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 12px; background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: 8px; }
+.git-panel-summary > div,
+.git-panel-summary > button { display: grid; align-content: start; gap: 4px; min-width: 0; padding: 12px; color: var(--color-text); background: var(--color-surface-raised); border: 1px solid var(--color-border); border-radius: 8px; text-align: left; }
 .git-panel-summary span, .git-panel-summary small { color: var(--color-text-muted); font-size: 12px; }
 .git-panel-summary strong, .git-panel-summary code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+.git-worktree-copy { cursor: pointer; }
+.git-worktree-copy small { display: inline-flex; align-items: center; gap: 5px; }
+.git-worktree-copy[data-copied="true"] small { color: var(--color-success); }
 
 .git-panel-error { margin: 0; padding: 10px; color: var(--color-error); background: var(--color-error-soft); border: 1px solid var(--color-error); border-radius: 8px; overflow-wrap: anywhere; }
 

@@ -1785,6 +1785,18 @@ export function GitWorkspacePanel({
   onAction: (action: GitWorkspaceAction) => void;
   onClose: () => void;
 }) {
+  const [worktreeCopied, setWorktreeCopied] = useState(false);
+
+  async function copyWorktreeName() {
+    try {
+      await copyText(workspace.sessionBranch);
+      setWorktreeCopied(true);
+      window.setTimeout(() => setWorktreeCopied(false), 1600);
+    } catch {
+      setWorktreeCopied(false);
+    }
+  }
+
   return (
     <div className="dialog-backdrop git-panel-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
       <section className="git-workspace-panel" role="dialog" aria-modal="true" aria-labelledby="git-workspace-dialog-title">
@@ -1796,7 +1808,18 @@ export function GitWorkspacePanel({
         </div>
         <div className="git-panel-summary">
           <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
-          <div><span>Worktree</span><strong title={workspace.worktreePath}>{workspace.sessionBranch}</strong></div>
+          <button
+            type="button"
+            className="git-worktree-copy"
+            data-copied={worktreeCopied || undefined}
+            onClick={() => void copyWorktreeName()}
+            aria-label={worktreeCopied ? `Copied worktree name ${workspace.sessionBranch}` : `Copy worktree name ${workspace.sessionBranch}`}
+            title={`Copy ${workspace.sessionBranch}`}
+          >
+            <span>Worktree</span>
+            <strong title={workspace.worktreePath}>{workspace.sessionBranch}</strong>
+            <small aria-live="polite">{worktreeCopied ? <><Check size={14} aria-hidden="true" /> Copied</> : <><Copy size={14} aria-hidden="true" /> Copy worktree name</>}</small>
+          </button>
           <div>
             <span>Remote</span>
             <strong>{workspace.targetRemote ?? "Not configured"}</strong>
