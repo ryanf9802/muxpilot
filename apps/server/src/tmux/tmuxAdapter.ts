@@ -6,6 +6,8 @@ const execFileAsync = promisify(execFile);
 const SEP = "\t";
 const MIN_INPUT_SUBMIT_DELAY_MS = 80;
 const MAX_INPUT_SUBMIT_DELAY_MS = 2500;
+const CODEX_STARTUP_POLL_INTERVAL_MS = 50;
+const CODEX_STARTUP_TIMEOUT_MS = 5000;
 const PANE_FORMAT = [
   "#{session_id}",
   "#{session_name}",
@@ -55,14 +57,14 @@ export class TmuxAdapter {
     const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
-    return parsePaneLine(line);
+    return this.prepareCodexPane(parsePaneLine(line));
   }
 
   private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
     const { stdout } = await execFileAsync("tmux", tmuxNewCodexResumeWindowArgs(targetSessionId, cwd, name, codexSessionId, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex window");
-    return parsePaneLine(line);
+    return this.prepareCodexPane(parsePaneLine(line));
   }
 
   private async createMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions): Promise<TmuxPane> {
@@ -82,7 +84,7 @@ export class TmuxAdapter {
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex session");
-    return parsePaneLine(line);
+    return this.prepareCodexPane(parsePaneLine(line));
   }
 
   private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
@@ -102,7 +104,22 @@ export class TmuxAdapter {
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex session");
-    return parsePaneLine(line);
+    return this.prepareCodexPane(parsePaneLine(line));
+  }
+
+  private async prepareCodexPane(pane: TmuxPane): Promise<TmuxPane> {
+    const deadline = Date.now() + CODEX_STARTUP_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const capture = await this.capturePane(pane.paneId, 40).catch(() => "");
+      if (isCodexDirectoryTrustPrompt(capture)) {
+        await this.sendKeys(pane.paneId, ["Enter"]);
+        await delay(250);
+        return pane;
+      }
+      if (isCodexReadyScreen(capture)) return pane;
+      await delay(CODEX_STARTUP_POLL_INTERVAL_MS);
+    }
+    return pane;
   }
 
   private async hasSession(sessionName: string): Promise<boolean> {
@@ -218,6 +235,20 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   if (options.developerInstructions) args.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
   if (resumeSessionId) args.push("resume", resumeSessionId);
   return args;
+}
+
+export function isCodexDirectoryTrustPrompt(text: string): boolean {
+  return text.includes("Do you trust the contents of this directory?") && text.includes("Yes, continue") && text.includes("No, quit");
+}
+
+function isCodexReadyScreen(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return (
+    normalized.includes("openai codex") ||
+    normalized.includes("use /skills to list available skills") ||
+    normalized.includes("context left") ||
+    normalized.includes("gpt-")
+  );
 }
 
 function delay(ms: number): Promise<void> {

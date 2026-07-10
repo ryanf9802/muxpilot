@@ -77,7 +77,9 @@ const manager = new SessionManager(
   activitySummarizer,
   codexProcessResolver,
   gitWorkspaces,
-  `http://127.0.0.1:${config.port}`
+  `http://127.0.0.1:${config.port}`,
+  config.codexHome,
+  config.gitIntegrationRoot
 );
 const access = createAccessControl(config, {
   unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()

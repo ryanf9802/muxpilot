@@ -39,6 +39,7 @@ interface GitWorkspaceManagerOptions {
 
 export class GitWorkspaceManager {
   private readonly locks = new Map<string, Promise<void>>();
+  private readonly finalizations = new Map<string, Promise<GitFinalizeResponse>>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -132,25 +133,27 @@ export class GitWorkspaceManager {
       if (current.summary.worktreePath && current.summary.sessionBranch && await pathExists(current.summary.worktreePath)) {
         return this.refresh(current);
       }
-      const suspended = current.summary.state === "suspended" && Boolean(current.summary.sessionBranch);
+      const reconciled = await this.reconcile(current, true);
+      const suspended = reconciled.summary.state === "suspended" && Boolean(reconciled.summary.sessionBranch);
       const generation = suspended ? Math.max(1, current.summary.generation ?? 1) : (current.summary.generation ?? 0) + 1;
       const materialized = await this.coordinator.materialize(
-        coordinates(current),
-        implementationRoot(current, this.options.worktreeRoot),
-        current.sessionName ?? current.id,
+        coordinates(reconciled),
+        implementationRoot(reconciled, this.options.worktreeRoot),
+        reconciled.sessionName ?? reconciled.id,
         generation,
-        current.recoveryRef ?? null
+        reconciled.recoveryRef ?? null
       );
       const status = await this.coordinator.status({
-        ...coordinates(current),
+        ...coordinates(reconciled),
         sessionBranch: materialized.sessionBranch,
         worktreePath: materialized.worktreePath,
         targetSha: materialized.targetSha
       });
+      const dependencyLinks = await this.coordinator.linkDependencies(reconciled.summary.repoRoot, materialized.worktreePath);
       return this.save(
-        { ...current, recoveryRef: materialized.recoveryError ? current.recoveryRef : null },
+        { ...reconciled, recoveryRef: materialized.recoveryError ? reconciled.recoveryRef : null },
         {
-          ...current.summary,
+          ...reconciled.summary,
           state: materialized.recoveryError ? "integration_conflict" : "active",
           generation,
           sourceSha: materialized.targetSha,
@@ -162,7 +165,9 @@ export class GitWorkspaceManager {
           aheadBy: status.aheadBy,
           review: null,
           reviewCurrent: false,
-          lastError: materialized.recoveryError
+          finalization: null,
+          dependencyLinks,
+          lastError: materialized.recoveryError ?? reconciled.summary.lastError
         }
       );
     })).summary;
@@ -232,12 +237,29 @@ export class GitWorkspaceManager {
       if (stored.summary.state === "cleaned") continue;
       let workspace = stored;
       try {
+        if (workspace.summary.finalization && ["queued", "reconciling", "reviewing", "integrating", "cleanup"].includes(workspace.summary.finalization.status)) {
+          workspace = await this.setFinalizationStatus(workspace, "interrupted", "Server restarted before finalization completed; rerun finish to resume safely");
+        }
         workspace = await this.ensureManagedTarget(workspace);
+        workspace = await this.reconcile(workspace, true);
+        const localSync = await this.coordinator.syncLocalTarget(coordinates(workspace));
+        if (workspace.summary.reconciliation) {
+          workspace = await this.save(workspace, {
+            ...workspace.summary,
+            reconciliation: {
+              ...workspace.summary.reconciliation,
+              localSha: localSync === "updated" || localSync === "current" ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
+              localSync
+            }
+          });
+        }
         await this.coordinator.recoverIntegrationWorktree(coordinates(workspace), this.options.integrationRoot);
         if (workspace.summary.worktreePath && !(await pathExists(workspace.summary.worktreePath))) {
           if (["integrated", "rotation_pending", "cleanup_pending"].includes(workspace.summary.state)) {
+            workspace = await this.ensureRecoveredCompletion(workspace);
             const targetSha = await this.coordinator.cleanupInactiveIntegrated(coordinates(workspace), workspace.summary.inspections);
-            await this.save(workspace, idleSummary({ ...workspace.summary, targetSha, sessionHeadSha: targetSha }));
+            const cleaned = await this.save(workspace, idleSummary({ ...workspace.summary, targetSha, sessionHeadSha: targetSha }));
+            await this.setFinalizationStatus(cleaned, "completed");
             continue;
           }
           const status = await this.coordinator.inactiveStatus(coordinates(workspace));
@@ -256,12 +278,15 @@ export class GitWorkspaceManager {
           workspace.summary.worktreePath &&
           ["integrated", "rotation_pending", "cleanup_pending"].includes(workspace.summary.state)
         ) {
-          await this.cleanupCompleted(workspace);
+          workspace = await this.ensureRecoveredCompletion(workspace);
+          const cleaned = await this.cleanupCompleted(workspace);
+          await this.setFinalizationStatus(cleaned, "completed");
           continue;
         }
         await this.refresh(workspace);
       } catch (error) {
-        await this.save(workspace, { ...workspace.summary, lastError: errorMessage(error) });
+        const current = await this.db.getGitWorkspace(workspace.id) ?? workspace;
+        await this.save(current, { ...current.summary, lastError: errorMessage(error) });
       }
     }
   }
@@ -304,7 +329,7 @@ export class GitWorkspaceManager {
     const workspace = requireWorkspace(await this.db.getGitWorkspaceBySession(sessionId));
     const key = workspaceLockKey(workspace);
     if (action.type === "refresh") return (await this.refresh(workspace)).summary;
-    return (await this.withLock(key, () => this.push(workspace))).summary;
+    return (await this.withLock(key, () => this.push(workspace, action.expectedTargetSha))).summary;
   }
 
   async addInspection(workspace: StoredGitWorkspace, revision: GitRevisionSpec, allowCachedRemote: boolean): Promise<StoredGitWorkspace> {
@@ -338,52 +363,117 @@ export class GitWorkspaceManager {
   async finalizeWithToken(workspaceId: string, token: string, options: GitFinalizeOptions = {}): Promise<GitFinalizeResponse> {
     const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
     if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    if (!workspace.summary.worktreePath && workspace.summary.finalization?.status === "completed" && workspace.summary.lastCompletion?.integratedSha === workspace.summary.targetSha) {
+      return {
+        status: "integrated",
+        targetSha: workspace.summary.targetSha,
+        generation: workspace.summary.lastCompletion.generation,
+        reviewed: workspace.summary.lastCompletion.reviewDisposition !== "bypassed",
+        workspace: workspace.summary
+      };
+    }
+    const existing = this.finalizations.get(workspaceId);
+    if (existing) return existing;
+    const operation = this.runFinalization(workspace, options);
+    this.finalizations.set(workspaceId, operation);
+    void operation.finally(() => {
+      if (this.finalizations.get(workspaceId) === operation) this.finalizations.delete(workspaceId);
+    }).catch(() => undefined);
+    return operation;
+  }
+
+  async statusWithToken(workspaceId: string, token: string): Promise<GitWorkspaceSummary> {
+    const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
+    if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    return (await this.refresh(workspace)).summary;
+  }
+
+  async detachDependenciesWithToken(workspaceId: string, token: string, requested: string[] | null): Promise<GitWorkspaceSummary> {
+    const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
+    if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    if (!workspace.summary.worktreePath) throw new GitWorkspaceError("Begin an implementation worktree before detaching dependencies", "workspace_idle");
+    const available = workspace.summary.dependencyLinks ?? [];
+    const paths = requested?.length ? requested : available.filter((link) => link.linked).map((link) => link.relativePath);
+    const detached = new Set(await this.coordinator.detachDependencyLinks(workspace.summary.worktreePath, paths));
+    return (await this.save(workspace, {
+      ...workspace.summary,
+      dependencyLinks: available.map((link) => detached.has(link.relativePath) ? { ...link, linked: false } : link)
+    })).summary;
+  }
+
+  private async runFinalization(workspace: StoredGitWorkspace, options: GitFinalizeOptions): Promise<GitFinalizeResponse> {
     if (!workspace.summary.worktreePath || !workspace.summary.sessionBranch) {
       throw new GitWorkspaceError("Begin an implementation worktree before finalizing", "workspace_idle");
     }
-    if (options.allowUnreviewed) return this.finalizeWithoutReview(workspace);
-    const reviewed = await this.prepareReview(workspace);
-    const result = parseStructuredReview(reviewed.summary.review?.report ?? "");
-    if (result.verdict !== "pass" || result.findings.length > 0) {
-      return { status: "changes_requested", summary: result.summary, findings: result.findings, workspace: reviewed.summary };
+    const now = nowIso();
+    workspace = await this.save(workspace, {
+      ...workspace.summary,
+      finalization: {
+        id: eventId(),
+        generation: workspace.summary.generation ?? 1,
+        candidateSha: workspace.summary.sessionHeadSha,
+        allowUnreviewed: options.allowUnreviewed === true,
+        status: "queued",
+        startedAt: now,
+        updatedAt: now,
+        error: null
+      }
+    });
+    try {
+      if (options.allowUnreviewed) return await this.finalizeWithoutReview(workspace);
+      const reviewed = await this.prepareReview(workspace);
+      const result = parseStructuredReview(reviewed.summary.review?.report ?? "");
+      if (result.verdict !== "pass" || result.findings.length > 0) {
+        const changed = await this.setFinalizationStatus(reviewed, "changes_requested");
+        return { status: "changes_requested", summary: result.summary, findings: result.findings, workspace: changed.summary };
+      }
+      const commitCount = reviewed.summary.aheadBy;
+      const integrated = await this.withLock(workspaceLockKey(reviewed), () => this.integrate(reviewed));
+      const completed = await this.withLock(workspaceLockKey(integrated), () =>
+        this.completeGeneration(integrated, commitCount, result.summary, "passed")
+      );
+      const finalized = await this.setFinalizationStatus(completed, "completed");
+      return {
+        status: "integrated",
+        targetSha: finalized.summary.targetSha,
+        generation: finalized.summary.generation ?? 1,
+        reviewed: true,
+        workspace: finalized.summary
+      };
+    } catch (error) {
+      const current = await this.db.getGitWorkspace(workspace.id);
+      if (current) await this.setFinalizationStatus(current, "failed", errorMessage(error));
+      throw error;
     }
-    const commitCount = reviewed.summary.aheadBy;
-    const integrated = await this.withLock(workspaceLockKey(reviewed), () => this.integrate(reviewed));
-    const completed = await this.withLock(workspaceLockKey(integrated), () =>
-      this.completeGeneration(integrated, commitCount, result.summary, "passed")
-    );
-    return {
-      status: "integrated",
-      targetSha: completed.summary.targetSha,
-      generation: completed.summary.generation ?? 1,
-      reviewed: true,
-      workspace: completed.summary
-    };
   }
 
   private async finalizeWithoutReview(workspace: StoredGitWorkspace): Promise<GitFinalizeResponse> {
-    const reviewFailure = workspace.summary.review?.report ?? "Independent review did not complete";
+    workspace = await this.setFinalizationStatus(workspace, "reconciling");
     const commitCount = workspace.summary.aheadBy;
     const integrated = await this.withLock(workspaceLockKey(workspace), () => this.integrate(workspace, true));
-    const reviewSummary = `Independent review bypassed after user approval. Review failure: ${reviewFailure}`;
+    const reviewSummary = workspace.summary.review?.report
+      ? `Independent review bypassed after explicit user approval. Last review: ${workspace.summary.review.report}`
+      : "Independent review bypassed after explicit user approval.";
     const completed = await this.withLock(workspaceLockKey(integrated), () =>
       this.completeGeneration(integrated, commitCount, reviewSummary, "bypassed")
     );
+    const finalized = await this.setFinalizationStatus(completed, "completed");
     return {
       status: "integrated",
-      targetSha: completed.summary.targetSha,
-      generation: completed.summary.generation ?? 1,
+      targetSha: finalized.summary.targetSha,
+      generation: finalized.summary.generation ?? 1,
       reviewed: false,
-      workspace: completed.summary
+      workspace: finalized.summary
     };
   }
 
   private async prepareReview(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
-    let current = workspace;
+    workspace = await this.setFinalizationStatus(workspace, "reconciling");
+    let current = await this.withLock(workspaceLockKey(workspace), () => this.reconcile(workspace, true));
     try {
-      const prepared = await this.withLock(workspaceLockKey(workspace), () => this.coordinator.prepareIntegration(coordinates(workspace)));
-      current = await this.save(workspace, {
-        ...workspace.summary,
+      const prepared = await this.withLock(workspaceLockKey(current), () => this.coordinator.prepareIntegration(coordinates(current)));
+      current = await this.save(current, {
+        ...current.summary,
         state: "reviewing",
         targetSha: prepared.targetSha,
         sessionHeadSha: prepared.sessionHeadSha,
@@ -392,12 +482,12 @@ export class GitWorkspaceManager {
         targetCheckedOutAt: prepared.targetCheckedOutAt,
         review: null,
         reviewCurrent: false,
-        lastError: null
+        lastError: current.summary.reconciliation?.status === "cached" ? current.summary.lastError : null
       });
     } catch (error) {
-      const conflict = error instanceof GitWorkspaceError && error.code === "integration_conflict";
-      await this.save(workspace, {
-        ...workspace.summary,
+      const conflict = error instanceof GitWorkspaceError && ["integration_conflict", "target_reconciliation_conflict"].includes(error.code);
+      await this.save(current, {
+        ...current.summary,
         state: conflict ? "integration_conflict" : "active",
         reviewCurrent: false,
         lastError: errorMessage(error)
@@ -414,7 +504,12 @@ export class GitWorkspaceManager {
       createdAt: nowIso(),
       completedAt: null
     };
-    current = await this.save(current, { ...current.summary, review, state: "reviewing" });
+    current = await this.save(current, {
+      ...current.summary,
+      review,
+      state: "reviewing",
+      finalization: current.summary.finalization ? { ...current.summary.finalization, status: "reviewing", updatedAt: nowIso() } : null
+    });
     try {
       const prompt = reviewPrompt(current.summary);
       const structured = await (this.options.reviewRunner ?? runStructuredReview)(requireWorktreePath(current.summary), current.summary.targetSha, prompt);
@@ -440,21 +535,28 @@ export class GitWorkspaceManager {
   }
 
   private async integrate(workspace: StoredGitWorkspace, allowUnreviewed = false): Promise<StoredGitWorkspace> {
-    const current = await this.refresh(workspace);
-    const failedReviewIsCurrent =
-      current.summary.review?.status === "failed" &&
-      current.summary.review.targetSha === current.summary.targetSha &&
-      current.summary.review.headSha === current.summary.sessionHeadSha;
-    if (allowUnreviewed && !failedReviewIsCurrent) {
-      throw new GitWorkspaceError(
-        "Unreviewed integration requires a failed review for the exact current target and session head",
-        "review_bypass_unavailable"
-      );
+    const reconciled = await this.reconcile(workspace, true);
+    let current = await this.refresh(reconciled);
+    if (allowUnreviewed) {
+      const prepared = await this.coordinator.prepareIntegration(coordinates(current));
+      current = await this.save(current, {
+        ...current.summary,
+        targetSha: prepared.targetSha,
+        sessionHeadSha: prepared.sessionHeadSha,
+        dirty: prepared.dirty,
+        aheadBy: prepared.aheadBy,
+        targetCheckedOutAt: prepared.targetCheckedOutAt
+      });
     }
     if (!current.summary.reviewCurrent && !allowUnreviewed) {
       throw new GitWorkspaceError("A current review is required before integration", "review_required");
     }
-    const integrating = await this.save(current, { ...current.summary, state: "integrating", lastError: null });
+    const integrating = await this.save(current, {
+      ...current.summary,
+      state: "integrating",
+      finalization: current.summary.finalization ? { ...current.summary.finalization, status: "integrating", updatedAt: nowIso() } : null,
+      lastError: null
+    });
     try {
       const result = await this.coordinator.integrate(
         coordinates(integrating),
@@ -484,9 +586,16 @@ export class GitWorkspaceManager {
     reviewDisposition: "passed" | "bypassed"
   ): Promise<StoredGitWorkspace> {
     const generation = Math.max(1, workspace.summary.generation ?? 1);
+    const localSync = await this.coordinator.syncLocalTarget(coordinates(workspace));
     const pending = await this.save(workspace, {
       ...workspace.summary,
+      reconciliation: workspace.summary.reconciliation ? {
+        ...workspace.summary.reconciliation,
+        localSha: localSync === "updated" || localSync === "current" ? workspace.summary.targetSha : workspace.summary.reconciliation.localSha,
+        localSync
+      } : workspace.summary.reconciliation,
       state: "cleanup_pending",
+      finalization: workspace.summary.finalization ? { ...workspace.summary.finalization, status: "cleanup", updatedAt: nowIso() } : null,
       lastCompletion: {
         generation,
         integratedSha: workspace.summary.targetSha,
@@ -515,18 +624,33 @@ export class GitWorkspaceManager {
     }));
   }
 
-  private async push(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+  private async push(workspace: StoredGitWorkspace, expectedTargetSha: string): Promise<StoredGitWorkspace> {
     try {
-      const pushed = await this.coordinator.push(coordinates(workspace));
-      return this.save(workspace, {
-        ...workspace.summary,
+      const reconciled = await this.reconcile(workspace, false);
+      if (reconciled.summary.targetSha !== expectedTargetSha) {
+        return this.save(reconciled, {
+          ...reconciled.summary,
+          pushConfirmationRequired: true,
+          lastError: `Target changed from ${expectedTargetSha} to ${reconciled.summary.targetSha}; confirm the refreshed target before pushing`
+        });
+      }
+      const pushed = await this.coordinator.push(coordinates(reconciled));
+      return this.save(reconciled, {
+        ...reconciled.summary,
+        reconciliation: reconciled.summary.reconciliation ? {
+          ...reconciled.summary.reconciliation,
+          remoteSha: pushed.remoteSha,
+          remoteFreshness: "fresh"
+        } : reconciled.summary.reconciliation,
         remoteSha: pushed.remoteSha,
         remoteAheadBy: 0,
         remoteBehindBy: 0,
+        pushConfirmationRequired: false,
         lastError: null
       });
     } catch (error) {
-      await this.save(workspace, { ...workspace.summary, lastError: errorMessage(error) });
+      const current = await this.db.getGitWorkspace(workspace.id) ?? workspace;
+      await this.save(current, { ...current.summary, lastError: errorMessage(error) });
       throw normalizeError(error);
     }
   }
@@ -538,12 +662,75 @@ export class GitWorkspaceManager {
     return next;
   }
 
+  private setFinalizationStatus(
+    workspace: StoredGitWorkspace,
+    status: NonNullable<GitWorkspaceSummary["finalization"]>["status"],
+    error: string | null = null
+  ): Promise<StoredGitWorkspace> {
+    if (!workspace.summary.finalization) return Promise.resolve(workspace);
+    return this.save(workspace, {
+      ...workspace.summary,
+      finalization: { ...workspace.summary.finalization, status, updatedAt: nowIso(), error }
+    });
+  }
+
+  private ensureRecoveredCompletion(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+    if (workspace.summary.lastCompletion) return Promise.resolve(workspace);
+    const generation = Math.max(1, workspace.summary.finalization?.generation ?? workspace.summary.generation ?? 1);
+    return this.save(workspace, {
+      ...workspace.summary,
+      state: "cleanup_pending",
+      lastCompletion: {
+        generation,
+        integratedSha: workspace.summary.targetSha,
+        completedAt: nowIso(),
+        commitCount: 0,
+        reviewSummary: "Recovered an integration that completed before finalization was interrupted.",
+        reviewDisposition: workspace.summary.finalization?.allowUnreviewed ? "bypassed" : "passed"
+      }
+    });
+  }
+
   private async ensureManagedTarget(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
     const targetRef = workspace.targetRef ?? managedTargetRef(workspace.summary.targetRemote, workspace.summary.targetBranch);
     const current = { ...workspace, targetRef };
     const targetSha = await this.coordinator.ensureManagedTargetRef(coordinates(current));
     if (workspace.targetRef === targetRef && workspace.summary.targetSha === targetSha) return workspace;
     return this.save(current, { ...workspace.summary, targetSha });
+  }
+
+  private async reconcile(workspace: StoredGitWorkspace, allowCachedRemote: boolean): Promise<StoredGitWorkspace> {
+    try {
+      const result = await this.coordinator.reconcileTarget(coordinates(workspace), this.options.integrationRoot, allowCachedRemote);
+      return this.save(workspace, {
+        ...workspace.summary,
+        targetSha: result.managedSha,
+        reconciliation: result,
+        lastError: result.status === "cached" ? "Target reconciled using cached remote state; publication requires a fresh fetch" : null
+      });
+    } catch (error) {
+      if (error instanceof GitWorkspaceError && error.code === "target_reconciliation_conflict") {
+        const worktreePath = error.causeText?.split("\n")[0] ?? null;
+        await this.save(workspace, {
+          ...workspace.summary,
+          state: "integration_conflict",
+          reconciliation: {
+            status: "conflict",
+            managedRef: workspace.targetRef ?? managedTargetRef(workspace.summary.targetRemote, workspace.summary.targetBranch),
+            managedSha: workspace.summary.targetSha,
+            localRef: `refs/heads/${workspace.summary.targetBranch}`,
+            localSha: null,
+            remoteRef: workspace.summary.targetRemote ? `refs/heads/${workspace.summary.targetBranch}` : null,
+            remoteSha: null,
+            remoteFreshness: "local",
+            worktreePath,
+            localSync: "current"
+          },
+          lastError: error.message
+        });
+      }
+      throw error;
+    }
   }
 
   private async withLock<T>(key: string, task: () => Promise<T>): Promise<T> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   codexCommandArgs,
   inputSubmitDelayMs,
+  isCodexDirectoryTrustPrompt,
   tmuxNewCodexResumeWindowArgs,
   tmuxNewCodexWindowArgs,
   tmuxPasteBufferArgs
@@ -36,6 +37,22 @@ describe("codexCommandArgs", () => {
   });
 });
 
+describe("isCodexDirectoryTrustPrompt", () => {
+  it("recognizes the Codex project trust gate", () => {
+    expect(isCodexDirectoryTrustPrompt([
+      "> You are in /home/dev/.muxpilot/sessions/example",
+      "Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.",
+      "› 1. Yes, continue",
+      "  2. No, quit",
+      "Press enter to continue"
+    ].join("\n"))).toBe(true);
+  });
+
+  it("does not mistake the normal Codex screen for a trust gate", () => {
+    expect(isCodexDirectoryTrustPrompt(">_ OpenAI Codex\nWhat can I help you build?")).toBe(false);
+  });
+});
+
 describe("inputSubmitDelayMs", () => {
   it("keeps short commands fast and gives larger pastes time to settle", () => {
     expect(inputSubmitDelayMs("hello")).toBe(80);
@@ -64,7 +81,7 @@ describe("tmuxPasteBufferArgs", () => {
 
 describe("tmuxNewCodexWindowArgs", () => {
   it("targets the shared session without requesting the active window index", () => {
-    const args = tmuxNewCodexWindowArgs("muxpilot", "/home/ryanf/workspace/teamweave", "make-warnings");
+    const args = tmuxNewCodexWindowArgs("muxpilot", "/home/dev/workspace/example", "make-warnings");
 
     expect(args).toEqual([
       "new-window",
@@ -76,13 +93,13 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-n",
       "make-warnings",
       "-c",
-      "/home/ryanf/workspace/teamweave",
+      "/home/dev/workspace/example",
       "codex"
     ]);
   });
 
   it("builds a Codex resume command for restorable sessions", () => {
-    const args = tmuxNewCodexResumeWindowArgs("muxpilot", "/home/ryanf/workspace/muxpilot", "old-work", "codex-session-id");
+    const args = tmuxNewCodexResumeWindowArgs("muxpilot", "/home/dev/workspace/example", "old-work", "codex-session-id");
 
     expect(args).toEqual([
       "new-window",
@@ -94,7 +111,7 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-n",
       "old-work",
       "-c",
-      "/home/ryanf/workspace/muxpilot",
+      "/home/dev/workspace/example",
       "codex",
       "resume",
       "codex-session-id"

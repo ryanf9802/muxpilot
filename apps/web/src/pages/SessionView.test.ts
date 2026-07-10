@@ -689,7 +689,7 @@ describe("GitWorkspacePanel", () => {
     expect(html).not.toContain("Push to");
   });
 
-  it("disables push while the target branch is behind its remote", () => {
+  it("allows push to reconcile a target branch that is behind its remote", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {
         workspace: gitWorkspace({ remoteBehindBy: 2 }),
@@ -699,7 +699,7 @@ describe("GitWorkspacePanel", () => {
         onClose: () => undefined
       })
     );
-    expect(html).toMatch(/<button[^>]*class="primary"[^>]*disabled=""[^>]*>/);
+    expect(html).toMatch(/<button[^>]*class="primary"(?![^>]*disabled)[^>]*>/);
   });
 });
 

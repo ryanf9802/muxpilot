@@ -148,6 +148,37 @@ export interface GitCompletionSummary {
   reviewDisposition?: "passed" | "bypassed";
 }
 
+export interface GitTargetReconciliationSummary {
+  status: "current" | "cached" | "conflict";
+  managedRef: string;
+  managedSha: string;
+  localRef: string;
+  localSha: string | null;
+  remoteRef: string | null;
+  remoteSha: string | null;
+  remoteFreshness: "fresh" | "cached" | "local";
+  worktreePath: string | null;
+  localSync: "current" | "pending" | "updated" | "dirty" | "diverged" | "missing";
+}
+
+export interface GitFinalizeOperationSummary {
+  id: string;
+  generation: number;
+  candidateSha: string;
+  allowUnreviewed: boolean;
+  status: "queued" | "reconciling" | "reviewing" | "integrating" | "cleanup" | "completed" | "changes_requested" | "failed" | "interrupted";
+  startedAt: string;
+  updatedAt: string;
+  error: string | null;
+}
+
+export interface GitDependencyLink {
+  kind: "node" | "python" | "composer" | "bundler";
+  relativePath: string;
+  sourcePath: string;
+  linked: boolean;
+}
+
 export interface GitWorkspaceSummary {
   id: string;
   state: GitWorkspaceState;
@@ -177,6 +208,10 @@ export interface GitWorkspaceSummary {
   compatibilityWarnings?: string[];
   generation?: number;
   lastCompletion?: GitCompletionSummary | null;
+  reconciliation?: GitTargetReconciliationSummary | null;
+  finalization?: GitFinalizeOperationSummary | null;
+  dependencyLinks?: GitDependencyLink[];
+  pushConfirmationRequired?: boolean;
 }
 
 export interface GitTargetBranchStatus {
@@ -495,7 +530,7 @@ export interface GitRepositoryProbe {
 
 export type GitWorkspaceAction =
   | { type: "refresh" }
-  | { type: "push" };
+  | { type: "push"; expectedTargetSha: string };
 
 export interface GitWorkspaceActionResponse {
   workspace: GitWorkspaceSummary;

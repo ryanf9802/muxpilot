@@ -39,9 +39,15 @@ describe("managed Codex launch instructions", () => {
         entryPath: "/repo",
         targetBranch: "main"
       }
-    } as Parameters<typeof managedCodexLaunchOptions>[0], "http://localhost/helper");
+    } as Parameters<typeof managedCodexLaunchOptions>[0], "http://localhost/helper", "/home/dev/.codex", "/tmp/integrations");
 
     expect(options.isolatedWorkspace).toBe(true);
+    expect(options.environment).toMatchObject({
+      CODEX_HOME: "/home/dev/.codex",
+      MUXPILOT_GIT_HELPER_DIR: "/home/dev/.codex/skills/muxpilot-git-workflow/scripts"
+    });
+    expect(options.writableRoots).toContain("/tmp/integrations");
+    expect(options.developerInstructions).toContain("/home/dev/.codex/skills/muxpilot-git-workflow/scripts");
     expect(options.developerInstructions).toContain("No implementation worktree exists initially");
     expect(options.developerInstructions).toContain("muxpilot-git-begin");
     expect(options.developerInstructions).toContain("without requiring special override wording");
