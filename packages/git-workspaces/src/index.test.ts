@@ -258,6 +258,13 @@ describe("GitWorkspaceCoordinator", () => {
     expect((await lstat(join(materialized.worktreePath, "node_modules"))).isSymbolicLink()).toBe(true);
     expect(await readlink(join(materialized.worktreePath, "node_modules"))).toBe(join(root, "node_modules"));
     expect(await coordinator.status(workspace, links)).toMatchObject({ dirty: false });
+    await writeFile(join(materialized.worktreePath, "feature.txt"), "feature\n");
+    await git(materialized.worktreePath, ["add", "feature.txt"]);
+    await git(materialized.worktreePath, ["commit", "-m", "feature"]);
+    const prepared = await coordinator.prepareIntegration(workspace, links);
+    await expect(coordinator.integrate(workspace, prepared.targetSha, prepared.sessionHeadSha, links)).resolves.toEqual({
+      targetSha: prepared.sessionHeadSha
+    });
     expect(await coordinator.detachDependencyLinks(materialized.worktreePath, ["node_modules"])).toEqual(["node_modules"]);
     await expect(lstat(join(materialized.worktreePath, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
     await mkdir(join(materialized.worktreePath, "node_modules"));

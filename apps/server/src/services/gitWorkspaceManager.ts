@@ -564,7 +564,8 @@ export class GitWorkspaceManager {
       const result = await this.coordinator.integrate(
         coordinates(integrating),
         integrating.summary.targetSha,
-        integrating.summary.sessionHeadSha
+        integrating.summary.sessionHeadSha,
+        integrating.summary.dependencyLinks
       );
       return this.save(integrating, {
         ...integrating.summary,

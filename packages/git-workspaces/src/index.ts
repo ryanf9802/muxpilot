@@ -710,9 +710,10 @@ export class GitWorkspaceCoordinator {
   async integrate(
     workspace: GitWorkspaceCoordinates,
     expectedTargetSha: string,
-    expectedHeadSha: string
+    expectedHeadSha: string,
+    dependencyLinks: GitDependencyLink[] = []
   ): Promise<GitIntegrationResult> {
-    const current = await this.status(workspace);
+    const current = await this.status(workspace, dependencyLinks);
     if (current.dirty || current.rebaseInProgress) throw new GitWorkspaceError("Session worktree is not ready to integrate", "not_ready");
     if (current.targetSha !== expectedTargetSha || current.sessionHeadSha !== expectedHeadSha) {
       throw new GitWorkspaceError("Target or session head changed; prepare and review again", "stale_candidate");
