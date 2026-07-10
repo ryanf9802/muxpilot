@@ -24,6 +24,7 @@ const PANE_FORMAT = [
 
 export interface CodexLaunchOptions {
   isolatedWorkspace?: boolean;
+  writableRoots?: string[];
   developerInstructions?: string;
   environment?: Record<string, string>;
 }
@@ -210,7 +211,10 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   const args = Object.keys(options.environment ?? {}).length
     ? ["env", ...Object.entries(options.environment ?? {}).map(([key, value]) => `${key}=${value}`), "codex"]
     : ["codex"];
-  if (options.isolatedWorkspace) args.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
+  if (options.isolatedWorkspace) {
+    args.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
+    for (const root of options.writableRoots ?? []) args.push("--add-dir", root);
+  }
   if (options.developerInstructions) args.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
   if (resumeSessionId) args.push("resume", resumeSessionId);
   return args;

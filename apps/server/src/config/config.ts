@@ -40,6 +40,7 @@ const schema = z.object({
   dbPath: z.string().default("./data/muxpilot.db"),
   codexHome: z.string().default(join(homedir(), ".codex")),
   gitWorktreeRoot: z.string().default(join(homedir(), ".muxpilot", "worktrees")),
+  gitSessionRoot: z.string().default(join(homedir(), ".muxpilot", "sessions")),
   gitInspectionRoot: z.string().default(join(homedir(), ".muxpilot", "inspections")),
   gitIntegrationRoot: z.string().default(join(homedir(), ".muxpilot", "integrations")),
   sessionSecret: z.string().min(16),
@@ -94,6 +95,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     dbPath: env.MUXPILOT_DB_PATH,
     codexHome: env.MUXPILOT_CODEX_HOME,
     gitWorktreeRoot: env.MUXPILOT_GIT_WORKTREE_ROOT,
+    gitSessionRoot: env.MUXPILOT_GIT_SESSION_ROOT,
     gitInspectionRoot: env.MUXPILOT_GIT_INSPECTION_ROOT,
     gitIntegrationRoot: env.MUXPILOT_GIT_INTEGRATION_ROOT,
     sessionSecret: env.MUXPILOT_SESSION_SECRET ?? randomSessionSecret(),
@@ -125,6 +127,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     dbPath: resolve(parsed.dbPath),
     codexHome: resolve(parsed.codexHome),
     gitWorktreeRoot: resolve(parsed.gitWorktreeRoot),
+    gitSessionRoot: resolve(parsed.gitSessionRoot),
     gitInspectionRoot: resolve(parsed.gitInspectionRoot),
     gitIntegrationRoot: resolve(parsed.gitIntegrationRoot),
     pwaTrustDir: parsed.pwaTrustDir ? resolve(parsed.pwaTrustDir) : undefined

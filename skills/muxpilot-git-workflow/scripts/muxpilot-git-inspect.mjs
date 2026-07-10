@@ -30,7 +30,7 @@ if (!inspection) {
   process.stderr.write("Muxpilot did not return the created inspection.\n");
   process.exit(1);
 }
-process.stdout.write(`${inspection.commitSha} ${inspection.resolvedRef}${inspection.worktreePath ? ` ${inspection.worktreePath}` : ""}\n`);
+process.stdout.write(`${inspection.commitSha} ${inspection.resolvedRef}\n`);
 
 function parseRevision(value) {
   if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(value)) return { kind: "commit", oid: value.toLowerCase() };

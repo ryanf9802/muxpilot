@@ -29,7 +29,7 @@ Codex JSONL files under `~/.codex/sessions` are the preferred transcript source 
 
 SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
-Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, named target and shared managed target ref, conditional source, current private worktree generation, exact inspection revisions, structured review pair, last completion, rotation recovery state, and remote publication state.
+Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, named target and shared managed target ref, conditional source, current ephemeral implementation generation, recovery ref, exact inspection revisions, structured review pair, last completion, cleanup recovery state, and remote publication state.
 
 ## Components
 
@@ -42,7 +42,7 @@ Managed Git sessions also store a durable Git workspace identity independent of 
 - Activity summarizer: optional OpenAI-backed, prompt-only session summaries and usage/cost recording.
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
-- Git workspace coordinator: provisions generation-scoped private branches/worktrees, fetches remote revisions into `refs/muxpilot/*`, prepares rebases, performs reviewed fast-forward integration, and rotates completed worktrees at a stable session path.
+- Git workspace coordinator: registers managed target metadata, creates generation-scoped private branches/worktrees only for active change tasks, fetches exact revisions into `refs/muxpilot/*`, preserves interrupted work, performs reviewed fast-forward integration, and removes completed worktrees.
 
 ## Operator Access
 
@@ -97,10 +97,10 @@ Supported actions include interrupt, input-mode switch, proposed-plan choice, re
 Managed Git session creation and integration:
 
 ```text
-entry directory + target/source -> fetch exact refs -> private branch/worktree -> tmux/Codex -C worktree
-private commits -> agent finish capability -> rebase onto current managed target ref
+entry directory + target/source -> fetch exact refs -> neutral tmux/Codex control directory
+change task -> agent begin capability -> private branch/worktree -> commits -> agent finish capability -> rebase onto current managed target ref
 five-minute structured ephemeral Codex review -> agent fixes findings, or halts for explicit user approval when review infrastructure fails
-reviewed head -> atomic compare-and-swap fast-forward of managed target -> fresh worktree generation
+reviewed head -> atomic compare-and-swap fast-forward of managed target -> remove implementation worktree and private branch
 explicit inline Git-panel confirmation -> fetch remote target -> normal non-force push of managed target
 ```
 

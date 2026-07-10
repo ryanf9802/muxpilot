@@ -86,7 +86,10 @@ The built-in pricing table covers `gpt-4.1`, `gpt-4.1-mini`, and `gpt-4.1-nano` 
 Managed Git session worktrees live outside the repository entry checkout by default:
 
 - `MUXPILOT_GIT_WORKTREE_ROOT` defaults to `~/.muxpilot/worktrees`.
-- `MUXPILOT_GIT_INSPECTION_ROOT` defaults to `~/.muxpilot/inspections`.
+- `MUXPILOT_GIT_SESSION_ROOT` defaults to `~/.muxpilot/sessions` and contains the small neutral control directories used by live Codex chats.
+- `MUXPILOT_GIT_INSPECTION_ROOT` defaults to `~/.muxpilot/inspections` and is retained only for cleaning up legacy inspection worktrees; new inspections use exact refs without a checkout.
 - `MUXPILOT_GIT_INTEGRATION_ROOT` defaults to `~/.muxpilot/integrations`.
 
 These paths may be overridden when worktrees need to live on a particular filesystem. Do not point them inside a repository working tree.
+
+Git sessions do not create a worktree at launch. The agent creates a meaningfully named implementation worktree only for change tasks, and successful integration removes it immediately. If a session disappears with unfinished work, muxpilot preserves committed work on its private branch and dirty state under `refs/muxpilot/recovery/*` before removing the checkout.

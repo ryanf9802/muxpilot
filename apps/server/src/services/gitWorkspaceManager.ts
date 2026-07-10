@@ -19,7 +19,6 @@ import {
   GitWorkspaceCoordinator,
   GitWorkspaceError,
   managedTargetRef,
-  type GitRotationResult,
   type GitWorkspaceCoordinates,
   type ProvisionGitWorkspaceRequest
 } from "@muxpilot/git-workspaces";
@@ -32,6 +31,7 @@ export const REVIEW_TIMEOUT_MS = 5 * 60_000;
 
 interface GitWorkspaceManagerOptions {
   worktreeRoot: string;
+  sessionRoot: string;
   inspectionRoot: string;
   integrationRoot: string;
   reviewRunner?: (worktreePath: string, targetSha: string, prompt: string) => Promise<StructuredReview>;
@@ -54,17 +54,18 @@ export class GitWorkspaceManager {
     return this.coordinator.targetBranchExists(path, branch);
   }
 
-  async provision(request: Omit<ProvisionGitWorkspaceRequest, "workspaceId" | "worktreeRoot">): Promise<StoredGitWorkspace> {
+  async provision(request: Omit<ProvisionGitWorkspaceRequest, "workspaceId" | "worktreeRoot" | "sessionRoot">): Promise<StoredGitWorkspace> {
     const id = eventId();
     const createdAt = nowIso();
     const provisioned = await this.coordinator.provision({
       ...request,
       workspaceId: id,
-      worktreeRoot: this.options.worktreeRoot
+      worktreeRoot: this.options.worktreeRoot,
+      sessionRoot: this.options.sessionRoot
     });
     const summary: GitWorkspaceSummary = {
       id,
-      state: "active",
+      state: "idle",
       entryPath: provisioned.entryPath,
       repoRoot: provisioned.repoRoot,
       targetBranch: provisioned.targetBranch,
@@ -74,9 +75,9 @@ export class GitWorkspaceManager {
       sourceFetchedAt: provisioned.sourceFetchedAt,
       sourceFreshness: provisioned.sourceFreshness,
       targetSha: provisioned.targetSha,
-      sessionBranch: provisioned.sessionBranch,
-      sessionHeadSha: provisioned.sessionHeadSha,
-      worktreePath: provisioned.worktreePath,
+      sessionBranch: null,
+      sessionHeadSha: provisioned.targetSha,
+      worktreePath: null,
       dirty: false,
       aheadBy: 0,
       targetCheckedOutAt: null,
@@ -89,14 +90,18 @@ export class GitWorkspaceManager {
       lastError: provisioned.usedCachedRemote ? "Provisioned from an explicitly accepted cached remote revision" : null,
       cleanupEligible: false,
       compatibilityWarnings: provisioned.compatibilityWarnings,
-      generation: 1,
+      generation: 0,
       lastCompletion: null
     };
     const stored: StoredGitWorkspace = {
       id,
       sessionId: null,
+      sessionName: request.sessionName,
       commonGitDir: provisioned.commonGitDir,
       targetRef: provisioned.targetRef,
+      controlPath: provisioned.controlPath,
+      implementationRoot: provisioned.implementationRoot,
+      recoveryRef: null,
       helperToken: randomBytes(24).toString("base64url"),
       summary,
       createdAt,
@@ -119,6 +124,109 @@ export class GitWorkspaceManager {
     return this.db.getGitWorkspace(workspaceId);
   }
 
+  async beginWithToken(workspaceId: string, token: string): Promise<GitWorkspaceSummary> {
+    const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
+    if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    return (await this.withLock(workspaceLockKey(workspace), async () => {
+      const current = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
+      if (current.summary.worktreePath && current.summary.sessionBranch && await pathExists(current.summary.worktreePath)) {
+        return this.refresh(current);
+      }
+      const suspended = current.summary.state === "suspended" && Boolean(current.summary.sessionBranch);
+      const generation = suspended ? Math.max(1, current.summary.generation ?? 1) : (current.summary.generation ?? 0) + 1;
+      const materialized = await this.coordinator.materialize(
+        coordinates(current),
+        implementationRoot(current, this.options.worktreeRoot),
+        current.sessionName ?? current.id,
+        generation,
+        current.recoveryRef ?? null
+      );
+      const status = await this.coordinator.status({
+        ...coordinates(current),
+        sessionBranch: materialized.sessionBranch,
+        worktreePath: materialized.worktreePath,
+        targetSha: materialized.targetSha
+      });
+      return this.save(
+        { ...current, recoveryRef: materialized.recoveryError ? current.recoveryRef : null },
+        {
+          ...current.summary,
+          state: materialized.recoveryError ? "integration_conflict" : "active",
+          generation,
+          sourceSha: materialized.targetSha,
+          targetSha: materialized.targetSha,
+          sessionBranch: materialized.sessionBranch,
+          sessionHeadSha: materialized.sessionHeadSha,
+          worktreePath: materialized.worktreePath,
+          dirty: status.dirty,
+          aheadBy: status.aheadBy,
+          review: null,
+          reviewCurrent: false,
+          lastError: materialized.recoveryError
+        }
+      );
+    })).summary;
+  }
+
+  async suspendBySession(sessionId: string, removeControl = false): Promise<GitWorkspaceSummary | null> {
+    const workspace = await this.db.getGitWorkspaceBySession(sessionId);
+    if (!workspace) return null;
+    let suspended: StoredGitWorkspace;
+    try {
+      suspended = await this.withLock(workspaceLockKey(workspace), async () => {
+        const current = requireWorkspace(await this.db.getGitWorkspace(workspace.id));
+        if (!current.summary.worktreePath || !current.summary.sessionBranch || !(await pathExists(current.summary.worktreePath))) {
+          return current;
+        }
+        const refreshed = await this.refresh(current);
+        if (!refreshed.summary.dirty && refreshed.summary.aheadBy === 0 && !refreshed.recoveryRef) {
+          await this.coordinator.cleanupIntegrated(coordinates(refreshed), refreshed.summary.inspections);
+          return this.save(refreshed, idleSummary(refreshed.summary));
+        }
+        const recoveryRef = refreshed.recoveryRef ?? `refs/muxpilot/recovery/${current.id}/g${Math.max(1, current.summary.generation ?? 1)}`;
+        const result = refreshed.recoveryRef
+          ? {
+              targetSha: refreshed.summary.targetSha,
+              sessionHeadSha: refreshed.summary.sessionHeadSha,
+              aheadBy: refreshed.summary.aheadBy,
+              recoveryRef: refreshed.recoveryRef
+            }
+          : await this.coordinator.suspend(coordinates(refreshed), recoveryRef);
+        const checkpointed = await this.save(
+          { ...refreshed, recoveryRef: result.recoveryRef },
+          {
+            ...refreshed.summary,
+            state: "suspension_pending",
+            targetSha: result.targetSha,
+            sessionHeadSha: result.sessionHeadSha,
+            dirty: Boolean(result.recoveryRef),
+            aheadBy: result.aheadBy,
+            reviewCurrent: false,
+            lastError: null
+          }
+        );
+        await this.coordinator.removeSuspendedWorktree(coordinates(checkpointed));
+        return this.save(checkpointed, { ...checkpointed.summary, state: "suspended", worktreePath: null });
+      });
+    } catch (error) {
+      const current = await this.db.getGitWorkspace(workspace.id);
+      if (current) await this.save(current, { ...current.summary, lastError: errorMessage(error) });
+      throw error;
+    }
+    if (removeControl && suspended.controlPath) await rm(suspended.controlPath, { recursive: true, force: true }).catch(() => undefined);
+    return suspended.summary;
+  }
+
+  async ensureControlPath(workspace: StoredGitWorkspace): Promise<string> {
+    const path = workspace.controlPath ?? join(this.options.sessionRoot, "legacy", workspace.id);
+    const root = implementationRoot(workspace, this.options.worktreeRoot);
+    await Promise.all([mkdir(path, { recursive: true }), mkdir(root, { recursive: true })]);
+    if (workspace.controlPath !== path || workspace.implementationRoot !== root) {
+      await this.save({ ...workspace, controlPath: path, implementationRoot: root }, workspace.summary);
+    }
+    return path;
+  }
+
   async recover(): Promise<void> {
     for (const stored of await this.db.listGitWorkspaces()) {
       if (stored.summary.state === "cleaned") continue;
@@ -126,10 +234,29 @@ export class GitWorkspaceManager {
       try {
         workspace = await this.ensureManagedTarget(workspace);
         await this.coordinator.recoverIntegrationWorktree(coordinates(workspace), this.options.integrationRoot);
-        if (workspace.summary.state === "rotation_pending") {
-          const generation = (workspace.summary.generation ?? 1) + 1;
-          const rotated = await this.coordinator.rotate(coordinates(workspace), workspace.summary.inspections, generation, true);
-          await this.save(workspace, completedRotationSummary(workspace.summary, rotated, generation));
+        if (workspace.summary.worktreePath && !(await pathExists(workspace.summary.worktreePath))) {
+          if (["integrated", "rotation_pending", "cleanup_pending"].includes(workspace.summary.state)) {
+            const targetSha = await this.coordinator.cleanupInactiveIntegrated(coordinates(workspace), workspace.summary.inspections);
+            await this.save(workspace, idleSummary({ ...workspace.summary, targetSha, sessionHeadSha: targetSha }));
+            continue;
+          }
+          const status = await this.coordinator.inactiveStatus(coordinates(workspace));
+          workspace = await this.save(workspace, {
+            ...workspace.summary,
+            state: workspace.summary.sessionBranch ? "suspended" : "idle",
+            worktreePath: null,
+            targetSha: status.targetSha,
+            sessionHeadSha: status.sessionHeadSha,
+            dirty: Boolean(workspace.recoveryRef),
+            aheadBy: status.aheadBy,
+            lastError: workspace.summary.dirty ? "Implementation worktree disappeared before uncommitted changes could be preserved" : null
+          });
+        }
+        if (
+          workspace.summary.worktreePath &&
+          ["integrated", "rotation_pending", "cleanup_pending"].includes(workspace.summary.state)
+        ) {
+          await this.cleanupCompleted(workspace);
           continue;
         }
         await this.refresh(workspace);
@@ -142,7 +269,9 @@ export class GitWorkspaceManager {
   async refresh(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
     if (workspace.summary.state === "cleaned") return workspace;
     try {
-      const status = await this.coordinator.status(coordinates(workspace));
+      const status = workspace.summary.worktreePath && workspace.summary.sessionBranch
+        ? await this.coordinator.status(coordinates(workspace))
+        : await this.coordinator.inactiveStatus(coordinates(workspace));
       const remote = await this.coordinator.remoteStatus(coordinates(workspace)).catch(() => ({
         remoteSha: workspace.summary.remoteSha,
         ahead: workspace.summary.remoteAheadBy,
@@ -163,8 +292,7 @@ export class GitWorkspaceManager {
           workspace.summary.review?.status === "passed" &&
           workspace.summary.review.targetSha === status.targetSha &&
           workspace.summary.review.headSha === status.sessionHeadSha,
-        cleanupEligible:
-          workspace.summary.state === "integrated" && !status.dirty && !status.rebaseInProgress && status.sessionHeadSha === status.targetSha,
+        cleanupEligible: false,
         lastError: status.rebaseInProgress ? workspace.summary.lastError : null
       });
     } catch (error) {
@@ -203,15 +331,16 @@ export class GitWorkspaceManager {
     const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
     if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
     return (await this.withLock(`${workspace.commonGitDir}\0${workspace.summary.targetBranch}`, async () => {
-      const added = await this.addInspection(workspace, revision, false);
-      const inspection = added.summary.inspections.at(-1);
-      return inspection ? this.materializeInspection(added, inspection.id) : added;
+      return this.addInspection(workspace, revision, false);
     })).summary;
   }
 
   async finalizeWithToken(workspaceId: string, token: string, options: GitFinalizeOptions = {}): Promise<GitFinalizeResponse> {
     const workspace = requireWorkspace(await this.db.getGitWorkspace(workspaceId));
     if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
+    if (!workspace.summary.worktreePath || !workspace.summary.sessionBranch) {
+      throw new GitWorkspaceError("Begin an implementation worktree before finalizing", "workspace_idle");
+    }
     if (options.allowUnreviewed) return this.finalizeWithoutReview(workspace);
     const reviewed = await this.prepareReview(workspace);
     const result = parseStructuredReview(reviewed.summary.review?.report ?? "");
@@ -220,15 +349,15 @@ export class GitWorkspaceManager {
     }
     const commitCount = reviewed.summary.aheadBy;
     const integrated = await this.withLock(workspaceLockKey(reviewed), () => this.integrate(reviewed));
-    const rotated = await this.withLock(workspaceLockKey(integrated), () =>
-      this.rotateGeneration(integrated, commitCount, result.summary, "passed")
+    const completed = await this.withLock(workspaceLockKey(integrated), () =>
+      this.completeGeneration(integrated, commitCount, result.summary, "passed")
     );
     return {
       status: "integrated",
-      targetSha: rotated.summary.targetSha,
-      generation: rotated.summary.generation ?? 1,
+      targetSha: completed.summary.targetSha,
+      generation: completed.summary.generation ?? 1,
       reviewed: true,
-      workspace: rotated.summary
+      workspace: completed.summary
     };
   }
 
@@ -237,34 +366,16 @@ export class GitWorkspaceManager {
     const commitCount = workspace.summary.aheadBy;
     const integrated = await this.withLock(workspaceLockKey(workspace), () => this.integrate(workspace, true));
     const reviewSummary = `Independent review bypassed after user approval. Review failure: ${reviewFailure}`;
-    const rotated = await this.withLock(workspaceLockKey(integrated), () =>
-      this.rotateGeneration(integrated, commitCount, reviewSummary, "bypassed")
+    const completed = await this.withLock(workspaceLockKey(integrated), () =>
+      this.completeGeneration(integrated, commitCount, reviewSummary, "bypassed")
     );
     return {
       status: "integrated",
-      targetSha: rotated.summary.targetSha,
-      generation: rotated.summary.generation ?? 1,
+      targetSha: completed.summary.targetSha,
+      generation: completed.summary.generation ?? 1,
       reviewed: false,
-      workspace: rotated.summary
+      workspace: completed.summary
     };
-  }
-
-  private async materializeInspection(workspace: StoredGitWorkspace, inspectionId: string): Promise<StoredGitWorkspace> {
-    const inspection = workspace.summary.inspections.find((candidate) => candidate.id === inspectionId);
-    if (!inspection) throw new GitWorkspaceError("Inspection not found", "missing_inspection");
-    if (inspection.worktreePath) return workspace;
-    const worktreePath = await this.coordinator.materializeInspection(
-      coordinates(workspace),
-      inspection.id,
-      inspection.commitSha,
-      this.options.inspectionRoot
-    );
-    return this.save(workspace, {
-      ...workspace.summary,
-      inspections: workspace.summary.inspections.map((candidate) =>
-        candidate.id === inspection.id ? { ...candidate, worktreePath } : candidate
-      )
-    });
   }
 
   private async prepareReview(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
@@ -306,7 +417,7 @@ export class GitWorkspaceManager {
     current = await this.save(current, { ...current.summary, review, state: "reviewing" });
     try {
       const prompt = reviewPrompt(current.summary);
-      const structured = await (this.options.reviewRunner ?? runStructuredReview)(current.summary.worktreePath, current.summary.targetSha, prompt);
+      const structured = await (this.options.reviewRunner ?? runStructuredReview)(requireWorktreePath(current.summary), current.summary.targetSha, prompt);
       const passed = structured.verdict === "pass" && structured.findings.length === 0;
       const completed = {
         ...review,
@@ -366,18 +477,18 @@ export class GitWorkspaceManager {
     }
   }
 
-  private async rotateGeneration(
+  private async completeGeneration(
     workspace: StoredGitWorkspace,
     commitCount: number,
     reviewSummary: string,
     reviewDisposition: "passed" | "bypassed"
   ): Promise<StoredGitWorkspace> {
-    const generation = (workspace.summary.generation ?? 1) + 1;
+    const generation = Math.max(1, workspace.summary.generation ?? 1);
     const pending = await this.save(workspace, {
       ...workspace.summary,
-      state: "rotation_pending",
+      state: "cleanup_pending",
       lastCompletion: {
-        generation: generation - 1,
+        generation,
         integratedSha: workspace.summary.targetSha,
         completedAt: nowIso(),
         commitCount,
@@ -387,13 +498,21 @@ export class GitWorkspaceManager {
       lastError: null
     });
     try {
-      await this.coordinator.recoverIntegrationWorktree(coordinates(pending), this.options.integrationRoot);
-      const rotated = await this.coordinator.rotate(coordinates(pending), pending.summary.inspections, generation);
-      return this.save(pending, completedRotationSummary(pending.summary, rotated, generation));
+      return await this.cleanupCompleted(pending);
     } catch (error) {
-      await this.save(pending, { ...pending.summary, state: "rotation_pending", lastError: errorMessage(error) });
+      await this.save(pending, { ...pending.summary, state: "cleanup_pending", lastError: errorMessage(error) });
       throw normalizeError(error);
     }
+  }
+
+  private async cleanupCompleted(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+    if (workspace.recoveryRef) await this.coordinator.deleteRef(workspace.summary.repoRoot, workspace.recoveryRef);
+    const targetSha = await this.coordinator.cleanupIntegrated(coordinates(workspace), workspace.summary.inspections);
+    return this.save({ ...workspace, recoveryRef: null }, idleSummary({
+      ...workspace.summary,
+      targetSha,
+      sessionHeadSha: targetSha
+    }));
   }
 
   private async push(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
@@ -464,26 +583,43 @@ function coordinates(workspace: StoredGitWorkspace): GitWorkspaceCoordinates {
 }
 
 function recoverableState(state: GitWorkspaceSummary["state"]): GitWorkspaceSummary["state"] {
-  return ["integrated", "rotation_pending", "cleanup_pending", "cleaned"].includes(state) ? state : "active";
+  return state === "rotation_pending" ? "cleanup_pending" : state;
 }
 
-function completedRotationSummary(summary: GitWorkspaceSummary, rotated: GitRotationResult, generation: number): GitWorkspaceSummary {
+function idleSummary(summary: GitWorkspaceSummary): GitWorkspaceSummary {
   return {
     ...summary,
-    state: "active",
-    generation,
-    sourceSha: rotated.targetSha,
-    targetSha: rotated.targetSha,
-    sessionBranch: rotated.sessionBranch,
-    sessionHeadSha: rotated.sessionHeadSha,
+    state: "idle",
+    sourceSha: summary.targetSha,
+    sessionBranch: null,
+    sessionHeadSha: summary.targetSha,
+    worktreePath: null,
     dirty: false,
     aheadBy: 0,
     review: null,
     reviewCurrent: false,
-    inspections: [],
+    inspections: summary.inspections.map((inspection) => ({ ...inspection, worktreePath: null })),
     cleanupEligible: false,
     lastError: null
   };
+}
+
+function requireWorktreePath(summary: GitWorkspaceSummary): string {
+  if (!summary.worktreePath) throw new GitWorkspaceError("No implementation worktree is active", "workspace_idle");
+  return summary.worktreePath;
+}
+
+function implementationRoot(workspace: StoredGitWorkspace, worktreeRoot: string): string {
+  return workspace.implementationRoot ?? join(worktreeRoot, "legacy", workspace.id);
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function requireWorkspace(workspace: StoredGitWorkspace | null): StoredGitWorkspace {

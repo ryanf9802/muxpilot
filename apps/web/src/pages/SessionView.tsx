@@ -1788,6 +1788,7 @@ export function GitWorkspacePanel({
   const [worktreeCopied, setWorktreeCopied] = useState(false);
 
   async function copyWorktreeName() {
+    if (!workspace.sessionBranch) return;
     try {
       await copyText(workspace.sessionBranch);
       setWorktreeCopied(true);
@@ -1808,18 +1809,20 @@ export function GitWorkspacePanel({
         </div>
         <div className="git-panel-summary">
           <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
-          <button
-            type="button"
-            className="git-worktree-copy"
-            data-copied={worktreeCopied || undefined}
-            onClick={() => void copyWorktreeName()}
-            aria-label={worktreeCopied ? `Copied worktree name ${workspace.sessionBranch}` : `Copy worktree name ${workspace.sessionBranch}`}
-            title={`Copy ${workspace.sessionBranch}`}
-          >
-            <span>Worktree</span>
-            <strong title={workspace.worktreePath}>{workspace.sessionBranch}</strong>
-            <small aria-live="polite">{worktreeCopied ? <><Check size={14} aria-hidden="true" /> Copied</> : <><Copy size={14} aria-hidden="true" /> Copy worktree name</>}</small>
-          </button>
+          {workspace.sessionBranch ? (
+            <button
+              type="button"
+              className="git-worktree-copy"
+              data-copied={worktreeCopied || undefined}
+              onClick={() => void copyWorktreeName()}
+              aria-label={worktreeCopied ? `Copied worktree name ${workspace.sessionBranch}` : `Copy worktree name ${workspace.sessionBranch}`}
+              title={`Copy ${workspace.sessionBranch}`}
+            >
+              <span>Worktree</span>
+              <strong title={workspace.worktreePath ?? undefined}>{workspace.sessionBranch}</strong>
+              <small aria-live="polite">{worktreeCopied ? <><Check size={14} aria-hidden="true" /> Copied</> : <><Copy size={14} aria-hidden="true" /> Copy worktree name</>}</small>
+            </button>
+          ) : <div><span>Worktree</span><strong>No implementation worktree</strong></div>}
           <div>
             <span>Remote</span>
             <strong>{workspace.targetRemote ?? "Not configured"}</strong>
@@ -1837,6 +1840,9 @@ export function GitWorkspacePanel({
 }
 
 export function gitWorkspaceChipState(workspace: GitWorkspaceSummary): string {
+  if (workspace.state === "idle") return "idle";
+  if (workspace.state === "suspended") return "suspended";
+  if (workspace.state === "suspension_pending") return "suspending";
   if (workspace.state === "integration_conflict") return "conflict";
   if (workspace.dirty) return "dirty";
   if (workspace.state === "integrated") return "integrated";

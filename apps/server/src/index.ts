@@ -32,6 +32,7 @@ const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
 const gitWorkspaces = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
   worktreeRoot: config.gitWorktreeRoot,
+  sessionRoot: config.gitSessionRoot,
   inspectionRoot: config.gitInspectionRoot,
   integrationRoot: config.gitIntegrationRoot
 });

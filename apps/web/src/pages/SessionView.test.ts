@@ -632,6 +632,21 @@ describe("SessionHeaderMeta", () => {
 });
 
 describe("GitWorkspacePanel", () => {
+  it("shows idle sessions without an implementation worktree", () => {
+    const html = renderToStaticMarkup(
+      createElement(GitWorkspacePanel, {
+        workspace: gitWorkspace({ state: "idle", sessionBranch: null, worktreePath: null }),
+        busy: null,
+        error: null,
+        onAction: () => undefined,
+        onClose: () => undefined
+      })
+    );
+
+    expect(html).toContain("No implementation worktree");
+    expect(html).not.toContain("Copy worktree name");
+  });
+
   it("renders the compact workspace summary as a modal", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {

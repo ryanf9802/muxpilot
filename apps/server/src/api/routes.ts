@@ -274,6 +274,20 @@ export function registerRoutes(
     }
   });
 
+  app.post("/api/internal/git-workspaces/:workspaceId/begin", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
+    const { workspaceId } = request.params as { workspaceId: string };
+    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
+    try {
+      return { workspace: await manager.beginGitWorkspaceByCapability(workspaceId, token) };
+    } catch (error) {
+      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
+        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
+      }
+      throw error;
+    }
+  });
+
   app.post("/api/internal/git-workspaces/:workspaceId/finalize", async (request, reply) => {
     if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
     const { workspaceId } = request.params as { workspaceId: string };

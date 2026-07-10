@@ -27,15 +27,25 @@ describe("managed Codex launch instructions", () => {
   it("uses the worktree for coordination without restricting user-directed checkout work", () => {
     const options = managedCodexLaunchOptions({
       id: "workspace-1",
-      targetBranch: "main",
-      sessionBranch: "muxpilot/workspace-1/g1",
-      worktreePath: "/tmp/worktree"
-    } as Parameters<typeof managedCodexLaunchOptions>[0], "token", "http://localhost/helper");
+      sessionId: "session-1",
+      sessionName: "change-task",
+      commonGitDir: "/repo/.git",
+      implementationRoot: "/tmp/worktrees/change-task",
+      helperToken: "token",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: {
+        id: "workspace-1",
+        entryPath: "/repo",
+        targetBranch: "main"
+      }
+    } as Parameters<typeof managedCodexLaunchOptions>[0], "http://localhost/helper");
 
     expect(options.isolatedWorkspace).toBe(true);
-    expect(options.developerInstructions).toContain("not as a boundary on what you may inspect or do");
+    expect(options.developerInstructions).toContain("No implementation worktree exists initially");
+    expect(options.developerInstructions).toContain("muxpilot-git-begin");
     expect(options.developerInstructions).toContain("without requiring special override wording");
-    expect(options.developerInstructions).toContain("Never use the session worktree's state to claim that another checkout is clean or dirty");
+    expect(options.developerInstructions).toContain("Never use an implementation worktree's state to claim that another checkout is clean or dirty");
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("Skip managed finalization for work performed exclusively outside the managed integration path");
   });

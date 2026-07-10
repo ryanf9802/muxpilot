@@ -8,9 +8,10 @@ import {
 } from "../src/tmux/tmuxAdapter.js";
 
 describe("codexCommandArgs", () => {
-  it("locks managed sessions to their worktree and carries inspection capabilities", () => {
-    expect(codexCommandArgs("/tmp/worktree", {
+  it("launches managed sessions in a neutral root with scoped writable directories", () => {
+    expect(codexCommandArgs("/tmp/control", {
       isolatedWorkspace: true,
+      writableRoots: ["/tmp/implementation", "/repo/.git"],
       developerInstructions: "Use $muxpilot-git-workflow.",
       environment: { MUXPILOT_GIT_WORKSPACE_ID: "workspace-1" }
     })).toEqual([
@@ -18,13 +19,17 @@ describe("codexCommandArgs", () => {
       "MUXPILOT_GIT_WORKSPACE_ID=workspace-1",
       "codex",
       "-C",
-      "/tmp/worktree",
+      "/tmp/control",
       "-s",
       "workspace-write",
       "-c",
       "sandbox_workspace_write.writable_roots=[]",
       "-c",
       "sandbox_workspace_write.network_access=true",
+      "--add-dir",
+      "/tmp/implementation",
+      "--add-dir",
+      "/repo/.git",
       "-c",
       'developer_instructions="Use $muxpilot-git-workflow."'
     ]);

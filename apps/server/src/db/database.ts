@@ -169,8 +169,12 @@ interface GitWorkspaceRow {
 export interface StoredGitWorkspace {
   id: string;
   sessionId: string | null;
+  sessionName?: string;
   commonGitDir: string;
   targetRef?: string;
+  controlPath?: string;
+  implementationRoot?: string;
+  recoveryRef?: string | null;
   helperToken: string;
   summary: GitWorkspaceSummary;
   createdAt: string;

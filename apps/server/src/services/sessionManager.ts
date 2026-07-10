@@ -26,7 +26,7 @@ import type {
   TmuxPane
 } from "@muxpilot/core";
 import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
-import type { AppDatabase } from "../db/database.js";
+import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
 import {
@@ -169,7 +169,7 @@ export class SessionManager {
       }
 
       seen.add(existingId);
-      const repo = await loadRepoMetadata(pane.cwd);
+      let repo = await loadRepoMetadata(pane.cwd);
       const nextCodexSessionId = match?.sessionId ?? null;
       const nextCodexJsonlPath = match?.path ?? null;
       const sourceChanged = Boolean(
@@ -217,6 +217,7 @@ export class SessionManager {
       );
       const liveModelSettings = mergeModelSettings(jsonlModelSettings, paneModelSettings);
       const storedGitWorkspace = await this.gitWorkspaces?.getBySession(existingId) ?? null;
+      if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
       const session: ManagedSession = {
         id: existingId,
@@ -255,6 +256,12 @@ export class SessionManager {
     }
 
     for (const session of await this.db.listSessions(true)) {
+      if (!seen.has(session.id)) {
+        const suspended = await this.gitWorkspaces?.suspendBySession(session.id, true).catch(async () =>
+          (await this.gitWorkspaces?.getBySession(session.id))?.summary ?? null
+        ) ?? null;
+        if (suspended) await this.db.upsertSession({ ...session, gitWorkspace: suspended }, now);
+      }
       if (!seen.has(session.id) && session.status !== "missing") {
         this.liveApprovals.delete(session.id);
         await this.db.setSessionStatus(session.id, "missing", now);
@@ -426,13 +433,18 @@ export class SessionManager {
     }
 
     const storedGitWorkspace = await this.gitWorkspaces?.getBySession(source.id) ?? null;
-    const cwd = await requireExistingDirectory(storedGitWorkspace?.summary.worktreePath ?? source.repo.root ?? source.tmux.cwd);
+    const cwd = storedGitWorkspace
+      ? await this.gitWorkspaces!.ensureControlPath(storedGitWorkspace)
+      : await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
+    const launchWorkspace = storedGitWorkspace
+      ? await this.gitWorkspaces!.get(storedGitWorkspace.id) ?? storedGitWorkspace
+      : null;
     const name = restoreSessionName(source);
     const pane = await this.tmux.createCodexResumeWindowInMuxpilotSession(
       cwd,
       name,
       source.codexSessionId,
-      storedGitWorkspace ? managedCodexLaunchOptions(storedGitWorkspace.summary, storedGitWorkspace.helperToken, this.gitHelperBaseUrl) : {}
+      launchWorkspace ? managedCodexLaunchOptions(launchWorkspace, this.gitHelperBaseUrl) : {}
     );
     const session = await this.rebindRestoredSession(source, pane);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
@@ -744,6 +756,7 @@ export class SessionManager {
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
     let workspace = await this.gitWorkspaces.provision({
+      sessionName,
       entryPath: directory,
       targetBranch: request.workspace.targetBranch,
       targetRemote: request.workspace.targetRemote,
@@ -753,10 +766,11 @@ export class SessionManager {
     for (const inspection of request.workspace.inspections ?? []) {
       workspace = await this.gitWorkspaces.addInspection(workspace, inspection, request.workspace.allowCachedRemote === true);
     }
+    const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
     const pane = await this.tmux.createCodexWindowInMuxpilotSession(
-      workspace.summary.worktreePath,
+      controlPath,
       sessionName,
-      managedCodexLaunchOptions(workspace.summary, workspace.helperToken, this.gitHelperBaseUrl)
+      managedCodexLaunchOptions(workspace, this.gitHelperBaseUrl)
     );
     const sessionId = tmuxPaneSessionId(pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
@@ -792,6 +806,22 @@ export class SessionManager {
         this.publish("session.updated", session.id, updated);
       }
     }
+    return summary;
+  }
+
+  async beginGitWorkspaceByCapability(workspaceId: string, token: string): Promise<GitWorkspaceSummary> {
+    if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+    const summary = await this.gitWorkspaces.beginWithToken(workspaceId, token);
+    const workspace = await this.gitWorkspaces.get(workspaceId);
+    if (workspace?.sessionId) {
+      const session = await this.db.getSession(workspace.sessionId);
+      if (session) {
+        const updated = { ...session, gitWorkspace: summary };
+        await this.db.upsertSession(updated, nowIso());
+        this.publish("session.updated", session.id, updated);
+      }
+    }
+    await this.db.addAudit("agent", "git_begin", workspaceId, "ok", nowIso());
     return summary;
   }
 
@@ -1051,7 +1081,7 @@ export class SessionManager {
 
   private async rebindRestoredSession(source: ManagedSession, pane: TmuxPane): Promise<ManagedSession> {
     const now = nowIso();
-    const repo = await loadRepoMetadata(pane.cwd);
+    const repo = await loadRepoMetadata(source.gitWorkspace?.entryPath ?? pane.cwd);
     const parserOffsetMove =
       source.codexJsonlPath ? { from: parserOffsetKey(source.id, source.codexJsonlPath), to: parserOffsetKey(tmuxPaneSessionId(pane), source.codexJsonlPath) } : null;
     const session: ManagedSession = {
@@ -1239,18 +1269,21 @@ function restoreSessionName(session: ManagedSession): string {
   return "restored";
 }
 
-export function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helperToken: string, helperBaseUrl: string | null) {
+export function managedCodexLaunchOptions(workspace: StoredGitWorkspace, helperBaseUrl: string | null) {
+  const summary = workspace.summary;
   return {
     isolatedWorkspace: true,
+    writableRoots: [workspace.implementationRoot, workspace.commonGitDir].filter((value): value is string => Boolean(value)),
     developerInstructions: [
-      "This is a muxpilot-managed isolated Git workspace.",
+      "This is a muxpilot-managed Git session running from a neutral control directory.",
       "Use $muxpilot-git-workflow as the default workflow for branch and inspection operations.",
-      `Target branch: ${workspace.targetBranch}.`,
-      `Default implementation branch: ${workspace.sessionBranch}.`,
-      `Implementation worktree: ${workspace.worktreePath}.`,
-      "Use the session worktree as the default place for agent-authored changes and managed integration, not as a boundary on what you may inspect or do.",
+      `Repository entry path: ${summary.entryPath}.`,
+      `Target branch: ${summary.targetBranch}.`,
+      "No implementation worktree exists initially. For change or build tasks, announce the workflow action, run the skill's muxpilot-git-begin helper, and perform every repository write in the returned worktree path.",
+      "For answers, plans, reviews, and diagnosis, inspect the repository directly without creating a worktree. Resolve comparison revisions through the inspection helper, which returns an exact ref and commit without creating a checkout.",
+      "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
       "User intent controls task scope: when the user names another branch, checkout, or Git operation, inspect the relevant checkout and follow the request there without requiring special override wording.",
-      "Never use the session worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
+      "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "Keep unrelated guardrails in effect. Ask for confirmation only when a request is ambiguous, destructive, unusually risky, or apparently irrational—not merely because it affects another checkout.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "When the task still uses muxpilot-managed integration, create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
@@ -1258,7 +1291,7 @@ export function managedCodexLaunchOptions(workspace: GitWorkspaceSummary, helper
     ].join(" "),
     environment: helperBaseUrl ? {
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
-      MUXPILOT_GIT_HELPER_TOKEN: helperToken,
+      MUXPILOT_GIT_HELPER_TOKEN: workspace.helperToken,
       MUXPILOT_GIT_HELPER_URL: helperBaseUrl
     } : undefined
   };

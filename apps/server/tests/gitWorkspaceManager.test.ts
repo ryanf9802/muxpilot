@@ -100,7 +100,7 @@ describe("syncMuxpilotGitWorkflowSkill", () => {
     const skill = await readFile(join(installed.path, "SKILL.md"), "utf8");
     expect(skill).toContain("name: muxpilot-git-workflow");
     expect(skill).toContain("coordination tool, not a boundary");
-    expect(skill).toContain("Never use the session worktree's state to claim that another checkout is clean or dirty");
+    expect(skill).toContain("Inspect every relevant checkout before describing its working-copy state");
     expect(skill).toContain("use the normal approval or escalation path instead of refusing it as out of scope");
     expect(skill).toContain("REVIEW_INCOMPLETE");
     expect(skill).toContain("--integrate-without-review");
@@ -125,7 +125,50 @@ describe("syncMuxpilotGitWorkflowSkill", () => {
 });
 
 describe("agent finalization", () => {
-  it("returns findings, then integrates and rotates after a clean review", async () => {
+  it("creates worktrees lazily and checkpoints dirty work when a session disappears", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-lazy-worktree-"));
+    await git(root, ["init", "-q"]);
+    await git(root, ["config", "user.name", "Muxpilot Test"]);
+    await git(root, ["config", "user.email", "muxpilot@example.invalid"]);
+    await writeFile(join(root, "base.txt"), "base\n");
+    await git(root, ["add", "base.txt"]);
+    await git(root, ["commit", "-qm", "base"]);
+    await git(root, ["branch", "target"]);
+    const db = new AppDatabase(join(root, "state.sqlite"));
+    const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
+      worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
+      inspectionRoot: join(root, "inspections"),
+      integrationRoot: join(root, "integrations")
+    });
+    const workspace = await manager.provision({ sessionName: "lazy-change", entryPath: root, targetBranch: "target" });
+    await manager.bind(workspace.id, "session-1");
+
+    expect(workspace.summary).toMatchObject({ state: "idle", generation: 0, sessionBranch: null, worktreePath: null });
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(workspace.implementationRoot!);
+    const inspected = await manager.addInspectionWithToken(workspace.id, workspace.helperToken, { kind: "local_branch", branch: "target" });
+    expect(inspected.inspections.at(-1)).toMatchObject({ worktreePath: null });
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(workspace.implementationRoot!);
+
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    expect(active.worktreePath).toContain("lazy-change-");
+    expect(active.sessionBranch).toMatch(/^muxpilot\/lazy-change-[0-9a-f]{8}\/g1$/);
+    expect((await manager.beginWithToken(workspace.id, workspace.helperToken)).worktreePath).toBe(active.worktreePath);
+    await writeFile(join(active.worktreePath!, "base.txt"), "unfinished\n");
+    await writeFile(join(active.worktreePath!, "new.txt"), "new\n");
+
+    const suspended = await manager.suspendBySession("session-1");
+    expect(suspended).toMatchObject({ state: "suspended", worktreePath: null, dirty: true });
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(active.worktreePath!);
+
+    const restored = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    expect(await readFile(join(restored.worktreePath!, "base.txt"), "utf8")).toBe("unfinished\n");
+    expect(await readFile(join(restored.worktreePath!, "new.txt"), "utf8")).toBe("new\n");
+    expect(restored).toMatchObject({ state: "active", generation: 1, dirty: true });
+    await db.close();
+  });
+
+  it("returns findings, then integrates and removes the worktree after a clean review", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-finalize-"));
     await git(root, ["init", "-q"]);
     await git(root, ["config", "user.name", "Muxpilot Test"]);
@@ -138,34 +181,36 @@ describe("agent finalization", () => {
     let pass = false;
     const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
       worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
       inspectionRoot: join(root, "inspections"),
       integrationRoot: join(root, "integrations"),
       reviewRunner: async () => pass
         ? { verdict: "pass", summary: "No fixes necessary", findings: [] }
         : { verdict: "changes_requested", summary: "Fix the edge case", findings: [{ title: "Edge case", body: "Add the missing guard", path: "feature.txt", line: 1 }] }
     });
-    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
-    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "first\n");
-    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
-    await git(workspace.summary.worktreePath, ["commit", "-qm", "feature"]);
+    const workspace = await manager.provision({ sessionName: "finalize", entryPath: root, targetBranch: "target" });
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    const worktreePath = active.worktreePath!;
+    await writeFile(join(worktreePath, "feature.txt"), "first\n");
+    await git(worktreePath, ["add", "feature.txt"]);
+    await git(worktreePath, ["commit", "-qm", "feature"]);
 
     const requested = await manager.finalizeWithToken(workspace.id, workspace.helperToken);
     expect(requested).toMatchObject({ status: "changes_requested", findings: [{ title: "Edge case" }] });
-    expect(await git(root, ["rev-parse", "target"])).not.toBe(await git(workspace.summary.worktreePath, ["rev-parse", "HEAD"]));
+    expect(await git(root, ["rev-parse", "target"])).not.toBe(await git(worktreePath, ["rev-parse", "HEAD"]));
 
-    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "fixed\n");
-    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
-    await git(workspace.summary.worktreePath, ["commit", "-qm", "fix review"]);
-    const completedHead = await git(workspace.summary.worktreePath, ["rev-parse", "HEAD"]);
+    await writeFile(join(worktreePath, "feature.txt"), "fixed\n");
+    await git(worktreePath, ["add", "feature.txt"]);
+    await git(worktreePath, ["commit", "-qm", "fix review"]);
+    const completedHead = await git(worktreePath, ["rev-parse", "HEAD"]);
     pass = true;
     const integrated = await manager.finalizeWithToken(workspace.id, workspace.helperToken);
 
-    expect(integrated).toMatchObject({ status: "integrated", generation: 2, reviewed: true });
+    expect(integrated).toMatchObject({ status: "integrated", generation: 1, reviewed: true, workspace: { state: "idle", worktreePath: null, sessionBranch: null } });
     expect(await git(root, ["rev-parse", "target"])).not.toBe(completedHead);
     expect(await git(root, ["rev-parse", workspace.targetRef!])).toBe(completedHead);
-    expect(await git(workspace.summary.worktreePath, ["branch", "--show-current"])).toContain("/g2");
-    expect(await git(workspace.summary.worktreePath, ["status", "--porcelain"])).toBe("");
-    await expect(git(root, ["rev-parse", `${workspace.summary.sessionBranch}^{commit}`])).rejects.toBeTruthy();
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(worktreePath);
+    await expect(git(root, ["rev-parse", `${active.sessionBranch}^{commit}`])).rejects.toBeTruthy();
     await db.close();
   });
 
@@ -181,17 +226,20 @@ describe("agent finalization", () => {
     const db = new AppDatabase(join(root, "state.sqlite"));
     const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
       worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
       inspectionRoot: join(root, "inspections"),
       integrationRoot: join(root, "integrations"),
       reviewRunner: async () => {
         throw new Error("timed out awaiting response headers");
       }
     });
-    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
-    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "feature\n");
-    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
-    await git(workspace.summary.worktreePath, ["commit", "-qm", "feature"]);
-    const completedHead = await git(workspace.summary.worktreePath, ["rev-parse", "HEAD"]);
+    const workspace = await manager.provision({ sessionName: "bypass", entryPath: root, targetBranch: "target" });
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    const worktreePath = active.worktreePath!;
+    await writeFile(join(worktreePath, "feature.txt"), "feature\n");
+    await git(worktreePath, ["add", "feature.txt"]);
+    await git(worktreePath, ["commit", "-qm", "feature"]);
+    const completedHead = await git(worktreePath, ["rev-parse", "HEAD"]);
 
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
       .rejects.toMatchObject({ code: "review_bypass_unavailable" });
@@ -203,7 +251,7 @@ describe("agent finalization", () => {
     expect(integrated).toMatchObject({
       status: "integrated",
       reviewed: false,
-      generation: 2,
+      generation: 1,
       workspace: {
         lastCompletion: {
           reviewDisposition: "bypassed",
@@ -228,6 +276,7 @@ describe("agent finalization", () => {
     let failReview = false;
     const manager = new GitWorkspaceManager(db, new GitWorkspaceCoordinator(), {
       worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
       inspectionRoot: join(root, "inspections"),
       integrationRoot: join(root, "integrations"),
       reviewRunner: async () => {
@@ -235,10 +284,12 @@ describe("agent finalization", () => {
         return { verdict: "changes_requested", summary: "Fix it", findings: [{ title: "Bug", body: "Fix it", path: "feature.txt", line: 1 }] };
       }
     });
-    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
-    await writeFile(join(workspace.summary.worktreePath, "feature.txt"), "feature\n");
-    await git(workspace.summary.worktreePath, ["add", "feature.txt"]);
-    await git(workspace.summary.worktreePath, ["commit", "-qm", "feature"]);
+    const workspace = await manager.provision({ sessionName: "guard", entryPath: root, targetBranch: "target" });
+    const active = await manager.beginWithToken(workspace.id, workspace.helperToken);
+    const worktreePath = active.worktreePath!;
+    await writeFile(join(worktreePath, "feature.txt"), "feature\n");
+    await git(worktreePath, ["add", "feature.txt"]);
+    await git(worktreePath, ["commit", "-qm", "feature"]);
 
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken)).resolves.toMatchObject({ status: "changes_requested" });
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
@@ -246,9 +297,9 @@ describe("agent finalization", () => {
 
     failReview = true;
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken)).rejects.toMatchObject({ code: "review_failed" });
-    await writeFile(join(workspace.summary.worktreePath, "later.txt"), "later\n");
-    await git(workspace.summary.worktreePath, ["add", "later.txt"]);
-    await git(workspace.summary.worktreePath, ["commit", "-qm", "change candidate"]);
+    await writeFile(join(worktreePath, "later.txt"), "later\n");
+    await git(worktreePath, ["add", "later.txt"]);
+    await git(worktreePath, ["commit", "-qm", "change candidate"]);
     await expect(manager.finalizeWithToken(workspace.id, workspace.helperToken, { allowUnreviewed: true }))
       .rejects.toMatchObject({ code: "review_bypass_unavailable" });
     await db.close();
@@ -268,10 +319,11 @@ describe("agent finalization", () => {
     const coordinator = new GitWorkspaceCoordinator();
     const manager = new GitWorkspaceManager(db, coordinator, {
       worktreeRoot: join(root, "worktrees"),
+      sessionRoot: join(root, "sessions"),
       inspectionRoot: join(root, "inspections"),
       integrationRoot: join(root, "integrations")
     });
-    const workspace = await manager.provision({ entryPath: root, targetBranch: "target" });
+    const workspace = await manager.provision({ sessionName: "legacy", entryPath: root, targetBranch: "target" });
     await git(root, ["update-ref", "-d", workspace.targetRef!]);
     const legacy = { ...workspace };
     delete legacy.targetRef;

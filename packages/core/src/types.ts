@@ -104,7 +104,10 @@ export type GitRevisionSpec =
 
 export type GitWorkspaceState =
   | "provisioning"
+  | "idle"
   | "active"
+  | "suspended"
+  | "suspension_pending"
   | "integration_conflict"
   | "reviewing"
   | "ready_to_integrate"
@@ -157,9 +160,9 @@ export interface GitWorkspaceSummary {
   sourceFetchedAt?: string | null;
   sourceFreshness?: "fresh" | "cached" | "local";
   targetSha: string;
-  sessionBranch: string;
+  sessionBranch: string | null;
   sessionHeadSha: string;
-  worktreePath: string;
+  worktreePath: string | null;
   dirty: boolean;
   aheadBy: number;
   targetCheckedOutAt: string | null;

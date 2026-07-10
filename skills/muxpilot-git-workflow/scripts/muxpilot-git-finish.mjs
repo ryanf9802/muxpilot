@@ -50,4 +50,4 @@ if (payload.status === "changes_requested") {
   process.exit(3);
 }
 const reviewStatus = payload.reviewed === false ? " review=bypassed" : " review=passed";
-process.stdout.write(`INTEGRATED ${payload.targetSha} generation=${payload.generation}${reviewStatus}\n`);
+process.stdout.write(`INTEGRATED ${payload.targetSha} generation=${payload.generation}${reviewStatus} worktree=removed\n`);
