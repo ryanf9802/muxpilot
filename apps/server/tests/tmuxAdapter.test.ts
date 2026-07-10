@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   codexCommandArgs,
   inputSubmitDelayMs,
+  isCodexDirectoryTrustPrompt,
   tmuxNewCodexResumeWindowArgs,
   tmuxNewCodexWindowArgs,
   tmuxPasteBufferArgs
@@ -18,8 +19,6 @@ describe("codexCommandArgs", () => {
       "env",
       "MUXPILOT_GIT_WORKSPACE_ID=workspace-1",
       "codex",
-      "-c",
-      'projects."/tmp/control".trust_level="trusted"',
       "-C",
       "/tmp/control",
       "-s",
@@ -35,6 +34,22 @@ describe("codexCommandArgs", () => {
       "-c",
       'developer_instructions="Use $muxpilot-git-workflow."'
     ]);
+  });
+});
+
+describe("isCodexDirectoryTrustPrompt", () => {
+  it("recognizes the Codex project trust gate", () => {
+    expect(isCodexDirectoryTrustPrompt([
+      "> You are in /home/dev/.muxpilot/sessions/example",
+      "Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.",
+      "› 1. Yes, continue",
+      "  2. No, quit",
+      "Press enter to continue"
+    ].join("\n"))).toBe(true);
+  });
+
+  it("does not mistake the normal Codex screen for a trust gate", () => {
+    expect(isCodexDirectoryTrustPrompt(">_ OpenAI Codex\nWhat can I help you build?")).toBe(false);
   });
 });
 
@@ -79,9 +94,7 @@ describe("tmuxNewCodexWindowArgs", () => {
       "make-warnings",
       "-c",
       "/home/dev/workspace/example",
-      "codex",
-      "-c",
-      'projects."/home/dev/workspace/example".trust_level="trusted"'
+      "codex"
     ]);
   });
 
@@ -100,8 +113,6 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-c",
       "/home/dev/workspace/example",
       "codex",
-      "-c",
-      'projects."/home/dev/workspace/example".trust_level="trusted"',
       "resume",
       "codex-session-id"
     ]);
