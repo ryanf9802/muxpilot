@@ -2326,7 +2326,7 @@ function hydrateGitWorkspace(row: GitWorkspaceRow): StoredGitWorkspace {
     helperToken: workspace.helperToken ?? "",
     sessionId: row.session_id,
     updatedAt: row.updated_at,
-    summary: { ...workspace.summary, generation: workspace.summary.generation ?? 1, lastCompletion: workspace.summary.lastCompletion ?? null }
+    summary: workspace.summary
   };
 }
 

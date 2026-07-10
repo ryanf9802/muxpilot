@@ -41,8 +41,6 @@ const schema = z.object({
   codexHome: z.string().default(join(homedir(), ".codex")),
   gitWorktreeRoot: z.string().default(join(homedir(), ".muxpilot", "worktrees")),
   gitSessionRoot: z.string().default(join(homedir(), ".muxpilot", "sessions")),
-  gitInspectionRoot: z.string().default(join(homedir(), ".muxpilot", "inspections")),
-  gitIntegrationRoot: z.string().default(join(homedir(), ".muxpilot", "integrations")),
   sessionSecret: z.string().min(16),
   operatorToken: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
@@ -96,8 +94,6 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     codexHome: env.MUXPILOT_CODEX_HOME,
     gitWorktreeRoot: env.MUXPILOT_GIT_WORKTREE_ROOT,
     gitSessionRoot: env.MUXPILOT_GIT_SESSION_ROOT,
-    gitInspectionRoot: env.MUXPILOT_GIT_INSPECTION_ROOT,
-    gitIntegrationRoot: env.MUXPILOT_GIT_INTEGRATION_ROOT,
     sessionSecret: env.MUXPILOT_SESSION_SECRET ?? randomSessionSecret(),
     operatorToken: env.MUXPILOT_OPERATOR_TOKEN ?? randomAccessKey(),
     corsOrigins: env.MUXPILOT_CORS_ORIGINS,
@@ -128,8 +124,6 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     codexHome: resolve(parsed.codexHome),
     gitWorktreeRoot: resolve(parsed.gitWorktreeRoot),
     gitSessionRoot: resolve(parsed.gitSessionRoot),
-    gitInspectionRoot: resolve(parsed.gitInspectionRoot),
-    gitIntegrationRoot: resolve(parsed.gitIntegrationRoot),
     pwaTrustDir: parsed.pwaTrustDir ? resolve(parsed.pwaTrustDir) : undefined
   };
 }

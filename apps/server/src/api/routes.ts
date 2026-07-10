@@ -3,7 +3,6 @@ import { z } from "zod";
 import type {
   CodexSkillsResponse,
   CreateSessionRequest,
-  GitWorkspaceAction,
   PushSubscriptionInput,
   QuestionAnswerRequest,
   ResolveApprovalRequest,
@@ -17,7 +16,7 @@ import type {
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
-import { isValidGitStyleName, isValidSessionName, normalizeGitStyleName, normalizeSessionName } from "@muxpilot/core";
+import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
   CreateSessionError,
@@ -38,7 +37,7 @@ import { discoverCodexSkills } from "../services/skillDiscovery.js";
 import type { CodexUsageService } from "../services/codexUsage.js";
 import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 import type { NotificationService } from "../services/notifications.js";
-import { GitWorkspaceError } from "@muxpilot/git-workspaces";
+import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
@@ -51,13 +50,6 @@ const sessionNameSchema = z
   .max(4096)
   .transform((value) => normalizeSessionName(value))
   .refine((value) => isValidSessionName(value), { message: "Session name must be a 2-32 character Git-style name" });
-const gitRevisionSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("local_branch"), branch: z.string().trim().min(1).max(1024) }),
-  z.object({ kind: z.literal("remote_branch"), remote: z.string().trim().min(1).max(255), branch: z.string().trim().min(1).max(1024) }),
-  z.object({ kind: z.literal("local_tag"), tag: z.string().trim().min(1).max(1024) }),
-  z.object({ kind: z.literal("remote_tag"), remote: z.string().trim().min(1).max(255), tag: z.string().trim().min(1).max(1024) }),
-  z.object({ kind: z.literal("commit"), oid: z.string().trim().min(40).max(64), remote: z.string().trim().min(1).max(255).optional() })
-]);
 const createSessionSchema = z.object({
   cwd: z.string().trim().min(1).max(4096),
   name: sessionNameSchema,
@@ -65,18 +57,10 @@ const createSessionSchema = z.object({
     z.object({ mode: z.literal("directory") }),
     z.object({
       mode: z.literal("git"),
-      targetBranch: z.string().transform(normalizeGitStyleName).refine(isValidGitStyleName, "Target branch must be a 2-32 character Git-style name"),
-      targetRemote: z.string().trim().min(1).max(255).optional(),
-      targetSource: gitRevisionSchema.optional(),
-      inspections: z.array(gitRevisionSchema).max(10).optional(),
-      allowCachedRemote: z.boolean().optional()
+      targetBranch: z.string().trim().min(1).max(1024)
     })
   ]).optional()
 });
-const gitWorkspaceActionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("refresh") }),
-  z.object({ type: z.literal("push"), expectedTargetSha: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/) })
-]);
 const queuedInputSchema = inputBodySchema;
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
@@ -251,87 +235,6 @@ export function registerRoutes(
     return manager.probeGitRepository(cwd);
   });
 
-  app.get("/api/git/target-branch-status", { preHandler: access.requireAccess }, async (request) => {
-    const { cwd, branch } = z.object({
-      cwd: z.string().trim().min(1).max(4096),
-      branch: z.string().transform(normalizeGitStyleName).refine(isValidGitStyleName)
-    }).parse(request.query);
-    return { exists: await manager.targetGitBranchExists(cwd, branch) };
-  });
-
-  app.post("/api/internal/git-workspaces/:workspaceId/inspections", async (request, reply) => {
-    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
-    const { workspaceId } = request.params as { workspaceId: string };
-    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
-    const revision = gitRevisionSchema.parse(request.body);
-    try {
-      return { workspace: await manager.addGitInspectionByCapability(workspaceId, token, revision) };
-    } catch (error) {
-      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
-        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message });
-      }
-      throw error;
-    }
-  });
-
-  app.post("/api/internal/git-workspaces/:workspaceId/begin", async (request, reply) => {
-    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
-    const { workspaceId } = request.params as { workspaceId: string };
-    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
-    try {
-      return { workspace: await manager.beginGitWorkspaceByCapability(workspaceId, token) };
-    } catch (error) {
-      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
-        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
-      }
-      throw error;
-    }
-  });
-
-  app.post("/api/internal/git-workspaces/:workspaceId/finalize", async (request, reply) => {
-    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
-    const { workspaceId } = request.params as { workspaceId: string };
-    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
-    const body = z.object({ allowUnreviewed: z.boolean().optional() }).parse(request.body ?? {});
-    try {
-      return await manager.finalizeGitWorkspaceByCapability(workspaceId, token, body.allowUnreviewed ?? false);
-    } catch (error) {
-      if (error instanceof GitWorkspaceError) {
-        return reply.code(409).send({ error: error.message, code: error.code, detail: error.causeText });
-      }
-      throw error;
-    }
-  });
-
-  app.get("/api/internal/git-workspaces/:workspaceId/status", async (request, reply) => {
-    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
-    const { workspaceId } = request.params as { workspaceId: string };
-    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
-    try {
-      return { workspace: await manager.gitWorkspaceStatusByCapability(workspaceId, token) };
-    } catch (error) {
-      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
-        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
-      }
-      throw error;
-    }
-  });
-
-  app.post("/api/internal/git-workspaces/:workspaceId/dependencies/detach", async (request, reply) => {
-    if (!isLoopbackAddress(request.ip)) return reply.code(403).send({ error: "Local access required" });
-    const { workspaceId } = request.params as { workspaceId: string };
-    const token = String(request.headers["x-muxpilot-git-token"] ?? "");
-    const body = z.object({ paths: z.array(z.string().min(1).max(2048)).max(100).nullable().optional() }).parse(request.body ?? {});
-    try {
-      return { workspace: await manager.detachGitWorkspaceDependenciesByCapability(workspaceId, token, body.paths ?? null) };
-    } catch (error) {
-      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
-        return reply.code(error instanceof GitWorkspaceError && error.code === "invalid_capability" ? 403 : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
-      }
-      throw error;
-    }
-  });
-
   app.get("/api/prompt-history", { preHandler: access.requireAccess }, async (request) => {
     const query = request.query as { q?: string; limit?: string };
     return {
@@ -371,19 +274,6 @@ export function registerRoutes(
       if (error instanceof SessionNameError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof CreateSessionError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
-      throw error;
-    }
-  });
-
-  app.post("/api/sessions/:id/git/actions", { preHandler: access.requireAccess }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const action: GitWorkspaceAction = gitWorkspaceActionSchema.parse(request.body);
-    try {
-      return { workspace: await manager.actOnGitWorkspace(id, action) };
-    } catch (error) {
-      if (error instanceof GitWorkspaceError || error instanceof CreateSessionError) {
-        return reply.code(error instanceof CreateSessionError ? error.statusCode : 409).send({ error: error.message, code: error instanceof GitWorkspaceError ? error.code : undefined });
-      }
       throw error;
     }
   });
@@ -627,11 +517,6 @@ function parseBoundedPositiveInteger(value: string | undefined, fallback: number
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(1, Math.floor(parsed)));
-}
-
-function isLoopbackAddress(value: string): boolean {
-  const normalized = value.replace(/^::ffff:/, "");
-  return normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function parsePromptHistoryLimit(value: string | undefined): number {

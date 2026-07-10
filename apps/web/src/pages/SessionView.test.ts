@@ -637,9 +637,6 @@ describe("GitWorkspacePanel", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {
         workspace: gitWorkspace({ state: "idle", sessionBranch: null, worktreePath: null }),
-        busy: null,
-        error: null,
-        onAction: () => undefined,
         onClose: () => undefined
       })
     );
@@ -652,9 +649,6 @@ describe("GitWorkspacePanel", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {
         workspace: gitWorkspace(),
-        busy: null,
-        error: null,
-        onAction: () => undefined,
         onClose: () => undefined
       })
     );
@@ -666,40 +660,20 @@ describe("GitWorkspacePanel", () => {
     expect(html).toContain("muxpilot/session-a");
     expect(html).toContain('aria-label="Copy worktree name muxpilot/session-a"');
     expect(html).toContain("Copy worktree name");
-    expect(html).toContain("origin");
-    expect(html).toContain("2 ahead · 1 behind");
-    expect(html).toContain("Refresh");
-    expect(html).toContain("Push to origin");
-    expect(html).not.toContain("Last integrated");
-    expect(html).not.toContain("generation");
+    expect(html).toContain("isolated");
+    expect(html).not.toContain("Push");
   });
 
-  it("shows an unconfigured remote without a push action", () => {
+  it("shows a blocked local workflow error", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {
-        workspace: gitWorkspace({ targetRemote: null, remoteSha: null }),
-        busy: null,
-        error: null,
-        onAction: () => undefined,
+        workspace: gitWorkspace({ state: "blocked", lastError: "Target checkout is dirty" }),
         onClose: () => undefined
       })
     );
 
-    expect(html).toContain("Not configured");
-    expect(html).not.toContain("Push to");
-  });
-
-  it("allows push to reconcile a target branch that is behind its remote", () => {
-    const html = renderToStaticMarkup(
-      createElement(GitWorkspacePanel, {
-        workspace: gitWorkspace({ remoteBehindBy: 2 }),
-        busy: null,
-        error: null,
-        onAction: () => undefined,
-        onClose: () => undefined
-      })
-    );
-    expect(html).toMatch(/<button[^>]*class="primary"(?![^>]*disabled)[^>]*>/);
+    expect(html).toContain("Target checkout is dirty");
+    expect(html).toContain("blocked");
   });
 });
 
@@ -2048,28 +2022,16 @@ function message(
 function gitWorkspace(overrides: Partial<GitWorkspaceSummary> = {}): GitWorkspaceSummary {
   return {
     id: "workspace-a",
-    state: "active",
+    state: "worktree",
     entryPath: "/workspace/muxpilot",
     repoRoot: "/workspace/muxpilot",
     targetBranch: "main",
-    targetRemote: "origin",
-    targetSource: null,
-    sourceSha: "1111111111111111111111111111111111111111",
     targetSha: "2222222222222222222222222222222222222222",
     sessionBranch: "muxpilot/session-a",
-    sessionHeadSha: "3333333333333333333333333333333333333333",
     worktreePath: "/workspace/muxpilot-worktrees/session-a",
-    dirty: false,
-    aheadBy: 1,
-    targetCheckedOutAt: null,
-    review: null,
-    reviewCurrent: false,
-    inspections: [],
-    remoteSha: "4444444444444444444444444444444444444444",
-    remoteAheadBy: 2,
-    remoteBehindBy: 1,
     lastError: null,
-    cleanupEligible: false,
+    updatedAt: "2026-07-10T00:00:00.000Z",
+    dependencyLinks: [],
     ...overrides
   };
 }

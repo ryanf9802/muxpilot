@@ -773,14 +773,14 @@ export function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGrou
         repoName: session.gitWorkspace ? dashboardPathBaseName(session.gitWorkspace.repoRoot) : session.repo.name,
         repoRoot,
         branch: session.gitWorkspace?.targetBranch ?? session.repo.branch,
-        dirty: session.gitWorkspace?.dirty ?? session.repo.dirty,
+        dirty: session.gitWorkspace?.state === "worktree" || session.repo.dirty,
         sessions: []
       };
       groupByKey.set(key, group);
       groups.push(group);
     }
 
-    group.dirty = group.dirty || (session.gitWorkspace?.dirty ?? session.repo.dirty);
+    group.dirty = group.dirty || session.gitWorkspace?.state === "worktree" || session.repo.dirty;
     group.sessions.push(session);
   }
 

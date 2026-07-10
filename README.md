@@ -82,16 +82,15 @@ The Create tab asks for:
 
 - Directory: the repo or working directory where Codex should start.
 - Name: the tmux window name for the new Codex session.
-- Target branch: required for Git repositories and used as the local integration destination.
-- Target remote and optional source: used to resolve current remote state and create a missing target without consulting the entry checkout.
+- Target branch: selected from existing local branches and used as the local integration destination.
 
 Directory suggestions come from active sessions and recently touched repositories. Session names are normalized and must be 2-32 lowercase letters, numbers, or hyphens.
 
-For Git repositories, muxpilot runs `codex` from a neutral control directory and creates no checkout until the agent begins a change task. Before work begins and again before integration, muxpilot reconciles the shared managed target with committed changes from the named local target and configured remote target. Independent histories are merged without force-pushing or rewriting either source; conflicts remain in a target-scoped reconciliation worktree for the agent to resolve. The agent worktree is then rebased onto that forward-only target, reviewed, atomically integrated, and removed. A clean local target checkout is synchronized after integration, while a dirty checkout is left untouched and reported explicitly. Remote publication requires a fresh fetch, exact-SHA confirmation, and a normal non-force push.
+For Git repositories, muxpilot runs `codex` from a neutral control directory. The bundled skill creates a short-lived local worktree only for a change task. The implementing agent runs focused checks and repeatedly self-reviews its complete diff until clean, then the skill rebases and fast-forwards the existing local target branch. A dirty target checkout blocks integration. Successful integration removes the task worktree and branch.
 
-The named local target branch is durable and exists as soon as the session is created. If it is missing, muxpilot creates `refs/heads/<target>` from the resolved remote or source commit without checking it out. The temporary `muxpilot/<session>/gN` implementation branch is created later, only when the agent begins change work, and is removed after integration.
+The target branch must already exist locally. Multiple tasks can target it concurrently; only their brief final integration operations serialize, so completion order determines landing order. Muxpilot never automatically pulls or pushes.
 
-Implementation worktrees reuse manifest-associated dependency installations already present in the entry checkout (`node_modules`, Python virtual environments, Composer `vendor`, and Bundler `vendor/bundle`). Tasks that change dependency manifests or lockfiles detach those shared links before installing worktree-local dependencies. Managed sessions receive absolute helper paths through `MUXPILOT_GIT_HELPER_DIR`; `muxpilot-git-status.mjs` reports durable finalization, reconciliation, dependency, local-ref, and remote-ref state after interruptions.
+Implementation worktrees use simple links to existing manifest-associated dependency directories (`node_modules`, Python virtual environments, Composer `vendor`, and Bundler `vendor/bundle`). Their real paths are writable in the Codex sandbox for test caches. Dependency-changing tasks localize the relevant link before installing. A tiny atomic status file lets the UI observe whether changes are isolated, integrating, blocked, or complete; the app does not orchestrate those transitions.
 
 Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into another working directory. Non-Git directories retain the direct-directory session flow.
 

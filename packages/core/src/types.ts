@@ -95,83 +95,6 @@ export interface RepoMetadata {
   worktree: string | null;
 }
 
-export type GitRevisionSpec =
-  | { kind: "local_branch"; branch: string }
-  | { kind: "remote_branch"; remote: string; branch: string }
-  | { kind: "local_tag"; tag: string }
-  | { kind: "remote_tag"; remote: string; tag: string }
-  | { kind: "commit"; oid: string; remote?: string };
-
-export type GitWorkspaceState =
-  | "provisioning"
-  | "idle"
-  | "active"
-  | "suspended"
-  | "suspension_pending"
-  | "integration_conflict"
-  | "reviewing"
-  | "ready_to_integrate"
-  | "integrating"
-  | "integrated"
-  | "rotation_pending"
-  | "cleanup_pending"
-  | "cleaned"
-  | "error";
-
-export interface GitInspection {
-  id: string;
-  requested: GitRevisionSpec;
-  resolvedRef: string;
-  commitSha: string;
-  worktreePath: string | null;
-  fetchedAt: string | null;
-  freshness: "fresh" | "cached" | "local";
-  error: string | null;
-}
-
-export interface GitReviewSummary {
-  id: string;
-  targetSha: string;
-  headSha: string;
-  status: "queued" | "running" | "passed" | "changes_requested" | "failed" | "cancelled";
-  report: string;
-  createdAt: string;
-  completedAt: string | null;
-}
-
-export interface GitCompletionSummary {
-  generation: number;
-  integratedSha: string;
-  completedAt: string;
-  commitCount: number;
-  reviewSummary: string;
-  reviewDisposition?: "passed" | "bypassed";
-}
-
-export interface GitTargetReconciliationSummary {
-  status: "current" | "cached" | "conflict";
-  managedRef: string;
-  managedSha: string;
-  localRef: string;
-  localSha: string | null;
-  remoteRef: string | null;
-  remoteSha: string | null;
-  remoteFreshness: "fresh" | "cached" | "local";
-  worktreePath: string | null;
-  localSync: "current" | "pending" | "created" | "updated" | "dirty" | "diverged" | "missing";
-}
-
-export interface GitFinalizeOperationSummary {
-  id: string;
-  generation: number;
-  candidateSha: string;
-  allowUnreviewed: boolean;
-  status: "queued" | "reconciling" | "reviewing" | "integrating" | "cleanup" | "completed" | "changes_requested" | "failed" | "interrupted";
-  startedAt: string;
-  updatedAt: string;
-  error: string | null;
-}
-
 export interface GitDependencyLink {
   kind: "node" | "python" | "composer" | "bundler";
   relativePath: string;
@@ -179,59 +102,22 @@ export interface GitDependencyLink {
   linked: boolean;
 }
 
+export type GitWorkspaceState = "idle" | "worktree" | "integrating" | "blocked" | "failed";
+
 export interface GitWorkspaceSummary {
   id: string;
   state: GitWorkspaceState;
   entryPath: string;
   repoRoot: string;
   targetBranch: string;
-  targetRemote: string | null;
-  targetSource: GitRevisionSpec | null;
-  sourceSha: string;
-  sourceFetchedAt?: string | null;
-  sourceFreshness?: "fresh" | "cached" | "local";
   targetSha: string;
   sessionBranch: string | null;
-  sessionHeadSha: string;
   worktreePath: string | null;
-  dirty: boolean;
-  aheadBy: number;
-  targetCheckedOutAt: string | null;
-  review: GitReviewSummary | null;
-  reviewCurrent: boolean;
-  inspections: GitInspection[];
-  remoteSha: string | null;
-  remoteAheadBy: number;
-  remoteBehindBy: number;
   lastError: string | null;
-  cleanupEligible: boolean;
-  compatibilityWarnings?: string[];
-  generation?: number;
-  lastCompletion?: GitCompletionSummary | null;
-  reconciliation?: GitTargetReconciliationSummary | null;
-  finalization?: GitFinalizeOperationSummary | null;
-  dependencyLinks?: GitDependencyLink[];
-  pushConfirmationRequired?: boolean;
+  updatedAt: string;
+  dependencyLinks: GitDependencyLink[];
 }
 
-export interface GitTargetBranchStatus {
-  exists: boolean;
-}
-
-export interface GitReviewFinding {
-  title: string;
-  body: string;
-  path: string | null;
-  line: number | null;
-}
-
-export interface GitFinalizeOptions {
-  allowUnreviewed?: boolean;
-}
-
-export type GitFinalizeResponse =
-  | { status: "changes_requested"; summary: string; findings: GitReviewFinding[]; workspace: GitWorkspaceSummary }
-  | { status: "integrated"; targetSha: string; generation: number; reviewed: boolean; workspace: GitWorkspaceSummary };
 
 export interface ManagedSession {
   id: string;
@@ -505,10 +391,6 @@ export type CreateSessionRequest =
       workspace: {
         mode: "git";
         targetBranch: string;
-        targetRemote?: string;
-        targetSource?: GitRevisionSpec;
-        inspections?: GitRevisionSpec[];
-        allowCachedRemote?: boolean;
       };
     }
   | { cwd: string; name: string; workspace?: { mode: "directory" } };
@@ -521,19 +403,7 @@ export interface GitRepositoryProbe {
   repoName: string;
   currentBranch: string | null;
   dirty: boolean;
-  remotes: string[];
-  defaultRemote: string | null;
   localBranches: string[];
-  remoteBranches: Array<{ remote: string; branch: string }>;
-  tags: string[];
-}
-
-export type GitWorkspaceAction =
-  | { type: "refresh" }
-  | { type: "push"; expectedTargetSha: string };
-
-export interface GitWorkspaceActionResponse {
-  workspace: GitWorkspaceSummary;
 }
 
 export interface SessionHistoryPromptMatch {

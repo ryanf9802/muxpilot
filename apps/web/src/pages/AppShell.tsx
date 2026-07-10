@@ -8,7 +8,6 @@ import type {
   AccessMode,
   CreateSessionRequest,
   GitRepositoryProbe,
-  GitRevisionSpec,
   ManagedSession,
   MeResponse,
   MuxpilotGitSkillStatus,
@@ -21,7 +20,7 @@ import type {
   SessionEvent,
   SessionHistoryResult
 } from "@muxpilot/core";
-import { GIT_STYLE_NAME_MAX_LENGTH, isValidGitStyleName, normalizeGitStyleName, normalizeGitStyleNameInput, SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { credentialSuppressedField, noAutofillTextField, searchField } from "../utils/formFields.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
@@ -75,9 +74,6 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
-  const [createSessionTargetStatus, setCreateSessionTargetStatus] = useState<"unverified" | "checking" | "existing" | "new" | "error">("unverified");
-  const [createSessionTargetSource, setCreateSessionTargetSource] = useState("");
-  const [createSessionAllowCachedRemote, setCreateSessionAllowCachedRemote] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
@@ -113,7 +109,6 @@ export function AppShell() {
   const createSessionCwdPrefillRef = useRef<() => string>(() => "");
   const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
   const sessionHistoryRequestIdRef = useRef(0);
-  const targetBranchCheckIdRef = useRef(0);
   const connectionProbeRunningRef = useRef(false);
 
   useEffect(() => installCtrlWGuard(), []);
@@ -322,6 +317,10 @@ export function AppShell() {
       void api.gitRepositoryProbe(createSessionCwd.trim()).then((probe) => {
         if (cancelled) return;
         setCreateSessionGitProbe(probe);
+        const target = probe.currentBranch && probe.localBranches.includes(probe.currentBranch)
+          ? probe.currentBranch
+          : probe.localBranches[0] ?? "";
+        setCreateSessionTargetBranch(target);
       }).catch(() => {
         if (!cancelled) setCreateSessionGitProbe(null);
       }).finally(() => {
@@ -391,9 +390,7 @@ export function AppShell() {
   );
   const createSessionNameWarning = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
   const createSessionNameInvalid = createSessionOpen && !isValidSessionName(normalizeSessionName(createSessionName));
-  const createSessionTargetRemote = preferredGitRemote(createSessionGitProbe);
   const gitWorkspaceFieldsAvailable = gitSkillStatus === "current";
-  const targetBranchVerified = createSessionTargetStatus === "existing" || createSessionTargetStatus === "new";
   const visibleDirectorySuggestions = useMemo(
     () => filterSessionDirectorySuggestions(directorySuggestions, createSessionCwd),
     [createSessionCwd, directorySuggestions]
@@ -430,9 +427,6 @@ export function AppShell() {
     setCreateSessionName("");
     setCreateSessionGitProbe(null);
     setCreateSessionTargetBranch("");
-    setCreateSessionTargetStatus("unverified");
-    setCreateSessionTargetSource("");
-    setCreateSessionAllowCachedRemote(false);
     setGitSkillStatus(null);
     setCreateSessionError(null);
     setCreateSessionDirectoryFocused(!hasPrefilledCwd);
@@ -581,8 +575,6 @@ export function AppShell() {
     setCreateSessionCwd(value);
     setCreateSessionError(null);
     setCreateSessionDirectorySelectedIndex(0);
-    setCreateSessionTargetStatus("unverified");
-    targetBranchCheckIdRef.current += 1;
   }
 
   function chooseCreateSessionDirectory(path: string) {
@@ -692,8 +684,8 @@ export function AppShell() {
       setCreateSessionError("Target branch is required for Git sessions.");
       return;
     }
-    if (createSessionGitProbe?.isGit && !targetBranchVerified) {
-      setCreateSessionError("Finish editing the target branch so muxpilot can check whether it exists.");
+    if (createSessionGitProbe?.isGit && !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)) {
+      setCreateSessionError("Select an existing local target branch.");
       return;
     }
 
@@ -703,10 +695,7 @@ export function AppShell() {
       const request: CreateSessionRequest = createSessionGitProbe?.isGit
         ? { cwd, name, workspace: {
             mode: "git" as const,
-            targetBranch: createSessionTargetBranch.trim(),
-            targetRemote: createSessionTargetRemote ?? undefined,
-            targetSource: createSessionTargetStatus === "new" ? parseGitRevisionInput(createSessionTargetSource, createSessionTargetRemote) : undefined,
-            allowCachedRemote: createSessionTargetStatus === "new" && createSessionAllowCachedRemote ? true : undefined
+            targetBranch: createSessionTargetBranch.trim()
           } }
         : { cwd, name, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
@@ -721,31 +710,7 @@ export function AppShell() {
   }
 
   function updateCreateSessionTargetBranch(value: string) {
-    setCreateSessionTargetBranch(normalizeGitStyleNameInput(value));
-    setCreateSessionTargetStatus("unverified");
-    targetBranchCheckIdRef.current += 1;
-  }
-
-  async function checkCreateSessionTargetBranch(candidate = createSessionTargetBranch) {
-    const branch = normalizeGitStyleName(candidate);
-    if (!createSessionGitProbe?.isGit || !isValidGitStyleName(branch)) {
-      setCreateSessionTargetStatus("unverified");
-      return;
-    }
-    if (branch !== createSessionTargetBranch) setCreateSessionTargetBranch(branch);
-    const requestId = ++targetBranchCheckIdRef.current;
-    setCreateSessionTargetStatus("checking");
-    try {
-      const result = await api.gitTargetBranchStatus(createSessionCwd.trim(), branch);
-      if (requestId !== targetBranchCheckIdRef.current) return;
-      setCreateSessionTargetStatus(result.exists ? "existing" : "new");
-      if (result.exists) {
-        setCreateSessionTargetSource("");
-        setCreateSessionAllowCachedRemote(false);
-      }
-    } catch {
-      if (requestId === targetBranchCheckIdRef.current) setCreateSessionTargetStatus("error");
-    }
+    if (createSessionGitProbe?.localBranches.includes(value)) setCreateSessionTargetBranch(value);
   }
 
   function selectSessionStoplightSeverity(severity: SessionStatusSeverity) {
@@ -969,35 +934,20 @@ export function AppShell() {
                     }} />
                     {gitWorkspaceFieldsAvailable ? (
                       <>
-                        <GitRefCombobox
-                          id="create-session-target-branch"
-                          label="Target branch"
-                          value={createSessionTargetBranch}
-                          onChange={updateCreateSessionTargetBranch}
-                          onCommit={(value) => void checkCreateSessionTargetBranch(value)}
-                          suggestions={targetBranchSuggestions(createSessionGitProbe, createSessionTargetRemote ?? "")}
-                          placeholder="tw-123"
-                          disabled={createSessionBusy}
-                          maxLength={GIT_STYLE_NAME_MAX_LENGTH}
-                        />
-                        {createSessionTargetStatus === "checking" ? <p className="session-git-probe-note">Checking target branch…</p> : null}
-                        {createSessionTargetStatus === "error" ? <button type="button" onClick={() => void checkCreateSessionTargetBranch()}>Retry target check</button> : null}
-                        {createSessionTargetStatus === "new" ? <div className="session-git-source-row">
-                          <GitRefCombobox
-                            id="create-session-target-source"
-                            label="Source when target is new (optional)"
-                            value={createSessionTargetSource}
-                            onChange={setCreateSessionTargetSource}
-                            suggestions={sourceRevisionSuggestions(createSessionGitProbe, createSessionTargetRemote ?? "")}
-                            placeholder={createSessionTargetRemote ? `${createSessionTargetRemote}/stage` : "local:stage or commit SHA"}
-                            disabled={createSessionBusy}
-                          />
-                          <AllowOfflineOption
-                            checked={createSessionAllowCachedRemote}
-                            onChange={setCreateSessionAllowCachedRemote}
-                            disabled={createSessionBusy}
-                          />
-                        </div> : null}
+                        <label className="rename-field" htmlFor="create-session-target-branch">
+                          <span>Target branch</span>
+                          <select
+                            id="create-session-target-branch"
+                            value={createSessionTargetBranch}
+                            onChange={(event) => updateCreateSessionTargetBranch(event.target.value)}
+                            disabled={createSessionBusy || createSessionGitProbe.localBranches.length === 0}
+                          >
+                            {targetBranchSuggestions(createSessionGitProbe).map((suggestion) => (
+                              <option key={suggestion.value} value={suggestion.value}>{suggestion.label}</option>
+                            ))}
+                          </select>
+                        </label>
+                        {createSessionGitProbe.localBranches.length === 0 ? <p className="session-git-probe-note">This repository has no local branches.</p> : null}
                         <p className="session-git-probe-note">The current checkout and its dirty files are not used as the session workspace.</p>
                       </>
                     ) : null}
@@ -1032,7 +982,7 @@ export function AppShell() {
                   <button
                     className="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !targetBranchVerified))}
+                    disabled={createSessionBusy || createSessionNameInvalid || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
                     aria-busy={createSessionBusy}
                     data-busy={createSessionBusy || undefined}
                   >
@@ -1303,189 +1253,23 @@ function directoryBaseName(path: string): string {
   return trimmed.split("/").filter(Boolean).pop() ?? path;
 }
 
-export function parseGitRevisionInput(value: string, defaultRemote: string | null): GitRevisionSpec | undefined {
-  const input = value.trim();
-  if (!input) return undefined;
-  if (/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(input)) return { kind: "commit", oid: input.toLowerCase() };
-  if (input.startsWith("local:")) return { kind: "local_branch", branch: input.slice("local:".length) };
-  if (input.startsWith("tag:")) return { kind: "local_tag", tag: input.slice("tag:".length) };
-  const slash = input.indexOf("/");
-  if (slash > 0) return { kind: "remote_branch", remote: input.slice(0, slash), branch: input.slice(slash + 1) };
-  if (defaultRemote) return { kind: "remote_branch", remote: defaultRemote, branch: input };
-  return { kind: "local_branch", branch: input };
-}
-
-export function preferredGitRemote(probe: Pick<GitRepositoryProbe, "remotes"> | null): string | null {
-  if (!probe) return null;
-  return probe.remotes.includes("origin") ? "origin" : probe.remotes[0] ?? null;
-}
-
 export interface GitRefSuggestion {
   value: string;
   label: string;
   detail: string;
 }
 
-export function targetBranchSuggestions(probe: GitRepositoryProbe, selectedRemote: string): GitRefSuggestion[] {
+export function targetBranchSuggestions(probe: GitRepositoryProbe): GitRefSuggestion[] {
   const suggestions = new Map<string, GitRefSuggestion>();
   for (const branch of probe.localBranches) {
-    if (!isValidGitStyleName(branch) || isMuxpilotManagedSessionBranch(branch)) continue;
+    if (isMuxpilotManagedSessionBranch(branch)) continue;
     suggestions.set(branch, { value: branch, label: branch, detail: "Local branch" });
-  }
-  for (const ref of probe.remoteBranches) {
-    if (!isValidGitStyleName(ref.branch)) continue;
-    if (selectedRemote && ref.remote !== selectedRemote) continue;
-    if (!suggestions.has(ref.branch)) {
-      suggestions.set(ref.branch, { value: ref.branch, label: ref.branch, detail: `${ref.remote} remote branch` });
-    }
   }
   return [...suggestions.values()].sort(compareGitRefSuggestions);
 }
 
-export function sourceRevisionSuggestions(probe: GitRepositoryProbe, selectedRemote: string): GitRefSuggestion[] {
-  const suggestions: GitRefSuggestion[] = [];
-  for (const ref of probe.remoteBranches) {
-    suggestions.push({
-      value: `${ref.remote}/${ref.branch}`,
-      label: ref.branch,
-      detail: ref.remote === selectedRemote ? `${ref.remote} remote branch · selected remote` : `${ref.remote} remote branch`
-    });
-  }
-  for (const branch of probe.localBranches) {
-    if (isMuxpilotManagedSessionBranch(branch)) continue;
-    suggestions.push({ value: `local:${branch}`, label: branch, detail: "Local branch" });
-  }
-  for (const tag of probe.tags) {
-    suggestions.push({ value: `tag:${tag}`, label: tag, detail: "Local tag" });
-  }
-  return suggestions.sort((left, right) => {
-    const leftSelected = left.detail.includes("selected remote") ? 0 : 1;
-    const rightSelected = right.detail.includes("selected remote") ? 0 : 1;
-    return leftSelected - rightSelected || compareGitRefSuggestions(left, right);
-  });
-}
-
 function compareGitRefSuggestions(left: GitRefSuggestion, right: GitRefSuggestion): number {
   return left.label.localeCompare(right.label) || left.value.localeCompare(right.value);
-}
-
-function GitRefCombobox({
-  id,
-  label,
-  value,
-  onChange,
-  onCommit,
-  suggestions,
-  placeholder,
-  disabled,
-  maxLength = 1024
-}: {
-  id: string;
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  onCommit?: (value: string) => void;
-  suggestions: GitRefSuggestion[];
-  placeholder: string;
-  disabled: boolean;
-  maxLength?: number;
-}) {
-  const [focused, setFocused] = useState(false);
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const query = value.trim().toLocaleLowerCase();
-  const visible = suggestions
-    .filter((suggestion) => !query || [suggestion.value, suggestion.label, suggestion.detail].some((part) => part.toLocaleLowerCase().includes(query)))
-    .slice(0, 10);
-  const expanded = focused && visible.length > 0;
-  const activeIndex = Math.min(selectedIndex, Math.max(visible.length - 1, 0));
-  const listboxId = `${id}-suggestions`;
-
-  function choose(suggestion: GitRefSuggestion) {
-    onChange(suggestion.value);
-    setFocused(false);
-    setSelectedIndex(0);
-    onCommit?.(suggestion.value);
-  }
-
-  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      if (!visible.length) return;
-      event.preventDefault();
-      setFocused(true);
-      setSelectedIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + visible.length) % visible.length);
-    } else if (event.key === "Enter" && expanded) {
-      event.preventDefault();
-      choose(visible[activeIndex]!);
-    } else if (event.key === "Escape") {
-      setFocused(false);
-    }
-  }
-
-  return (
-    <div className="rename-field git-ref-field">
-      <label htmlFor={id}>{label}</label>
-      <div className="git-ref-combobox">
-        <input
-          {...noAutofillTextField}
-          id={id}
-          value={value}
-          onChange={(event) => {
-            onChange(event.target.value);
-            setSelectedIndex(0);
-          }}
-          onFocus={() => setFocused(true)}
-          onBlur={() => {
-            setFocused(false);
-            onCommit?.(value);
-          }}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          maxLength={maxLength}
-          disabled={disabled}
-          role="combobox"
-          aria-autocomplete="list"
-          aria-expanded={expanded}
-          aria-controls={listboxId}
-          aria-activedescendant={expanded ? `${listboxId}-${activeIndex}` : undefined}
-        />
-        {expanded ? (
-          <div className="git-ref-suggestions" id={listboxId} role="listbox" aria-label={`${label} suggestions`}>
-            {visible.map((suggestion, index) => (
-              <button
-                key={suggestion.value}
-                id={`${listboxId}-${index}`}
-                type="button"
-                role="option"
-                aria-selected={index === activeIndex}
-                className={index === activeIndex ? "git-ref-suggestion-selected" : undefined}
-                onMouseDown={(event) => event.preventDefault()}
-                onMouseEnter={() => setSelectedIndex(index)}
-                onClick={() => choose(suggestion)}
-              >
-                <span>{suggestion.label}</span>
-                <small>{suggestion.detail}</small>
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function AllowOfflineOption({ checked, onChange, disabled }: { checked: boolean; onChange: (checked: boolean) => void; disabled: boolean }) {
-  return (
-    <div className="session-git-offline-option">
-      <label>
-        <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
-        <span>Allow offline</span>
-      </label>
-      <details>
-        <summary aria-label="About offline Git revisions"><Info size={15} /></summary>
-        <p>Muxpilot will try the remote first. If it is unavailable, this allows the last successfully fetched revision and records its exact commit and fetch time.</p>
-      </details>
-    </div>
-  );
 }
 
 function sessionDirectorySuggestionOptionId(path: string | undefined): string | undefined {

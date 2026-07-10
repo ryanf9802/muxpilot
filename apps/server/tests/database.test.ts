@@ -1307,28 +1307,16 @@ function testGitWorkspace(sessionId: string, workspaceId = "workspace-rekey"): S
     updatedAt: timestamp,
     summary: {
       id: workspaceId,
-      state: "active",
+      state: "worktree",
       entryPath: "/repo",
       repoRoot: "/repo",
       targetBranch: "main",
-      targetRemote: "origin",
-      targetSource: null,
-      sourceSha: "a".repeat(40),
       targetSha: "a".repeat(40),
       sessionBranch: `muxpilot/${workspaceId}`,
-      sessionHeadSha: "a".repeat(40),
       worktreePath: `/tmp/${workspaceId}`,
-      dirty: false,
-      aheadBy: 0,
-      targetCheckedOutAt: null,
-      review: null,
-      reviewCurrent: false,
-      inspections: [],
-      remoteSha: null,
-      remoteAheadBy: 0,
-      remoteBehindBy: 0,
       lastError: null,
-      cleanupEligible: false
+      updatedAt: timestamp,
+      dependencyLinks: []
     }
   };
 }

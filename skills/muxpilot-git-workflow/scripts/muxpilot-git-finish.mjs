@@ -1,100 +1,137 @@
 #!/usr/bin/env node
+import { acquireBranchLock, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
 
-import { formatWorkspaceStatus } from "./helper-output.mjs";
-
+const bypasses = process.argv.slice(2).filter((value) => value.startsWith("--bypass=")).map((value) => value.slice(9));
+const allowedBypasses = new Set(["worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target", "local-target-only", "automatic-cleanup", "no-pull-push"]);
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  process.stdout.write("Usage: muxpilot-git-finish [--integrate-without-review | --status]\n");
+  process.stdout.write("Usage: muxpilot-git-finish [--bypass=<guard>]\n");
   process.exit(0);
 }
-
-const supportedArguments = new Set(["--integrate-without-review", "--status"]);
-const unknownArgument = process.argv.slice(2).find((argument) => !supportedArguments.has(argument));
-if (unknownArgument) {
-  process.stderr.write(`Unknown argument: ${unknownArgument}\n`);
-  process.exit(2);
-}
-const allowUnreviewed = process.argv.includes("--integrate-without-review");
-
-const baseUrl = process.env.MUXPILOT_GIT_HELPER_URL;
-const workspaceId = process.env.MUXPILOT_GIT_WORKSPACE_ID;
-const token = process.env.MUXPILOT_GIT_HELPER_TOKEN;
-if (!baseUrl || !workspaceId || !token) {
-  process.stderr.write("This command is only available inside a muxpilot-managed Git session.\n");
+if (bypasses.some((value) => !allowedBypasses.has(value))) {
+  process.stderr.write("Unknown guard bypass. Bypasses must name an exact muxpilot guard.\n");
   process.exit(2);
 }
 
-if (process.argv.includes("--status")) {
-  const response = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/status`, {
-    headers: { "x-muxpilot-git-token": token }
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    process.stderr.write(`${payload.code ? `${payload.code}: ` : ""}${payload.error ?? `Status failed with HTTP ${response.status}`}\n`);
-    process.exit(1);
+let release = null;
+let config = null;
+let status = null;
+try {
+  config = configuration();
+  status = await readStatus(config);
+  if (!["worktree", "blocked", "failed"].includes(status?.state) || !(await worktreeExists(status.worktreePath)) || !status.sessionBranch) {
+    throw new Error("No active task worktree to integrate");
   }
-  process.stdout.write(`${formatWorkspaceStatus(payload.workspace)}\n`);
-  process.exit(0);
-}
-
-process.stdout.write("FINALIZATION_STARTED\n");
-const finalizeRequest = fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/finalize`, {
-  method: "POST",
-  headers: {
-    "content-type": "application/json",
-    "x-muxpilot-git-token": token
-  },
-  body: JSON.stringify({ allowUnreviewed })
-});
-let lastPhase = null;
-let lastProgressAt = Date.now();
-let polling = false;
-const progressTimer = setInterval(async () => {
-  if (polling) return;
-  polling = true;
-  try {
-    const statusResponse = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/status`, {
-      headers: { "x-muxpilot-git-token": token }
+  const worktree = status.worktreePath;
+  const porcelain = await git(worktree, ["status", "--porcelain"]);
+  if (hasMeaningfulChanges(porcelain, config.dependencies)) throw new Error("The task worktree is not clean; commit the completed changes before integration");
+  const taskHead = await git(worktree, ["rev-parse", "HEAD"]);
+  let targetSha = await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]);
+  if (taskHead === targetSha) {
+    if (!bypasses.includes("automatic-cleanup")) {
+      await unlinkSharedDependencies(config, worktree);
+      await git(config.repoRoot, ["worktree", "remove", worktree]);
+      await git(config.repoRoot, ["branch", "-d", status.sessionBranch]);
+    }
+    await writeStatus(config, {
+      state: "idle",
+      targetSha,
+      sessionBranch: bypasses.includes("automatic-cleanup") ? status.sessionBranch : null,
+      worktreePath: bypasses.includes("automatic-cleanup") ? worktree : null,
+      lastError: null
     });
-    const statusPayload = await statusResponse.json().catch(() => ({}));
-    const phase = statusPayload.workspace?.finalization?.status;
-    if (statusResponse.ok && phase && phase !== lastPhase) {
-      process.stdout.write(`FINALIZATION_PROGRESS phase=${phase}\n`);
-      lastPhase = phase;
-      lastProgressAt = Date.now();
-    } else if (Date.now() - lastProgressAt >= 30_000) {
-      process.stdout.write(`FINALIZATION_WAITING phase=${phase ?? lastPhase ?? "unknown"}\n`);
-      lastProgressAt = Date.now();
-    }
-  } catch {
-    if (Date.now() - lastProgressAt >= 30_000) {
-      process.stdout.write(`FINALIZATION_WAITING phase=${lastPhase ?? "unknown"}\n`);
-      lastProgressAt = Date.now();
-    }
-  } finally {
-    polling = false;
+    process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${targetSha} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+    process.exit(0);
   }
-}, 1_000);
-const response = await finalizeRequest.finally(() => clearInterval(progressTimer));
-const payload = await response.json().catch(() => ({}));
-if (!response.ok) {
-  if (payload.code === "review_failed") {
-    process.stdout.write("REVIEW_INCOMPLETE\n");
-    process.stdout.write(`${payload.detail ?? payload.error ?? "Independent review did not complete."}\n`);
-    process.stdout.write("Stop and tell the user that independent review is incomplete. Ask whether integration should proceed without successful review.\n");
-    process.stdout.write("Only after explicit user approval, rerun the finish helper with --integrate-without-review.\n");
-    process.exit(4);
+  const commits = Number(await git(worktree, ["rev-list", "--count", `${targetSha}..${taskHead}`]).catch(() => "0"));
+  if (commits < 1) throw new Error("The task branch has no commits to integrate");
+
+  const checkout = await targetCheckout(config);
+  if (checkout && !bypasses.includes("clean-target")) {
+    const dirty = await git(checkout, ["status", "--porcelain"]);
+    if (hasMeaningfulChanges(dirty, config.dependencies)) {
+      await writeStatus(config, { ...status, state: "blocked", targetSha, lastError: "The target branch is checked out with uncommitted changes" });
+      throw new Error("DIRTY_TARGET: clean or move the target checkout before integration");
+    }
   }
-  process.stderr.write(`${payload.code ? `${payload.code}: ` : ""}${payload.error ?? `Finalize failed with HTTP ${response.status}`}\n`);
+
+  if (!(await isAncestor(worktree, targetSha, taskHead))) {
+    try {
+      await git(worktree, ["rebase", targetSha]);
+    } catch (error) {
+      await writeStatus(config, { ...status, state: "blocked", targetSha, lastError: `Rebase conflict: ${error.message}` });
+      throw new Error(`REBASE_CONFLICT: resolve the task worktree, rerun focused checks and self-review, then retry finish\n${error.message}`);
+    }
+    status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null });
+    process.stdout.write("REBASED_REVIEW_REQUIRED: the target advanced; rerun focused checks and the self-review loop before retrying integration\n");
+    process.exit(3);
+  }
+
+  release = await acquireBranchLock(config);
+  const lockedTarget = await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]);
+  if (lockedTarget !== targetSha) {
+    await release();
+    release = null;
+    try {
+      await git(worktree, ["rebase", lockedTarget]);
+      await writeStatus(config, { ...status, state: "worktree", targetSha: lockedTarget, lastError: null });
+      process.stdout.write("REBASED_REVIEW_REQUIRED: another task integrated first; rerun focused checks and the self-review loop\n");
+      process.exit(3);
+    } catch (error) {
+      await writeStatus(config, { ...status, state: "blocked", targetSha: lockedTarget, lastError: `Rebase conflict: ${error.message}` });
+      throw error;
+    }
+  }
+
+  await writeStatus(config, { ...status, state: "integrating", targetSha, lastError: null });
+  const finalHead = await git(worktree, ["rev-parse", "HEAD"]);
+  const currentCheckout = await targetCheckout(config);
+  if (currentCheckout) {
+    if (!bypasses.includes("clean-target") && hasMeaningfulChanges(await git(currentCheckout, ["status", "--porcelain"]), config.dependencies)) throw new Error("DIRTY_TARGET: target changed during integration");
+    await git(currentCheckout, ["merge", "--ff-only", finalHead]);
+  } else {
+    await git(config.repoRoot, ["update-ref", `refs/heads/${config.targetBranch}`, finalHead, lockedTarget]);
+  }
+  await release();
+  release = null;
+
+  if (!bypasses.includes("automatic-cleanup")) {
+    await unlinkSharedDependencies(config, worktree);
+    await git(config.repoRoot, ["worktree", "remove", worktree]);
+    await git(config.repoRoot, ["branch", "-d", status.sessionBranch]);
+  }
+  await writeStatus(config, {
+    state: "idle",
+    targetSha: finalHead,
+    sessionBranch: bypasses.includes("automatic-cleanup") ? status.sessionBranch : null,
+    worktreePath: bypasses.includes("automatic-cleanup") ? worktree : null,
+    lastError: null
+  });
+  process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${finalHead} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+} catch (error) {
+  if (release) await release().catch(() => undefined);
+  if (config) {
+    const current = await readStatus(config).catch(() => null);
+    if (current?.state === "integrating") {
+      await writeStatus(config, { ...current, state: "failed", lastError: error.message }).catch(() => undefined);
+    }
+  }
+  process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }
-if (payload.status === "changes_requested") {
-  process.stdout.write(`CHANGES_REQUESTED\n${payload.summary ?? "Review requested changes."}\n`);
-  for (const finding of payload.findings ?? []) {
-    const location = finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ""})` : "";
-    process.stdout.write(`- ${finding.title}${location}: ${finding.body}\n`);
+
+async function isAncestor(cwd, ancestor, descendant) {
+  try {
+    await git(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
   }
-  process.exit(3);
 }
-const reviewStatus = payload.reviewed === false ? " review=bypassed" : " review=passed";
-process.stdout.write(`INTEGRATED managed_ref=${payload.workspace?.reconciliation?.managedRef ?? "unknown"} managed_sha=${payload.targetSha} generation=${payload.generation}${reviewStatus} worktree=removed\n`);
-process.stdout.write(`${formatWorkspaceStatus(payload.workspace)}\n`);
+
+function hasMeaningfulChanges(porcelain, dependencies) {
+  const ignored = dependencies.map((dependency) => dependency.relativePath.replaceAll("\\", "/"));
+  return porcelain.split(/\r?\n/).filter(Boolean).some((line) => {
+    const path = line.slice(3).replace(/^"|"$/g, "").replaceAll("\\", "/");
+    return !ignored.some((dependency) => path === dependency || path.startsWith(`${dependency}/`));
+  });
+}

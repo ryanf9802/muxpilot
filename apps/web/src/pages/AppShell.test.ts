@@ -21,9 +21,6 @@ import {
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSeverity,
   sessionStoplightSearch,
-  parseGitRevisionInput,
-  preferredGitRemote,
-  sourceRevisionSuggestions,
   targetBranchSuggestions,
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
@@ -42,12 +39,7 @@ import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
-  it("parses explicit and default-remote revision inputs without using the current checkout", () => {
-    expect(parseGitRevisionInput("origin/stage", "origin")).toEqual({ kind: "remote_branch", remote: "origin", branch: "stage" });
-    expect(parseGitRevisionInput("main", "origin")).toEqual({ kind: "remote_branch", remote: "origin", branch: "main" });
-    expect(parseGitRevisionInput("local:release", "origin")).toEqual({ kind: "local_branch", branch: "release" });
-  });
-  it("formats target and source autocomplete values without collapsing revision concepts", () => {
+  it("offers only existing local branches as targets", () => {
     const probe = {
       isGit: true,
       bare: false,
@@ -56,37 +48,21 @@ describe("shell connection state", () => {
       repoName: "repo",
       currentBranch: "main",
       dirty: false,
-      remotes: ["origin", "upstream"],
-      defaultRemote: "origin",
       localBranches: [
         "main",
         "local-only",
+        "Feature/API_v2",
         "muxpilot/1234567890ABCDEF/g1",
         "muxpilot/1234567890ABCDEF",
         "muxpilot/feature"
-      ],
-      remoteBranches: [
-        { remote: "origin", branch: "main" },
-        { remote: "origin", branch: "stage" },
-        { remote: "upstream", branch: "release" }
-      ],
-      tags: ["v1.0.0"]
+      ]
     };
 
-    expect(targetBranchSuggestions(probe, "origin")).toEqual([
+    expect(targetBranchSuggestions(probe)).toEqual([
+      { value: "Feature/API_v2", label: "Feature/API_v2", detail: "Local branch" },
       { value: "local-only", label: "local-only", detail: "Local branch" },
       { value: "main", label: "main", detail: "Local branch" },
-      { value: "muxpilot/feature", label: "muxpilot/feature", detail: "Local branch" },
-      { value: "stage", label: "stage", detail: "origin remote branch" }
-    ]);
-    expect(sourceRevisionSuggestions(probe, "origin").map((item) => item.value)).toEqual([
-      "origin/main",
-      "origin/stage",
-      "local:local-only",
-      "local:main",
-      "local:muxpilot/feature",
-      "upstream/release",
-      "tag:v1.0.0"
+      { value: "muxpilot/feature", label: "muxpilot/feature", detail: "Local branch" }
     ]);
   });
   it("recognizes current and legacy managed branches without hiding ordinary muxpilot branches", () => {
@@ -94,11 +70,6 @@ describe("shell connection state", () => {
     expect(isMuxpilotManagedSessionBranch("muxpilot/1234567890ABCDEF")).toBe(true);
     expect(isMuxpilotManagedSessionBranch("muxpilot/feature")).toBe(false);
     expect(isMuxpilotManagedSessionBranch("muxpilot/1234567890ABCDEF/review")).toBe(false);
-  });
-  it("selects origin automatically, then the first available remote", () => {
-    expect(preferredGitRemote({ remotes: ["upstream", "origin"] })).toBe("origin");
-    expect(preferredGitRemote({ remotes: ["upstream", "backup"] })).toBe("upstream");
-    expect(preferredGitRemote({ remotes: [] })).toBeNull();
   });
   it("renders the app logo next to the wordmark", () => {
     const html = renderToStaticMarkup(createElement(AppBrand));

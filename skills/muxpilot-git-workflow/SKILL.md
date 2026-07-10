@@ -1,22 +1,38 @@
 ---
 name: muxpilot-git-workflow
-description: Create short-lived implementation worktrees for muxpilot-managed Git changes, including atomic commits, independent review fixes, automatic target integration, cleanup, and exact cross-branch inspection. Use whenever a Codex session has MUXPILOT_GIT_WORKSPACE_ID or a muxpilot-managed target branch.
+description: Run isolated local Git tasks in short-lived worktrees, self-review them, perform focused validation, and atomically integrate them into an existing local target branch.
 ---
 
-# Muxpilot Git Workflow
+# Muxpilot Local Git Workflow
 
-Muxpilot Git chats start in a neutral control directory with no implementation checkout. The named local target branch is durable and is created during session provisioning when missing; the `muxpilot/<session>/gN` implementation branch is temporary and appears only after begin. Read-only work must stay worktree-free. Create a short-lived worktree only for a change/build task, use it for all managed writes, and finalize it before reporting completion. The worktree is a coordination tool, not a boundary on what the agent may inspect or do. User intent controls task scope; never ignore or misreport another checkout because it is outside the implementation worktree. Normal approval, safety, and destructive-action requirements still apply.
+Muxpilot supplies a repository entry path and an existing local target branch. The application observes this workflow but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific confirmation process below.
 
-1. Read the repository entry path and target branch from the launch instructions. Before repository work, read applicable repository instructions from the entry path because the current directory is only a control directory.
-2. For answers, plans, reviews, diagnosis, and other read-only tasks, inspect the named checkout directly and do not create an implementation worktree.
-3. For a change/build task, tell the user that this skill is creating the implementation checkout, then run `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-begin.mjs"`. Record the returned branch, path, and reused dependency links and make every managed repository write there. Reused dependency directories are writable for tool-generated caches and their managed links do not make the worktree dirty. Before changing dependency manifests, lockfiles, or installed packages, detach shared dependencies with `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-deps.mjs" detach` and install inside the worktree. Detaching any Node installation detaches all linked Node installations in the workspace so package-manager relinking cannot mutate the entry checkout.
-4. When the user names another branch, checkout, or Git operation, locate the relevant checkout and follow that request there; no special override wording is required. Inspect every relevant checkout before describing its working-copy state.
-5. Test the requested changes, create small atomic commits, and leave the implementation worktree clean.
-6. When comparing committed branch contents, request an exact revision with `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-inspect.mjs" <branch|remote/branch|local:branch|tag:name|full-commit-sha>` and record the returned ref and SHA. Plain names resolve as local branches. This does not create a checkout. Inspect the actual checkout directly for working-copy state or checkout-specific actions.
-7. When the task uses muxpilot-managed integration, run `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-finish.mjs"` before reporting completion. The helper reports finalization phase changes and periodic waiting heartbeats; successful integration removes the implementation worktree. If the command is interrupted or its outcome is unclear, run `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-status.mjs"` or rerun finish; finalization is idempotent and reports its durable phase. Skip it for work performed exclusively outside that integration path; for mixed tasks, finalize the managed portion separately.
-8. If it reports `CHANGES_REQUESTED`, fix every finding, test, commit the fixes, and run it again unless the user explicitly directs integration without review. If it reports a rebase conflict, resolve it in the implementation worktree, continue the rebase, and retry.
-9. If it reports `REVIEW_INCOMPLETE`, stop and tell the user that independent review did not complete, including the reported reason. Ask whether integration should proceed without successful review. Do not integrate or report completion unless the user explicitly approves.
-10. Whenever the user explicitly directs integration without review, run `node "${MUXPILOT_GIT_HELPER_DIR:-$CODEX_HOME/skills/muxpilot-git-workflow/scripts}/muxpilot-git-finish.mjs" --integrate-without-review`. The explicit flag bypasses review regardless of whether review has not run, failed, or returned findings. Never use this flag without explicit user direction.
-11. When using managed integration, report completion only after the helper reports `INTEGRATED`. Name the exact managed ref it updated, whether the local target was synchronized, whether the remote was published, and whether review passed or was bypassed. Never say work “landed on main” unless the helper confirms the local or remote `main` ref advanced. The next change task will create a fresh generation from the latest reconciled managed target.
+## Read-only work
 
-If a requested write falls outside the sandbox's writable roots, use the normal approval or escalation path instead of refusing it as out of scope. Ask for confirmation when a request is ambiguous, destructive, unusually risky, or apparently irrational—not merely because it affects another checkout. An instruction naming a checkout or operation authorizes only that requested scope; preserve unrelated guardrails.
+For plans, answers, diagnosis, or review, inspect the repository entry path directly. Read applicable `AGENTS.md`, `CLAUDE.md`, and repository documentation before acting. Do not create a task worktree merely to inspect code.
+
+## Change tasks
+
+1. Tell the user you are creating an isolated task worktree, then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-begin.mjs"`.
+2. Perform every repository write in the returned worktree. Shared dependency directories may be linked there and their real targets are writable for test caches.
+3. Before changing dependency manifests, lockfiles, or installed packages, run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-deps.mjs" localize <relative-dependency-path>` and install into the worktree-local directory.
+4. Follow repository guidance, but default to focused file/module lint, typechecking, and tests. Run repository-wide suites only when the user requests them.
+5. Make clean, logically atomic commits. Do not leave tracked or untracked task changes uncommitted.
+6. Review the complete target-to-task diff yourself. Fix every actionable finding, rerun affected focused checks, commit fixes, and review again. Repeat until a final review finds nothing actionable. Any material change invalidates the prior review.
+7. Run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-finish.mjs"`. If the target advanced, the helper rebases and stops; rerun affected focused checks and the complete self-review loop before retrying. Resolve conflicts in the task worktree, then do the same.
+8. Report completion only after the helper prints `INTEGRATED`. Successful integration removes the worktree and temporary branch. Failed or unfinished work is preserved.
+
+Integration is entirely local. Normal helpers never create a target branch, pull, push, publish, or reconcile a remote. Multiple tasks may target the same branch; their short final integration steps serialize, and completion order determines landing order.
+
+## Guard-specific overrides
+
+Muxpilot guards are: `worktree-isolation`, `same-agent-review`, `focused-validation`, `atomic-commits`, `clean-target`, `local-target-only`, `automatic-cleanup`, and `no-pull-push`.
+
+When a user instruction conflicts with one or more guards:
+
+1. Name each conflicting guard and explain the concrete consequence of bypassing it.
+2. Obtain explicit confirmation for those exact guards before acting. Do not infer confirmation from the original conflicting request.
+3. Scope confirmation to that operation only; every unrelated guard remains active.
+4. Pass an exact `--bypass=<guard>` option when a helper supports the confirmed exception. There is no blanket force option.
+
+Platform safety, sandbox, permission, and approval requirements are not muxpilot guards and cannot be bypassed through this process.

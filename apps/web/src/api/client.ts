@@ -8,10 +8,7 @@ import type {
   ConnectivityResponse,
   CreateSessionRequest,
   GitRepositoryProbe,
-  GitTargetBranchStatus,
   MuxpilotGitSkillStatus,
-  GitWorkspaceAction,
-  GitWorkspaceActionResponse,
   ManagedSession,
   MeResponse,
   NotificationSettings,
@@ -113,7 +110,6 @@ export const api = {
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   gitRepositoryProbe: (cwd: string) => json<GitRepositoryProbe>(`/api/git/repository-probe?cwd=${encodeURIComponent(cwd)}`),
-  gitTargetBranchStatus: (cwd: string, branch: string) => json<GitTargetBranchStatus>(`/api/git/target-branch-status?cwd=${encodeURIComponent(cwd)}&branch=${encodeURIComponent(branch)}`),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),
@@ -150,8 +146,6 @@ export const api = {
     json<{ ok: true }>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode }) }),
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) }),
-  gitAction: (id: string, action: GitWorkspaceAction) =>
-    json<GitWorkspaceActionResponse>(`/api/sessions/${id}/git/actions`, { method: "POST", body: JSON.stringify(action) })
 };
 
 function messageQueryString(query: MessageQuery): string {

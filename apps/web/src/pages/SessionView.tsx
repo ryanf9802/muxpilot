@@ -18,8 +18,6 @@ import {
   ShieldCheck,
   Skull,
   Trash2,
-  Upload,
-  RefreshCw,
   X
 } from "lucide-react";
 import { cursorLineDown, insertNewlineAndIndent } from "@codemirror/commands";
@@ -53,15 +51,13 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
-import { parseGitRevisionInput, type AppShellOutletContext, type PrimaryInputFocusCommand } from "./AppShell.js";
+import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
   CodexSkill,
   CollaborationMode,
-  GitRevisionSpec,
-  GitWorkspaceAction,
   GitWorkspaceSummary,
   ManagedSession,
   PlanActionChoice,
@@ -502,8 +498,6 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
-  const [gitActionBusy, setGitActionBusy] = useState<GitWorkspaceAction["type"] | null>(null);
-  const [gitActionError, setGitActionError] = useState<string | null>(null);
   const [inputModeError, setInputModeError] = useState("");
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
@@ -1354,21 +1348,6 @@ export function SessionView() {
     }
   }
 
-  async function runGitAction(action: GitWorkspaceAction) {
-    if (!session?.gitWorkspace || gitActionBusy) return;
-    if (action.type === "push" && !confirm(`Push ${session.gitWorkspace.targetBranch} to ${session.gitWorkspace.targetRemote ?? "its remote"}?`)) return;
-    setGitActionBusy(action.type);
-    setGitActionError(null);
-    try {
-      const response = await api.gitAction(session.id, action);
-      setSession((current) => current ? { ...current, gitWorkspace: response.workspace } : current);
-    } catch (error) {
-      setGitActionError(error instanceof Error ? error.message : "Git operation failed.");
-    } finally {
-      setGitActionBusy(null);
-    }
-  }
-
   function killSession() {
     if (actionBusy || !confirm("Kill this tmux pane?")) return;
     const targetId = id;
@@ -1535,10 +1514,7 @@ export function SessionView() {
               ref={gitWorkspaceButtonRef}
               className="git-workspace-chip"
               type="button"
-              onClick={() => {
-                setGitPanelOpen(true);
-                void runGitAction({ type: "refresh" });
-              }}
+              onClick={() => setGitPanelOpen(true)}
               aria-haspopup="dialog"
               aria-expanded={gitPanelOpen}
               aria-label={`Open Git workspace controls for ${readySession.gitWorkspace.targetBranch}`}
@@ -1764,9 +1740,6 @@ export function SessionView() {
       {gitPanelOpen && readySession.gitWorkspace ? (
         <GitWorkspacePanel
           workspace={readySession.gitWorkspace}
-          busy={gitActionBusy}
-          error={gitActionError}
-          onAction={(action) => void runGitAction(action)}
           onClose={closeGitPanel}
         />
       ) : null}
@@ -1776,15 +1749,9 @@ export function SessionView() {
 
 export function GitWorkspacePanel({
   workspace,
-  busy,
-  error,
-  onAction,
   onClose
 }: {
   workspace: GitWorkspaceSummary;
-  busy: GitWorkspaceAction["type"] | null;
-  error: string | null;
-  onAction: (action: GitWorkspaceAction) => void;
   onClose: () => void;
 }) {
   const [worktreeCopied, setWorktreeCopied] = useState(false);
@@ -1811,7 +1778,6 @@ export function GitWorkspacePanel({
         </div>
         <div className="git-panel-summary">
           <div><span>Target branch</span><strong>{workspace.targetBranch}</strong><code>{shortSha(workspace.targetSha)}</code></div>
-          {workspace.reconciliation ? <div><span>Managed ref</span><strong title={workspace.reconciliation.managedRef}>{workspace.reconciliation.managedRef}</strong><small>{workspace.reconciliation.status} · local {workspace.reconciliation.localSync}</small></div> : null}
           {workspace.sessionBranch ? (
             <button
               type="button"
@@ -1826,20 +1792,9 @@ export function GitWorkspacePanel({
               <small aria-live="polite">{worktreeCopied ? <><Check size={14} aria-hidden="true" /> Copied</> : <><Copy size={14} aria-hidden="true" /> Copy worktree name</>}</small>
             </button>
           ) : <div><span>Worktree</span><strong>No implementation worktree</strong></div>}
-          <div>
-            <span>Remote</span>
-            <strong>{workspace.targetRemote ?? "Not configured"}</strong>
-            {workspace.targetRemote ? <small>{workspace.remoteSha ? `${workspace.remoteAheadBy} ahead · ${workspace.remoteBehindBy} behind` : "Target branch not pushed"}</small> : null}
-          </div>
+          <div><span>State</span><strong>{gitWorkspaceChipState(workspace)}</strong><small>{workspace.updatedAt}</small></div>
         </div>
-        {workspace.finalization ? <p><strong>Finalization:</strong> {workspace.finalization.status} · <code>{shortSha(workspace.finalization.candidateSha)}</code></p> : null}
-        {workspace.reconciliation?.worktreePath ? <p><strong>Reconciliation worktree:</strong> <code>{workspace.reconciliation.worktreePath}</code></p> : null}
-        {(workspace.dependencyLinks?.length ?? 0) > 0 ? <p><strong>Shared dependencies:</strong> {workspace.dependencyLinks!.filter((link) => link.linked).map((link) => link.relativePath).join(", ") || "detached"}</p> : null}
-        {workspace.lastError || error ? <p className="git-panel-error" role="alert">{error ?? workspace.lastError}</p> : null}
-        <div className="git-panel-actions">
-          <button type="button" disabled={Boolean(busy)} onClick={() => onAction({ type: "refresh" })}><RefreshCw className={busy === "refresh" ? "spin" : ""} size={16} /> Refresh</button>
-          {workspace.targetRemote ? <button type="button" className="primary" disabled={Boolean(busy) || workspace.remoteSha === workspace.targetSha} onClick={() => onAction({ type: "push", expectedTargetSha: workspace.targetSha })}><Upload size={16} /> {workspace.pushConfirmationRequired ? "Confirm push" : "Push"} to {workspace.targetRemote}</button> : null}
-        </div>
+        {workspace.lastError ? <p className="git-panel-error" role="alert">{workspace.lastError}</p> : null}
       </section>
     </div>
   );
@@ -1847,13 +1802,8 @@ export function GitWorkspacePanel({
 
 export function gitWorkspaceChipState(workspace: GitWorkspaceSummary): string {
   if (workspace.state === "idle") return "idle";
-  if (workspace.state === "suspended") return "suspended";
-  if (workspace.state === "suspension_pending") return "suspending";
-  if (workspace.state === "integration_conflict") return "conflict";
-  if (workspace.dirty) return "dirty";
-  if (workspace.state === "integrated") return "integrated";
-  if (workspace.reviewCurrent) return "reviewed";
-  return `${workspace.aheadBy}↑`;
+  if (workspace.state === "worktree") return "isolated";
+  return workspace.state;
 }
 
 function shortSha(value: string): string {
@@ -2401,7 +2351,7 @@ export function SkillTextArea({
 
 export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace"> }) {
   const branch = session.gitWorkspace?.targetBranch ?? session.repo.branch ?? "no branch";
-  const dirty = session.gitWorkspace?.dirty ?? session.repo.dirty;
+  const dirty = session.gitWorkspace?.state === "worktree" || session.repo.dirty;
   const dirtyLabel = dirty ? " · dirty" : "";
   const title = `${session.repo.name} · ${branch}${dirtyLabel}`;
 

@@ -29,7 +29,7 @@ Codex JSONL files under `~/.codex/sessions` are the preferred transcript source 
 
 SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
-Managed Git sessions also store a durable Git workspace identity independent of the tmux pane id. The record contains the repository entry point, named target and shared managed target ref, conditional source, current ephemeral implementation generation, recovery ref, exact inspection revisions, structured review pair, last completion, cleanup recovery state, and remote publication state.
+Managed Git sessions store only the repository entry point, existing local target branch, dependency link candidates, and path to a skill-owned status file.
 
 ## Components
 
@@ -42,7 +42,7 @@ Managed Git sessions also store a durable Git workspace identity independent of 
 - Activity summarizer: optional OpenAI-backed, prompt-only session summaries and usage/cost recording.
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
-- Git workspace coordinator: registers managed target metadata, creates generation-scoped private branches/worktrees only for active change tasks, fetches exact revisions into `refs/muxpilot/*`, preserves interrupted work, performs reviewed fast-forward integration, and removes completed worktrees.
+- Local Git workflow skill: creates task worktrees, links dependencies, guides focused validation and iterative self-review, serializes local fast-forward integration, and removes completed worktrees. The backend only reads its status file.
 
 ## Operator Access
 
@@ -97,14 +97,11 @@ Supported actions include interrupt, input-mode switch, proposed-plan choice, re
 Managed Git session creation and integration:
 
 ```text
-entry directory + target/source -> fetch exact refs -> atomically create missing local target branch -> neutral tmux/Codex control directory
-change task -> reconcile managed + committed local + fetched/cached remote target -> private branch/worktree with manifest-aware dependency links -> commits -> agent finish capability -> reconcile again -> rebase onto current managed target ref
-five-minute structured ephemeral Codex review -> agent fixes findings, or halts for explicit user approval when review infrastructure fails
-reviewed head -> atomic compare-and-swap fast-forward of managed target -> synchronize clean local target checkout -> remove implementation worktree and private branch
-explicit inline Git-panel confirmation of exact SHA -> fresh remote reconciliation -> renewed confirmation if target changed -> normal non-force push of managed target
+entry directory + existing local target -> neutral tmux/Codex control directory
+change task -> skill creates private branch/worktree + simple dependency links -> focused checks + iterative same-agent review -> atomic local fast-forward -> cleanup
 ```
 
-Each repository has one shared muxpilot-owned target ref per remote and branch. Final integration advances that ref atomically, so multiple sessions serialize. Muxpilot incorporates every committed managed, local-target, and remote-target head; clean divergence produces merge commits and conflicts are resolved in a durable target-scoped worktree. A clean local target checkout is fast-forwarded after integration. Dirty checkout files, index state, and branch position are never changed. Remote publication remains a confirmed UI-only action and uses a normal non-force push. Finalization is idempotent and exposes durable phase/status data so an interrupted helper can safely attach or report the prior result.
+Task implementation is concurrent. A repository-local branch lock protects only the final local integration step. If another task lands first, the later task rebases and repeats focused validation and self-review. Conflicts and unfinished changes remain in their task worktree; dirty target checkouts are never changed. Normal workflow helpers do not pull or push.
 
 Restorable session history:
 
