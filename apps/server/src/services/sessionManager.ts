@@ -74,6 +74,7 @@ export class SessionManager {
   private readonly answeredQuestionMessageIds = new Set<string>();
   private readonly processingQueuedSessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
+  private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -145,6 +146,10 @@ export class SessionManager {
   async discover(): Promise<void> {
     const panes = await this.tmux.listPanes();
     const codexFiles = await this.codexStore.listRecent();
+    const growingCodexFilePaths = growingCodexFiles(codexFiles, this.codexFileObservations);
+    this.codexFileObservations = new Map(
+      codexFiles.map((file) => [file.path, { sizeBytes: file.sizeBytes, updatedAtMs: file.updatedAtMs }])
+    );
     const codexClaims = new Set<string>();
     const now = nowIso();
     const seen = new Set<string>();
@@ -160,7 +165,8 @@ export class SessionManager {
         codexFiles,
         codexClaims,
         processInfo,
-        (lines) => this.tmux.capturePane(pane.paneId, lines, false)
+        (lines) => this.tmux.capturePane(pane.paneId, lines, false),
+        growingCodexFilePaths
       );
       const include = await this.shouldIncludePane(pane, match);
       if (!include) {
@@ -180,6 +186,9 @@ export class SessionManager {
         await this.db.clearSessionTranscript(existingId);
         if (nextCodexJsonlPath) await this.db.resetParserOffset(parserOffsetKey(existingId, nextCodexJsonlPath));
       }
+      const transcriptSyncing = nextCodexJsonlPath
+        ? sourceChanged || !existing || existing.transcriptSyncing === true
+        : false;
       const inputMode =
         (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
         existing?.inputMode ??
@@ -236,6 +245,7 @@ export class SessionManager {
         inputMode,
         models: mergeSessionModels(existing?.models, inputMode, liveModelSettings),
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
+        transcriptSyncing,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         pinned: existing?.pinned ?? false,
         archived: existing?.archived ?? false,
@@ -354,17 +364,17 @@ export class SessionManager {
               this.publish("session.updated", session.id, await this.db.getSession(session.id));
             }
           }
-          if (message.type === "approval_request") {
+          if (!session.transcriptSyncing && message.type === "approval_request") {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "approval", now);
             this.publish("status.changed", session.id, { status: "approval" });
           }
-          if (message.type === "question_request") {
+          if (!session.transcriptSyncing && message.type === "question_request") {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "question", now);
             this.publish("status.changed", session.id, { status: "question" });
           }
-          if (isPlanReadyMessage(message)) {
+          if (!session.transcriptSyncing && isPlanReadyMessage(message)) {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "plan_ready", now);
             this.publish("status.changed", session.id, { status: "plan_ready" });
@@ -380,6 +390,28 @@ export class SessionManager {
         return { incomplete: false, progressed: false };
       }
       await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
+      if (result.complete && currentSession.transcriptSyncing) {
+        const latestMessage = await this.db.latestMessage(session.id);
+        const latestQuestionMessage = await this.db.latestQuestionMessage(session.id);
+        const latestUserMessage = await this.db.latestUserMessage(session.id);
+        const baselineStatus = latestMessage?.type === "approval_request" ? "approval" : currentSession.status;
+        const status = resolveSessionStatus(
+          baselineStatus,
+          baselineStatus,
+          currentSession.inputMode,
+          latestMessage,
+          latestQuestionMessage,
+          await this.latestQuestionAnswerMessage(session.id, latestQuestionMessage),
+          await this.db.latestPlanReadyMessage(session.id),
+          await this.db.latestAssistantMessage(session.id),
+          latestUserMessage,
+          this.answeredPlanMessageIds,
+          this.answeredQuestionMessageIds
+        );
+        const syncedSession = { ...currentSession, status, transcriptSyncing: false };
+        await this.db.upsertSession(syncedSession, nowIso());
+        this.publish("session.updated", session.id, syncedSession);
+      }
       return { incomplete: !result.complete, progressed: result.nextOffset > offset };
     } catch (error) {
       const currentSession = await this.db.getSession(session.id);
@@ -733,6 +765,7 @@ export class SessionManager {
       inputMode: "default",
       models: emptySessionModels(),
       transcriptSize: 0,
+      transcriptSyncing: false,
       unreadCount: 0,
       pinned: false,
       archived: false,
@@ -1101,6 +1134,7 @@ export class SessionManager {
       inputMode: source.inputMode,
       models: source.models,
       transcriptSize: source.transcriptSize,
+      transcriptSyncing: source.transcriptSyncing === true,
       unreadCount: source.unreadCount,
       pinned: source.pinned,
       archived: false,
@@ -1449,7 +1483,8 @@ async function claimCodexFile(
   files: CodexSessionFile[],
   claims: Set<string>,
   processInfo: CodexProcessInfo | null,
-  capturePane: (lines: number) => Promise<string>
+  capturePane: (lines: number) => Promise<string>,
+  growingPaths: ReadonlySet<string>
 ): Promise<CodexSessionFile | null> {
   const exact = files.filter((file) => file.cwd === pane.cwd);
   const existingMatch = exact.find((file) => file.path === existing?.codexJsonlPath);
@@ -1465,6 +1500,12 @@ async function claimCodexFile(
   if (visibleMatch && !claims.has(visibleMatch.path)) {
     claims.add(visibleMatch.path);
     return visibleMatch;
+  }
+
+  const growingSuccessor = uniqueGrowingSuccessor(compatibleExact, existingMatch, growingPaths);
+  if (growingSuccessor && !claims.has(growingSuccessor.path)) {
+    claims.add(growingSuccessor.path);
+    return growingSuccessor;
   }
 
   const startTimeMatch = matchByProcessStart(processInfo, compatibleExact);
@@ -1491,6 +1532,36 @@ async function claimCodexFile(
   const match = await bestCodexFileForPane(fuzzy, processInfo, capturePane);
   if (match) claims.add(match.path);
   return match;
+}
+
+function growingCodexFiles(
+  files: CodexSessionFile[],
+  previous: ReadonlyMap<string, { sizeBytes: number; updatedAtMs: number }>
+): Set<string> {
+  return new Set(
+    files
+      .filter((file) => {
+        const observed = previous.get(file.path);
+        return Boolean(observed && (file.sizeBytes > observed.sizeBytes || file.updatedAtMs > observed.updatedAtMs));
+      })
+      .map((file) => file.path)
+  );
+}
+
+function uniqueGrowingSuccessor(
+  candidates: CodexSessionFile[],
+  existing: CodexSessionFile | undefined,
+  growingPaths: ReadonlySet<string>
+): CodexSessionFile | null {
+  if (!existing || growingPaths.has(existing.path)) return null;
+  const successors = candidates.filter(
+    (file) =>
+      file.path !== existing.path &&
+      file.startedAtMs !== null &&
+      (existing.startedAtMs === null || file.startedAtMs > existing.startedAtMs) &&
+      growingPaths.has(file.path)
+  );
+  return successors.length === 1 ? successors[0] ?? null : null;
 }
 
 async function bestCodexFileForPane(
@@ -1736,6 +1807,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
     lastActivityAt: session.lastActivityAt,
+    transcriptSyncing: session.transcriptSyncing === true,
     inputMode: session.inputMode,
     models: session.models,
     pinned: session.pinned,

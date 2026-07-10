@@ -80,6 +80,7 @@ import {
   shellQuote,
   tmuxAttachCommand,
   TmuxCommandButton,
+  TranscriptSyncIndicator,
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
@@ -1694,6 +1695,14 @@ describe("WorkingIndicator", () => {
 
     expect(html).toContain("Codex is planning...");
     expect(html).not.toContain("Codex is working");
+  });
+
+  it("renders transcript synchronization without an elapsed runtime", () => {
+    const html = renderToStaticMarkup(createElement(TranscriptSyncIndicator));
+
+    expect(html).toContain("Syncing transcript...");
+    expect(html).toContain('role="status"');
+    expect(html).not.toContain("working-indicator-elapsed");
   });
 
   it("only shows for live working sessions at the newest transcript position", () => {

@@ -2046,6 +2046,7 @@ export class SyncAppDatabase {
       inputMode: collaborationMode(session.inputMode) ?? "default",
       models: sessionModels(session.models),
       transcriptSize: this.messageCount(row.id),
+      transcriptSyncing: session.transcriptSyncing === true,
       unreadCount: row.unread_count,
       pinned: session.pinned === true,
       archived: row.archived === 1,

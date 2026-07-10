@@ -129,6 +129,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
     );
   }
 
+  if (topType === "event_msg" && payloadType === "context_compacted") return null;
+
   if (topType === "response_item" && payloadType === "function_call") {
     const command = event.payload?.name ? `${event.payload.name}(${event.payload.arguments ?? ""})` : "Tool call";
     return message("tool_call", "tool", timestamp, command, event as unknown as Record<string, unknown>, collaborationMode);

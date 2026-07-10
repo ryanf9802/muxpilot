@@ -19,6 +19,7 @@ type NotificationSeverity = NotificationTriggeredPayload["severity"];
 
 export class NotificationService {
   private readonly knownStatuses = new Map<string, SessionStatus>();
+  private readonly syncingSessions = new Set<string>();
   private unsubscribe: (() => void) | null = null;
   private vapidKeys: PushVapidKeys | null = null;
 
@@ -62,6 +63,15 @@ export class NotificationService {
     if (event.type === "session.updated") {
       const session = event.payload as Partial<ManagedSession>;
       if (typeof session.id === "string" && isSessionStatus(session.status)) {
+        if (session.transcriptSyncing === true) {
+          this.knownStatuses.set(session.id, session.status);
+          this.syncingSessions.add(session.id);
+          return;
+        }
+        if (this.syncingSessions.delete(session.id)) {
+          this.knownStatuses.set(session.id, session.status);
+          return;
+        }
         await this.handleStatusTransition(session.id, session.status);
       }
       return;
@@ -70,6 +80,11 @@ export class NotificationService {
     if (event.type !== "status.changed") return;
     const nextStatus = statusFromPayload(event.payload);
     if (!nextStatus) return;
+
+    if (this.syncingSessions.has(event.sessionId)) {
+      this.knownStatuses.set(event.sessionId, nextStatus);
+      return;
+    }
 
     await this.handleStatusTransition(event.sessionId, nextStatus);
   }

@@ -248,6 +248,61 @@ describe("matchingNotificationRules", () => {
     expect(appendedEvents).toEqual([]);
     service.stop();
   });
+
+  it("uses transcript replay statuses as a silent notification baseline", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => webPush.generateVAPIDKeys(),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["status_change"]) }),
+        getSession: async () => testSession({ status: "waiting" }),
+        appendEvent: async (event: SessionEvent) => {
+          appendedEvents.push(event);
+        },
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+
+    await service.start();
+    events.publish({
+      id: "sync-start",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "working", transcriptSyncing: true }),
+      timestamp: "2026-07-08T00:00:00.000Z"
+    });
+    events.publish({
+      id: "replayed-approval",
+      type: "status.changed",
+      sessionId: "a",
+      payload: { status: "approval" },
+      timestamp: "2026-07-08T00:00:01.000Z"
+    });
+    events.publish({
+      id: "sync-complete",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "waiting", transcriptSyncing: false }),
+      timestamp: "2026-07-08T00:00:02.000Z"
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendedEvents).toEqual([]);
+
+    events.publish({
+      id: "real-working",
+      type: "status.changed",
+      sessionId: "a",
+      payload: { status: "working" },
+      timestamp: "2026-07-08T00:00:03.000Z"
+    });
+    await vi.waitFor(() => expect(appendedEvents).toHaveLength(1));
+    service.stop();
+  });
 });
 
 function testNotificationSettings(

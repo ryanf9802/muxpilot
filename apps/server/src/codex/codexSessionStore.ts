@@ -7,6 +7,7 @@ export interface CodexSessionFile {
   cwd: string | null;
   startedAtMs: number | null;
   updatedAtMs: number;
+  sizeBytes: number;
   cliVersion: string | null;
 }
 
@@ -46,6 +47,7 @@ export class CodexSessionStore {
           cwd: meta.cwd,
           startedAtMs: meta.startedAtMs,
           updatedAtMs: fileStat.mtimeMs,
+          sizeBytes: fileStat.size,
           cliVersion: meta.cliVersion
         } satisfies CodexSessionFile;
       })

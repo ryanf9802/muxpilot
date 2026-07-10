@@ -2383,6 +2383,71 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("rebinds a stale long-running pane when one newer rollout starts growing", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1", pid: 101 });
+    const oldStartedAt = new Date("2026-07-07T00:00:00.000Z");
+
+    await writeCodexSession(harness.codexHome, "old.jsonl", {
+      sessionId: "codex-old",
+      cwd: repo,
+      user: "old prompt",
+      assistant: "old answer",
+      startedAt: oldStartedAt,
+      mtime: oldStartedAt
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› ";
+    harness.processLookup.set(pane.pid, { pid: 201, sessionId: null, startedAtMs: oldStartedAt.getTime() });
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session?.codexSessionId).toBe("codex-old");
+
+    const newPath = join(harness.codexHome, "sessions", "new.jsonl");
+    await writeCodexSession(harness.codexHome, "new.jsonl", {
+      sessionId: "codex-new",
+      cwd: repo,
+      user: "new prompt",
+      assistant: "new answer",
+      startedAt: new Date("2026-07-07T02:00:00.000Z"),
+      mtime: new Date("2026-07-07T02:00:00.000Z")
+    });
+
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session!.id))?.codexSessionId).toBe("codex-old");
+
+    const replayedStatusEvents: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "status.changed") replayedStatusEvents.push(String((event.payload as { status?: unknown }).status));
+    });
+    await appendFile(
+      newPath,
+      `${JSON.stringify({ timestamp: "2026-07-07T02:00:03.000Z", type: "event_msg", payload: { type: "agent_message", message: "new progress" } })}\n`
+    );
+    await harness.manager.discover();
+
+    const syncing = await harness.manager.getSession(session!.id);
+    expect(syncing).toMatchObject({ codexSessionId: "codex-new", transcriptSyncing: true });
+    expect(harness.manager.listMessages(session!.id, 0)).toEqual([]);
+
+    await harness.manager.catchUpIngest();
+
+    const rebound = await harness.manager.getSession(session!.id);
+    expect(rebound).toMatchObject({ codexSessionId: "codex-new", transcriptSyncing: false });
+    expect(harness.manager.listMessages(session!.id, 0).map((message) => message.text)).toEqual([
+      "new prompt",
+      "new answer",
+      "new progress"
+    ]);
+    expect(replayedStatusEvents).toEqual([]);
+    unsubscribe();
+    harness.db.close();
+  });
+
   it("keeps an existing same-cwd binding when visible overlap ties a newer candidate", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "shared-repo");

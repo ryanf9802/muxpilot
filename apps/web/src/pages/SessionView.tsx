@@ -580,7 +580,8 @@ export function SessionView() {
   const firstSequence = useMemo(() => transcriptItems[0]?.firstSequence ?? 0, [transcriptItems]);
   lastSequenceRef.current = lastSequence;
   const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages, suppressedPlanMessageId), [loadedMessages, suppressedPlanMessageId]);
-  const showWorkingIndicator = shouldShowWorkingIndicator(session?.status, hasMoreAfter);
+  const showWorkingIndicator = !session?.transcriptSyncing && shouldShowWorkingIndicator(session?.status, hasMoreAfter);
+  const showTranscriptSyncIndicator = session?.transcriptSyncing === true && !hasMoreAfter;
   const pendingUserChatMessage = useMemo(() => (pendingUserMessage ? pendingUserMessageToChatMessage(pendingUserMessage) : null), [pendingUserMessage]);
   const lastUserPromptAt = useMemo(
     () => latestUserPromptTimestamp(pendingUserChatMessage ? [...loadedMessages, pendingUserChatMessage] : loadedMessages),
@@ -962,7 +963,7 @@ export function SessionView() {
       if (initialTranscriptSessionId === id && !initialScrollReady) setInitialScrollReady(true);
     });
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [id, initialScrollReady, initialTranscriptSessionId, transcriptItems, showWorkingIndicator]);
+  }, [id, initialScrollReady, initialTranscriptSessionId, transcriptItems, showWorkingIndicator, showTranscriptSyncIndicator]);
 
   async function trackRefreshRequest<T>(request: () => Promise<T>): Promise<T> {
     return request();
@@ -1680,6 +1681,7 @@ export function SessionView() {
           ) : null}
           {transcriptItems.map((item) => renderTranscriptItem(item))}
           {pendingUserChatMessage ? <MessageBubble message={pendingUserChatMessage} pending onOpenMenu={openMessageMenu} /> : null}
+          {showTranscriptSyncIndicator ? <TranscriptSyncIndicator /> : null}
           {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
           {question && !questionRenderedInline ? (
             <QuestionBanner question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
@@ -3145,6 +3147,24 @@ export function WorkingIndicator({
             {formatElapsedSeconds(elapsedSeconds)}
           </time>
         ) : null}
+      </div>
+    </article>
+  );
+}
+
+export function TranscriptSyncIndicator() {
+  return (
+    <article className="message message-assistant message-working-indicator" aria-live="polite" role="status">
+      <div className="message-meta">
+        <span className="message-meta-main">
+          <span>Codex</span>
+        </span>
+      </div>
+      <div className="working-indicator-content">
+        <span className="working-indicator-label">
+          <LoaderCircle className="spin" size={18} aria-hidden="true" />
+          <span>Syncing transcript...</span>
+        </span>
       </div>
     </article>
   );

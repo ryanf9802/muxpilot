@@ -215,6 +215,7 @@ export interface ManagedSession {
   inputMode: CollaborationMode;
   models: SessionModelSelections;
   transcriptSize: number;
+  transcriptSyncing?: boolean;
   unreadCount: number;
   pinned: boolean;
   archived: boolean;
