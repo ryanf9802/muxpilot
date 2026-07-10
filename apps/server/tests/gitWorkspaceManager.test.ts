@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview, REVIEW_TIMEOUT_MS } from "../src/services/gitWorkspaceManager.js";
+import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview, readStructuredReviewResult, reviewProcessDiagnostic, REVIEW_TIMEOUT_MS } from "../src/services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus, syncMuxpilotGitWorkflowSkill } from "../src/services/bundledSkills.js";
 import { AppDatabase } from "../src/db/database.js";
 import { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
@@ -59,6 +59,23 @@ describe("codexReviewArgs", () => {
       findings: [{ title: "Bug", body: "Incorrect edge case", path: "src/a.ts", line: 12 }]
     }))).toMatchObject({ verdict: "changes_requested", findings: [{ path: "src/a.ts", line: 12 }] });
   });
+
+  it("diagnoses review process failures with outcome and captured logs", () => {
+    expect(reviewProcessDiagnostic({ killed: true, signal: "SIGTERM", stderr: "review stalled" }))
+      .toContain("timed out after 300 seconds");
+    expect(reviewProcessDiagnostic({ code: 7, stdout: "partial output", stderr: "fatal detail" }))
+      .toContain("exited with status 7");
+    expect(reviewProcessDiagnostic({ signal: "SIGKILL" })).toContain("terminated by signal SIGKILL");
+  });
+
+  it("distinguishes missing and invalid review result files", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-review-result-"));
+    await expect(readStructuredReviewResult(join(directory, "missing.json")))
+      .rejects.toThrow("did not create result.json");
+    const invalid = join(directory, "invalid.json");
+    await writeFile(invalid, "not json");
+    await expect(readStructuredReviewResult(invalid)).rejects.toThrow("invalid structured output");
+  });
 });
 
 describe("muxpilot-git-finish", () => {
@@ -69,6 +86,7 @@ describe("muxpilot-git-finish", () => {
     );
 
     expect(result.code).toBe(4);
+    expect(result.stdout).toContain("FINALIZATION_STARTED");
     expect(result.stdout).toContain("REVIEW_INCOMPLETE");
     expect(result.stdout).toContain("timed out awaiting response headers");
     expect(result.stdout).toContain("Ask whether integration should proceed without successful review");
@@ -86,6 +104,26 @@ describe("muxpilot-git-finish", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("review=bypassed");
     expect(result.requestBody).toEqual({ allowUnreviewed: true });
+  });
+
+  it("reports durable finalization phases while waiting", async () => {
+    const result = await runFinishHelper(
+      { status: "integrated", targetSha: "a".repeat(40), generation: 2, reviewed: true },
+      200,
+      [],
+      1_200
+    );
+    expect(result.stdout).toContain("FINALIZATION_STARTED");
+    expect(result.stdout).toContain("FINALIZATION_PROGRESS phase=reviewing");
+  });
+});
+
+describe("muxpilot-git-inspect", () => {
+  it("accepts an unqualified local branch name", async () => {
+    const result = await runInspectHelper("main");
+    expect(result.code).toBe(0);
+    expect(result.requestBody).toEqual({ kind: "local_branch", branch: "main" });
+    expect(result.stdout).toContain("refs/heads/main");
   });
 });
 
@@ -461,7 +499,8 @@ async function git(cwd: string, args: string[]): Promise<string> {
 async function runFinishHelper(
   responseBody: object,
   statusCode: number,
-  args: string[] = []
+  args: string[] = [],
+  responseDelayMs = 0
 ): Promise<{ code: number; stdout: string; stderr: string; requestBody: unknown }> {
   let requestBody: unknown;
   const server = createServer((request, response) => {
@@ -469,9 +508,16 @@ async function runFinishHelper(
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
+      if (request.method === "GET") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ workspace: { finalization: { status: "reviewing" } } }));
+        return;
+      }
       requestBody = JSON.parse(body);
-      response.writeHead(statusCode, { "content-type": "application/json" });
-      response.end(JSON.stringify(responseBody));
+      setTimeout(() => {
+        response.writeHead(statusCode, { "content-type": "application/json" });
+        response.end(JSON.stringify(responseBody));
+      }, responseDelayMs);
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -482,6 +528,42 @@ async function runFinishHelper(
   const script = fileURLToPath(new URL("../../../skills/muxpilot-git-workflow/scripts/muxpilot-git-finish.mjs", import.meta.url));
   try {
     const { stdout, stderr } = await execFileAsync("node", [script, ...args], {
+      env: {
+        ...process.env,
+        MUXPILOT_GIT_HELPER_URL: `http://127.0.0.1:${port}`,
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-test",
+        MUXPILOT_GIT_HELPER_TOKEN: "token-test"
+      }
+    });
+    return { code: 0, stdout, stderr, requestBody };
+  } catch (error) {
+    const failure = error as Error & { code?: number; stdout?: string; stderr?: string };
+    return { code: failure.code ?? 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", requestBody };
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+async function runInspectHelper(input: string): Promise<{ code: number; stdout: string; stderr: string; requestBody: unknown }> {
+  let requestBody: unknown;
+  const server = createServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => { body += chunk; });
+    request.on("end", () => {
+      requestBody = JSON.parse(body);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ workspace: { inspections: [{ commitSha: "a".repeat(40), resolvedRef: "refs/heads/main" }] } }));
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const port = (server.address() as AddressInfo).port;
+  const script = fileURLToPath(new URL("../../../skills/muxpilot-git-workflow/scripts/muxpilot-git-inspect.mjs", import.meta.url));
+  try {
+    const { stdout, stderr } = await execFileAsync("node", [script, input], {
       env: {
         ...process.env,
         MUXPILOT_GIT_HELPER_URL: `http://127.0.0.1:${port}`,

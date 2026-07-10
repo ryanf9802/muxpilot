@@ -92,7 +92,8 @@ export class GitWorkspaceManager {
       cleanupEligible: false,
       compatibilityWarnings: provisioned.compatibilityWarnings,
       generation: 0,
-      lastCompletion: null
+      lastCompletion: null,
+      dependencyLinks: provisioned.dependencyLinks
     };
     const stored: StoredGitWorkspace = {
       id,
@@ -148,7 +149,7 @@ export class GitWorkspaceManager {
         sessionBranch: materialized.sessionBranch,
         worktreePath: materialized.worktreePath,
         targetSha: materialized.targetSha
-      });
+      }, current.summary.dependencyLinks);
       const dependencyLinks = await this.coordinator.linkDependencies(reconciled.summary.repoRoot, materialized.worktreePath);
       return this.save(
         { ...reconciled, recoveryRef: materialized.recoveryError ? reconciled.recoveryRef : null },
@@ -179,10 +180,11 @@ export class GitWorkspaceManager {
     let suspended: StoredGitWorkspace;
     try {
       suspended = await this.withLock(workspaceLockKey(workspace), async () => {
-        const current = requireWorkspace(await this.db.getGitWorkspace(workspace.id));
+        let current = requireWorkspace(await this.db.getGitWorkspace(workspace.id));
         if (!current.summary.worktreePath || !current.summary.sessionBranch || !(await pathExists(current.summary.worktreePath))) {
           return current;
         }
+        current = await this.detachLinkedDependencies(current);
         const refreshed = await this.refresh(current);
         if (!refreshed.summary.dirty && refreshed.summary.aheadBy === 0 && !refreshed.recoveryRef) {
           await this.coordinator.cleanupIntegrated(coordinates(refreshed), refreshed.summary.inspections);
@@ -295,7 +297,7 @@ export class GitWorkspaceManager {
     if (workspace.summary.state === "cleaned") return workspace;
     try {
       const status = workspace.summary.worktreePath && workspace.summary.sessionBranch
-        ? await this.coordinator.status(coordinates(workspace))
+        ? await this.coordinator.status(coordinates(workspace), workspace.summary.dependencyLinks)
         : await this.coordinator.inactiveStatus(coordinates(workspace));
       const remote = await this.coordinator.remoteStatus(coordinates(workspace)).catch(() => ({
         remoteSha: workspace.summary.remoteSha,
@@ -471,7 +473,7 @@ export class GitWorkspaceManager {
     workspace = await this.setFinalizationStatus(workspace, "reconciling");
     let current = await this.withLock(workspaceLockKey(workspace), () => this.reconcile(workspace, true));
     try {
-      const prepared = await this.withLock(workspaceLockKey(current), () => this.coordinator.prepareIntegration(coordinates(current)));
+      const prepared = await this.withLock(workspaceLockKey(current), () => this.coordinator.prepareIntegration(coordinates(current), current.summary.dependencyLinks));
       current = await this.save(current, {
         ...current.summary,
         state: "reviewing",
@@ -538,7 +540,7 @@ export class GitWorkspaceManager {
     const reconciled = await this.reconcile(workspace, true);
     let current = await this.refresh(reconciled);
     if (allowUnreviewed) {
-      const prepared = await this.coordinator.prepareIntegration(coordinates(current));
+      const prepared = await this.coordinator.prepareIntegration(coordinates(current), current.summary.dependencyLinks);
       current = await this.save(current, {
         ...current.summary,
         targetSha: prepared.targetSha,
@@ -615,6 +617,7 @@ export class GitWorkspaceManager {
   }
 
   private async cleanupCompleted(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+    workspace = await this.detachLinkedDependencies(workspace);
     if (workspace.recoveryRef) await this.coordinator.deleteRef(workspace.summary.repoRoot, workspace.recoveryRef);
     const targetSha = await this.coordinator.cleanupIntegrated(coordinates(workspace), workspace.summary.inspections);
     return this.save({ ...workspace, recoveryRef: null }, idleSummary({
@@ -622,6 +625,18 @@ export class GitWorkspaceManager {
       targetSha,
       sessionHeadSha: targetSha
     }));
+  }
+
+  private async detachLinkedDependencies(workspace: StoredGitWorkspace): Promise<StoredGitWorkspace> {
+    if (!workspace.summary.worktreePath) return workspace;
+    const available = workspace.summary.dependencyLinks ?? [];
+    const linked = available.filter((dependency) => dependency.linked).map((dependency) => dependency.relativePath);
+    if (linked.length === 0) return workspace;
+    const detached = new Set(await this.coordinator.detachDependencyLinks(workspace.summary.worktreePath, linked));
+    return this.save(workspace, {
+      ...workspace.summary,
+      dependencyLinks: available.map((dependency) => detached.has(dependency.relativePath) ? { ...dependency, linked: false } : dependency)
+    });
   }
 
   private async push(workspace: StoredGitWorkspace, expectedTargetSha: string): Promise<StoredGitWorkspace> {
@@ -891,14 +906,52 @@ async function runStructuredReview(worktreePath: string, targetSha: string, prom
       execFileAsync("git", gitReviewDiffArgs(targetSha, patchPath), { cwd: worktreePath }),
       writeFile(schemaPath, JSON.stringify(REVIEW_SCHEMA))
     ]);
-    await execFileAsync("codex", codexReviewArgs(worktreePath, `${prompt} The exact patch to review is at ${patchPath}. Begin with that patch and inspect repository context as needed.`, schemaPath, outputPath), {
-      cwd: worktreePath,
-      timeout: REVIEW_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024
-    });
-    return parseStructuredReview(await readFile(outputPath, "utf8"));
+    try {
+      await execFileAsync("codex", codexReviewArgs(worktreePath, `${prompt} The exact patch to review is at ${patchPath}. Begin with that patch and inspect repository context as needed.`, schemaPath, outputPath), {
+        cwd: worktreePath,
+        timeout: REVIEW_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024
+      });
+    } catch (error) {
+      throw new Error(reviewProcessDiagnostic(error));
+    }
+    return readStructuredReviewResult(outputPath);
   } finally {
     await rm(temp, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+export function reviewProcessDiagnostic(error: unknown): string {
+  const value = error as Error & { code?: string | number; signal?: string; killed?: boolean; stdout?: string; stderr?: string };
+  const timedOut = value.killed === true && value.signal === "SIGTERM";
+  const outcome = timedOut
+    ? `timed out after ${REVIEW_TIMEOUT_MS / 1000} seconds`
+    : value.signal
+      ? `terminated by signal ${value.signal}`
+      : `exited with status ${value.code ?? "unknown"}`;
+  const details = [
+    `Independent review ${outcome}.`,
+    value.stderr?.trim() ? `stderr:\n${value.stderr.trim()}` : "",
+    value.stdout?.trim() ? `stdout:\n${value.stdout.trim()}` : ""
+  ].filter(Boolean).join("\n");
+  return details.slice(0, 64 * 1024);
+}
+
+export async function readStructuredReviewResult(outputPath: string): Promise<StructuredReview> {
+  let output: string;
+  try {
+    output = await readFile(outputPath, "utf8");
+  } catch (error) {
+    const value = error as NodeJS.ErrnoException;
+    if (value.code === "ENOENT") {
+      throw new Error("Independent review process exited successfully but did not create result.json.");
+    }
+    throw new Error(`Independent review result could not be read: ${value.message}`);
+  }
+  try {
+    return parseStructuredReview(output);
+  } catch (error) {
+    throw new Error(`Independent review returned invalid structured output: ${errorMessage(error)}`);
   }
 }
 

@@ -249,14 +249,20 @@ describe("GitWorkspaceCoordinator", () => {
     await writeFile(join(root, "node_modules", "marker"), "shared\n");
     const coordinator = new GitWorkspaceCoordinator();
     const registered = await provision(coordinator, root, "session_dependencies", "target");
+    expect(registered.dependencyLinks).toMatchObject([{ kind: "node", relativePath: "node_modules", linked: false }]);
     const materialized = await coordinator.materialize(coordinates(registered), registered.implementationRoot, "dependencies", 1);
+    const workspace = coordinates(registered, materialized.sessionBranch, materialized.worktreePath);
 
     const links = await coordinator.linkDependencies(root, materialized.worktreePath);
     expect(links).toMatchObject([{ kind: "node", relativePath: "node_modules", linked: true }]);
     expect((await lstat(join(materialized.worktreePath, "node_modules"))).isSymbolicLink()).toBe(true);
     expect(await readlink(join(materialized.worktreePath, "node_modules"))).toBe(join(root, "node_modules"));
+    expect(await coordinator.status(workspace, links)).toMatchObject({ dirty: false });
     expect(await coordinator.detachDependencyLinks(materialized.worktreePath, ["node_modules"])).toEqual(["node_modules"]);
     await expect(lstat(join(materialized.worktreePath, "node_modules"))).rejects.toMatchObject({ code: "ENOENT" });
+    await mkdir(join(materialized.worktreePath, "node_modules"));
+    await writeFile(join(materialized.worktreePath, "node_modules", "local-cache"), "local\n");
+    expect(await coordinator.status(workspace, links.map((link) => ({ ...link, linked: false })))).toMatchObject({ dirty: true });
     expect(await readFile(join(root, "node_modules", "marker"), "utf8")).toBe("shared\n");
   });
 

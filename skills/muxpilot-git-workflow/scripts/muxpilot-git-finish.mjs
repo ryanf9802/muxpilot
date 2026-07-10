@@ -36,7 +36,8 @@ if (process.argv.includes("--status")) {
   process.exit(0);
 }
 
-const response = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/finalize`, {
+process.stdout.write("FINALIZATION_STARTED\n");
+const finalizeRequest = fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/finalize`, {
   method: "POST",
   headers: {
     "content-type": "application/json",
@@ -44,6 +45,36 @@ const response = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURI
   },
   body: JSON.stringify({ allowUnreviewed })
 });
+let lastPhase = null;
+let lastProgressAt = Date.now();
+let polling = false;
+const progressTimer = setInterval(async () => {
+  if (polling) return;
+  polling = true;
+  try {
+    const statusResponse = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/status`, {
+      headers: { "x-muxpilot-git-token": token }
+    });
+    const statusPayload = await statusResponse.json().catch(() => ({}));
+    const phase = statusPayload.workspace?.finalization?.status;
+    if (statusResponse.ok && phase && phase !== lastPhase) {
+      process.stdout.write(`FINALIZATION_PROGRESS phase=${phase}\n`);
+      lastPhase = phase;
+      lastProgressAt = Date.now();
+    } else if (Date.now() - lastProgressAt >= 30_000) {
+      process.stdout.write(`FINALIZATION_WAITING phase=${phase ?? lastPhase ?? "unknown"}\n`);
+      lastProgressAt = Date.now();
+    }
+  } catch {
+    if (Date.now() - lastProgressAt >= 30_000) {
+      process.stdout.write(`FINALIZATION_WAITING phase=${lastPhase ?? "unknown"}\n`);
+      lastProgressAt = Date.now();
+    }
+  } finally {
+    polling = false;
+  }
+}, 1_000);
+const response = await finalizeRequest.finally(() => clearInterval(progressTimer));
 const payload = await response.json().catch(() => ({}));
 if (!response.ok) {
   if (payload.code === "review_failed") {

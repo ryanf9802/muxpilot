@@ -1325,7 +1325,12 @@ export function managedCodexLaunchOptions(
   const helperDir = codexHome ? join(codexHome, "skills", "muxpilot-git-workflow", "scripts") : null;
   return {
     isolatedWorkspace: true,
-    writableRoots: [workspace.implementationRoot, workspace.commonGitDir, integrationRoot].filter((value): value is string => Boolean(value)),
+    writableRoots: [
+      workspace.implementationRoot,
+      workspace.commonGitDir,
+      integrationRoot,
+      ...(summary.dependencyLinks ?? []).map((dependency) => dependency.sourcePath)
+    ].filter((value): value is string => Boolean(value)),
     developerInstructions: [
       "This is a muxpilot-managed Git session running from a neutral control directory.",
       "Use $muxpilot-git-workflow as the default workflow for branch and inspection operations.",
@@ -1341,6 +1346,7 @@ export function managedCodexLaunchOptions(
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "Keep unrelated guardrails in effect. Ask for confirmation only when a request is ambiguous, destructive, unusually risky, or apparently irrational—not merely because it affects another checkout.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
+      "Muxpilot-managed shared dependency directories are writable for tool-generated caches; do not modify installed packages unless the task requires dependency changes, in which case detach them first.",
       "When the task still uses muxpilot-managed integration, create clean atomic commits, test them, and run the skill's muxpilot-git-finish helper before reporting completion.",
       "Fix and commit every independent review finding until the helper integrates successfully. Skip managed finalization for work performed exclusively outside the managed integration path."
     ].join(" "),

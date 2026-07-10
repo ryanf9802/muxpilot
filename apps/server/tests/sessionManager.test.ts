@@ -37,7 +37,8 @@ describe("managed Codex launch instructions", () => {
       summary: {
         id: "workspace-1",
         entryPath: "/repo",
-        targetBranch: "main"
+        targetBranch: "main",
+        dependencyLinks: [{ kind: "node", relativePath: "node_modules", sourcePath: "/repo/node_modules", linked: false }]
       }
     } as Parameters<typeof managedCodexLaunchOptions>[0], "http://localhost/helper", "/home/dev/.codex", "/tmp/integrations");
 
@@ -47,6 +48,7 @@ describe("managed Codex launch instructions", () => {
       MUXPILOT_GIT_HELPER_DIR: "/home/dev/.codex/skills/muxpilot-git-workflow/scripts"
     });
     expect(options.writableRoots).toContain("/tmp/integrations");
+    expect(options.writableRoots).toContain("/repo/node_modules");
     expect(options.developerInstructions).toContain("/home/dev/.codex/skills/muxpilot-git-workflow/scripts");
     expect(options.developerInstructions).toContain("No implementation worktree exists initially");
     expect(options.developerInstructions).toContain("muxpilot-git-begin");
@@ -54,6 +56,7 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("Never use an implementation worktree's state to claim that another checkout is clean or dirty");
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("Skip managed finalization for work performed exclusively outside the managed integration path");
+    expect(options.developerInstructions).toContain("writable for tool-generated caches");
   });
 });
 

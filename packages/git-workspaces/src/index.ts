@@ -45,6 +45,7 @@ export interface ProvisionedGitWorkspace {
   sourceFetchedAt: string | null;
   sourceFreshness: GitInspection["freshness"];
   compatibilityWarnings: string[];
+  dependencyLinks: GitDependencyLink[];
 }
 
 export interface GitWorkspaceCoordinates {
@@ -279,6 +280,7 @@ export class GitWorkspaceCoordinator {
     const implementationRoot = resolve(request.worktreeRoot, repoIdentity(commonGitDir), workspaceName);
     const controlPath = resolve(request.sessionRoot, repoIdentity(commonGitDir), workspaceName);
     const compatibilityWarnings = await this.compatibilityWarnings(repoRoot, targetSha);
+    const dependencyLinks = await this.discoverDependencies(repoRoot);
     await mkdir(controlPath, { recursive: true });
     await mkdir(implementationRoot, { recursive: true });
 
@@ -298,7 +300,8 @@ export class GitWorkspaceCoordinator {
       usedCachedRemote: source?.freshness === "cached",
       sourceFetchedAt: source?.fetchedAt ?? null,
       sourceFreshness: source?.freshness ?? "local",
-      compatibilityWarnings
+      compatibilityWarnings,
+      dependencyLinks
     };
   }
 
@@ -343,7 +346,7 @@ export class GitWorkspaceCoordinator {
     };
   }
 
-  async linkDependencies(repoRoot: string, worktreePath: string): Promise<GitDependencyLink[]> {
+  async discoverDependencies(repoRoot: string): Promise<GitDependencyLink[]> {
     const manifestOutput = await this.run(repoRoot, [
       "ls-files", "-z", "--",
       "package.json", "**/package.json",
@@ -372,12 +375,21 @@ export class GitWorkspaceCoordinator {
     const links: GitDependencyLink[] = [];
     for (const [relativePath, kind] of candidates) {
       const sourcePath = join(repoRoot, relativePath);
-      const targetPath = join(worktreePath, relativePath);
-      if (!(await pathExists(sourcePath)) || await pathExists(targetPath)) continue;
+      if (!(await pathExists(sourcePath))) continue;
       if (await this.tryOutput(repoRoot, ["ls-files", "--", relativePath])) continue;
+      links.push({ kind, relativePath, sourcePath, linked: false });
+    }
+    return links;
+  }
+
+  async linkDependencies(repoRoot: string, worktreePath: string): Promise<GitDependencyLink[]> {
+    const links: GitDependencyLink[] = [];
+    for (const dependency of await this.discoverDependencies(repoRoot)) {
+      const targetPath = join(worktreePath, dependency.relativePath);
+      if (await pathExists(targetPath)) continue;
       await mkdir(dirname(targetPath), { recursive: true });
-      await symlink(sourcePath, targetPath, "dir");
-      links.push({ kind, relativePath, sourcePath, linked: true });
+      await symlink(dependency.sourcePath, targetPath, "dir");
+      links.push({ ...dependency, linked: true });
     }
     return links;
   }
@@ -489,12 +501,12 @@ export class GitWorkspaceCoordinator {
     }
   }
 
-  async status(workspace: GitWorkspaceCoordinates): Promise<GitWorkspaceStatus> {
+  async status(workspace: GitWorkspaceCoordinates, dependencyLinks: GitDependencyLink[] = []): Promise<GitWorkspaceStatus> {
     const active = requireActiveWorkspace(workspace);
     const targetSha = await this.resolveCommit(active.repoRoot, active.targetRef);
     const sessionHeadSha = await this.resolveCommit(active.worktreePath, "HEAD");
     const [porcelain, ahead, worktrees, mergePath, applyPath] = await Promise.all([
-      this.output(active.worktreePath, ["status", "--porcelain"]),
+      this.output(active.worktreePath, ["status", "--porcelain", "-z"]),
       this.output(active.repoRoot, ["rev-list", "--count", `${targetSha}..${sessionHeadSha}`]),
       this.output(active.repoRoot, ["worktree", "list", "--porcelain"]),
       this.output(active.worktreePath, ["rev-parse", "--git-path", "rebase-merge"]),
@@ -503,7 +515,7 @@ export class GitWorkspaceCoordinator {
     return {
       targetSha,
       sessionHeadSha,
-      dirty: Boolean(porcelain),
+      dirty: hasUserChanges(porcelain, dependencyLinks),
       aheadBy: Number(ahead) || 0,
       targetCheckedOutAt: checkedOutBranchPath(worktrees, localBranchRef(workspace.targetBranch)),
       rebaseInProgress:
@@ -568,9 +580,9 @@ export class GitWorkspaceCoordinator {
     return { id: inspectionId, ...(await this.resolveRevision(workspace.repoRoot, spec, allowCachedRemote)) };
   }
 
-  async prepareIntegration(workspace: GitWorkspaceCoordinates): Promise<GitWorkspaceStatus> {
+  async prepareIntegration(workspace: GitWorkspaceCoordinates, dependencyLinks: GitDependencyLink[] = []): Promise<GitWorkspaceStatus> {
     const active = requireActiveWorkspace(workspace);
-    const current = await this.status(active);
+    const current = await this.status(active, dependencyLinks);
     if (current.dirty) throw new GitWorkspaceError("Commit or discard all worktree changes before preparing integration", "dirty_worktree");
     if (current.aheadBy === 0) throw new GitWorkspaceError("Session has no commits to integrate", "no_commits");
     if (current.rebaseInProgress) throw new GitWorkspaceError("Resolve or abort the existing rebase first", "rebase_in_progress");
@@ -588,7 +600,7 @@ export class GitWorkspaceCoordinator {
         throw new GitWorkspaceError("Rebase stopped with conflicts in the implementation worktree", "integration_conflict", errorText(error));
       }
     }
-    return this.status({ ...active, targetSha: current.targetSha });
+    return this.status({ ...active, targetSha: current.targetSha }, dependencyLinks);
   }
 
   async reconcileTarget(
@@ -948,6 +960,20 @@ export class GitWorkspaceCoordinator {
   private run(cwd: string, args: string[]): Promise<GitCommandResult> {
     return this.runner.run(cwd, args);
   }
+}
+
+function hasUserChanges(porcelain: string, dependencyLinks: GitDependencyLink[]): boolean {
+  const generated = new Set(dependencyLinks.filter((link) => link.linked).map((link) => link.relativePath));
+  if (generated.size === 0) return Boolean(porcelain);
+  const records = porcelain.split("\0").filter(Boolean);
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!;
+    const status = record.slice(0, 2);
+    const path = record.slice(3);
+    if ((status[0] === "R" || status[0] === "C") && records[index + 1]) index += 1;
+    if (!generated.has(path)) return true;
+  }
+  return false;
 }
 
 function localBranchRef(branch: string): string {

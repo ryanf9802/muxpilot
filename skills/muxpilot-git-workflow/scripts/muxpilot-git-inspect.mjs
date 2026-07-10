@@ -2,7 +2,7 @@
 
 const input = process.argv[2]?.trim();
 if (!input || input === "--help" || input === "-h") {
-  process.stdout.write("Usage: muxpilot-git-inspect <remote/branch|local:branch|tag:name|full-commit-sha>\n");
+  process.stdout.write("Usage: muxpilot-git-inspect <branch|remote/branch|local:branch|tag:name|full-commit-sha>\n");
   process.exit(input ? 0 : 2);
 }
 
@@ -14,7 +14,13 @@ if (!baseUrl || !workspaceId || !token) {
   process.exit(2);
 }
 
-const revision = parseRevision(input);
+let revision;
+try {
+  revision = parseRevision(input);
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(2);
+}
 const response = await fetch(`${baseUrl}/api/internal/git-workspaces/${encodeURIComponent(workspaceId)}/inspections`, {
   method: "POST",
   headers: { "content-type": "application/json", "x-muxpilot-git-token": token },
@@ -37,6 +43,7 @@ function parseRevision(value) {
   if (value.startsWith("local:")) return { kind: "local_branch", branch: value.slice(6) };
   if (value.startsWith("tag:")) return { kind: "local_tag", tag: value.slice(4) };
   const slash = value.indexOf("/");
-  if (slash <= 0 || slash === value.length - 1) throw new Error("Remote branches must use <remote>/<branch> syntax.");
+  if (slash === -1) return { kind: "local_branch", branch: value };
+  if (slash === 0 || slash === value.length - 1) throw new Error("Use <branch> for a local branch or <remote>/<branch> for a remote branch.");
   return { kind: "remote_branch", remote: value.slice(0, slash), branch: value.slice(slash + 1) };
 }
