@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type {
+  GitDependencyLink,
   GitInspection,
   GitFinalizeOptions,
   GitFinalizeResponse,
@@ -395,7 +396,7 @@ export class GitWorkspaceManager {
     if (!validToken(workspace.helperToken, token)) throw new GitWorkspaceError("Invalid Git workspace capability", "invalid_capability");
     if (!workspace.summary.worktreePath) throw new GitWorkspaceError("Begin an implementation worktree before detaching dependencies", "workspace_idle");
     const available = workspace.summary.dependencyLinks ?? [];
-    const paths = requested?.length ? requested : available.filter((link) => link.linked).map((link) => link.relativePath);
+    const paths = dependencyDetachPaths(available, requested);
     const detached = new Set(await this.coordinator.detachDependencyLinks(workspace.summary.worktreePath, paths));
     return (await this.save(workspace, {
       ...workspace.summary,
@@ -766,6 +767,16 @@ export class GitWorkspaceManager {
       if (this.locks.get(key) === tail) this.locks.delete(key);
     }
   }
+}
+
+export function dependencyDetachPaths(available: GitDependencyLink[], requested: string[] | null): string[] {
+  if (!requested?.length) return available.filter((link) => link.linked).map((link) => link.relativePath);
+  const selected = new Set(requested);
+  const detachAllNodeLinks = available.some((link) => link.kind === "node" && selected.has(link.relativePath));
+  if (detachAllNodeLinks) {
+    for (const link of available) if (link.kind === "node" && link.linked) selected.add(link.relativePath);
+  }
+  return [...selected];
 }
 
 function coordinates(workspace: StoredGitWorkspace): GitWorkspaceCoordinates {

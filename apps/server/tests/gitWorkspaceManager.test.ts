@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { codexReviewArgs, gitReviewDiffArgs, parseStructuredReview, readStructuredReviewResult, reviewProcessDiagnostic, REVIEW_TIMEOUT_MS } from "../src/services/gitWorkspaceManager.js";
+import { codexReviewArgs, dependencyDetachPaths, gitReviewDiffArgs, parseStructuredReview, readStructuredReviewResult, reviewProcessDiagnostic, REVIEW_TIMEOUT_MS } from "../src/services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus, syncMuxpilotGitWorkflowSkill } from "../src/services/bundledSkills.js";
 import { AppDatabase } from "../src/db/database.js";
 import { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
@@ -75,6 +75,21 @@ describe("codexReviewArgs", () => {
     const invalid = join(directory, "invalid.json");
     await writeFile(invalid, "not json");
     await expect(readStructuredReviewResult(invalid)).rejects.toThrow("invalid structured output");
+  });
+});
+
+describe("dependency detachment", () => {
+  it("detaches every linked Node installation before a workspace package-manager operation", () => {
+    const links = [
+      { kind: "node" as const, relativePath: "node_modules", sourcePath: "/repo/node_modules", linked: true },
+      { kind: "node" as const, relativePath: "packages/core/node_modules", sourcePath: "/repo/packages/core/node_modules", linked: true },
+      { kind: "python" as const, relativePath: ".venv", sourcePath: "/repo/.venv", linked: true }
+    ];
+    expect(dependencyDetachPaths(links, ["node_modules"])).toEqual([
+      "node_modules",
+      "packages/core/node_modules"
+    ]);
+    expect(dependencyDetachPaths(links, [".venv"])).toEqual([".venv"]);
   });
 });
 
