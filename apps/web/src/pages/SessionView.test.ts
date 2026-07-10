@@ -14,6 +14,7 @@ import {
   composerHasContent,
   copyableMessageText,
   createPendingUserMessage,
+  DESKTOP_VIM_MEDIA_QUERY,
   elapsedSince,
   formatElapsedSeconds,
   groupEventStacks,
@@ -294,17 +295,34 @@ describe("vim mode preference", () => {
 });
 
 describe("desktop vim availability", () => {
-  it("requires the desktop media query to match", () => {
+  it("allows hybrid desktops when any attached pointer supports hover and fine input", () => {
+    const matchMedia = vi.fn((query: string) => ({
+      matches: query === DESKTOP_VIM_MEDIA_QUERY,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn()
+    }));
     vi.stubGlobal("window", {
-      matchMedia: vi.fn((query: string) => ({
-        matches: query.includes("min-width: 560px") && query.includes("pointer: fine"),
-        media: query,
+      matchMedia
+    });
+
+    expect(isDesktopVimAvailable()).toBe(true);
+    expect(matchMedia).toHaveBeenCalledWith(
+      "(min-width: 560px) and (any-hover: hover) and (any-pointer: fine)"
+    );
+  });
+
+  it("returns false when no fine hover-capable pointer is available", () => {
+    vi.stubGlobal("window", {
+      matchMedia: vi.fn(() => ({
+        matches: false,
+        media: DESKTOP_VIM_MEDIA_QUERY,
         addEventListener: vi.fn(),
         removeEventListener: vi.fn()
       }))
     });
 
-    expect(isDesktopVimAvailable()).toBe(true);
+    expect(isDesktopVimAvailable()).toBe(false);
   });
 
   it("returns false when media query support is unavailable", () => {

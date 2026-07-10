@@ -106,7 +106,7 @@ export interface PendingUserMessage {
 
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
 export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
-export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (hover: hover) and (pointer: fine)";
+export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (any-hover: hover) and (any-pointer: fine)";
 const composerRootInputHints: Record<string, string | boolean> = {
   autoComplete: "off",
   autoCorrect: "off",
