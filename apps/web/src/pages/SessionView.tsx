@@ -77,6 +77,7 @@ import { api, eventSocket } from "../api/client.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
+import { Modal } from "../components/Modal.js";
 import { codeMirrorComposerFieldAttributes, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
@@ -549,25 +550,12 @@ export function SessionView() {
   const vimPendingGRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
-  const gitWorkspaceButtonRef = useRef<HTMLButtonElement>(null);
   activeIdRef.current = id;
   promptHistoryPrefillTextRef.current = text;
 
   const closeGitPanel = useCallback(() => {
     setGitPanelOpen(false);
-    window.requestAnimationFrame(() => gitWorkspaceButtonRef.current?.focus());
   }, []);
-
-  useEffect(() => {
-    if (!gitPanelOpen) return undefined;
-    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      closeGitPanel();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [closeGitPanel, gitPanelOpen]);
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
@@ -1512,7 +1500,6 @@ export function SessionView() {
           </button>
           {readyWorkspace ? (
             <button
-              ref={gitWorkspaceButtonRef}
               className="git-workspace-chip"
               type="button"
               onClick={() => setGitPanelOpen(true)}
@@ -1771,14 +1758,14 @@ export function GitWorkspacePanel({
   }
 
   return (
-    <div className="dialog-backdrop git-panel-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className="git-workspace-panel" role="dialog" aria-modal="true" aria-labelledby="git-workspace-dialog-title">
-        <div className="git-panel-head">
-          <h2 id="git-workspace-dialog-title"><GitBranch size={18} /> Git workspace</h2>
-          <button autoFocus type="button" className="icon-button" onClick={onClose} aria-label="Close Git workspace controls">
-            <X size={18} />
-          </button>
-        </div>
+    <Modal
+      open
+      onClose={onClose}
+      title={<><GitBranch size={18} /> Git workspace</>}
+      panelClassName="git-workspace-panel"
+      backdropClassName="git-panel-backdrop"
+      closeLabel="Close Git workspace controls"
+    >
         <div className="git-panel-summary">
           <div><span>Target branch</span><strong>{current.targetBranch}</strong>{current.targetSha ? <code>{shortSha(current.targetSha)}</code> : null}</div>
           {current.sessionBranch ? (
@@ -1798,8 +1785,7 @@ export function GitWorkspacePanel({
           <div><span>State</span><strong>{gitWorkspaceChipState(current)}</strong>{current.updatedAt ? <small>{current.updatedAt}</small> : null}</div>
         </div>
         {current.lastError ? <p className="git-panel-error" role="alert">{current.lastError}</p> : null}
-      </section>
-    </div>
+    </Modal>
   );
 }
 

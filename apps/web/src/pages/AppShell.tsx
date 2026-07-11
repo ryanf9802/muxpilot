@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Upload, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Upload } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -37,6 +37,7 @@ import {
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { AppBrand } from "../components/AppBrand.js";
 import { AppLoadingSkeleton, loadingSkeletonVariantForPath } from "../components/LoadingSkeleton.js";
+import { Modal } from "../components/Modal.js";
 import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, dropdownMenuPosition, submenuPosition, useDismissableContextMenu } from "../components/ContextMenu.js";
 import {
   disablePushSubscription,
@@ -281,16 +282,6 @@ export function AppShell() {
       clearInterval(interval);
     };
   }, [applyMe, connectionState, markDisconnected]);
-
-  useEffect(() => {
-    if (!createSessionOpen) return undefined;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || createSessionBusy) return;
-      closeCreateSession();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [createSessionBusy, createSessionOpen]);
 
   useEffect(() => {
     if (!createSessionOpen) return;
@@ -864,19 +855,15 @@ export function AppShell() {
         />
       </main>
       <ToastContainer theme="dark" newestOnTop closeOnClick pauseOnFocusLoss={false} />
-      {createSessionOpen ? (
-        <div
-          className="dialog-backdrop"
-          role="presentation"
-          onPointerDown={(event) => event.currentTarget === event.target && closeCreateSession()}
-        >
-          <form className="session-name-dialog" onSubmit={submitCreateSession} role="dialog" aria-modal="true" aria-labelledby="create-session-title">
-            <div className="dialog-head">
-              <h2 id="create-session-title">New session</h2>
-              <button type="button" className="icon-button" onClick={closeCreateSession} aria-label="Close" disabled={createSessionBusy || Boolean(sessionHistoryRestoreId)}>
-                <X size={18} />
-              </button>
-            </div>
+      <Modal
+        open={createSessionOpen}
+        onClose={closeCreateSession}
+        title="New session"
+        panelClassName="session-name-dialog"
+        as="form"
+        onSubmit={submitCreateSession}
+        dismissible={!createSessionBusy && !sessionHistoryRestoreId}
+      >
             <div className="dialog-tabs" role="tablist" aria-label="New session options">
               <button type="button" role="tab" aria-selected={createSessionTab === "create"} data-active={createSessionTab === "create" || undefined} onClick={() => setCreateSessionTab("create")}>
                 <Play size={15} />
@@ -1040,9 +1027,7 @@ export function AppShell() {
                 </div>
               </div>
             )}
-          </form>
-        </div>
-      ) : null}
+      </Modal>
       {promptHistoryOpen ? (
         <PromptHistoryDialog
           initialQuery={promptHistoryInitialQuery}
@@ -1425,6 +1410,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [mappings, setMappings] = useState<Record<string, { destinationCwd: string; targetBranch: string }>>({});
   const [result, setResult] = useState<SessionTransferImportResponse | null>(null);
   const [busy, setBusy] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [error, setError] = useState("");
   const [importDragging, setImportDragging] = useState(false);
   const [importFileName, setImportFileName] = useState("");
@@ -1439,7 +1425,8 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   }, []);
 
   async function close() {
-    if (busy) return;
+    if (busy || closing) return;
+    setClosing(true);
     if (preview && !result) await api.cancelSessionTransfer(preview.token).catch(() => undefined);
     onClose();
   }
@@ -1511,12 +1498,13 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   }) ?? false;
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && void close()}>
-      <section className="session-name-dialog" role="dialog" aria-modal="true" aria-labelledby="session-transfer-title">
-        <div className="dialog-head">
-          <h2 id="session-transfer-title">Session transfer</h2>
-          <button type="button" className="icon-button" onClick={() => void close()} aria-label="Close" disabled={busy}><X size={18} /></button>
-        </div>
+    <Modal
+      open
+      onClose={close}
+      title="Session transfer"
+      panelClassName="session-name-dialog"
+      dismissible={!busy && !closing}
+    >
         <div className="dialog-tabs" role="tablist" aria-label="Session transfer options">
           <button type="button" role="tab" aria-selected={tab === "export"} data-active={tab === "export" || undefined} onClick={() => setTab("export")}><Download size={16} /> Export</button>
           <button type="button" role="tab" aria-selected={tab === "import"} data-active={tab === "import" || undefined} onClick={() => setTab("import")}><Upload size={16} /> Import</button>
@@ -1593,8 +1581,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
           </div>
         )}
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}
-      </section>
-    </div>
+    </Modal>
   );
 }
 
@@ -1705,11 +1692,6 @@ function PromptHistoryDialog({
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      onClose();
-      return;
-    }
     if (event.key === "ArrowDown") {
       event.preventDefault();
       setSelectedIndex((index) => Math.min(results.length - 1, index + 1));
@@ -1730,14 +1712,15 @@ function PromptHistoryDialog({
   }
 
   return (
-    <div className="dialog-backdrop prompt-history-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className="prompt-history-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-history-title" data-loading={loading || undefined}>
-        <div className="dialog-head">
-          <h2 id="prompt-history-title">Prompt history</h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
-        </div>
+    <Modal
+      open
+      onClose={onClose}
+      title="Prompt history"
+      panelClassName="prompt-history-dialog"
+      backdropClassName="prompt-history-backdrop"
+      initialFocusRef={inputRef}
+      loading={loading}
+    >
         <label className="prompt-history-search">
           <Search size={17} aria-hidden="true" />
           <input
@@ -1775,8 +1758,7 @@ function PromptHistoryDialog({
               ))
             : null}
         </div>
-      </section>
-    </div>
+    </Modal>
   );
 }
 
@@ -1872,15 +1854,13 @@ function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && onClose()}>
-      <section className="connect-dialog" role="dialog" aria-modal="true" aria-labelledby="connect-device-title">
-        <div className="dialog-head">
-          <h2 id="connect-device-title">Connect device</h2>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close">
-            <X size={18} />
-          </button>
-        </div>
-
+    <Modal
+      open
+      onClose={onClose}
+      title="Connect device"
+      panelClassName="connect-dialog"
+      dismissible={!revokeBusy && !settingsBusy}
+    >
         {error ? <p className="dialog-error">{error}</p> : null}
         {!remoteAccess && !error ? <p className="connect-muted">Loading remote access details</p> : null}
 
@@ -1895,8 +1875,7 @@ function ConnectDeviceDialog({ onClose }: { onClose: () => void }) {
             onUpdateUnrestrictedRemoteAccess={updateUnrestrictedRemoteAccess}
           />
         ) : null}
-      </section>
-    </div>
+    </Modal>
   );
 }
 

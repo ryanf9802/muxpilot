@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull, X } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -28,6 +28,7 @@ import { StatusPill } from "../components/StatusPill.js";
 import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/LoadingSkeleton.js";
+import { Modal } from "../components/Modal.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -180,19 +181,6 @@ export function Dashboard() {
   }, [loadCodexUsageSummary, loadUsageSummary]);
 
   useDismissableContextMenu(Boolean(menu), menuRef, () => setMenu(null));
-
-  useEffect(() => {
-    if (!renameSession) return undefined;
-
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || busyAction) return;
-      setRenameSession(null);
-      setActionError(null);
-    };
-
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [renameSession, busyAction]);
 
   useEffect(
     () =>
@@ -463,14 +451,15 @@ export function Dashboard() {
       ) : null}
 
       {renameSession ? (
-        <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && closeRename()}>
-          <form className="session-name-dialog" onSubmit={submitRename} role="dialog" aria-modal="true" aria-labelledby="rename-session-title">
-            <div className="dialog-head">
-              <h2 id="rename-session-title">Rename session</h2>
-              <button type="button" className="icon-button" onClick={closeRename} aria-label="Close" disabled={Boolean(busyAction)}>
-                <X size={18} />
-              </button>
-            </div>
+        <Modal
+          open
+          onClose={closeRename}
+          title="Rename session"
+          panelClassName="session-name-dialog"
+          as="form"
+          onSubmit={submitRename}
+          dismissible={!busyAction}
+        >
             <label className="rename-field">
               <span>Name</span>
               <input
@@ -507,8 +496,7 @@ export function Dashboard() {
                 {busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? "Renaming" : "Rename"}
               </button>
             </div>
-          </form>
-        </div>
+        </Modal>
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />

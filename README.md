@@ -162,6 +162,7 @@ These work when focus is not already inside an input, editor, menu, or dialog.
 | -------- | ------------------------------------ |
 | `Ctrl+N` | Open new-session dialog              |
 | `Ctrl+R` | Open prompt history                  |
+| `Escape` | Close the active dialog              |
 | `i`      | Focus the primary input              |
 | `I`      | Focus the primary input at the start |
 | `a`      | Focus the primary input for append   |

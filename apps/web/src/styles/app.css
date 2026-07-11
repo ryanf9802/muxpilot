@@ -1812,7 +1812,7 @@ select:focus-visible {
   overflow-y: auto;
 }
 
-.prompt-history-dialog[data-loading="true"] .prompt-history-results {
+.prompt-history-dialog[aria-busy="true"] .prompt-history-results {
   height: min(520px, calc(100dvh - 168px));
 }
 
@@ -2455,14 +2455,7 @@ select:focus-visible {
   box-shadow: var(--shadow-elevated);
 }
 
-.git-panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.git-panel-head h2 {
+.git-workspace-panel > .dialog-head h2 {
   display: inline-flex;
   align-items: center;
   gap: 7px;
