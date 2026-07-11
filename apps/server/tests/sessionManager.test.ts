@@ -1105,7 +1105,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("keeps plan-mode sessions planning while the proposed plan is still being emitted", async () => {
+  it("returns plan-mode sessions to waiting when Codex stops before proposing a plan", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -1147,7 +1147,7 @@ describe("SessionManager transcript isolation", () => {
     capture = "› ";
     await harness.manager.discover();
 
-    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
 
     await appendFile(
       path,
@@ -1170,7 +1170,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("keeps planning from session input mode when transcript mode metadata is missing", async () => {
+  it("does not treat plan input mode or ordinary assistant output as active planning", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -1207,7 +1207,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.ingest();
     await harness.manager.discover();
 
-    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
     harness.db.close();
   });
 
@@ -1997,7 +1997,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("keeps planning while an incomplete proposed plan is the latest assistant output", async () => {
+  it("returns to waiting when Codex stops with an incomplete proposed plan", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -2038,8 +2038,9 @@ describe("SessionManager transcript isolation", () => {
       ].join("\n")
     );
     await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
+    let capture = "Working (1s)\nEsc to interrupt";
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
-    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.capturePane = async () => capture;
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
@@ -2048,6 +2049,11 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
 
     expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+
+    capture = "› ";
+    await harness.manager.discover();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
     harness.db.close();
   });
 

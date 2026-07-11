@@ -23,7 +23,7 @@ import type {
   TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, hasIncompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { hasCompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -215,7 +215,6 @@ export class SessionManager {
         latestQuestionMessage,
         await this.latestQuestionAnswerMessage(existingId, latestQuestionMessage),
         await this.db.latestPlanReadyMessage(existingId),
-        await this.db.latestAssistantMessage(existingId),
         latestUserMessage,
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
@@ -405,7 +404,6 @@ export class SessionManager {
           latestQuestionMessage,
           await this.latestQuestionAnswerMessage(session.id, latestQuestionMessage),
           await this.db.latestPlanReadyMessage(session.id),
-          await this.db.latestAssistantMessage(session.id),
           latestUserMessage,
           this.answeredPlanMessageIds,
           this.answeredQuestionMessageIds
@@ -1264,7 +1262,6 @@ function resolveSessionStatus(
   latestQuestionMessage: ChatMessage | null,
   latestQuestionAnswerMessage: ChatMessage | null,
   latestPlanReadyMessage: ChatMessage | null,
-  latestAssistantMessage: ChatMessage | null,
   latestUserMessage: ChatMessage | null,
   answeredPlanMessageIds: Set<string>,
   answeredQuestionMessageIds: Set<string>
@@ -1281,12 +1278,6 @@ function resolveSessionStatus(
     answeredQuestionMessageIds
   );
   if (isWorkingStatus(pendingStatus) && isPlanModeTurn(latestUserMessage, inputMode)) return "planning";
-  if (
-    isInputReadyStatus(pendingStatus) &&
-    hasPendingPlanTurn(inputMode, previousStatus, latestAssistantMessage, latestUserMessage, latestPlanReadyMessage)
-  ) {
-    return "planning";
-  }
   return pendingStatus;
 }
 
@@ -1446,23 +1437,6 @@ function isPlanModeTurn(latestUserMessage: ChatMessage | null, inputMode: Collab
 function collaborationModeFromMessage(message: ChatMessage): CollaborationMode | null {
   const mode = recordValue(message.payload)?.collaborationMode;
   return mode === "default" || mode === "plan" ? mode : null;
-}
-
-function hasPendingPlanTurn(
-  inputMode: CollaborationMode,
-  previousStatus: SessionStatus | undefined,
-  latestAssistantMessage: ChatMessage | null,
-  latestUserMessage: ChatMessage | null,
-  latestPlanReadyMessage: ChatMessage | null
-): boolean {
-  if (!latestUserMessage) return inputMode === "plan" && previousStatus === "planning";
-  if (!isPlanModeTurn(latestUserMessage, inputMode)) return false;
-  if (latestPlanReadyMessage && latestPlanReadyMessage.sequence > latestUserMessage.sequence) return false;
-  if (previousStatus === "planning") return true;
-  if (inputMode === "plan") return true;
-  if (!latestAssistantMessage || latestAssistantMessage.sequence <= latestUserMessage.sequence) return true;
-  if (latestAssistantMessage.type !== "assistant" && latestAssistantMessage.type !== "assistant_update") return false;
-  return hasIncompleteProposedPlan(latestAssistantMessage.text);
 }
 
 function isPlanReadyMessage(message: ChatMessage): boolean {
