@@ -65,6 +65,10 @@ const schema = z.object({
   summaryIntervalMs: z.coerce.number().int().positive().default(10_000),
   summaryDebounceMs: z.coerce.number().int().nonnegative().default(0),
   openaiPricingJson: z.string().optional(),
+  sessionFileKey: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() ? value : undefined),
+    z.string().min(16).optional()
+  ),
   inputSubmitKeys: keySequence(["Enter"]),
   inputModeCycleKeys: keySequence(["BTab"]),
   approvalKeys: z.object({
@@ -105,6 +109,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,
     summaryDebounceMs: env.MUXPILOT_SUMMARY_DEBOUNCE_MS,
     openaiPricingJson: env.MUXPILOT_OPENAI_PRICING_JSON,
+    sessionFileKey: env.MUXPILOT_SESSION_FILE_KEY,
     inputSubmitKeys: env.MUXPILOT_INPUT_SUBMIT_KEYS,
     inputModeCycleKeys: env.MUXPILOT_INPUT_MODE_CYCLE_KEYS,
     approvalKeys: {

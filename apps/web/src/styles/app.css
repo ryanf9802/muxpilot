@@ -1474,6 +1474,96 @@ select:focus-visible {
   overflow-y: auto;
 }
 
+.session-transfer-dialog {
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  background: var(--color-panel);
+  box-shadow: 0 24px 70px rgb(0 0 0 / 35%);
+}
+
+.session-transfer-dialog .dialog-head,
+.session-transfer-body,
+.session-transfer-dialog > .dialog-error {
+  padding: 18px 20px;
+}
+
+.session-transfer-dialog .dialog-head p,
+.session-transfer-note,
+.session-transfer-list small,
+.session-transfer-mapping small {
+  color: var(--color-muted);
+}
+
+.session-transfer-body,
+.session-transfer-list,
+.session-transfer-mappings,
+.session-transfer-mapping,
+.session-transfer-results {
+  display: grid;
+  gap: 12px;
+}
+
+.session-transfer-list {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.session-transfer-list label,
+.session-transfer-file,
+.session-transfer-mapping,
+.session-transfer-results > div {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.session-transfer-list label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.session-transfer-list span,
+.session-transfer-results > div {
+  display: grid;
+  gap: 3px;
+}
+
+.session-transfer-list small,
+.session-transfer-mapping small {
+  display: block;
+}
+
+.session-transfer-file {
+  min-height: 150px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  cursor: pointer;
+  border-style: dashed;
+}
+
+.session-transfer-file input {
+  max-width: 100%;
+}
+
+.session-transfer-mapping label {
+  display: grid;
+  gap: 5px;
+}
+
+.session-transfer-mapping input {
+  width: 100%;
+}
+
+.session-transfer-results > div[data-status="resume_failed"] {
+  border-color: var(--color-danger);
+}
+
 .session-git-probe-note {
   color: var(--color-text-muted);
   font-size: 12px;

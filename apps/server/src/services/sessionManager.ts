@@ -1,5 +1,5 @@
-import { open, realpath, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type {
   ApprovalDecision,
   ApprovalRequest,
@@ -19,6 +19,8 @@ import type {
   SessionModelSettings,
   SessionModelSelections,
   SessionStatus,
+  SessionTransferImportMapping,
+  SessionTransferImportResult,
   TranscriptPageResponse,
   TranscriptSearchResponse,
   TmuxPane
@@ -39,6 +41,7 @@ import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
 import { statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
+import type { PortableSession } from "./sessionTransfer.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -482,6 +485,108 @@ export class SessionManager {
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
     return { session, restored: true };
+  }
+
+  async importPortableSession(
+    portable: PortableSession,
+    transcript: Buffer,
+    mapping: SessionTransferImportMapping
+  ): Promise<SessionTransferImportResult> {
+    const destination = await requireExistingDirectory(mapping.destinationCwd);
+    const existing = (await this.db.listSessions(true)).find((session) => session.codexSessionId === portable.codexSessionId) ?? null;
+    let selectedTranscript = transcript;
+    let keptExisting = false;
+    if (existing) {
+      const live = await this.findLiveSessionByCodexSessionId(portable.codexSessionId);
+      if (live) return {
+        codexSessionId: portable.codexSessionId,
+        sessionName: portable.sessionName,
+        status: "reused_live",
+        sessionId: live.id,
+        error: null
+      };
+      const existingTranscript = existing.codexJsonlPath ? await readFile(existing.codexJsonlPath).catch(() => null) : null;
+      if (existingTranscript && compareTranscripts(existingTranscript, transcript) >= 0) {
+        selectedTranscript = completeTranscriptPrefix(existingTranscript);
+        keptExisting = true;
+      }
+      await this.db.markSessionArchived(existing.id, true, nowIso());
+    }
+
+    if (!this.codexHome) throw new SessionRestoreError("Codex home is unavailable");
+    const transcriptPath = join(this.codexHome, "sessions", "imported", `rollout-imported-${portable.codexSessionId}.jsonl`);
+    await atomicWrite(transcriptPath, selectedTranscript);
+    const placeholderId = `imported:${eventId()}`;
+    const repo = await loadRepoMetadata(destination);
+    const syntheticPane: TmuxPane = {
+      sessionId: "muxpilot",
+      sessionName: "muxpilot",
+      windowId: "@imported",
+      windowIndex: -1,
+      windowName: portable.sessionName,
+      paneId: `%imported-${portable.codexSessionId}`,
+      paneIndex: -1,
+      paneActive: false,
+      cwd: destination,
+      currentCommand: "codex",
+      title: portable.sessionName,
+      pid: 0,
+      size: "0x0"
+    };
+    const session: ManagedSession = {
+      id: placeholderId,
+      tmux: syntheticPane,
+      repo,
+      codexSessionId: portable.codexSessionId,
+      codexJsonlPath: transcriptPath,
+      discoveryConfidence: "high",
+      status: "missing",
+      lastActivityAt: portable.lastActivityAt,
+      preview: "",
+      recentUserPrompts: [],
+      activitySummary: null,
+      activitySummaryGeneratedAt: null,
+      activitySummarySourceSequence: null,
+      inputMode: portable.inputMode,
+      models: portable.models,
+      transcriptSize: 0,
+      unreadCount: 0,
+      pinned: portable.pinned,
+      archived: false,
+      gitWorkspace: null
+    };
+    await this.db.upsertSession(session, nowIso());
+
+    if (portable.workspaceMode === "git") {
+      if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
+      const targetBranch = mapping.targetBranch ?? portable.targetBranch;
+      if (!targetBranch) throw new SessionRestoreError("A local target branch is required for the imported Git session");
+      const workspace = await this.gitWorkspaces.provision({ sessionName: portable.sessionName, entryPath: destination, targetBranch });
+      await this.gitWorkspaces.bind(workspace.id, placeholderId);
+      session.gitWorkspace = workspace.summary;
+      await this.db.upsertSession(session, nowIso());
+    }
+
+    await this.ingestSession(session);
+    const restored = await this.restoreSession(placeholderId);
+    return {
+      codexSessionId: portable.codexSessionId,
+      sessionName: portable.sessionName,
+      status: keptExisting ? "kept_existing" : "resumed",
+      sessionId: restored.session.id,
+      error: null
+    };
+  }
+
+  async validatePortableMapping(portable: PortableSession, mapping: SessionTransferImportMapping): Promise<void> {
+    const destination = await requireExistingDirectory(mapping.destinationCwd);
+    if (portable.workspaceMode !== "git") return;
+    if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
+    const targetBranch = mapping.targetBranch ?? portable.targetBranch;
+    if (!targetBranch) throw new SessionRestoreError(`A local target branch is required for '${portable.sessionName}'`);
+    const probe = await this.gitWorkspaces.probe(destination);
+    if (!probe.isGit || !probe.repoRoot) throw new SessionRestoreError(`Destination for '${portable.sessionName}' is not a Git repository`);
+    if (!probe.localBranches.includes(targetBranch)) throw new SessionRestoreError(`Local target branch '${targetBranch}' does not exist for '${portable.sessionName}'`);
   }
 
   async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
@@ -2326,4 +2431,37 @@ function timestampPlusMs(timestamp: string, ms: number): string | null {
   const start = new Date(timestamp).getTime();
   if (!Number.isFinite(start)) return null;
   return new Date(start + ms).toISOString();
+}
+
+async function atomicWrite(path: string, contents: Buffer): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.muxpilot-import-${process.pid}`;
+  await writeFile(temporary, contents, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+function compareTranscripts(first: Buffer, second: Buffer): number {
+  const firstTimestamp = latestTranscriptTimestamp(first);
+  const secondTimestamp = latestTranscriptTimestamp(second);
+  return firstTimestamp === secondTimestamp ? first.length - second.length : firstTimestamp - secondTimestamp;
+}
+
+function completeTranscriptPrefix(transcript: Buffer): Buffer {
+  if (transcript.length === 0 || transcript[transcript.length - 1] === 0x0a) return transcript;
+  const newline = transcript.lastIndexOf(0x0a);
+  return newline < 0 ? transcript : transcript.subarray(0, newline + 1);
+}
+
+function latestTranscriptTimestamp(transcript: Buffer): number {
+  const lines = transcript.toString("utf8").trimEnd().split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    try {
+      const value = JSON.parse(lines[index]!) as { timestamp?: string };
+      const timestamp = Date.parse(value.timestamp ?? "");
+      if (Number.isFinite(timestamp)) return timestamp;
+    } catch {
+      // A running transcript may end with a partial line; inspect earlier events.
+    }
+  }
+  return 0;
 }

@@ -19,6 +19,7 @@ import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
+import { SessionTransferService } from "./services/sessionTransfer.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -77,6 +78,8 @@ const manager = new SessionManager(
   config.codexHome,
   config.gitWorktreeRoot
 );
+const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
+await sessionTransfers.initialize();
 const access = createAccessControl(config, {
   unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()
 });
@@ -94,8 +97,14 @@ await app.register(cors, {
 });
 await app.register(websocket);
 
+app.addContentTypeParser(
+  "application/vnd.muxpilot.session",
+  { parseAs: "buffer", bodyLimit: 512 * 1024 * 1024 },
+  (_request, body, done) => done(null, body)
+);
+
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers);
 
 app.get("/healthz", async () => ({ ok: true }));
 

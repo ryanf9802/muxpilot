@@ -472,6 +472,59 @@ export interface RestoreSessionResponse {
   restored: boolean;
 }
 
+export interface SessionTransferExportRequest {
+  sessionIds: string[];
+}
+
+export interface SessionTransferPreviewSession {
+  codexSessionId: string;
+  sessionName: string;
+  sourceCwd: string;
+  repoName: string;
+  workspaceMode: "directory" | "git";
+  targetBranch: string | null;
+  transcriptBytes: number;
+  lastActivityAt: string | null;
+}
+
+export interface SessionTransferMappingRequirement {
+  sourceCwd: string;
+  repoName: string;
+  workspaceMode: "directory" | "git";
+  targetBranch: string | null;
+}
+
+export interface SessionTransferInspectResponse {
+  token: string;
+  encrypted: boolean;
+  expiresAt: string;
+  sessions: SessionTransferPreviewSession[];
+  mappings: SessionTransferMappingRequirement[];
+}
+
+export interface SessionTransferImportMapping {
+  sourceCwd: string;
+  destinationCwd: string;
+  targetBranch?: string;
+}
+
+export interface SessionTransferImportRequest {
+  token: string;
+  mappings: SessionTransferImportMapping[];
+}
+
+export interface SessionTransferImportResult {
+  codexSessionId: string;
+  sessionName: string;
+  status: "resumed" | "reused_live" | "kept_existing" | "resume_failed";
+  sessionId: string | null;
+  error: string | null;
+}
+
+export interface SessionTransferImportResponse {
+  results: SessionTransferImportResult[];
+}
+
 export interface SessionDirectorySuggestion {
   path: string;
   label: string;

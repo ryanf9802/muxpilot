@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Check, ChevronRight, Copy, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Upload, X } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -18,7 +18,9 @@ import type {
   RemoteAccessResponse,
   SessionDirectorySuggestion,
   SessionEvent,
-  SessionHistoryResult
+  SessionHistoryResult,
+  SessionTransferImportResponse,
+  SessionTransferInspectResponse
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
@@ -64,6 +66,7 @@ export function AppShell() {
   const [connectionState, setConnectionState] = useState<ShellConnectionState>("checking");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
+  const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
   const [showConnectButton, setShowConnectButton] = useState(false);
   const [showLogoutButton, setShowLogoutButton] = useState(true);
   const [accessMode, setAccessMode] = useState<AccessMode | null>(null);
@@ -764,6 +767,11 @@ export function AppShell() {
         <AppBrand />
         <SessionStoplight counts={stoplightCounts} activeSeverity={activeStoplightSeverity} onSelect={selectSessionStoplightSeverity} />
         <div className="topbar-actions">
+          {accessMode === "local" ? (
+            <button className="icon-button" onClick={() => setSessionTransferOpen(true)} aria-label="Import or export sessions">
+              <ArrowLeftRight size={18} />
+            </button>
+          ) : null}
           <button className="icon-button" onClick={openGlobalNotificationMenu} aria-label="Global notifications">
             <Bell size={18} />
           </button>
@@ -786,6 +794,7 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
+      {sessionTransferOpen ? <SessionTransferDialog onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
           className="notification-rule-menu"
@@ -1401,6 +1410,147 @@ export function isPromptHistoryShortcut(event: Pick<globalThis.KeyboardEvent, "c
 
 export function isNewSessionShortcut(event: Pick<globalThis.KeyboardEvent, "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "key">): boolean {
   return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n";
+}
+
+function SessionTransferDialog({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<"export" | "import">("export");
+  const [sessions, setSessions] = useState<ManagedSession[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [encryptionEnabled, setEncryptionEnabled] = useState(false);
+  const [preview, setPreview] = useState<SessionTransferInspectResponse | null>(null);
+  const [mappings, setMappings] = useState<Record<string, { destinationCwd: string; targetBranch: string }>>({});
+  const [result, setResult] = useState<SessionTransferImportResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
+      .then(([sessionResponse, status]) => {
+        setSessions(sessionResponse.sessions);
+        setEncryptionEnabled(status.encryptionEnabled);
+      })
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, []);
+
+  async function close() {
+    if (busy) return;
+    if (preview && !result) await api.cancelSessionTransfer(preview.token).catch(() => undefined);
+    onClose();
+  }
+
+  async function exportSelected() {
+    setBusy(true);
+    setError("");
+    try {
+      const download = await api.exportSessionTransfer([...selected]);
+      const url = URL.createObjectURL(download.blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = download.filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(false); }
+  }
+
+  async function inspectFile(file: File | undefined) {
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    setResult(null);
+    if (preview) await api.cancelSessionTransfer(preview.token).catch(() => undefined);
+    try {
+      const next = await api.inspectSessionTransfer(file);
+      setPreview(next);
+      setMappings(Object.fromEntries(next.mappings.map((mapping) => [mapping.sourceCwd, {
+        destinationCwd: mapping.sourceCwd,
+        targetBranch: mapping.targetBranch ?? ""
+      }])));
+    } catch (cause) {
+      setPreview(null);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(false); }
+  }
+
+  async function importSessions() {
+    if (!preview) return;
+    setBusy(true);
+    setError("");
+    try {
+      const imported = await api.importSessionTransfer({
+        token: preview.token,
+        mappings: preview.mappings.map((requirement) => ({
+          sourceCwd: requirement.sourceCwd,
+          destinationCwd: mappings[requirement.sourceCwd]?.destinationCwd.trim() ?? "",
+          ...(requirement.workspaceMode === "git" ? { targetBranch: mappings[requirement.sourceCwd]?.targetBranch.trim() } : {})
+        }))
+      });
+      setResult(imported);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally { setBusy(false); }
+  }
+
+  const portableSessions = sessions.filter((session) => Boolean(session.codexSessionId && session.codexJsonlPath));
+  const mappingComplete = preview?.mappings.every((requirement) => {
+    const value = mappings[requirement.sourceCwd];
+    return Boolean(value?.destinationCwd.trim() && (requirement.workspaceMode !== "git" || value.targetBranch.trim()));
+  }) ?? false;
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && void close()}>
+      <section className="session-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="session-transfer-title">
+        <div className="dialog-head">
+          <div>
+            <h2 id="session-transfer-title">Session transfer</h2>
+            <p>Move Codex session history between muxpilot hosts.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={() => void close()} aria-label="Close" disabled={busy}><X size={18} /></button>
+        </div>
+        <div className="dialog-tabs" role="tablist" aria-label="Session transfer options">
+          <button type="button" role="tab" aria-selected={tab === "export"} data-active={tab === "export" || undefined} onClick={() => setTab("export")}><Download size={16} /> Export</button>
+          <button type="button" role="tab" aria-selected={tab === "import"} data-active={tab === "import" || undefined} onClick={() => setTab("import")}><Upload size={16} /> Import</button>
+        </div>
+        {tab === "export" ? (
+          <div className="session-transfer-body">
+            <p className="session-transfer-note">{encryptionEnabled ? "Exports are encrypted with MUXPILOT_SESSION_FILE_KEY." : "Exports are not encrypted. Configure MUXPILOT_SESSION_FILE_KEY to protect them."}</p>
+            <div className="session-transfer-list">
+              {portableSessions.map((session) => (
+                <label key={session.id}>
+                  <input type="checkbox" checked={selected.has(session.id)} onChange={(event) => setSelected((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.add(session.id); else next.delete(session.id);
+                    return next;
+                  })} />
+                  <span><strong>{session.tmux.windowName || session.repo.name}</strong><small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small></span>
+                </label>
+              ))}
+              {!portableSessions.length ? <p>No portable sessions found.</p> : null}
+            </div>
+            <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary-button" disabled={busy || selected.size === 0} onClick={() => void exportSelected()}>{busy ? "Exporting…" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
+          </div>
+        ) : (
+          <div className="session-transfer-body">
+            {!preview ? <label className="session-transfer-file"><Upload size={24} /><span>Select a .mpsession file</span><input type="file" accept=".mpsession,application/vnd.muxpilot.session" disabled={busy} onChange={(event) => void inspectFile(event.target.files?.[0])} /></label> : null}
+            {preview && !result ? <>
+              <p className="session-transfer-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
+              <div className="session-transfer-mappings">
+                {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
+                  <strong>{requirement.repoName}</strong><small>From {requirement.sourceCwd}</small>
+                  <label>Destination directory<input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, destinationCwd: event.target.value } }))} /></label>
+                  {requirement.workspaceMode === "git" ? <label>Local target branch<input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.targetBranch ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, targetBranch: event.target.value } }))} /></label> : null}
+                </div>)}
+              </div>
+              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary-button" disabled={busy || !mappingComplete} onClick={() => void importSessions()}>{busy ? "Importing…" : "Import and resume all"}</button></div>
+            </> : null}
+            {result ? <><div className="session-transfer-results">{result.results.map((item) => <div key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}</div><div className="dialog-actions"><button type="button" className="primary-button" onClick={onClose}>Done</button></div></> : null}
+          </div>
+        )}
+        {error ? <p className="dialog-error" role="alert">{error}</p> : null}
+      </section>
+    </div>
+  );
 }
 
 export function primaryInputFocusCommandForShortcut(

@@ -96,6 +96,14 @@ Externally discovered Codex panes remain unmanaged because a running process can
 
 The History tab searches restorable sessions that muxpilot has managed before. Search matches only submitted user prompts, not assistant replies, tool output, or command output. Selecting a live result opens the existing pane; selecting a missing or archived result starts a new tmux window with `codex resume <session-id>` and opens the resumed session.
 
+### Moving Sessions Between Hosts
+
+The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the Codex transcripts and portable session preferences, then resumes all imported sessions in tmux.
+
+Project files are not included. Clone or copy the relevant repositories first; Git sessions also require a local target branch on the destination. Host-specific worktrees, queued inputs, notification rules, dependencies, and local files referenced by a transcript are intentionally excluded.
+
+Set the same `MUXPILOT_SESSION_FILE_KEY` value (at least 16 characters) on both hosts to encrypt exports and decrypt imports. When the variable is unset, exports are plaintext. Plaintext files remain importable when a key is configured. Import/export controls and APIs are available only from the muxpilot host browser.
+
 ### Sending Input
 
 The composer sends text through a tmux paste buffer and then sends the configured submit key sequence. By default that submit key is `Enter`.
@@ -440,6 +448,7 @@ Common settings:
 - `MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS`, `MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS`, `MUXPILOT_APPROVAL_DENY_KEYS`: key sequences for approval gates.
 - `MUXPILOT_SUMMARY_MODEL`, `MUXPILOT_SUMMARY_INTERVAL_MS`, `MUXPILOT_SUMMARY_DEBOUNCE_MS`: activity summary behavior.
 - `MUXPILOT_OPENAI_PRICING_JSON`: optional pricing overrides for usage/cost estimates.
+- `MUXPILOT_SESSION_FILE_KEY`: optional passphrase used for authenticated `.mpsession` encryption; use the same value on importing hosts.
 
 The lifecycle scripts load `.env` first and `.env.local` second. Machine-specific output from `pnpm pwa:setup` belongs in `.env.local`.
 

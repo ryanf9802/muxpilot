@@ -10,6 +10,8 @@ import type {
   SendInputRequest,
   SessionDirectoriesResponse,
   SessionHistoryResponse,
+  SessionTransferExportRequest,
+  SessionTransferImportRequest,
   SessionAction,
   MuxpilotGitSkillStatus,
   UpdateNotificationSettingRequest,
@@ -39,6 +41,7 @@ import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 import type { NotificationService } from "../services/notifications.js";
 import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
+import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const inputBodySchema = z
@@ -82,6 +85,15 @@ const questionAnswerSchema = z.object({
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
+const sessionTransferExportSchema = z.object({ sessionIds: z.array(z.string().min(1)).min(1).max(500) });
+const sessionTransferImportSchema = z.object({
+  token: z.string().min(16).max(100),
+  mappings: z.array(z.object({
+    sourceCwd: z.string().min(1).max(4096),
+    destinationCwd: z.string().min(1).max(4096),
+    targetBranch: z.string().min(1).max(1024).optional()
+  })).max(500)
+});
 const notificationDeviceIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,80}$/);
 const notificationRuleTypeSchema = z.enum(["done_task", "approval_gate", "status_change"]);
 const notificationSettingSchema = z.union([
@@ -125,11 +137,59 @@ export function registerRoutes(
   access: AccessControl,
   codexUsage?: CodexUsageService,
   activitySummarizer?: ActivitySummarizer,
-  notificationService?: NotificationService
+  notificationService?: NotificationService,
+  sessionTransfers?: SessionTransferService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
   );
+
+  if (sessionTransfers) {
+    app.get("/api/session-transfers/status", { preHandler: access.requireLocalAccess }, async () => ({
+      encryptionEnabled: sessionTransfers.encryptionEnabled()
+    }));
+
+    app.post("/api/session-transfers/export", { preHandler: access.requireLocalAccess }, async (request, reply) => {
+      try {
+        const body = sessionTransferExportSchema.parse(request.body) satisfies SessionTransferExportRequest;
+        const file = await sessionTransfers.export(body.sessionIds);
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        return reply
+          .header("Content-Type", "application/vnd.muxpilot.session")
+          .header("Content-Disposition", `attachment; filename="muxpilot-${stamp}.mpsession"`)
+          .send(file);
+      } catch (error) {
+        if (error instanceof SessionTransferError) return reply.code(error.statusCode).send({ error: error.message });
+        throw error;
+      }
+    });
+
+    app.post("/api/session-transfers/inspect", { preHandler: access.requireLocalAccess }, async (request, reply) => {
+      try {
+        if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: "Upload a .mpsession file" });
+        return await sessionTransfers.inspect(request.body);
+      } catch (error) {
+        if (error instanceof SessionTransferError) return reply.code(error.statusCode).send({ error: error.message });
+        throw error;
+      }
+    });
+
+    app.post("/api/session-transfers/import", { preHandler: access.requireLocalAccess }, async (request, reply) => {
+      try {
+        const body = sessionTransferImportSchema.parse(request.body) satisfies SessionTransferImportRequest;
+        return await sessionTransfers.import(body.token, body.mappings);
+      } catch (error) {
+        if (error instanceof SessionTransferError) return reply.code(error.statusCode).send({ error: error.message });
+        throw error;
+      }
+    });
+
+    app.delete("/api/session-transfers/:token", { preHandler: access.requireLocalAccess }, async (request) => {
+      const { token } = request.params as { token: string };
+      await sessionTransfers.cancel(token);
+      return { ok: true };
+    });
+  }
 
   app.get("/api/remote-access", { preHandler: access.requireLocalAccess }, async () =>
     buildRemoteAccess(config, access.currentAccessKey(), undefined, access.isUnrestrictedRemoteAccessEnabled())

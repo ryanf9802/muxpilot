@@ -27,6 +27,9 @@ import type {
   SessionHistoryResponse,
   SessionActionResponse,
   SessionAction,
+  SessionTransferImportRequest,
+  SessionTransferImportResponse,
+  SessionTransferInspectResponse,
   TranscriptPageResponse,
   TranscriptSearchResponse,
   UpdateNotificationSettingRequest,
@@ -104,11 +107,37 @@ export const api = {
   gitWorkflowSkillStatus: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/status"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
+  transferableSessions: () => json<{ sessions: ManagedSession[] }>("/api/sessions?includeArchived=true&includeAll=true"),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   restoreSession: (id: string) =>
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
+  sessionTransferStatus: () => json<{ encryptionEnabled: boolean }>("/api/session-transfers/status"),
+  inspectSessionTransfer: async (file: File) => {
+    const response = await fetch("/api/session-transfers/inspect", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/vnd.muxpilot.session" },
+      body: file
+    });
+    if (!response.ok) throw new ApiError(await responseError(response), response.status);
+    return await response.json() as SessionTransferInspectResponse;
+  },
+  importSessionTransfer: (request: SessionTransferImportRequest) =>
+    json<SessionTransferImportResponse>("/api/session-transfers/import", { method: "POST", body: JSON.stringify(request) }),
+  cancelSessionTransfer: (token: string) =>
+    json<{ ok: true }>(`/api/session-transfers/${encodeURIComponent(token)}`, { method: "DELETE" }),
+  exportSessionTransfer: async (sessionIds: string[]) => {
+    const response = await fetch("/api/session-transfers/export", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionIds })
+    });
+    if (!response.ok) throw new ApiError(await responseError(response), response.status);
+    return { blob: await response.blob(), filename: downloadFilename(response.headers.get("Content-Disposition")) };
+  },
   gitRepositoryProbe: (cwd: string) => json<GitRepositoryProbe>(`/api/git/repository-probe?cwd=${encodeURIComponent(cwd)}`),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
@@ -147,6 +176,18 @@ export const api = {
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) }),
 };
+
+async function responseError(response: Response): Promise<string> {
+  const text = await response.text();
+  try {
+    const parsed = JSON.parse(text) as { error?: string };
+    return parsed.error ?? text;
+  } catch { return text || response.statusText; }
+}
+
+function downloadFilename(disposition: string | null): string {
+  return disposition?.match(/filename="([^"]+)"/)?.[1] ?? "muxpilot-sessions.mpsession";
+}
 
 function messageQueryString(query: MessageQuery): string {
   const params = new URLSearchParams();
