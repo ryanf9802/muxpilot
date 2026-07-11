@@ -1483,6 +1483,11 @@ select:focus-visible {
   gap: 12px;
 }
 
+.session-history-results.session-transfer-list {
+  min-height: clamp(0px, calc(100dvh - 256px), 260px);
+  max-height: clamp(0px, calc(100dvh - 256px), 460px);
+}
+
 .session-transfer-option,
 .session-transfer-mapping,
 .session-transfer-result {
