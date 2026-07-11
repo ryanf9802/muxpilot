@@ -501,6 +501,7 @@ Phone cannot connect:
 - Confirm the phone is on the same LAN and not on guest WiFi.
 - On native Linux, run `scripts/linux-lan.sh status --port 12778` for the web port.
 - On Windows/WSL2, run `scripts/windows-lan.ps1 status` for the web port.
+- On managed Windows laptops that block direct mirrored-networking access, use the host-specific [port proxy fallback](docs/windows-wsl-lan.md#managed-laptop-port-proxy-fallback).
 
 QR scanner is missing or camera fails:
 

@@ -109,6 +109,81 @@ powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows-lan.ps1 install -
 
 The certificate setup handles browser trust; the firewall setup handles reachability.
 
+## Managed-Laptop Port Proxy Fallback
+
+Most WSL mirrored-networking hosts do not need this fallback. Use it only when
+company security or firewall software prevents direct LAN traffic from reaching
+WSL even though muxpilot is healthy locally and the Windows and Hyper-V firewall
+rules above are installed.
+
+This fallback keeps mirrored networking enabled. It exposes two alternate ports
+on Windows and proxies them to muxpilot over loopback:
+
+- HTTPS Web UI: Windows TCP `12779` to WSL TCP `12778`
+- HTTP certificate server: Windows TCP `12881` to WSL TCP `12880`
+
+Run PowerShell as Administrator. Set `$ip` to the Windows LAN address shown by
+the Connect device dialog, then create the proxy and firewall entries:
+
+```powershell
+$ip = "<windows-lan-ip>"
+
+netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=12779
+netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=12881
+netsh interface portproxy add v4tov4 listenaddress=$ip listenport=12779 connectaddress=127.0.0.1 connectport=12778
+netsh interface portproxy add v4tov4 listenaddress=$ip listenport=12881 connectaddress=127.0.0.1 connectport=12880
+
+Remove-NetFirewallRule -Name muxpilotWeb12779 -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -Name muxpilotCert12881 -ErrorAction SilentlyContinue
+New-NetFirewallRule -Name muxpilotWeb12779 -DisplayName "muxpilot Web 12779" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 12779 -Profile Any
+New-NetFirewallRule -Name muxpilotCert12881 -DisplayName "muxpilot Cert 12881" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 12881 -Profile Any
+
+Restart-Service iphlpsvc
+```
+
+If the Windows LAN address changes, remove entries for the old address and
+create new entries using the current address.
+
+The proxy configuration persists across Windows restarts, but IP Helper may
+start before the managed network is ready and fail to open the persisted
+listeners. If phone access stops working after a reboot, first run this from an
+Administrator PowerShell:
+
+```powershell
+Restart-Service iphlpsvc
+```
+
+Verify that the proxy entries and Windows listeners are active:
+
+```powershell
+$ip = "<windows-lan-ip>"
+netsh interface portproxy show all
+netstat -ano | findstr ":12779 :12881"
+Test-NetConnection $ip -Port 12779
+Test-NetConnection $ip -Port 12881
+```
+
+The phone must use the alternate ports:
+
+```text
+https://<windows-lan-ip>:12779
+http://<windows-lan-ip>:12881/muxpilot-root-ca.crt
+```
+
+The Connect device dialog still reports the normal direct ports. Substitute
+`12779` for the Web UI port and `12881` for the certificate-server port when
+this fallback is active.
+
+To remove only the fallback configuration, run PowerShell as Administrator:
+
+```powershell
+$ip = "<windows-lan-ip>"
+netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=12779
+netsh interface portproxy delete v4tov4 listenaddress=$ip listenport=12881
+Remove-NetFirewallRule -Name muxpilotWeb12779 -ErrorAction SilentlyContinue
+Remove-NetFirewallRule -Name muxpilotCert12881 -ErrorAction SilentlyContinue
+```
+
 ## Remove Rules
 
 Run PowerShell as Administrator:
