@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, ManagedSession, QuestionRequest, RepoMetadata, TranscriptItem } from "@muxpilot/core";
+import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
   activeSkillToken,
   ApprovalBanner,
@@ -24,6 +24,7 @@ import {
   isPlanModeMessage,
   inputModeAction,
   latestUserPromptTimestamp,
+  latestUnmatchedPendingUserMessage,
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
@@ -38,6 +39,7 @@ import {
   queuedInputHasLineBreaks,
   queuedInputRemovable,
   relativeLineNumber,
+  retainLatestSentQueuedUserMessage,
   replaceTranscriptTail,
   restoringSessionIdFromLocationState,
   loadComposerDraft,
@@ -45,6 +47,7 @@ import {
   sessionWithPendingInputMode,
   saveComposerDraft,
   saveVimModePreference,
+  sentQueuedInputToPendingUserMessage,
   restoreScrollTopForAnchor,
   secondsUntil,
   sessionCreateSessionCwd,
@@ -1628,6 +1631,47 @@ describe("pending user messages", () => {
     expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(message("session-a", 3, "Different text"))], pending)).toBe(false);
   });
 
+  it("turns only dispatched queued inputs into optimistic user messages", () => {
+    const queued = queuedInput({ status: "queued", sentAt: null });
+    const sent = queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" });
+
+    expect(sentQueuedInputToPendingUserMessage(queued)).toBeNull();
+    expect(sentQueuedInputToPendingUserMessage(sent)).toEqual({
+      id: "pending-queued-user-queued-1",
+      sessionId: "session-a",
+      text: "Queued prompt",
+      mode: "plan",
+      timestamp: "2026-07-07T00:01:00.000Z",
+      matchAfter: "2026-07-07T00:00:00.000Z"
+    });
+  });
+
+  it("uses the newest unmatched optimistic prompt until its transcript echo arrives", () => {
+    const direct = createPendingUserMessage("session-a", "Earlier prompt", "default", "2026-07-07T00:00:00.000Z");
+    const dispatched = sentQueuedInputToPendingUserMessage(
+      queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" })
+    );
+
+    expect(latestUnmatchedPendingUserMessage([], [direct, dispatched])).toEqual(dispatched);
+    expect(
+      latestUnmatchedPendingUserMessage(
+        [transcriptMessageItem(message("session-a", 3, "Queued prompt", "user", "user", {}, "2026-07-07T00:01:00.000Z"))],
+        [direct, dispatched]
+      )
+    ).toEqual(direct);
+  });
+
+  it("retains a dispatched prompt when its queue record is removed before transcript refresh", () => {
+    const dispatched = sentQueuedInputToPendingUserMessage(
+      queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" })
+    );
+
+    expect(retainLatestSentQueuedUserMessage(null, [queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" })])).toEqual(
+      dispatched
+    );
+    expect(retainLatestSentQueuedUserMessage(dispatched, [])).toEqual(dispatched);
+  });
+
   it("reconciles skill prompts that gain display metadata after parsing", () => {
     const pending = createPendingUserMessage("session-a", "use $pr-to-stage", "default", "2026-07-07T00:00:00.000Z");
     const parsed = message("session-a", 3, "use $pr-to-stage\n\nSkills: pr-to-stage");
@@ -1656,7 +1700,38 @@ describe("pending user messages", () => {
       )
     ).toBe(false);
   });
+
+  it("reconciles queued paste placeholders created just before their sent timestamp", () => {
+    const pending = sentQueuedInputToPendingUserMessage(
+      queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" })
+    );
+
+    expect(pending).not.toBeNull();
+    expect(
+      transcriptItemsContainPendingUserMessage(
+        [transcriptMessageItem(message("session-a", 3, "[Pasted Content 4096 chars]", "user", "user", {}, "2026-07-07T00:00:59.999Z"))],
+        pending!
+      )
+    ).toBe(true);
+  });
 });
+
+function queuedInput(overrides: Partial<QueuedInput> = {}): QueuedInput {
+  return {
+    id: "queued-1",
+    sessionId: "session-a",
+    text: "Queued prompt",
+    mode: "plan",
+    status: "queued",
+    error: null,
+    codexSessionId: "codex-a",
+    codexJsonlPath: "/tmp/codex-a.jsonl",
+    createdAt: "2026-07-07T00:00:00.000Z",
+    updatedAt: "2026-07-07T00:00:00.000Z",
+    sentAt: null,
+    ...overrides
+  };
+}
 
 describe("WorkingIndicator", () => {
   it("renders an assistant-side working status with a spinner", () => {

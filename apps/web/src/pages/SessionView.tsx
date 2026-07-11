@@ -99,6 +99,7 @@ export interface PendingUserMessage {
   text: string;
   mode: CollaborationMode;
   timestamp: string;
+  matchAfter?: string;
 }
 
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
@@ -381,6 +382,38 @@ export function pendingUserMessageToChatMessage(message: PendingUserMessage): Ch
   };
 }
 
+export function sentQueuedInputToPendingUserMessage(input: QueuedInput): PendingUserMessage | null {
+  if (input.status !== "sent" || !input.sentAt) return null;
+  return {
+    id: `pending-queued-user-${input.id}`,
+    sessionId: input.sessionId,
+    text: input.text,
+    mode: input.mode,
+    timestamp: input.sentAt,
+    matchAfter: input.createdAt
+  };
+}
+
+export function latestUnmatchedPendingUserMessage(
+  items: CoreTranscriptItem[],
+  messages: Array<PendingUserMessage | null>
+): PendingUserMessage | null {
+  return messages
+    .filter((message): message is PendingUserMessage => Boolean(message))
+    .filter((message) => !transcriptItemsContainPendingUserMessage(items, message))
+    .sort((first, second) => Date.parse(second.timestamp) - Date.parse(first.timestamp))[0] ?? null;
+}
+
+export function retainLatestSentQueuedUserMessage(
+  current: PendingUserMessage | null,
+  inputs: QueuedInput[]
+): PendingUserMessage | null {
+  return inputs
+    .map(sentQueuedInputToPendingUserMessage)
+    .filter((message): message is PendingUserMessage => Boolean(message))
+    .sort((first, second) => Date.parse(second.timestamp) - Date.parse(first.timestamp))[0] ?? current;
+}
+
 export function transcriptItemsContainPendingUserMessage(items: CoreTranscriptItem[], pending: PendingUserMessage): boolean {
   return transcriptMessages(items).some((message) => {
     if (message.sessionId !== pending.sessionId || message.role !== "user") return false;
@@ -399,7 +432,7 @@ export function isCodexPastedContentPlaceholder(text: string | null): boolean {
 
 function messageCreatedAtOrAfterPending(message: ChatMessage, pending: PendingUserMessage): boolean {
   const messageTime = Date.parse(message.timestamp);
-  const pendingTime = Date.parse(pending.timestamp);
+  const pendingTime = Date.parse(pending.matchAfter ?? pending.timestamp);
   return Number.isFinite(messageTime) && Number.isFinite(pendingTime) && messageTime >= pendingTime;
 }
 
@@ -519,6 +552,7 @@ export function SessionView() {
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [jumpBusy, setJumpBusy] = useState<"top" | "bottom" | null>(null);
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
+  const [sentQueuedUserMessage, setSentQueuedUserMessage] = useState<PendingUserMessage | null>(null);
   const [expandedStacks, setExpandedStacks] = useState<Set<string>>(() => new Set());
   const [expandedRangeItems, setExpandedRangeItems] = useState<Record<string, CoreTranscriptItem[]>>({});
   const [loadingRanges, setLoadingRanges] = useState<Set<string>>(() => new Set());
@@ -564,7 +598,14 @@ export function SessionView() {
   const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages, suppressedPlanMessageId), [loadedMessages, suppressedPlanMessageId]);
   const showWorkingIndicator = !session?.transcriptSyncing && shouldShowWorkingIndicator(session?.status, hasMoreAfter);
   const showTranscriptSyncIndicator = session?.transcriptSyncing === true && !hasMoreAfter;
-  const pendingUserChatMessage = useMemo(() => (pendingUserMessage ? pendingUserMessageToChatMessage(pendingUserMessage) : null), [pendingUserMessage]);
+  const effectivePendingUserMessage = useMemo(
+    () => latestUnmatchedPendingUserMessage(transcriptItems, [pendingUserMessage, sentQueuedUserMessage]),
+    [pendingUserMessage, sentQueuedUserMessage, transcriptItems]
+  );
+  const pendingUserChatMessage = useMemo(
+    () => (effectivePendingUserMessage ? pendingUserMessageToChatMessage(effectivePendingUserMessage) : null),
+    [effectivePendingUserMessage]
+  );
   const lastUserPromptAt = useMemo(
     () => latestUserPromptTimestamp(pendingUserChatMessage ? [...loadedMessages, pendingUserChatMessage] : loadedMessages),
     [loadedMessages, pendingUserChatMessage]
@@ -859,6 +900,7 @@ export function SessionView() {
       setLoadingNewer(false);
       setJumpBusy(null);
       setPendingUserMessage(null);
+      setSentQueuedUserMessage(null);
       setExpandedRangeItems({});
       setLoadingRanges(new Set());
       transcriptSourceKeyRef.current = null;
@@ -1123,6 +1165,7 @@ export function SessionView() {
     const response = await trackRefreshRequest(() => api.queuedInputs(targetId));
     if (!isCurrentRequest(targetId, token)) return;
     setQueuedInputs(response.queuedInputs);
+    setSentQueuedUserMessage((current) => retainLatestSentQueuedUserMessage(current, response.queuedInputs));
   }
 
   function isCurrentRequest(targetId: string, token: number): boolean {
@@ -1195,6 +1238,7 @@ export function SessionView() {
 
   function reconcilePendingUserMessage(items: CoreTranscriptItem[]) {
     setPendingUserMessage((pending) => (pending && transcriptItemsContainPendingUserMessage(items, pending) ? null : pending));
+    setSentQueuedUserMessage((pending) => (pending && transcriptItemsContainPendingUserMessage(items, pending) ? null : pending));
   }
 
   function handleMessageListScroll() {
