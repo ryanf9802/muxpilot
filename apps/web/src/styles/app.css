@@ -192,6 +192,12 @@ select:focus-visible {
   color: var(--color-warning);
 }
 
+.git-workspace-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .icon-button,
 .send-button {
   display: inline-flex;
@@ -2252,9 +2258,8 @@ select:focus-visible {
   min-height: 30px;
   max-width: 220px;
   padding: 0 9px;
-  color: var(--color-text);
-  background: color-mix(in srgb, var(--color-brand) 10%, var(--color-surface-raised));
-  border: 1px solid color-mix(in srgb, var(--color-brand) 35%, var(--color-border));
+  color: var(--color-text-inverse);
+  border: 1px solid;
   border-radius: 999px;
 }
 
@@ -2264,13 +2269,35 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.git-workspace-chip i {
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-style: normal;
+.git-workspace-status-indicator[data-state="idle"] {
+  color: var(--color-success);
 }
 
-.git-workspace-chip i[data-state="integration_conflict"] {
+.git-workspace-chip[data-state="idle"] {
+  color: var(--color-text-inverse);
+  background: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.git-workspace-chip[data-state="worktree"],
+.git-workspace-chip[data-state="integrating"] {
+  background: var(--color-warning);
+  border-color: var(--color-warning);
+}
+
+.git-workspace-status-indicator[data-state="worktree"],
+.git-workspace-status-indicator[data-state="integrating"] {
+  color: var(--color-warning);
+}
+
+.git-workspace-chip[data-state="blocked"],
+.git-workspace-chip[data-state="failed"] {
+  background: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.git-workspace-status-indicator[data-state="blocked"],
+.git-workspace-status-indicator[data-state="failed"] {
   color: var(--color-error);
 }
 
@@ -2659,9 +2686,6 @@ select:focus-visible {
 
 .actions .git-workspace-chip {
   max-width: 220px;
-  color: var(--color-text);
-  background: color-mix(in srgb, var(--color-brand) 10%, var(--color-surface-raised));
-  border-color: color-mix(in srgb, var(--color-brand) 35%, var(--color-border));
   border-radius: 999px;
 }
 
@@ -3933,7 +3957,6 @@ select:focus-visible {
   }
 
   .actions .git-workspace-chip span,
-  .actions .git-workspace-chip i,
   .session-action-label {
     display: none;
   }

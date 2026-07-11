@@ -645,7 +645,7 @@ export function SessionCard({
         <div className="card-head">
           <div>
             <h2>{displayName}</h2>
-            {workspace ? <p>{workspace.targetBranch} · {workspace.state === "worktree" ? "isolated" : workspace.state}</p> : null}
+            {workspace ? <p>{workspace.targetBranch}</p> : null}
           </div>
           <span className="session-card-head-actions">
             {session.pinned ? (
@@ -676,6 +676,16 @@ export function SessionCard({
             {notificationRules.length > 0 ? (
               <span className="session-notification-indicator" title={`Notify: ${notificationRulesLabel(notificationRules)}`} aria-label={`Notify: ${notificationRulesLabel(notificationRules)}`}>
                 <Bell size={13} />
+              </span>
+            ) : null}
+            {workspace ? (
+              <span
+                className="git-workspace-status-indicator"
+                data-state={workspace.state}
+                title={`Git workspace: ${workspace.targetBranch} · ${workspace.state === "worktree" ? "isolated" : workspace.state}`}
+                aria-label={`Git workspace: ${workspace.targetBranch} · ${workspace.state === "worktree" ? "isolated" : workspace.state}`}
+              >
+                <GitBranch size={14} />
               </span>
             ) : null}
           </span>

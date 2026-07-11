@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ManagedSession } from "@muxpilot/core";
+import type { GitWorkspaceState, ManagedSession } from "@muxpilot/core";
 import {
   CodexUsagePanel,
   DASHBOARD_EVENT_DEBOUNCE_MS,
@@ -110,6 +110,40 @@ describe("SessionCard", () => {
 
     expect(html).not.toContain("main");
     expect(html).not.toContain("dirty");
+  });
+
+  it.each([
+    ["idle", "idle"],
+    ["worktree", "isolated"],
+    ["integrating", "integrating"],
+    ["blocked", "blocked"],
+    ["failed", "failed"]
+  ] satisfies [GitWorkspaceState, string][])('renders the %s Git workspace as a footer indicator', (state, label) => {
+    const session = testSession({
+      id: state,
+      paneId: "%118",
+      windowName: state,
+      gitWorkspace: {
+        workflowVersion: 1,
+        id: `workspace-${state}`,
+        state,
+        entryPath: "/repo",
+        repoRoot: "/repo",
+        targetBranch: "main",
+        targetSha: "2222222222222222222222222222222222222222",
+        sessionBranch: state === "idle" ? null : `muxpilot/${state}`,
+        worktreePath: state === "idle" ? null : `/worktrees/${state}`,
+        lastError: state === "blocked" || state === "failed" ? `${label} error` : null,
+        updatedAt: "2026-07-11T00:00:00.000Z",
+        dependencyLinks: []
+      }
+    });
+
+    const html = renderSessionCard(session);
+    expect(html).toContain("<p>main</p>");
+    expect(html).not.toContain(`<p>main · ${label}</p>`);
+    expect(html).toContain(`class="git-workspace-status-indicator" data-state="${state}"`);
+    expect(html).toContain(`aria-label="Git workspace: main · ${label}"`);
   });
 
   it("renders obsolete workspace errors as a neutral target state", () => {

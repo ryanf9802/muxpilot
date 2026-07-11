@@ -1518,12 +1518,12 @@ export function SessionView() {
               onClick={() => setGitPanelOpen(true)}
               aria-haspopup="dialog"
               aria-expanded={gitPanelOpen}
-              aria-label={`Open Git workspace controls for ${readyWorkspace.targetBranch}`}
-              title={`Git workspace: ${readyWorkspace.targetBranch}`}
+              aria-label={`Open Git workspace controls for ${readyWorkspace.targetBranch} · ${gitWorkspaceChipState(readyWorkspace)}`}
+              title={`Git workspace: ${readyWorkspace.targetBranch} · ${gitWorkspaceChipState(readyWorkspace)}`}
+              data-state={readyWorkspace.state}
             >
               <GitBranch size={14} />
               <span>{readyWorkspace.targetBranch}</span>
-              <i data-state={readyWorkspace.state}>{gitWorkspaceChipState(readyWorkspace)}</i>
             </button>
           ) : null}
           <button
