@@ -854,6 +854,16 @@ select:focus-visible {
   margin-bottom: 12px;
 }
 
+.dashboard,
+.repo-session-groups,
+.repo-session-group,
+.session-grid,
+.session-card-shell,
+.usage-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .search-box {
   display: flex;
   align-items: center;
@@ -899,6 +909,14 @@ select:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.usage-panel-head > div,
+.usage-panel-controls,
+.usage-total,
+.codex-limit-meta > span,
+.codex-limit-foot > span {
+  min-width: 0;
 }
 
 .usage-panel-head h2 {
@@ -949,6 +967,11 @@ select:focus-visible {
 
 .usage-total strong {
   font-size: 18px;
+}
+
+.usage-total strong,
+.usage-total span {
+  overflow-wrap: anywhere;
 }
 
 .usage-total span,
@@ -1090,9 +1113,9 @@ select:focus-visible {
 }
 
 .repo-session-group-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 16px;
   padding: 6px 8px;
   border: 1px solid transparent;
@@ -1239,6 +1262,8 @@ select:focus-visible {
 .session-card {
   display: grid;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   width: 100%;
   padding: 14px;
   text-align: left;
@@ -1284,6 +1309,19 @@ select:focus-visible {
 
 .session-card .card-head {
   padding-right: 44px;
+}
+
+.session-card .card-head > div,
+.session-card .preview,
+.session-card .card-foot > span {
+  min-width: 0;
+}
+
+.session-card .card-head h2,
+.session-card .card-foot > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-card-head-actions {
@@ -3828,6 +3866,25 @@ select:focus-visible {
 
   .filters {
     grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .usage-panel-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .usage-panel-controls {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .usage-panel-head > .usage-total {
+    max-width: 100%;
+    text-align: left;
+  }
+
+  .repo-session-group-head {
+    gap: 8px;
   }
 
   .dashboard-new-session-button {
