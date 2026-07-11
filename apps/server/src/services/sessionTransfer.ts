@@ -20,7 +20,7 @@ import type { SessionManager } from "./sessionManager.js";
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
-const MAGIC = Buffer.from("MPSESSN1", "ascii");
+const MAGIC = Buffer.from("MPSESSN2", "ascii");
 const FLAG_ENCRYPTED = 1;
 const SALT_BYTES = 16;
 const NONCE_BYTES = 12;
@@ -46,9 +46,14 @@ export interface PortableSession {
 }
 
 interface Manifest {
-  formatVersion: 1;
+  formatVersion: 2;
   createdAt: string;
   sessions: PortableSession[];
+}
+
+export interface SessionTransferExport {
+  contents: Buffer;
+  filename: string;
 }
 
 interface StagedTransfer {
@@ -83,15 +88,16 @@ export class SessionTransferService {
     await mkdir(this.stagingDir, { recursive: true, mode: 0o700 });
   }
 
-  async export(sessionIds: string[]): Promise<Buffer> {
+  async export(sessionIds: string[]): Promise<SessionTransferExport> {
     const uniqueIds = [...new Set(sessionIds)];
     if (uniqueIds.length === 0) throw new SessionTransferError("Select at least one session");
     if (uniqueIds.length > MAX_SESSIONS) throw new SessionTransferError(`At most ${MAX_SESSIONS} sessions can be exported`);
 
-    const manifest: Manifest = { formatVersion: 1, createdAt: new Date().toISOString(), sessions: [] };
+    const createdAt = new Date().toISOString();
+    const manifest: Manifest = { formatVersion: 2, createdAt, sessions: [] };
     const transcripts = new Map<string, Buffer>();
     const codexSessionIds = new Set<string>();
-    for (const id of uniqueIds) {
+    for (const [index, id] of uniqueIds.entries()) {
       const session = await this.db.getSession(id);
       if (!session?.codexSessionId || !session.codexJsonlPath) throw new SessionTransferError(`Session '${id}' does not have a portable Codex transcript`, 409);
       if (codexSessionIds.has(session.codexSessionId)) throw new SessionTransferError("The selection contains more than one record for the same Codex session", 409);
@@ -99,7 +105,7 @@ export class SessionTransferService {
       const file = await readFile(session.codexJsonlPath).catch(() => null);
       if (!file) throw new SessionTransferError(`Transcript for session '${id}' is unavailable`, 409);
       const transcript = completeJsonlPrefix(file);
-      const entry = `sessions/${session.codexSessionId}.jsonl`;
+      const entry = `sessions/${String(index + 1).padStart(4, "0")}.jsonl`;
       transcripts.set(entry, transcript);
       manifest.sessions.push(portableSession(session, entry, transcript));
     }
@@ -108,7 +114,10 @@ export class SessionTransferService {
     const compressed = await gzipAsync(archive, { level: 6 });
     const envelope = await encodeEnvelope(compressed, this.encryptionKey);
     if (envelope.length > MAX_ARCHIVE_BYTES) throw new SessionTransferError("Export exceeds the 512 MiB archive limit", 413);
-    return envelope;
+    return {
+      contents: envelope,
+      filename: sessionTransferFilename(manifest.sessions.map((session) => session.sessionName), Boolean(this.encryptionKey), createdAt)
+    };
   }
 
   async inspect(file: Buffer): Promise<SessionTransferInspectResponse> {
@@ -268,7 +277,7 @@ function parseManifest(value: Buffer | undefined): Manifest {
   try { raw = JSON.parse(value.toString("utf8")); } catch { throw new SessionTransferError("Session archive manifest is invalid JSON"); }
   if (!raw || typeof raw !== "object") throw new SessionTransferError("Session archive manifest is invalid");
   const manifest = raw as Manifest;
-  if (manifest.formatVersion !== 1 || !Array.isArray(manifest.sessions) || manifest.sessions.length === 0 || manifest.sessions.length > MAX_SESSIONS) {
+  if (manifest.formatVersion !== 2 || !Array.isArray(manifest.sessions) || manifest.sessions.length === 0 || manifest.sessions.length > MAX_SESSIONS) {
     throw new SessionTransferError("Unsupported or invalid session archive manifest");
   }
   const ids = new Set<string>();
@@ -277,7 +286,7 @@ function parseManifest(value: Buffer | undefined): Manifest {
       || typeof session.sessionName !== "string" || session.sessionName.length > 200
       || typeof session.sourceCwd !== "string" || session.sourceCwd.length === 0 || session.sourceCwd.length > 4096
       || typeof session.repoName !== "string" || session.repoName.length > 512
-      || session.transcriptEntry !== `sessions/${session.codexSessionId}.jsonl`
+      || session.transcriptEntry !== `sessions/${String(ids.size + 1).padStart(4, "0")}.jsonl`
       || !Number.isSafeInteger(session.transcriptBytes) || session.transcriptBytes <= 0 || session.transcriptBytes > 1024 * 1024 * 1024
       || typeof session.transcriptSha256 !== "string" || !/^[a-f0-9]{64}$/.test(session.transcriptSha256)
       || !validPortablePreferences(session)
@@ -346,7 +355,33 @@ async function gunzipArchive(payload: Buffer): Promise<Buffer> {
 }
 
 function sha256(value: Buffer): string { return createHash("sha256").update(value).digest("hex"); }
-function safeEntryName(name: string): boolean { return name === "manifest.json" || /^sessions\/[a-zA-Z0-9-]{8,80}\.jsonl$/.test(name); }
+function safeEntryName(name: string): boolean {
+  return name === "manifest.json"
+    || /^sessions\/\d{4}\.jsonl$/.test(name);
+}
+
+export function sessionTransferFilename(sessionNames: string[], encrypted: boolean, createdAt: string): string {
+  if (encrypted) return `muxpilot-encrypted-${compactUtcTimestamp(createdAt)}.mpsession`;
+  if (sessionNames.length !== 1) return `muxpilot-${sessionNames.length}-sessions.mpsession`;
+  return `${safeFilenameStem(sessionNames[0] ?? "") || "muxpilot-session"}.mpsession`;
+}
+
+function compactUtcTimestamp(value: string): string {
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) return "unknown-time";
+  return timestamp.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function safeFilenameStem(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .slice(0, 80)
+    .replace(/[._-]+$/g, "");
+}
 
 function completeJsonlPrefix(transcript: Buffer): Buffer {
   if (transcript.length === 0) throw new SessionTransferError("Codex transcript is empty", 409);

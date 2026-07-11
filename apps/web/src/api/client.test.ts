@@ -208,6 +208,21 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/session-directories", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("uses the server-provided session archive download filename", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("archive", {
+      status: 200,
+      headers: {
+        "Content-Type": "application/vnd.muxpilot.session",
+        "Content-Disposition": "attachment; filename=\"release-notes.mpsession\""
+      }
+    }));
+
+    const download = await api.exportSessionTransfer(["session-1"]);
+
+    expect(download.filename).toBe("release-notes.mpsession");
+    expect(fetchMock).toHaveBeenCalledWith("/api/session-transfers/export", expect.objectContaining({ method: "POST", credentials: "include" }));
+  });
+
   it("creates sessions from a cwd and name", async () => {
     const fetchMock = mockJsonResponse({ session: { id: "created-session" } });
 

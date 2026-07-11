@@ -152,12 +152,11 @@ export function registerRoutes(
     app.post("/api/session-transfers/export", { preHandler: access.requireLocalAccess }, async (request, reply) => {
       try {
         const body = sessionTransferExportSchema.parse(request.body) satisfies SessionTransferExportRequest;
-        const file = await sessionTransfers.export(body.sessionIds);
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const archive = await sessionTransfers.export(body.sessionIds);
         return reply
           .header("Content-Type", "application/vnd.muxpilot.session")
-          .header("Content-Disposition", `attachment; filename="muxpilot-${stamp}.mpsession"`)
-          .send(file);
+          .header("Content-Disposition", `attachment; filename="${archive.filename}"`)
+          .send(archive.contents);
       } catch (error) {
         if (error instanceof SessionTransferError) return reply.code(error.statusCode).send({ error: error.message });
         throw error;

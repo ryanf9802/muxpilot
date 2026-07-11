@@ -100,6 +100,8 @@ The History tab searches restorable sessions that muxpilot has managed before. S
 
 The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the Codex transcripts and portable session preferences, then resumes all imported sessions in tmux.
 
+Single-session plaintext exports use the session name as the filename. Multi-session exports use a generic session-count filename, and encrypted exports use a non-identifying timestamped filename. Filenames are descriptive only: all identity and restoration metadata lives inside the archive, so a `.mpsession` file can be renamed without affecting import.
+
 Project files are not included. Clone or copy the relevant repositories first; Git sessions also require a local target branch on the destination. Host-specific worktrees, queued inputs, notification rules, dependencies, and local files referenced by a transcript are intentionally excluded.
 
 Set the same `MUXPILOT_SESSION_FILE_KEY` value (at least 16 characters) on both hosts to encrypt exports and decrypt imports. When the variable is unset, exports are plaintext. Plaintext files remain importable when a key is configured. Import/export controls and APIs are available only from the muxpilot host browser.
