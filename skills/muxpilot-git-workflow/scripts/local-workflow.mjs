@@ -78,6 +78,21 @@ export async function linkDependencies(config, worktreePath) {
   return linked;
 }
 
+export async function ignoreSharedDependencies(config, worktreePath) {
+  if (config.dependencies.length === 0) return;
+  const inheritedExcludeFile = await git(worktreePath, ["config", "--path", "--get", "core.excludesFile"]).catch(() => null);
+  const inheritedPatterns = inheritedExcludeFile
+    ? await readFile(inheritedExcludeFile, "utf8").catch(() => "")
+    : "";
+  await git(config.repoRoot, ["config", "extensions.worktreeConfig", "true"]);
+  const gitDirectory = await git(worktreePath, ["rev-parse", "--absolute-git-dir"]);
+  const excludeFile = join(gitDirectory, "muxpilot-dependencies.exclude");
+  const patterns = config.dependencies.map((dependency) => `/${escapeIgnorePattern(dependency.relativePath.replaceAll("\\", "/"))}`);
+  const prefix = inheritedPatterns === "" || inheritedPatterns.endsWith("\n") ? inheritedPatterns : `${inheritedPatterns}\n`;
+  await writeFile(excludeFile, `${prefix}${patterns.join("\n")}\n`, "utf8");
+  await git(worktreePath, ["config", "--worktree", "core.excludesFile", excludeFile]);
+}
+
 export async function localizeDependency(config, worktreePath, relativePath) {
   const dependency = config.dependencies.find((candidate) => candidate.relativePath === relativePath);
   if (!dependency) throw new Error(`'${relativePath}' is not a registered shared dependency path`);
@@ -174,4 +189,8 @@ function safeJoin(root, relativePath) {
   const path = resolve(root, relativePath);
   if (path !== root && !path.startsWith(`${resolve(root)}/`)) throw new Error(`Dependency path escapes the worktree: ${relativePath}`);
   return path;
+}
+
+function escapeIgnorePattern(path) {
+  return path.replace(/[\\*?[\] #!]/g, "\\$&");
 }

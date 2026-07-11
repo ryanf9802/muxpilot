@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { configuration, git, linkDependencies, readStatus, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { configuration, git, ignoreSharedDependencies, linkDependencies, readStatus, worktreeExists, writeStatus } from "./local-workflow.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.stdout.write("Usage: muxpilot-git-begin\n");
@@ -22,6 +22,7 @@ try {
   const worktreePath = join(config.worktreeRoot, suffix);
   await git(config.repoRoot, ["worktree", "add", "-b", branch, worktreePath, targetSha]);
   const links = await linkDependencies(config, worktreePath);
+  await ignoreSharedDependencies(config, worktreePath);
   await writeStatus(config, { state: "worktree", targetSha, sessionBranch: branch, worktreePath });
   process.stdout.write(`WORKTREE_READY ${worktreePath} branch=${branch}\n`);
   for (const link of links) process.stdout.write(`DEPENDENCY_REUSED kind=${link.kind} path=${link.relativePath} source=${link.sourcePath}\n`);

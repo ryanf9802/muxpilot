@@ -18,12 +18,19 @@ describe("standalone local Git workflow helpers", () => {
     const root = await repository();
     const dependencies = join(root, "node_modules");
     await mkdir(dependencies);
+    const inheritedExcludeFile = join(root, "session", "inherited-excludes");
+    await mkdir(join(root, "session"));
+    await writeFile(inheritedExcludeFile, "scratch.txt\n");
+    await git(root, ["config", "core.excludesFile", inheritedExcludeFile]);
     const environment = helperEnvironment(root, [{ kind: "node", relativePath: "node_modules", sourcePath: dependencies, linked: true }]);
 
     const begin = await node("muxpilot-git-begin.mjs", environment);
     const worktree = begin.match(/WORKTREE_READY (\S+)/)?.[1];
     expect(worktree).toBeTruthy();
     expect((await lstat(join(worktree!, "node_modules"))).isSymbolicLink()).toBe(true);
+    await writeFile(join(worktree!, "scratch.txt"), "ignored\n");
+    expect(await git(worktree!, ["status", "--porcelain"])).toBe("");
+    expect(await git(root, ["config", "--get", "core.excludesFile"])).toBe(inheritedExcludeFile);
     await writeFile(join(worktree!, "tracked.txt"), "completed\n");
     await git(worktree!, ["add", "tracked.txt"]);
     await git(worktree!, ["commit", "-m", "complete task"]);
@@ -90,7 +97,7 @@ async function repository(): Promise<string> {
   await git(root, ["config", "user.name", "Muxpilot Test"]);
   await git(root, ["config", "user.email", "muxpilot@example.test"]);
   await writeFile(join(root, "tracked.txt"), "initial\n");
-  await writeFile(join(root, ".gitignore"), "node_modules/\n*session/\n*worktrees/\n");
+  await writeFile(join(root, ".gitignore"), "*session/\n*worktrees/\n");
   await git(root, ["add", "tracked.txt", ".gitignore"]);
   await git(root, ["commit", "-m", "initial"]);
   return root;
