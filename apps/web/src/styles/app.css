@@ -3519,6 +3519,8 @@ select:focus-visible {
 }
 
 .vim-editor .cm-panels {
+  /* CodeMirror defaults panels to 300, above the app's modal layer. */
+  z-index: 1;
   color: var(--color-text);
   background: var(--color-surface-raised);
   border-top: 1px solid var(--color-border);
