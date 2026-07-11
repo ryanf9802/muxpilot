@@ -150,6 +150,18 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("shares approval prefixes by repository common Git directory", async () => {
+    const db = await tempDb();
+    const prefix = ["pnpm", "test"];
+
+    await db.addRepositoryApprovalRule("/repo/.git", prefix, "2026-07-10T00:00:00.000Z");
+
+    expect(await db.hasRepositoryApprovalRule("/repo/.git", prefix)).toBe(true);
+    expect(await db.hasRepositoryApprovalRule("/other/.git", prefix)).toBe(false);
+    expect(await db.hasRepositoryApprovalRule("/repo/.git", ["pnpm", "install"])).toBe(false);
+    db.close();
+  });
+
   it("continues collapsing unmanaged history by Codex session", async () => {
     const db = await tempDb();
     const older = { ...testSession("history-unmanaged-old"), codexSessionId: "shared-unmanaged", lastActivityAt: "2026-07-07T00:00:01.000Z" };

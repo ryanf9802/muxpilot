@@ -72,6 +72,7 @@ export class SessionManager {
   private readonly answeredQuestionMessageIds = new Set<string>();
   private readonly processingQueuedSessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
+  private readonly resolvingRepositoryApprovals = new Map<string, string>();
   private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
 
   constructor(
@@ -195,9 +196,11 @@ export class SessionManager {
       const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
       const latestMessage = await this.db.latestMessage(existingId);
       const liveApprovalPrompt =
-        rawInferredStatus === "approval" && latestMessage?.type !== "approval_request"
-          ? await this.corroboratedLiveApproval(pane, latestMessage)
-          : null;
+        rawInferredStatus !== "approval"
+          ? null
+          : latestMessage?.type === "approval_request"
+            ? await this.capturePaneApprovalPrompt(pane)
+            : await this.corroboratedLiveApproval(pane, latestMessage);
       const inferredStatus =
         rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
           ? rejectedApprovalFallbackStatus(pane, existing?.status)
@@ -256,12 +259,16 @@ export class SessionManager {
       } else {
         this.liveApprovals.delete(existingId);
       }
+      if (!liveApprovalPrompt) this.resolvingRepositoryApprovals.delete(existingId);
 
       const changed = !existing || sessionChanged(existing, session);
       await this.db.upsertSession(session, now);
       await this.recordTouchedRepository(session, now);
       if (changed) this.publish("session.updated", session.id, session);
       await this.processQueuedInputs(session.id);
+      if (liveApprovalPrompt) {
+        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt);
+      }
     }
 
     for (const session of await this.db.listSessions(true)) {
@@ -570,14 +577,29 @@ export class SessionManager {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status !== "approval") return null;
     const liveApproval = this.liveApprovals.get(sessionId);
-    if (liveApproval) return liveApproval;
+    if (liveApproval) return this.repositoryScopedApproval(sessionId, liveApproval);
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
-      return materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
+      return this.repositoryScopedApproval(
+        sessionId,
+        materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId))
+      );
     }
     const message = await this.db.latestApprovalMessage(sessionId);
     if (!message) return null;
-    return materializeApproval(message);
+    return this.repositoryScopedApproval(sessionId, materializeApproval(message));
+  }
+
+  private async repositoryScopedApproval(sessionId: string, approval: ApprovalRequest): Promise<ApprovalRequest> {
+    if (!approval.prefixRule?.length || !(await this.db.getGitWorkspaceBySession(sessionId))) return approval;
+    return {
+      ...approval,
+      options: approval.options.map((option) =>
+        option.decision === "approve_for_prefix"
+          ? { ...option, label: "Allow for repository", description: "Remember this prefix for this Git repository." }
+          : option
+      )
+    };
   }
 
   async getPendingQuestion(sessionId: string): Promise<QuestionRequest | null> {
@@ -639,6 +661,8 @@ export class SessionManager {
     if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) {
       throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
     }
+    const workspace = await this.db.getGitWorkspaceBySession(sessionId);
+    const codexDecision = request.decision === "approve_for_prefix" && workspace ? "approve_once" : request.decision;
 
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     let keys: string[];
@@ -646,25 +670,60 @@ export class SessionManager {
       if (!interactiveApprovalMatches(approval, interactive)) {
         throw new ApprovalResolutionError("The pending approval changed before this choice was submitted");
       }
-      if (!interactive.options.some((option) => option.decision === request.decision)) {
+      if (!interactive.options.some((option) => option.decision === codexDecision)) {
         throw new ApprovalResolutionError("This choice is no longer available for the pending approval");
       }
       const interactiveKeys =
-        request.decision === "deny" ? this.approvalKeys.deny : interactiveApprovalKeys(interactive, request.decision);
+        codexDecision === "deny" ? this.approvalKeys.deny : interactiveApprovalKeys(interactive, codexDecision);
       if (!interactiveKeys) throw new ApprovalResolutionError("Could not select this approval choice");
       keys = interactiveKeys;
     } else {
       const active = await this.isApprovalGateVisible(session);
       if (!active) throw new ApprovalResolutionError("The tmux pane is not showing an approval gate");
-      keys = this.keysForDecision(request.decision);
+      keys = this.keysForDecision(codexDecision);
     }
 
-    await this.tmux.sendKeys(session.tmux.paneId, keys);
     const now = nowIso();
+    await this.tmux.sendKeys(session.tmux.paneId, keys);
+    if (request.decision === "approve_for_prefix" && approval.prefixRule?.length) {
+      if (workspace) {
+        await this.db.addRepositoryApprovalRule(
+          workspace.commonGitDir,
+          normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace),
+          now
+        );
+      }
+    }
     await this.db.setSessionStatus(sessionId, "waiting", now);
     await this.db.addAudit("local", `approval:${request.decision}`, sessionId, "ok", now);
     this.publish("status.changed", sessionId, { status: "waiting" });
     this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+  }
+
+  private async resolveRememberedRepositoryApproval(
+    session: ManagedSession,
+    prompt: InteractiveApprovalPrompt
+  ): Promise<void> {
+    if (!prompt.prefixRule?.length || !prompt.options.some((option) => option.decision === "approve_once")) return;
+    const signature = JSON.stringify(prompt.prefixRule);
+    if (this.resolvingRepositoryApprovals.get(session.id) === signature) return;
+    const workspace = await this.db.getGitWorkspaceBySession(session.id);
+    if (
+      !workspace ||
+      !(await this.db.hasRepositoryApprovalRule(
+        workspace.commonGitDir,
+        normalizeRepositoryApprovalPrefix(prompt.prefixRule, workspace)
+      ))
+    ) return;
+    const keys = interactiveApprovalKeys(prompt, "approve_once");
+    if (!keys) return;
+    await this.tmux.sendKeys(session.tmux.paneId, keys);
+    this.resolvingRepositoryApprovals.set(session.id, signature);
+    const now = nowIso();
+    await this.db.setSessionStatus(session.id, "waiting", now);
+    await this.db.addAudit("local", "approval:repository_prefix", session.id, prompt.prefixRule.join(" "), now);
+    this.liveApprovals.delete(session.id);
+    this.publish("status.changed", session.id, { status: "waiting" });
   }
 
   async answerQuestion(sessionId: string, request: QuestionAnswerRequest): Promise<void> {
@@ -960,6 +1019,14 @@ export class SessionManager {
     }
   }
 
+  private async capturePaneApprovalPrompt(pane: TmuxPane): Promise<InteractiveApprovalPrompt | null> {
+    try {
+      return parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
+    } catch {
+      return null;
+    }
+  }
+
   private async corroboratedLiveApproval(
     pane: TmuxPane,
     latestMessage: ChatMessage | null
@@ -1135,6 +1202,19 @@ export class SessionManager {
       codexJsonlPath: session.codexJsonlPath
     };
   }
+}
+
+export function normalizeRepositoryApprovalPrefix(prefixRule: string[], workspace: StoredGitWorkspace): string[] {
+  const exactWorktree = workspace.summary.worktreePath;
+  const implementationRoot = workspace.implementationRoot;
+  return prefixRule.map((part) => {
+    let normalized = exactWorktree ? part.replaceAll(exactWorktree, "$MUXPILOT_WORKTREE") : part;
+    if (implementationRoot) {
+      const taskPath = new RegExp(`${escapeRegExp(implementationRoot)}[/\\\\][^/\\\\\\s'\"]+`, "g");
+      normalized = normalized.replace(taskPath, "$MUXPILOT_WORKTREE");
+    }
+    return normalized;
+  });
 }
 
 export class ApprovalResolutionError extends Error {

@@ -7,7 +7,12 @@ import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
-import { codexModelSettingsFromPaneText, managedCodexLaunchOptions, SessionManager } from "../src/services/sessionManager.js";
+import {
+  codexModelSettingsFromPaneText,
+  managedCodexLaunchOptions,
+  normalizeRepositoryApprovalPrefix,
+  SessionManager
+} from "../src/services/sessionManager.js";
 import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
 
 describe("Codex pane model settings", () => {
@@ -57,6 +62,38 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("focused file/module checks");
     expect(options.developerInstructions).toContain("writable for test caches");
+  });
+});
+
+describe("repository approval prefixes", () => {
+  it("normalizes ephemeral task paths across worktrees", () => {
+    const workspace = {
+      id: "workspace-1",
+      sessionId: "session-1",
+      commonGitDir: "/repo/.git",
+      implementationRoot: "/tmp/muxpilot/workspaces/workspace-1",
+      helperToken: "token",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: {
+        id: "workspace-1",
+        entryPath: "/repo",
+        targetBranch: "main",
+        worktreePath: "/tmp/muxpilot/workspaces/workspace-1/task-a"
+      }
+    } as Parameters<typeof normalizeRepositoryApprovalPrefix>[1];
+
+    expect(normalizeRepositoryApprovalPrefix([
+      "tool",
+      "-C",
+      "/tmp/muxpilot/workspaces/workspace-1/task-a",
+      "cd /tmp/muxpilot/workspaces/workspace-1/task-a/apps/server && pnpm test"
+    ], workspace)).toEqual([
+      "tool",
+      "-C",
+      "$MUXPILOT_WORKTREE",
+      "cd $MUXPILOT_WORKTREE/apps/server && pnpm test"
+    ]);
   });
 });
 
@@ -542,8 +579,49 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
     expect(sentKeys).toEqual([["Down", "Enter"]]);
+    expect(await harness.db.hasRepositoryApprovalRule("/repo/.git", ["pnpm", "app", "restart", "prod"])).toBe(false);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    harness.db.close();
+  });
+
+  it("records prefix approvals for the session repository", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "repo-approval.jsonl");
+    await writeFile(path, [
+      JSON.stringify({ timestamp: "2026-07-10T00:00:00.000Z", type: "session_meta", payload: { session_id: "codex-session", cwd: repo, cli_version: "test" } }),
+      JSON.stringify({ timestamp: "2026-07-10T00:00:01.000Z", type: "response_item", payload: { type: "function_call", name: "exec_command", call_id: "call-repo-approval", arguments: JSON.stringify({ cmd: "pnpm test", sandbox_permissions: "require_escalated", prefix_rule: ["pnpm", "test"] }) } }),
+      ""
+    ].join("\n"));
+    const sentKeys: string[][] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1)
+      .replaceAll("pnpm app restart prod", "pnpm test");
+    harness.tmux.sendKeys = async (_paneId, keys) => { sentKeys.push(keys); };
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertGitWorkspace({
+      id: "workspace-repo-approval",
+      sessionId: session.id,
+      commonGitDir: join(repo, ".git"),
+      helperToken: "token",
+      summary: { id: "workspace-repo-approval", entryPath: repo, targetBranch: "main" },
+      createdAt: "2026-07-10T00:00:02.000Z",
+      updatedAt: "2026-07-10T00:00:02.000Z"
+    }, "2026-07-10T00:00:02.000Z");
+    await harness.manager.ingest();
+    await harness.manager.discover();
+    expect((await harness.manager.getPendingApproval(session.id))?.options).toContainEqual(
+      expect.objectContaining({ decision: "approve_for_prefix", label: "Allow for repository" })
+    );
+    await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
+
+    expect(await harness.db.hasRepositoryApprovalRule(join(repo, ".git"), ["pnpm", "test"])).toBe(true);
+    await harness.manager.discover();
+    expect(sentKeys).toEqual([["Enter"], ["Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     harness.db.close();
   });
 

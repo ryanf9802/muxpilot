@@ -333,6 +333,14 @@ export class AppDatabase {
     return this.call("listGitWorkspaces") as Promise<StoredGitWorkspace[]>;
   }
 
+  addRepositoryApprovalRule(commonGitDir: string, prefixRule: string[], createdAt: string): Promise<void> {
+    return this.call("addRepositoryApprovalRule", commonGitDir, prefixRule, createdAt) as Promise<void>;
+  }
+
+  hasRepositoryApprovalRule(commonGitDir: string, prefixRule: string[]): Promise<boolean> {
+    return this.call("hasRepositoryApprovalRule", commonGitDir, prefixRule) as Promise<boolean>;
+  }
+
   upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): Promise<void> {
     return this.call("upsertTouchedRepository", repository, updatedAt) as Promise<void>;
   }
@@ -825,6 +833,27 @@ export class SyncAppDatabase {
 
   listGitWorkspaces(): StoredGitWorkspace[] {
     return (this.db.prepare("SELECT * FROM git_workspaces ORDER BY updated_at DESC").all() as unknown as GitWorkspaceRow[]).map(hydrateGitWorkspace);
+  }
+
+  addRepositoryApprovalRule(commonGitDir: string, prefixRule: string[], createdAt: string): void {
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO repository_approval_rules
+          (common_git_dir, prefix_rule_json, created_at)
+         VALUES (?, ?, ?)`
+      )
+      .run(commonGitDir, JSON.stringify(prefixRule), createdAt);
+  }
+
+  hasRepositoryApprovalRule(commonGitDir: string, prefixRule: string[]): boolean {
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT 1 FROM repository_approval_rules
+           WHERE common_git_dir = ? AND prefix_rule_json = ?`
+        )
+        .get(commonGitDir, JSON.stringify(prefixRule))
+    );
   }
 
   upsertTouchedRepository(repository: TouchedSessionRepository, updatedAt: string): void {
@@ -2253,6 +2282,13 @@ export class SyncAppDatabase {
         session_id TEXT UNIQUE,
         data_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS repository_approval_rules (
+        common_git_dir TEXT NOT NULL,
+        prefix_rule_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY(common_git_dir, prefix_rule_json)
       );
 
       CREATE INDEX IF NOT EXISTS idx_messages_session_sequence ON messages(session_id, sequence);
