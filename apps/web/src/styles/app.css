@@ -1542,6 +1542,78 @@ select:focus-visible {
   background: var(--color-error-soft);
 }
 
+.session-transfer-dropzone {
+  position: relative;
+  display: grid;
+  min-height: 190px;
+  place-items: center;
+  align-content: center;
+  gap: 7px;
+  padding: 24px;
+  cursor: pointer;
+  text-align: center;
+  color: var(--color-text-muted);
+  background: var(--color-input);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 8px;
+  transition: 140ms ease border-color, 140ms ease background, 140ms ease box-shadow;
+}
+
+.session-transfer-dropzone:hover,
+.session-transfer-dropzone:focus-within,
+.session-transfer-dropzone[data-dragging="true"] {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-brand) 8%, var(--color-input));
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 18%, transparent);
+}
+
+.session-transfer-dropzone[data-dragging="true"] {
+  border-style: solid;
+}
+
+.session-transfer-dropzone[data-busy="true"] {
+  cursor: wait;
+}
+
+.session-transfer-dropzone input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.session-transfer-dropzone-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  color: var(--color-brand);
+  background: color-mix(in srgb, var(--color-brand) 13%, transparent);
+  border-radius: 50%;
+}
+
+.session-transfer-dropzone strong {
+  color: var(--color-text);
+}
+
+.session-transfer-dropzone > span:not(.session-transfer-dropzone-icon),
+.session-transfer-dropzone small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-transfer-dropzone small {
+  color: var(--color-text-subtle);
+}
+
 .session-git-probe-note {
   color: var(--color-text-muted);
   font-size: 12px;

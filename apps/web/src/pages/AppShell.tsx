@@ -1412,6 +1412,10 @@ export function isNewSessionShortcut(event: Pick<globalThis.KeyboardEvent, "ctrl
   return event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "n";
 }
 
+export function isSessionTransferFileName(name: string): boolean {
+  return name.trim().toLowerCase().endsWith(".mpsession");
+}
+
 function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"export" | "import">("export");
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
@@ -1422,6 +1426,8 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [result, setResult] = useState<SessionTransferImportResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [importDragging, setImportDragging] = useState(false);
+  const [importFileName, setImportFileName] = useState("");
 
   useEffect(() => {
     void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
@@ -1456,6 +1462,12 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
 
   async function inspectFile(file: File | undefined) {
     if (!file) return;
+    if (!isSessionTransferFileName(file.name)) {
+      setImportFileName(file.name);
+      setError("Choose a .mpsession file.");
+      return;
+    }
+    setImportFileName(file.name);
     setBusy(true);
     setError("");
     setResult(null);
@@ -1529,7 +1541,43 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
           </div>
         ) : (
           <div className="session-transfer-panel">
-            {!preview ? <><label className="rename-field"><span>Archive file</span><input type="file" accept=".mpsession,application/vnd.muxpilot.session" disabled={busy} onChange={(event) => void inspectFile(event.target.files?.[0])} /></label><div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button></div></> : null}
+            {!preview ? <>
+              <label
+                className="session-transfer-dropzone"
+                data-dragging={importDragging || undefined}
+                data-busy={busy || undefined}
+                aria-busy={busy}
+                onDragEnter={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); if (!busy) setImportDragging(true); }}
+                onDragOver={(event) => { if (!event.dataTransfer.types.includes("Files")) return; event.preventDefault(); event.dataTransfer.dropEffect = "copy"; if (!busy) setImportDragging(true); }}
+                onDragLeave={(event) => {
+                  if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+                  setImportDragging(false);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setImportDragging(false);
+                  if (!busy) void inspectFile(event.dataTransfer.files[0]);
+                }}
+              >
+                <input
+                  type="file"
+                  accept=".mpsession,application/vnd.muxpilot.session"
+                  disabled={busy}
+                  onChange={(event) => {
+                    const file = event.currentTarget.files?.[0];
+                    event.currentTarget.value = "";
+                    void inspectFile(file);
+                  }}
+                />
+                <span className="session-transfer-dropzone-icon" aria-hidden="true">
+                  {busy ? <LoaderCircle className="spin" size={22} /> : <Upload size={22} />}
+                </span>
+                <strong>{busy ? "Inspecting archive" : importDragging ? "Drop file to import" : "Drop a .mpsession file here"}</strong>
+                <span>{busy ? importFileName : "or click to browse"}</span>
+                {!busy && importFileName ? <small>Selected: {importFileName}</small> : null}
+              </label>
+              <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button></div>
+            </> : null}
             {preview && !result ? <>
               <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
               <div className="session-transfer-mappings">

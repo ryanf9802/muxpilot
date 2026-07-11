@@ -17,6 +17,7 @@ import {
   isNewSessionShortcut,
   isPrimaryInputFocusShortcut,
   isPromptHistoryShortcut,
+  isSessionTransferFileName,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSeverity,
@@ -113,6 +114,14 @@ describe("shell connection state", () => {
     expect(html).toContain("Cannot reach muxpilot");
     expect(html).toContain("The app is open, but the backend is not responding.");
     expect(html).toContain("Retry now");
+  });
+});
+
+describe("session transfer files", () => {
+  it("accepts .mpsession filenames case-insensitively", () => {
+    expect(isSessionTransferFileName("muxpilot-export.mpsession")).toBe(true);
+    expect(isSessionTransferFileName("ARCHIVE.MPSESSION")).toBe(true);
+    expect(isSessionTransferFileName("muxpilot-export.zip")).toBe(false);
   });
 });
 
