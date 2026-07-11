@@ -587,7 +587,8 @@ export class SessionManager {
     }
     const message = await this.db.latestApprovalMessage(sessionId);
     if (!message) return null;
-    return this.repositoryScopedApproval(sessionId, materializeApproval(message));
+    const approval = materializeApproval(message);
+    return approval ? this.repositoryScopedApproval(sessionId, approval) : null;
   }
 
   private async repositoryScopedApproval(sessionId: string, approval: ApprovalRequest): Promise<ApprovalRequest> {
