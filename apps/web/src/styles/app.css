@@ -1474,30 +1474,7 @@ select:focus-visible {
   overflow-y: auto;
 }
 
-.session-transfer-dialog {
-  width: min(720px, calc(100vw - 32px));
-  max-height: min(820px, calc(100vh - 32px));
-  overflow: auto;
-  border: 1px solid var(--color-border);
-  border-radius: 14px;
-  background: var(--color-panel);
-  box-shadow: 0 24px 70px rgb(0 0 0 / 35%);
-}
-
-.session-transfer-dialog .dialog-head,
-.session-transfer-body,
-.session-transfer-dialog > .dialog-error {
-  padding: 18px 20px;
-}
-
-.session-transfer-dialog .dialog-head p,
-.session-transfer-note,
-.session-transfer-list small,
-.session-transfer-mapping small {
-  color: var(--color-muted);
-}
-
-.session-transfer-body,
+.session-transfer-panel,
 .session-transfer-list,
 .session-transfer-mappings,
 .session-transfer-mapping,
@@ -1506,62 +1483,63 @@ select:focus-visible {
   gap: 12px;
 }
 
-.session-transfer-list {
-  max-height: 360px;
-  overflow: auto;
-}
-
-.session-transfer-list label,
-.session-transfer-file,
+.session-transfer-option,
 .session-transfer-mapping,
-.session-transfer-results > div {
+.session-transfer-result {
   border: 1px solid var(--color-border);
-  border-radius: 10px;
-  padding: 12px;
+  border-radius: 6px;
+  background: transparent;
 }
 
-.session-transfer-list label {
+.session-transfer-option {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-height: 58px;
+  padding: 9px 10px;
+  cursor: pointer;
 }
 
-.session-transfer-list span,
-.session-transfer-results > div {
+.session-transfer-option:hover {
+  background: color-mix(in srgb, var(--color-brand) 8%, transparent);
+}
+
+.session-transfer-option > span,
+.session-transfer-result {
   display: grid;
   gap: 3px;
 }
 
-.session-transfer-list small,
-.session-transfer-mapping small {
+.session-transfer-option small,
+.session-transfer-mapping-head span,
+.session-transfer-result span {
   display: block;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+  line-height: 1.35;
 }
 
-.session-transfer-file {
-  min-height: 150px;
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
-  cursor: pointer;
-  border-style: dashed;
+.session-transfer-mapping {
+  padding: 12px;
 }
 
-.session-transfer-file input {
-  max-width: 100%;
+.session-transfer-mapping-head {
+  min-width: 0;
 }
 
-.session-transfer-mapping label {
-  display: grid;
-  gap: 5px;
+.session-transfer-mapping-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.session-transfer-mapping input {
-  width: 100%;
+.session-transfer-result {
+  padding: 10px;
 }
 
-.session-transfer-results > div[data-status="resume_failed"] {
-  border-color: var(--color-danger);
+.session-transfer-result[data-status="resume_failed"] {
+  border-color: var(--color-error);
+  background: var(--color-error-soft);
 }
 
 .session-git-probe-note {

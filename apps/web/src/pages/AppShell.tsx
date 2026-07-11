@@ -1500,12 +1500,9 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="dialog-backdrop" role="presentation" onPointerDown={(event) => event.currentTarget === event.target && void close()}>
-      <section className="session-transfer-dialog" role="dialog" aria-modal="true" aria-labelledby="session-transfer-title">
+      <section className="session-name-dialog" role="dialog" aria-modal="true" aria-labelledby="session-transfer-title">
         <div className="dialog-head">
-          <div>
-            <h2 id="session-transfer-title">Session transfer</h2>
-            <p>Move Codex session history between muxpilot hosts.</p>
-          </div>
+          <h2 id="session-transfer-title">Session transfer</h2>
           <button type="button" className="icon-button" onClick={() => void close()} aria-label="Close" disabled={busy}><X size={18} /></button>
         </div>
         <div className="dialog-tabs" role="tablist" aria-label="Session transfer options">
@@ -1513,11 +1510,11 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
           <button type="button" role="tab" aria-selected={tab === "import"} data-active={tab === "import" || undefined} onClick={() => setTab("import")}><Upload size={16} /> Import</button>
         </div>
         {tab === "export" ? (
-          <div className="session-transfer-body">
-            <p className="session-transfer-note">{encryptionEnabled ? "Exports are encrypted with MUXPILOT_SESSION_FILE_KEY." : "Exports are not encrypted. Configure MUXPILOT_SESSION_FILE_KEY to protect them."}</p>
-            <div className="session-transfer-list">
+          <div className="session-transfer-panel">
+            <p className="session-git-probe-note">{encryptionEnabled ? "Exports are encrypted with MUXPILOT_SESSION_FILE_KEY." : "Exports are not encrypted. Configure MUXPILOT_SESSION_FILE_KEY to protect them."}</p>
+            <div className="session-history-results session-transfer-list">
               {portableSessions.map((session) => (
-                <label key={session.id}>
+                <label className="session-transfer-option" key={session.id}>
                   <input type="checkbox" checked={selected.has(session.id)} onChange={(event) => setSelected((current) => {
                     const next = new Set(current);
                     if (event.target.checked) next.add(session.id); else next.delete(session.id);
@@ -1526,25 +1523,25 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
                   <span><strong>{session.tmux.windowName || session.repo.name}</strong><small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small></span>
                 </label>
               ))}
-              {!portableSessions.length ? <p>No portable sessions found.</p> : null}
+              {!portableSessions.length ? <p className="prompt-history-muted">No portable sessions found.</p> : null}
             </div>
-            <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary-button" disabled={busy || selected.size === 0} onClick={() => void exportSelected()}>{busy ? "Exporting…" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
+            <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary" disabled={busy || selected.size === 0} aria-busy={busy} data-busy={busy || undefined} onClick={() => void exportSelected()}>{busy ? "Exporting" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
           </div>
         ) : (
-          <div className="session-transfer-body">
-            {!preview ? <label className="session-transfer-file"><Upload size={24} /><span>Select a .mpsession file</span><input type="file" accept=".mpsession,application/vnd.muxpilot.session" disabled={busy} onChange={(event) => void inspectFile(event.target.files?.[0])} /></label> : null}
+          <div className="session-transfer-panel">
+            {!preview ? <><label className="rename-field"><span>Archive file</span><input type="file" accept=".mpsession,application/vnd.muxpilot.session" disabled={busy} onChange={(event) => void inspectFile(event.target.files?.[0])} /></label><div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button></div></> : null}
             {preview && !result ? <>
-              <p className="session-transfer-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
+              <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
               <div className="session-transfer-mappings">
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
-                  <strong>{requirement.repoName}</strong><small>From {requirement.sourceCwd}</small>
-                  <label>Destination directory<input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, destinationCwd: event.target.value } }))} /></label>
-                  {requirement.workspaceMode === "git" ? <label>Local target branch<input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.targetBranch ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, targetBranch: event.target.value } }))} /></label> : null}
+                  <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
+                  <label className="rename-field"><span>Destination directory</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, destinationCwd: event.target.value } }))} /></label>
+                  {requirement.workspaceMode === "git" ? <label className="rename-field"><span>Local target branch</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.targetBranch ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, targetBranch: event.target.value } }))} /></label> : null}
                 </div>)}
               </div>
-              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary-button" disabled={busy || !mappingComplete} onClick={() => void importSessions()}>{busy ? "Importing…" : "Import and resume all"}</button></div>
+              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
             </> : null}
-            {result ? <><div className="session-transfer-results">{result.results.map((item) => <div key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}</div><div className="dialog-actions"><button type="button" className="primary-button" onClick={onClose}>Done</button></div></> : null}
+            {result ? <><div className="session-transfer-results">{result.results.map((item) => <div className="session-transfer-result" key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}</div><div className="dialog-actions"><button type="button" className="primary" onClick={onClose}>Done</button></div></> : null}
           </div>
         )}
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}
