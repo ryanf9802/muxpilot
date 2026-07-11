@@ -18,6 +18,7 @@ import {
   isPrimaryInputFocusShortcut,
   isPromptHistoryShortcut,
   isSessionTransferFileName,
+  importTargetBranchValue,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSeverity,
@@ -122,6 +123,27 @@ describe("session transfer files", () => {
     expect(isSessionTransferFileName("muxpilot-export.mpsession")).toBe(true);
     expect(isSessionTransferFileName("ARCHIVE.MPSESSION")).toBe(true);
     expect(isSessionTransferFileName("muxpilot-export.zip")).toBe(false);
+  });
+});
+
+describe("session transfer branch selection", () => {
+  const probe = {
+    isGit: true,
+    bare: false,
+    incompatibleReason: null,
+    repoRoot: "/repo",
+    repoName: "repo",
+    currentBranch: "main",
+    dirty: false,
+    localBranches: ["main", "release", "muxpilot/1234567890ABCDEF/g1"]
+  };
+
+  it("keeps an exported target branch when it exists locally", () => {
+    expect(importTargetBranchValue(probe, "release")).toBe("release");
+  });
+
+  it("falls back to the same first branch offered by New Session", () => {
+    expect(importTargetBranchValue(probe, "missing")).toBe(targetBranchSuggestions(probe)[0]?.value);
   });
 });
 

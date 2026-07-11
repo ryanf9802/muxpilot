@@ -1401,6 +1401,18 @@ export function isSessionTransferFileName(name: string): boolean {
   return name.trim().toLowerCase().endsWith(".mpsession");
 }
 
+interface SessionTransferMappingProbe {
+  path: string;
+  probe: GitRepositoryProbe | null;
+  busy: boolean;
+  error: string | null;
+}
+
+export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: string): string {
+  const suggestions = targetBranchSuggestions(probe);
+  return suggestions.some((suggestion) => suggestion.value === preferred) ? preferred : suggestions[0]?.value ?? "";
+}
+
 function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"export" | "import">("export");
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
@@ -1414,6 +1426,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState("");
   const [importDragging, setImportDragging] = useState(false);
   const [importFileName, setImportFileName] = useState("");
+  const [mappingProbes, setMappingProbes] = useState<Record<string, SessionTransferMappingProbe>>({});
 
   useEffect(() => {
     void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
@@ -1423,6 +1436,49 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
       })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, []);
+
+  const mappingProbeKey = preview?.mappings
+    .filter((requirement) => requirement.workspaceMode === "git")
+    .map((requirement) => `${requirement.sourceCwd}\u0000${mappings[requirement.sourceCwd]?.destinationCwd.trim() ?? ""}`)
+    .join("\u0001") ?? "";
+
+  useEffect(() => {
+    if (!preview) {
+      setMappingProbes({});
+      return undefined;
+    }
+    const targets = preview.mappings
+      .filter((requirement) => requirement.workspaceMode === "git")
+      .map((requirement) => ({
+        sourceCwd: requirement.sourceCwd,
+        path: mappings[requirement.sourceCwd]?.destinationCwd.trim() ?? ""
+      }));
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      for (const target of targets) {
+        if (!target.path) {
+          setMappingProbes((current) => ({ ...current, [target.sourceCwd]: { path: "", probe: null, busy: false, error: null } }));
+          continue;
+        }
+        setMappingProbes((current) => ({ ...current, [target.sourceCwd]: { path: target.path, probe: null, busy: true, error: null } }));
+        void api.gitRepositoryProbe(target.path).then((probe) => {
+          if (cancelled) return;
+          setMappingProbes((current) => ({ ...current, [target.sourceCwd]: { path: target.path, probe, busy: false, error: null } }));
+          setMappings((current) => {
+            const mapping = current[target.sourceCwd];
+            if (!mapping || mapping.destinationCwd.trim() !== target.path) return current;
+            return { ...current, [target.sourceCwd]: { ...mapping, targetBranch: importTargetBranchValue(probe, mapping.targetBranch) } };
+          });
+        }).catch(() => {
+          if (!cancelled) setMappingProbes((current) => ({ ...current, [target.sourceCwd]: { path: target.path, probe: null, busy: false, error: "Could not inspect this repository." } }));
+        });
+      }
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [mappingProbeKey, preview]);
 
   async function close() {
     if (busy || closing) return;
@@ -1491,10 +1547,23 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
     } finally { setBusy(false); }
   }
 
+  function updateImportDestination(sourceCwd: string, workspaceMode: "directory" | "git", destinationCwd: string) {
+    setMappings((current) => ({ ...current, [sourceCwd]: { ...current[sourceCwd]!, destinationCwd } }));
+    if (workspaceMode === "git") {
+      setMappingProbes((current) => ({
+        ...current,
+        [sourceCwd]: { path: destinationCwd.trim(), probe: null, busy: Boolean(destinationCwd.trim()), error: null }
+      }));
+    }
+  }
+
   const portableSessions = sessions.filter((session) => Boolean(session.codexSessionId && session.codexJsonlPath));
   const mappingComplete = preview?.mappings.every((requirement) => {
     const value = mappings[requirement.sourceCwd];
-    return Boolean(value?.destinationCwd.trim() && (requirement.workspaceMode !== "git" || value.targetBranch.trim()));
+    if (!value?.destinationCwd.trim()) return false;
+    if (requirement.workspaceMode !== "git") return true;
+    const mappingProbe = mappingProbes[requirement.sourceCwd];
+    return Boolean(mappingProbe?.path === value.destinationCwd.trim() && mappingProbe.probe?.isGit && targetBranchSuggestions(mappingProbe.probe).some((suggestion) => suggestion.value === value.targetBranch));
   }) ?? false;
 
   return (
@@ -1571,8 +1640,24 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
               <div className="session-transfer-mappings">
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
                   <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
-                  <label className="rename-field"><span>Destination directory</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, destinationCwd: event.target.value } }))} /></label>
-                  {requirement.workspaceMode === "git" ? <label className="rename-field"><span>Local target branch</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.targetBranch ?? ""} onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, targetBranch: event.target.value } }))} /></label> : null}
+                  <label className="rename-field"><span>Destination directory</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => updateImportDestination(requirement.sourceCwd, requirement.workspaceMode, event.target.value)} /></label>
+                  {requirement.workspaceMode === "git" ? <>
+                    <label className="rename-field">
+                      <span>Local target branch</span>
+                      <select
+                        value={mappings[requirement.sourceCwd]?.targetBranch ?? ""}
+                        disabled={busy || mappingProbes[requirement.sourceCwd]?.busy || !mappingProbes[requirement.sourceCwd]?.probe?.isGit || targetBranchSuggestions(mappingProbes[requirement.sourceCwd]!.probe!).length === 0}
+                        onChange={(event) => setMappings((current) => ({ ...current, [requirement.sourceCwd]: { ...current[requirement.sourceCwd]!, targetBranch: event.target.value } }))}
+                      >
+                        {mappingProbes[requirement.sourceCwd]?.busy ? <option value="">Inspecting repository…</option> : null}
+                        {!mappingProbes[requirement.sourceCwd]?.busy && !mappingProbes[requirement.sourceCwd]?.probe?.isGit ? <option value="">Choose a valid Git directory</option> : null}
+                        {mappingProbes[requirement.sourceCwd]?.probe?.isGit && targetBranchSuggestions(mappingProbes[requirement.sourceCwd]!.probe!).length === 0 ? <option value="">No local branches</option> : null}
+                        {mappingProbes[requirement.sourceCwd]?.probe?.isGit ? targetBranchSuggestions(mappingProbes[requirement.sourceCwd]!.probe!).map((suggestion) => <option key={suggestion.value} value={suggestion.value}>{suggestion.label}</option>) : null}
+                      </select>
+                    </label>
+                    {mappingProbes[requirement.sourceCwd]?.error ? <p className="session-git-probe-note dialog-error">{mappingProbes[requirement.sourceCwd]!.error}</p> : null}
+                    {mappingProbes[requirement.sourceCwd]?.probe && !mappingProbes[requirement.sourceCwd]!.probe!.isGit ? <p className="session-git-probe-note dialog-error">Destination is not a Git repository.</p> : null}
+                  </> : null}
                 </div>)}
               </div>
               <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
