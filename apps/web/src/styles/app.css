@@ -2342,14 +2342,14 @@ select:focus-visible {
 }
 
 .git-workspace-chip {
+  --git-workspace-state-color: var(--color-success);
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-height: 30px;
   max-width: 220px;
   padding: 0 9px;
-  color: var(--color-text-inverse);
-  border: 1px solid;
+  border: 1px solid var(--color-border);
   border-radius: 999px;
 }
 
@@ -2364,15 +2364,12 @@ select:focus-visible {
 }
 
 .git-workspace-chip[data-state="idle"] {
-  color: var(--color-text-inverse);
-  background: var(--color-success);
-  border-color: var(--color-success);
+  --git-workspace-state-color: var(--color-success);
 }
 
 .git-workspace-chip[data-state="worktree"],
 .git-workspace-chip[data-state="integrating"] {
-  background: var(--color-warning);
-  border-color: var(--color-warning);
+  --git-workspace-state-color: var(--color-warning);
 }
 
 .git-workspace-status-indicator[data-state="worktree"],
@@ -2382,8 +2379,7 @@ select:focus-visible {
 
 .git-workspace-chip[data-state="blocked"],
 .git-workspace-chip[data-state="failed"] {
-  background: var(--color-error);
-  border-color: var(--color-error);
+  --git-workspace-state-color: var(--color-error);
 }
 
 .git-workspace-status-indicator[data-state="blocked"],
@@ -2776,6 +2772,9 @@ select:focus-visible {
 
 .actions .git-workspace-chip {
   max-width: 220px;
+  color: var(--git-workspace-state-color);
+  background: color-mix(in srgb, var(--git-workspace-state-color) 10%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--git-workspace-state-color) 45%, var(--color-border));
   border-radius: 999px;
 }
 
