@@ -28,9 +28,7 @@ try {
   let targetSha = await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]);
   if (taskHead === targetSha) {
     if (!bypasses.includes("automatic-cleanup")) {
-      await unlinkSharedDependencies(config, worktree);
-      await git(config.repoRoot, ["worktree", "remove", worktree]);
-      await git(config.repoRoot, ["branch", "-d", status.sessionBranch]);
+      await cleanupTask(config, status, worktree, taskHead, targetSha);
     }
     await writeStatus(config, {
       state: "idle",
@@ -95,9 +93,7 @@ try {
   release = null;
 
   if (!bypasses.includes("automatic-cleanup")) {
-    await unlinkSharedDependencies(config, worktree);
-    await git(config.repoRoot, ["worktree", "remove", worktree]);
-    await git(config.repoRoot, ["branch", "-d", status.sessionBranch]);
+    await cleanupTask(config, status, worktree, finalHead, finalHead);
   }
   await writeStatus(config, {
     state: "idle",
@@ -126,6 +122,25 @@ async function isAncestor(cwd, ancestor, descendant) {
   } catch {
     return false;
   }
+}
+
+async function cleanupTask(config, status, worktree, expectedHead, targetHead) {
+  const expectedPrefix = `muxpilot/${config.workspaceId}/`;
+  if (!status.sessionBranch.startsWith(expectedPrefix)) {
+    throw new Error(`Refusing to clean up branch not owned by this workspace: ${status.sessionBranch}`);
+  }
+  await git(config.repoRoot, ["check-ref-format", "--branch", status.sessionBranch]);
+  const branchRef = `refs/heads/${status.sessionBranch}`;
+  const branchHead = await git(config.repoRoot, ["rev-parse", `${branchRef}^{commit}`]);
+  if (branchHead !== expectedHead) {
+    throw new Error(`Temporary branch moved during cleanup: expected ${expectedHead}, found ${branchHead}`);
+  }
+  if (!(await isAncestor(config.repoRoot, branchHead, targetHead))) {
+    throw new Error(`Temporary branch ${status.sessionBranch} is not integrated into ${config.targetBranch}`);
+  }
+  await unlinkSharedDependencies(config, worktree);
+  await git(config.repoRoot, ["worktree", "remove", worktree]);
+  await git(config.repoRoot, ["update-ref", "-d", branchRef, branchHead]);
 }
 
 function hasMeaningfulChanges(porcelain, dependencies) {

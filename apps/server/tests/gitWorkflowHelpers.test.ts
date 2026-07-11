@@ -57,6 +57,33 @@ describe("standalone local Git workflow helpers", () => {
     expect(await git(root, ["rev-parse", "main"])).not.toBe(await git(worktree, ["rev-parse", "HEAD"]));
   });
 
+  it("cleans up after integration while an unrelated branch is checked out", async () => {
+    const root = await repository();
+    await git(root, ["switch", "-c", "unrelated"]);
+    const environment = helperEnvironment(root, []);
+    const begin = await node("muxpilot-git-begin.mjs", environment);
+    const worktree = begin.match(/WORKTREE_READY (\S+)/)![1]!;
+    const sessionBranch = begin.match(/branch=(\S+)/)![1]!;
+    await writeFile(join(worktree, "task.txt"), "integrated\n");
+    await git(worktree, ["add", "task.txt"]);
+    await git(worktree, ["commit", "-m", "task on main"]);
+    const taskHead = await git(worktree, ["rev-parse", "HEAD"]);
+
+    const finish = await node("muxpilot-git-finish.mjs", environment);
+
+    expect(finish).toContain("INTEGRATED target=refs/heads/main");
+    expect(await git(root, ["branch", "--show-current"])).toBe("unrelated");
+    expect(await git(root, ["rev-parse", "main"])).toBe(taskHead);
+    expect(await git(root, ["show", "main:task.txt"])).toBe("integrated");
+    await expect(git(root, ["show-ref", "--verify", `refs/heads/${sessionBranch}`])).rejects.toThrow();
+    await expect(stat(worktree)).rejects.toThrow();
+    expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({
+      state: "idle",
+      sessionBranch: null,
+      worktreePath: null
+    });
+  });
+
   it("rebases and requires renewed review when another task lands first", async () => {
     const root = await repository();
     const first = helperEnvironment(root, []);
