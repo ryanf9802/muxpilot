@@ -596,6 +596,7 @@ describe("SessionHeaderMeta", () => {
     expect(html).toContain("feature/activity-summary");
     expect(html).toContain('class="session-header-repo"');
     expect(html).toContain('class="session-header-branch"');
+    expect(html).toContain('class="session-header-branch" title="feature/activity-summary"');
     expect(html).toContain('class="session-header-branch-separator"');
     expect(html).not.toContain("Header summary display");
     expect(html).not.toContain("session-header-summary");
@@ -628,7 +629,7 @@ describe("SessionHeaderMeta", () => {
     );
 
     expect(html).toContain('title="muxpilot · main · dirty"');
-    expect(html).toContain('<span class="session-header-branch">main</span><span class="session-header-branch-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
+    expect(html).toContain('<span class="session-header-branch" title="main">main</span><span class="session-header-branch-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
   });
 });
 

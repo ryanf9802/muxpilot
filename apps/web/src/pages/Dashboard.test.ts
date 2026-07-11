@@ -214,6 +214,7 @@ describe("RepoSessionGroupHeader", () => {
 
     expect(html).toContain("muxpilot");
     expect(html).toContain("main");
+    expect(html).toContain('<span title="main">main</span>');
     expect(html).toContain("dirty");
     expect(html).not.toContain("/repo");
     expect(html).toContain('role="button"');

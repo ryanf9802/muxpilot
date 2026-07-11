@@ -739,7 +739,9 @@ export function RepoSessionGroupHeader({
           </h2>
           <p className="repo-session-group-meta">
             <GitBranch size={14} />
-            <span>{group.branch ?? "no branch"}</span>
+            <span title={group.branch ?? "no branch"}>
+              {group.branch ?? "no branch"}
+            </span>
             {group.dirty ? <span className="dirty">dirty</span> : null}
           </p>
         </div>

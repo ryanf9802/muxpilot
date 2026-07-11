@@ -1121,6 +1121,10 @@ select:focus-visible {
   gap: 8px;
 }
 
+.repo-session-group-title-row > div {
+  min-width: 0;
+}
+
 .repo-collapse-button {
   display: inline-flex;
   align-items: center;
@@ -2191,6 +2195,14 @@ select:focus-visible {
 
 .session-header-meta span {
   flex: 0 0 auto;
+}
+
+.session-header-branch {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .git-workspace-chip {

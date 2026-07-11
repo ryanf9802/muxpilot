@@ -2366,7 +2366,9 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
       <span className="session-header-branch-separator" aria-hidden="true">
         ·
       </span>
-      <span className="session-header-branch">{branch}</span>
+      <span className="session-header-branch" title={branch}>
+        {branch}
+      </span>
       {dirty ? (
         <>
           <span className="session-header-branch-separator" aria-hidden="true">
