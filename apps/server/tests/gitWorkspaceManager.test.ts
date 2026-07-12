@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -35,6 +35,26 @@ describe("lightweight Git workspace metadata", () => {
     const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
     await expect(manager.provision({ sessionName: "task", entryPath: root, targetBranch: "missing" }))
       .rejects.toThrow("Local target branch 'missing' does not exist");
+    db.close();
+  });
+
+  it("reuses writable dependencies and skips non-writable dependencies", async () => {
+    const root = await repository();
+    await mkdir(join(root, ".venv"));
+    await mkdir(join(root, "locked", ".venv"), { recursive: true });
+    await writeFile(join(root, "pyproject.toml"), "[project]\nname = 'root'\nversion = '1.0.0'\n");
+    await writeFile(join(root, "locked", "pyproject.toml"), "[project]\nname = 'locked'\nversion = '1.0.0'\n");
+    await git(root, ["add", "pyproject.toml", "locked/pyproject.toml"]);
+    await git(root, ["commit", "-m", "add Python projects"]);
+    await chmod(join(root, "locked", ".venv"), 0o555);
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "main" });
+
+    expect(workspace.summary.dependencyLinks).toEqual([
+      { kind: "python", relativePath: ".venv", sourcePath: join(root, ".venv"), linked: true }
+    ]);
     db.close();
   });
 

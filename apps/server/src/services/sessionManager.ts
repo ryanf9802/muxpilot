@@ -40,7 +40,7 @@ import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
-import { statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
+import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
 import type { PortableSession } from "./sessionTransfer.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
@@ -1414,13 +1414,14 @@ export function managedCodexLaunchOptions(
   const summary = workspace.summary;
   const helperDir = codexHome ? join(codexHome, "skills", "muxpilot-git-workflow", "scripts") : null;
   const implementationRoot = workspace.implementationRoot ?? worktreeRoot ?? join(summary.repoRoot, ".muxpilot-worktrees", workspace.id);
+  const dependencies = reusableDependencyLinks(summary.dependencyLinks ?? []);
   return {
     isolatedWorkspace: true,
     writableRoots: [
       implementationRoot,
       workspace.commonGitDir,
       worktreeRoot,
-      ...(summary.dependencyLinks ?? []).map((dependency) => dependency.sourcePath)
+      ...dependencies.map((dependency) => dependency.sourcePath)
     ].filter((value): value is string => Boolean(value)),
     developerInstructions: [
       "This is a local-only muxpilot Git session running from a neutral control directory.",
@@ -1448,7 +1449,7 @@ export function managedCodexLaunchOptions(
       MUXPILOT_GIT_TARGET_BRANCH: summary.targetBranch,
       MUXPILOT_GIT_WORKTREE_ROOT: implementationRoot,
       MUXPILOT_GIT_STATUS_FILE: statusPath(workspace),
-      MUXPILOT_GIT_DEPENDENCIES: JSON.stringify(summary.dependencyLinks ?? [])
+      MUXPILOT_GIT_DEPENDENCIES: JSON.stringify(dependencies)
     }
   };
 }

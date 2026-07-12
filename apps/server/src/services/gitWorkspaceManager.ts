@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
 import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -219,9 +220,24 @@ async function discoverDependencies(repoRoot: string): Promise<GitDependencyLink
     const sourcePath = join(repoRoot, relativePath);
     if (!(await isDirectory(sourcePath))) continue;
     if (await git(repoRoot, ["ls-files", "--", relativePath])) continue;
-    links.push({ kind, relativePath, sourcePath: await realpath(sourcePath), linked: true });
+    const dependency = { kind, relativePath, sourcePath: await realpath(sourcePath), linked: true } satisfies GitDependencyLink;
+    if (isReusableDependency(dependency)) links.push(dependency);
   }
   return links;
+}
+
+export function reusableDependencyLinks(links: GitDependencyLink[]): GitDependencyLink[] {
+  return links.filter(isReusableDependency);
+}
+
+function isReusableDependency(dependency: GitDependencyLink): boolean {
+  try {
+    if (!statSync(dependency.sourcePath).isDirectory()) return false;
+    accessSync(dependency.sourcePath, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function isDirectory(path: string): Promise<boolean> {

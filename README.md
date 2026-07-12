@@ -90,7 +90,7 @@ For Git repositories, muxpilot runs `codex` from a neutral control directory. Th
 
 The target branch must already exist locally. Multiple tasks can target it concurrently; only their brief final integration operations serialize, so completion order determines landing order. Muxpilot never automatically pulls or pushes.
 
-Implementation worktrees use simple links to existing manifest-associated dependency directories (`node_modules`, Python virtual environments, Composer `vendor`, and Bundler `vendor/bundle`). Their real paths are writable in the Codex sandbox for test caches. Dependency-changing tasks localize the relevant link before installing. A tiny atomic status file lets the UI observe whether changes are isolated, integrating, blocked, or complete; the app does not orchestrate those transitions.
+Implementation worktrees use simple links to existing manifest-associated dependency directories (`node_modules`, Python virtual environments, Composer `vendor`, and Bundler `vendor/bundle`). Their real paths are writable in the Codex sandbox for test caches; dependencies the Muxpilot host user cannot write are skipped instead of being linked. Dependency-changing tasks localize the relevant link before installing. A tiny atomic status file lets the UI observe whether changes are isolated, integrating, blocked, or complete; the app does not orchestrate those transitions.
 
 Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into another working directory. Non-Git directories retain the direct-directory session flow.
 

@@ -43,7 +43,7 @@ describe("managed Codex launch instructions", () => {
         id: "workspace-1",
         entryPath: "/repo",
         targetBranch: "main",
-        dependencyLinks: [{ kind: "node", relativePath: "node_modules", sourcePath: "/repo/node_modules", linked: false }]
+        dependencyLinks: [{ kind: "node", relativePath: "node_modules", sourcePath: "/tmp", linked: false }]
       }
     } as Parameters<typeof managedCodexLaunchOptions>[0], "/home/dev/.codex", "/tmp/worktrees");
 
@@ -53,7 +53,7 @@ describe("managed Codex launch instructions", () => {
       MUXPILOT_GIT_HELPER_DIR: "/home/dev/.codex/skills/muxpilot-git-workflow/scripts"
     });
     expect(options.writableRoots).toContain("/tmp/worktrees");
-    expect(options.writableRoots).toContain("/repo/node_modules");
+    expect(options.writableRoots).toContain("/tmp");
     expect(options.developerInstructions).toContain("/home/dev/.codex/skills/muxpilot-git-workflow/scripts");
     expect(options.developerInstructions).toContain("short-lived worktree");
     expect(options.developerInstructions).toContain("muxpilot-git-begin");
@@ -62,6 +62,29 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("focused file/module checks");
     expect(options.developerInstructions).toContain("writable for test caches");
+  });
+
+  it("filters stale inaccessible dependencies from restored session launch options", () => {
+    const dependency = { kind: "python" as const, relativePath: ".venv", sourcePath: "/missing/.venv", linked: true };
+    const options = managedCodexLaunchOptions({
+      id: "workspace-1",
+      sessionId: "session-1",
+      sessionName: "change-task",
+      commonGitDir: "/repo/.git",
+      implementationRoot: "/tmp/worktrees/change-task",
+      helperToken: "token",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: {
+        id: "workspace-1",
+        entryPath: "/repo",
+        targetBranch: "main",
+        dependencyLinks: [dependency]
+      }
+    } as Parameters<typeof managedCodexLaunchOptions>[0]);
+
+    expect(options.writableRoots).not.toContain(dependency.sourcePath);
+    expect(JSON.parse(options.environment.MUXPILOT_GIT_DEPENDENCIES)).toEqual([]);
   });
 });
 
