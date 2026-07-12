@@ -678,16 +678,22 @@ export class SessionManager {
 
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
     const session = await this.db.getSession(sessionId);
-    if (!session || session.status !== "approval") return null;
-    const liveApproval = this.liveApprovals.get(sessionId);
-    if (liveApproval) return this.repositoryScopedApproval(sessionId, liveApproval);
+    if (!session || session.status === "missing") return null;
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
-      return this.repositoryScopedApproval(
-        sessionId,
-        materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId))
-      );
+      const approval = materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
+      this.liveApprovals.set(sessionId, approval);
+      if (session.status !== "approval") {
+        const now = nowIso();
+        await this.db.setSessionStatus(sessionId, "approval", now);
+        this.publish("status.changed", sessionId, { status: "approval" });
+        this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+      }
+      return this.repositoryScopedApproval(sessionId, approval);
     }
+    if (session.status !== "approval") return null;
+    const liveApproval = this.liveApprovals.get(sessionId);
+    if (liveApproval) return this.repositoryScopedApproval(sessionId, liveApproval);
     const message = await this.db.latestApprovalMessage(sessionId);
     if (!message) return null;
     const approval = materializeApproval(message);

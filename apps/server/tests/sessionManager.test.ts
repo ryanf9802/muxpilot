@@ -486,6 +486,7 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.capturePane = async () => capture;
     harness.tmux.sendKeys = async (_paneId, keys) => {
       sentKeys.push(keys);
+      capture = "› ";
     };
 
     await harness.manager.discover();
@@ -548,6 +549,7 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.capturePane = async () => capture;
     harness.tmux.sendKeys = async (_paneId, keys) => {
       sentKeys.push(keys);
+      capture = "› ";
     };
 
     await harness.manager.discover();
@@ -582,6 +584,69 @@ describe("SessionManager transcript isolation", () => {
     expect(await harness.db.hasRepositoryApprovalRule("/repo/.git", ["pnpm", "app", "restart", "prod"])).toBe(false);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    harness.db.close();
+  });
+
+  it("recovers a nested terminal approval when the persisted status is waiting", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "nested-command-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-nested-command-approval",
+            input: "for (const command of commands) await tools.exec_command({ sandbox_permissions: 'require_escalated' });"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    const sentKeys: string[][] = [];
+    let capture = commandApprovalCapture(1);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      capture = "› ";
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+    await harness.manager.resolveApproval(session.id, { decision: "approve_once" });
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+
+    capture = commandApprovalCapture(1)
+      .replaceAll("pnpm app restart prod", "git status --short --branch; git log -1 --oneline --decorate")
+      .replace(
+        "Do you want to allow restarting the muxpilot production server so the simplified hold feedback is live?",
+        "May I verify which existing managed checkout matches the target branch outside the broken sandbox mount?"
+      );
+    const approval = await harness.manager.getPendingApproval(session.id);
+
+    expect(approval).toMatchObject({
+      kind: "command",
+      command: "git status --short --branch; git log -1 --oneline --decorate",
+      reason: "May I verify which existing managed checkout matches the target branch outside the broken sandbox mount?"
+    });
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_once" });
+    expect(sentKeys).toEqual([["Enter"], ["Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     harness.db.close();
   });
 
