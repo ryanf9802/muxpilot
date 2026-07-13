@@ -267,9 +267,13 @@ export function AppShell() {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
       if (isNotificationTriggeredEvent(event)) {
         if (notificationSoundEnabled(notificationSettingsRef.current)) playNotificationBell();
-        toast(notificationToastMessage(event.payload), {
+        const message = notificationToastMessage(event.payload);
+        toast(message, {
           position: locationPathRef.current.startsWith("/sessions/") ? "top-right" : "top-left",
-          type: toastTypeForNotification(event.payload)
+          type: toastTypeForNotification(event.payload),
+          className: "session-notification-toast",
+          ariaLabel: `${message}. Open chat session`,
+          onClick: () => navigate(event.payload.url)
         });
       }
       if (shouldRefreshSessionsForEvent(event)) scheduleLoad();
@@ -286,7 +290,7 @@ export function AppShell() {
       clearInterval(interval);
       socket.close();
     };
-  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, probeShellConnection, shellSocketEpoch]);
+  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "disconnected") return undefined;
@@ -877,7 +881,7 @@ export function AppShell() {
           }
         />
       </main>
-      <ToastContainer theme="dark" newestOnTop closeOnClick pauseOnFocusLoss={false} />
+      <ToastContainer theme="dark" newestOnTop closeButton closeOnClick pauseOnFocusLoss={false} />
       <Modal
         open={createSessionOpen}
         onClose={closeCreateSession}
