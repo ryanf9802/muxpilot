@@ -1101,6 +1101,38 @@ describe("AppDatabase notifications", () => {
 });
 
 describe("AppDatabase touched repositories", () => {
+  it("persists dismissals until the directory is touched again", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const db = new AppDatabase(path);
+    const repository = {
+      path: "/repo/old",
+      label: "old",
+      repoRoot: "/repo/old",
+      branch: "main",
+      lastActivityAt: "2026-07-08T00:00:00.000Z"
+    };
+
+    await db.upsertTouchedRepository(repository, "2026-07-08T00:00:00.000Z");
+    await db.dismissSessionDirectory(repository.path, "2026-07-08T01:00:00.000Z");
+    expect(await db.listDismissedSessionDirectories()).toEqual([repository.path]);
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listDismissedSessionDirectories()).toEqual([repository.path]);
+    await restarted.upsertTouchedRepository(
+      { ...repository, lastActivityAt: "2026-07-08T00:30:00.000Z" },
+      "2026-07-08T03:00:00.000Z"
+    );
+    expect(await restarted.listDismissedSessionDirectories()).toEqual([repository.path]);
+    await restarted.upsertTouchedRepository(
+      { ...repository, lastActivityAt: "2026-07-08T02:00:00.000Z" },
+      "2026-07-08T03:00:00.000Z"
+    );
+    expect(await restarted.listDismissedSessionDirectories()).toEqual([]);
+    restarted.close();
+  });
+
   it("persists touched repositories in recency order", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
     const path = join(dir, "test.db");
@@ -1200,9 +1232,11 @@ describe("AppDatabase touched repositories", () => {
       },
       "2026-07-08T04:00:01.000Z"
     );
+    await db.dismissSessionDirectory("/repo/backfilled", "2026-07-08T05:00:00.000Z");
     db.close();
 
     const restarted = new AppDatabase(path);
+    expect(await restarted.listDismissedSessionDirectories()).toEqual(["/repo/backfilled"]);
     expect(await restarted.listTouchedRepositories()).toEqual([
       {
         path: "/repo/backfilled",

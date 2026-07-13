@@ -2225,7 +2225,13 @@ select:focus-visible {
   box-shadow: var(--shadow-elevated);
 }
 
-.session-directory-suggestions button {
+.session-directory-suggestion-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+}
+
+.session-directory-suggestion-option {
   display: grid;
   gap: 3px;
   width: 100%;
@@ -2238,11 +2244,30 @@ select:focus-visible {
   border-radius: 7px;
 }
 
-.session-directory-suggestions button:hover,
-.session-directory-suggestions button:focus-visible,
-.session-directory-suggestions button.session-directory-suggestion-selected {
+.session-directory-suggestion-option:hover,
+.session-directory-suggestion-option:focus-visible,
+.session-directory-suggestion-option.session-directory-suggestion-selected {
   background: color-mix(in srgb, var(--color-secondary) 10%, transparent);
   border-color: color-mix(in srgb, var(--color-secondary) 34%, var(--color-border));
+}
+
+.session-directory-suggestion-remove {
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  width: 38px;
+  padding: 0;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+}
+
+.session-directory-suggestion-remove:hover,
+.session-directory-suggestion-remove:focus-visible {
+  color: var(--color-error);
+  background: color-mix(in srgb, var(--color-error) 10%, transparent);
+  border-color: color-mix(in srgb, var(--color-error) 34%, var(--color-border));
 }
 
 .session-directory-suggestion-name,

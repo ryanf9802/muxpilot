@@ -3240,6 +3240,24 @@ describe("SessionManager transcript isolation", () => {
     expect(suggestions.map((suggestion) => [suggestion.path, suggestion.source])).toContainEqual([activeRepo, "active"]);
     expect(suggestions.map((suggestion) => [suggestion.path, suggestion.source])).toContainEqual([recentRepo, "recent"]);
     expect(suggestions.map((suggestion) => suggestion.path)).not.toContain(missingRepo);
+
+    await harness.manager.dismissSessionDirectory(activeRepo);
+    expect((await harness.manager.listSessionDirectories()).map((suggestion) => suggestion.path)).not.toContain(activeRepo);
+
+    await harness.manager.dismissSessionDirectory(recentRepo);
+    expect((await harness.manager.listSessionDirectories()).map((suggestion) => suggestion.path)).not.toContain(recentRepo);
+
+    await harness.db.upsertTouchedRepository(
+      {
+        path: recentRepo,
+        label: "recent",
+        repoRoot: recentRepo,
+        branch: null,
+        lastActivityAt: "9999-07-08T02:00:00.000Z"
+      },
+      "9999-07-08T02:00:00.000Z"
+    );
+    expect((await harness.manager.listSessionDirectories()).map((suggestion) => suggestion.path)).toContain(recentRepo);
     harness.db.close();
   });
 

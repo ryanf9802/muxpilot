@@ -345,6 +345,14 @@ export class AppDatabase {
     return this.call("upsertTouchedRepository", repository, updatedAt) as Promise<void>;
   }
 
+  dismissSessionDirectory(path: string, dismissedAt: string): Promise<void> {
+    return this.call("dismissSessionDirectory", path, dismissedAt) as Promise<void>;
+  }
+
+  listDismissedSessionDirectories(): Promise<string[]> {
+    return this.call("listDismissedSessionDirectories") as Promise<string[]>;
+  }
+
   listTouchedRepositories(limit = 100): Promise<SessionDirectorySuggestion[]> {
     return this.call("listTouchedRepositories", limit) as Promise<SessionDirectorySuggestion[]>;
   }
@@ -882,6 +890,26 @@ export class SyncAppDatabase {
         repository.lastActivityAt,
         updatedAt
       );
+    if (repository.lastActivityAt) {
+      this.db
+        .prepare("DELETE FROM dismissed_session_directories WHERE path = ? AND dismissed_at < ?")
+        .run(repository.path, repository.lastActivityAt);
+    }
+  }
+
+  dismissSessionDirectory(path: string, dismissedAt: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO dismissed_session_directories (path, dismissed_at)
+         VALUES (?, ?)
+         ON CONFLICT(path) DO UPDATE SET dismissed_at=excluded.dismissed_at`
+      )
+      .run(path, dismissedAt);
+  }
+
+  listDismissedSessionDirectories(): string[] {
+    return (this.db.prepare("SELECT path FROM dismissed_session_directories").all() as unknown as Array<{ path: string }>)
+      .map((row) => row.path);
   }
 
   listTouchedRepositories(limit = 100): SessionDirectorySuggestion[] {
@@ -2275,6 +2303,11 @@ export class SyncAppDatabase {
         branch TEXT,
         last_activity_at TEXT,
         updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS dismissed_session_directories (
+        path TEXT PRIMARY KEY,
+        dismissed_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS git_workspaces (

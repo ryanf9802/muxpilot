@@ -852,6 +852,7 @@ export class SessionManager {
 
   async listSessionDirectories(): Promise<SessionDirectorySuggestion[]> {
     const suggestions = new Map<string, SessionDirectorySuggestion>();
+    const dismissedPaths = new Set(await this.db.listDismissedSessionDirectories());
 
     for (const session of await this.db.listSessions(false)) {
       if (session.status === "missing") continue;
@@ -861,15 +862,19 @@ export class SessionManager {
         repoRoot: session.repo.root,
         branch: session.repo.branch
       });
-      if (next) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
+      if (next && !dismissedPaths.has(next.path)) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
     }
 
     for (const repository of await this.db.listTouchedRepositories()) {
       const next = await directorySuggestionFromPath(repository.path, "recent", repository.lastActivityAt, repository);
-      if (next) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
+      if (next && !dismissedPaths.has(next.path)) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
     }
 
     return [...suggestions.values()].sort(compareDirectorySuggestions);
+  }
+
+  async dismissSessionDirectory(path: string): Promise<void> {
+    await this.db.dismissSessionDirectory(path, nowIso());
   }
 
   async probeGitRepository(path: string) {

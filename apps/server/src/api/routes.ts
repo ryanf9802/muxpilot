@@ -85,6 +85,7 @@ const questionAnswerSchema = z.object({
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
+const sessionDirectorySchema = z.object({ path: z.string().trim().min(1).max(4096) });
 const sessionTransferExportSchema = z.object({ sessionIds: z.array(z.string().min(1)).min(1).max(500) });
 const sessionTransferImportSchema = z.object({
   token: z.string().min(16).max(100),
@@ -288,6 +289,12 @@ export function registerRoutes(
   app.get("/api/session-directories", { preHandler: access.requireAccess }, async (): Promise<SessionDirectoriesResponse> => ({
     directories: await manager.listSessionDirectories()
   }));
+
+  app.delete("/api/session-directories", { preHandler: access.requireAccess }, async (request) => {
+    const { path } = sessionDirectorySchema.parse(request.body);
+    await manager.dismissSessionDirectory(path);
+    return { ok: true as const };
+  });
 
   app.get("/api/git/repository-probe", { preHandler: access.requireAccess }, async (request) => {
     const { cwd } = z.object({ cwd: z.string().trim().min(1).max(4096) }).parse(request.query);

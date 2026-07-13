@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Upload } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -302,6 +302,7 @@ export function AppShell() {
   useEffect(() => {
     if (!createSessionOpen) return;
     let cancelled = false;
+    setServerDirectorySuggestions([]);
     api
       .sessionDirectories()
       .then((response) => {
@@ -393,11 +394,7 @@ export function AppShell() {
   });
 
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
-  const clientDirectorySuggestions = useMemo(() => sessionDirectorySuggestionsFromSessions(sessions), [sessions]);
-  const directorySuggestions = useMemo(
-    () => mergeSessionDirectorySuggestions(clientDirectorySuggestions, serverDirectorySuggestions),
-    [clientDirectorySuggestions, serverDirectorySuggestions]
-  );
+  const directorySuggestions = serverDirectorySuggestions;
   const createSessionNameWarning = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
   const createSessionNameInvalid = createSessionOpen && !isValidSessionName(normalizeSessionName(createSessionName));
   const gitWorkspaceFieldsAvailable = gitSkillStatus === "current";
@@ -589,6 +586,19 @@ export function AppShell() {
     setCreateSessionDirectoryFocused(false);
     setCreateSessionError(null);
     setCreateSessionDirectorySelectedIndex(0);
+  }
+
+  async function dismissCreateSessionDirectory(path: string) {
+    const removedSuggestion = serverDirectorySuggestions.find((suggestion) => suggestion.path === path);
+    setServerDirectorySuggestions((suggestions) => suggestions.filter((suggestion) => suggestion.path !== path));
+    try {
+      await api.dismissSessionDirectory(path);
+    } catch {
+      if (removedSuggestion) {
+        setServerDirectorySuggestions((suggestions) => mergeSessionDirectorySuggestions(suggestions, [removedSuggestion]));
+      }
+      toast.error("Could not remove directory recommendation.");
+    }
   }
 
   function handleCreateSessionDirectoryKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
@@ -911,21 +921,32 @@ export function AppShell() {
                     {showDirectorySuggestions ? (
                       <div className="session-directory-suggestions" id="session-directory-suggestions" role="listbox" aria-label="Session directories">
                         {visibleDirectorySuggestions.map((suggestion, index) => (
-                          <button
-                            key={suggestion.path}
-                            id={sessionDirectorySuggestionOptionId(suggestion.path)}
-                            ref={(element) => updateDirectorySuggestionRef(directorySuggestionRefs.current, suggestion.path, element)}
-                            type="button"
-                            role="option"
-                            aria-selected={index === createSessionDirectorySelectedIndex}
-                            className={index === createSessionDirectorySelectedIndex ? "session-directory-suggestion-selected" : undefined}
-                            onMouseDown={(event) => event.preventDefault()}
-                            onMouseEnter={() => setCreateSessionDirectorySelectedIndex(index)}
-                            onClick={() => chooseCreateSessionDirectory(suggestion.path)}
-                          >
-                            <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
-                            <span className="session-directory-suggestion-path">{suggestion.path}</span>
-                          </button>
+                          <div className="session-directory-suggestion-row" role="presentation" key={suggestion.path}>
+                            <button
+                              id={sessionDirectorySuggestionOptionId(suggestion.path)}
+                              ref={(element) => updateDirectorySuggestionRef(directorySuggestionRefs.current, suggestion.path, element)}
+                              type="button"
+                              role="option"
+                              aria-selected={index === createSessionDirectorySelectedIndex}
+                              className={`session-directory-suggestion-option${index === createSessionDirectorySelectedIndex ? " session-directory-suggestion-selected" : ""}`}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onMouseEnter={() => setCreateSessionDirectorySelectedIndex(index)}
+                              onClick={() => chooseCreateSessionDirectory(suggestion.path)}
+                            >
+                              <span className="session-directory-suggestion-name">{directorySuggestionLabel(suggestion)}</span>
+                              <span className="session-directory-suggestion-path">{suggestion.path}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className="session-directory-suggestion-remove"
+                              aria-label={`Remove ${suggestion.path} from recommendations`}
+                              title="Remove from recommendations"
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => void dismissCreateSessionDirectory(suggestion.path)}
+                            >
+                              <Trash2 size={15} />
+                            </button>
+                          </div>
                         ))}
                       </div>
                     ) : null}

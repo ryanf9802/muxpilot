@@ -220,6 +220,21 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/session-directories", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("dismisses a session directory suggestion", async () => {
+    const fetchMock = mockJsonResponse({ ok: true });
+
+    await api.dismissSessionDirectory("/home/dev/old project");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/session-directories",
+      expect.objectContaining({
+        method: "DELETE",
+        credentials: "include",
+        body: JSON.stringify({ path: "/home/dev/old project" })
+      })
+    );
+  });
+
   it("uses the server-provided session archive download filename", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("archive", {
       status: 200,

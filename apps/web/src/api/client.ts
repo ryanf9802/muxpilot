@@ -113,6 +113,8 @@ export const api = {
   restoreSession: (id: string) =>
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
+  dismissSessionDirectory: (path: string) =>
+    json<{ ok: true }>("/api/session-directories", { method: "DELETE", body: JSON.stringify({ path }) }),
   sessionTransferStatus: () => json<{ encryptionEnabled: boolean }>("/api/session-transfers/status"),
   inspectSessionTransfer: async (file: File) => {
     const response = await fetch("/api/session-transfers/inspect", {
