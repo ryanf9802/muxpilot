@@ -9,6 +9,7 @@ import {
   DisconnectedNotice,
   GitWorkflowSkillStatusCallout,
   SHELL_RECONNECT_INTERVAL_MS,
+  SHELL_CONNECTION_PROBE_TIMEOUT_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
   hasShortcutBlockingOverlay,
@@ -83,6 +84,7 @@ describe("shell connection state", () => {
 
   it("uses a short reconnect interval for transient disconnects", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);
+    expect(SHELL_CONNECTION_PROBE_TIMEOUT_MS).toBe(5000);
   });
 
   it("only probes connectivity for failures that did not receive an HTTP response", () => {

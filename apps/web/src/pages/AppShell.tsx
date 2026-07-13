@@ -38,6 +38,7 @@ import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { AppBrand } from "../components/AppBrand.js";
 import { AppLoadingSkeleton, loadingSkeletonVariantForPath } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
+import { installForegroundRecoveryListeners, requestWithTimeout } from "../utils/connectionRecovery.js";
 import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, dropdownMenuPosition, submenuPosition, useDismissableContextMenu } from "../components/ContextMenu.js";
 import {
   disablePushSubscription,
@@ -52,6 +53,7 @@ import {
 
 export type ShellConnectionState = "checking" | "connected" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
+export const SHELL_CONNECTION_PROBE_TIMEOUT_MS = 5000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
@@ -113,7 +115,10 @@ export function AppShell() {
   const createSessionCwdPrefillRef = useRef<() => string>(() => "");
   const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
   const sessionHistoryRequestIdRef = useRef(0);
-  const connectionProbeRunningRef = useRef(false);
+  const connectionProbeRef = useRef<{
+    controller: AbortController;
+    promise: Promise<boolean>;
+  } | null>(null);
 
   useEffect(() => installCtrlWGuard(), []);
 
@@ -155,22 +160,45 @@ export function AppShell() {
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
   }, [markUnauthorized]);
 
+  const probeShellConnection = useCallback((supersede = false): Promise<boolean> => {
+    const activeProbe = connectionProbeRef.current;
+    if (activeProbe && !supersede) return activeProbe.promise;
+    if (activeProbe) {
+      connectionProbeRef.current = null;
+      activeProbe.controller.abort();
+    }
+
+    const controller = new AbortController();
+    const probe: { controller: AbortController; promise: Promise<boolean> } = {
+      controller,
+      promise: Promise.resolve(false)
+    };
+    probe.promise = requestWithTimeout((signal) => api.me(signal), SHELL_CONNECTION_PROBE_TIMEOUT_MS, controller)
+      .then((me) => {
+        if (connectionProbeRef.current !== probe) return false;
+        applyMe(me);
+        return me.accessGranted;
+      })
+      .catch((error) => {
+        if (connectionProbeRef.current !== probe) return false;
+        markDisconnected(error);
+        return false;
+      })
+      .finally(() => {
+        if (connectionProbeRef.current === probe) connectionProbeRef.current = null;
+      });
+    connectionProbeRef.current = probe;
+    return probe.promise;
+  }, [applyMe, markDisconnected]);
+
   const handleConnectedRequestFailure = useCallback((error: unknown) => {
     if (isUnauthorizedError(error)) {
       markUnauthorized();
       return;
     }
     if (!shouldProbeShellConnection(error)) return;
-    if (connectionProbeRunningRef.current) return;
-    connectionProbeRunningRef.current = true;
-    void api
-      .me()
-      .then(applyMe)
-      .catch(markDisconnected)
-      .finally(() => {
-        connectionProbeRunningRef.current = false;
-      });
-  }, [applyMe, markDisconnected, markUnauthorized]);
+    void probeShellConnection();
+  }, [markUnauthorized, probeShellConnection]);
 
   useEffect(() => {
     const handleAuthExpired = () => markUnauthorized();
@@ -193,11 +221,21 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
-    api
-      .me()
-      .then(applyMe)
-      .catch(markDisconnected);
-  }, [applyMe, markDisconnected]);
+    void probeShellConnection(true);
+    return () => {
+      const activeProbe = connectionProbeRef.current;
+      connectionProbeRef.current = null;
+      activeProbe?.controller.abort();
+    };
+  }, [probeShellConnection]);
+
+  useEffect(() => installForegroundRecoveryListeners(() => {
+    if (connectionStateRef.current === "connected") {
+      setConnectionEpoch((epoch) => epoch + 1);
+      setShellSocketEpoch((epoch) => epoch + 1);
+    }
+    void probeShellConnection(true);
+  }), [probeShellConnection]);
 
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
@@ -238,20 +276,8 @@ export function AppShell() {
     };
     socket.onclose = () => {
       if (closing) return;
-      void api
-        .me()
-        .then((me) => {
-          if (closing) return;
-          if (!me.accessGranted) {
-            markUnauthorized();
-            return;
-          }
-          applyMe(me);
-          reconnectSockets();
-        })
-        .catch((error) => {
-          if (!closing) markDisconnected(error);
-        });
+      reconnectSockets();
+      void probeShellConnection();
     };
     return () => {
       closing = true;
@@ -260,28 +286,18 @@ export function AppShell() {
       clearInterval(interval);
       socket.close();
     };
-  }, [applyMe, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, markDisconnected, markUnauthorized, shellSocketEpoch]);
+  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, probeShellConnection, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "disconnected") return undefined;
 
-    let cancelled = false;
-    const poll = () => {
-      void api
-        .me()
-        .then((me) => {
-          if (!cancelled) applyMe(me);
-        })
-        .catch((error) => {
-          if (!cancelled) markDisconnected(error);
-        });
-    };
+    const poll = () => void probeShellConnection();
+    poll();
     const interval = setInterval(poll, SHELL_RECONNECT_INTERVAL_MS);
     return () => {
-      cancelled = true;
       clearInterval(interval);
     };
-  }, [applyMe, connectionState, markDisconnected]);
+  }, [connectionState, probeShellConnection]);
 
   useEffect(() => {
     if (!createSessionOpen) return;
@@ -508,14 +524,11 @@ export function AppShell() {
     if (retryBusy) return;
     setRetryBusy(true);
     try {
-      const me = await api.me();
-      applyMe(me);
-    } catch (error) {
-      markDisconnected(error);
+      await probeShellConnection(true);
     } finally {
       setRetryBusy(false);
     }
-  }, [applyMe, markDisconnected, retryBusy]);
+  }, [probeShellConnection, retryBusy]);
 
   if (connectionState === "checking") {
     return <AppLoadingSkeleton variant={loadingSkeletonVariantForPath(location.pathname)} />;

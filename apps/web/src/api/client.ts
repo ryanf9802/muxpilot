@@ -86,7 +86,7 @@ interface MessageQuery {
 }
 
 export const api = {
-  me: () => json<MeResponse>("/api/me"),
+  me: (signal?: AbortSignal) => json<MeResponse>("/api/me", { signal }),
   access: (accessKey: string) =>
     json<AccessResponse>("/api/access", { method: "POST", body: JSON.stringify({ accessKey }) }),
   logout: () => json<{ ok: true }>("/api/logout", { method: "POST" }),

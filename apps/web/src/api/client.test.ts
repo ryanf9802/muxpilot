@@ -21,6 +21,18 @@ describe("api client request headers", () => {
     expect(new Headers(init.headers).has("Content-Type")).toBe(false);
   });
 
+  it("forwards an abort signal to connectivity probes", async () => {
+    const fetchMock = mockJsonResponse({ accessGranted: true, accessKeyRequired: false, accessMode: "local" });
+    const controller = new AbortController();
+
+    await api.me(controller.signal);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/me",
+      expect.objectContaining({ credentials: "include", signal: controller.signal })
+    );
+  });
+
   it("sends access keys to the operator access endpoint", async () => {
     const fetchMock = mockJsonResponse({ ok: true });
 
