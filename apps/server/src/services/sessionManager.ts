@@ -159,8 +159,17 @@ export class SessionManager {
     const paneIds = panes.map(tmuxPaneSessionId);
 
     for (const [index, pane] of panes.entries()) {
-      const existingId = paneIds[index] ?? tmuxPaneSessionId(pane);
-      const existing = await this.db.getSession(existingId);
+      const sessionId = paneIds[index] ?? tmuxPaneSessionId(pane);
+      const currentExisting = await this.db.getSession(sessionId);
+      const legacyId = legacyTmuxPaneSessionId(pane);
+      const legacyExisting = !currentExisting && legacyId !== sessionId
+        ? await this.db.getSession(legacyId)
+        : null;
+      const migratingLegacy = legacyExisting && sameLivePaneProcess(legacyExisting, pane)
+        ? legacyExisting
+        : null;
+      const existing = currentExisting ?? migratingLegacy;
+      const lookupId = existing?.id ?? sessionId;
       const processInfo = await this.codexProcessLookup?.resolveForPane(pane.pid).catch(() => null) ?? null;
       const match = await claimCodexFile(
         pane,
@@ -177,7 +186,7 @@ export class SessionManager {
         continue;
       }
 
-      seen.add(existingId);
+      seen.add(sessionId);
       let repo = await loadRepoMetadata(pane.cwd);
       const nextCodexSessionId = match?.sessionId ?? null;
       const nextCodexJsonlPath = match?.path ?? null;
@@ -186,8 +195,8 @@ export class SessionManager {
           (existing.codexSessionId !== nextCodexSessionId || existing.codexJsonlPath !== nextCodexJsonlPath)
       );
       if (sourceChanged) {
-        await this.db.clearSessionTranscript(existingId);
-        if (nextCodexJsonlPath) await this.db.resetParserOffset(parserOffsetKey(existingId, nextCodexJsonlPath));
+        await this.db.clearSessionTranscript(lookupId);
+        if (nextCodexJsonlPath) await this.db.resetParserOffset(parserOffsetKey(lookupId, nextCodexJsonlPath));
       }
       const transcriptSyncing = nextCodexJsonlPath
         ? sourceChanged || !existing || existing.transcriptSyncing === true
@@ -197,7 +206,7 @@ export class SessionManager {
         existing?.inputMode ??
         "default";
       const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-      const latestMessage = await this.db.latestMessage(existingId);
+      const latestMessage = await this.db.latestMessage(lookupId);
       const liveApprovalPrompt =
         rawInferredStatus !== "approval"
           ? null
@@ -208,16 +217,16 @@ export class SessionManager {
         rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
           ? rejectedApprovalFallbackStatus(pane, existing?.status)
           : rawInferredStatus;
-      const latestUserMessage = await this.db.latestUserMessage(existingId);
-      const latestQuestionMessage = await this.db.latestQuestionMessage(existingId);
+      const latestUserMessage = await this.db.latestUserMessage(lookupId);
+      const latestQuestionMessage = await this.db.latestQuestionMessage(lookupId);
       const status = resolveSessionStatus(
         inferredStatus,
         existing?.status,
         inputMode,
         latestMessage,
         latestQuestionMessage,
-        await this.latestQuestionAnswerMessage(existingId, latestQuestionMessage),
-        await this.db.latestPlanReadyMessage(existingId),
+        await this.latestQuestionAnswerMessage(lookupId, latestQuestionMessage),
+        await this.db.latestPlanReadyMessage(lookupId),
         latestUserMessage,
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
@@ -229,11 +238,11 @@ export class SessionManager {
         (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
       );
       const liveModelSettings = mergeModelSettings(jsonlModelSettings, paneModelSettings);
-      const storedGitWorkspace = await this.gitWorkspaces?.getBySession(existingId) ?? null;
+      const storedGitWorkspace = await this.gitWorkspaces?.getBySession(lookupId) ?? null;
       if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
       const session: ManagedSession = {
-        id: existingId,
+        id: sessionId,
         tmux: pane,
         repo,
         codexSessionId: nextCodexSessionId,
@@ -257,14 +266,26 @@ export class SessionManager {
       };
 
       if (status === "approval" && liveApprovalPrompt) {
-        this.liveApprovals.set(existingId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
+        this.liveApprovals.set(sessionId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
       } else {
-        this.liveApprovals.delete(existingId);
+        this.liveApprovals.delete(sessionId);
       }
-      if (!liveApprovalPrompt) this.resolvingRepositoryApprovals.delete(existingId);
+      if (!liveApprovalPrompt) this.resolvingRepositoryApprovals.delete(sessionId);
 
       const changed = !existing || sessionChanged(existing, session);
-      await this.db.upsertSession(session, now);
+      if (migratingLegacy) {
+        const parserOffsetMove = nextCodexJsonlPath
+          ? {
+              from: parserOffsetKey(migratingLegacy.id, nextCodexJsonlPath),
+              to: parserOffsetKey(session.id, nextCodexJsonlPath)
+            }
+          : null;
+        await this.db.rekeySession(migratingLegacy.id, session, parserOffsetMove, now);
+        this.liveApprovals.delete(migratingLegacy.id);
+        this.resolvingRepositoryApprovals.delete(migratingLegacy.id);
+      } else {
+        await this.db.upsertSession(session, now);
+      }
       await this.recordTouchedRepository(session, now);
       if (changed) this.publish("session.updated", session.id, session);
       await this.processQueuedInputs(session.id);
@@ -1901,8 +1922,18 @@ function parserOffsetKey(sessionId: string, source: string): string {
   return `${sessionId}:${source}`;
 }
 
-function tmuxPaneSessionId(pane: TmuxPane): string {
+export function tmuxPaneSessionId(pane: TmuxPane): string {
+  const legacyIdentity = `${pane.sessionId}:${pane.windowId}:${pane.paneId}`;
+  if (!pane.serverPid || !pane.sessionCreatedAt) return stableId(legacyIdentity);
+  return stableId(`${pane.serverPid}:${pane.sessionCreatedAt}:${legacyIdentity}`);
+}
+
+export function legacyTmuxPaneSessionId(pane: TmuxPane): string {
   return stableId(`${pane.sessionId}:${pane.windowId}:${pane.paneId}`);
+}
+
+function sameLivePaneProcess(session: ManagedSession, pane: TmuxPane): boolean {
+  return session.tmux.pid > 0 && session.tmux.pid === pane.pid;
 }
 
 function sessionChanged(previous: ManagedSession, next: ManagedSession): boolean {

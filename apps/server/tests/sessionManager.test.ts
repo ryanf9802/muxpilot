@@ -9,9 +9,11 @@ import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import {
   codexModelSettingsFromPaneText,
+  legacyTmuxPaneSessionId,
   managedCodexLaunchOptions,
   normalizeRepositoryApprovalPrefix,
-  SessionManager
+  SessionManager,
+  tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
 import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
 
@@ -3056,6 +3058,111 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("keeps recycled tmux counters distinct across server generations", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const firstPane = testPane({
+      cwd: repo,
+      paneId: "%1",
+      windowId: "@1",
+      pid: 101,
+      serverPid: 1001,
+      sessionCreatedAt: 1_700_000_001
+    });
+    let panes = [firstPane];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.discover();
+    const firstSessionId = tmuxPaneSessionId(firstPane);
+    await harness.db.upsertGitWorkspace({
+      id: "workspace-first-generation",
+      sessionId: firstSessionId,
+      commonGitDir: join(repo, ".git"),
+      helperToken: "",
+      summary: { id: "workspace-first-generation", entryPath: repo, targetBranch: "main" },
+      createdAt: "2026-07-13T00:00:00.000Z",
+      updatedAt: "2026-07-13T00:00:00.000Z"
+    }, "2026-07-13T00:00:00.000Z");
+
+    panes = [];
+    await harness.manager.discover();
+    const secondPane = testPane({
+      cwd: repo,
+      paneId: "%1",
+      windowId: "@1",
+      pid: 102,
+      serverPid: 1002,
+      sessionCreatedAt: 1_700_000_002
+    });
+    panes = [secondPane];
+    await harness.manager.discover();
+    const secondSessionId = tmuxPaneSessionId(secondPane);
+    await harness.db.upsertGitWorkspace({
+      id: "workspace-second-generation",
+      sessionId: secondSessionId,
+      commonGitDir: join(repo, ".git"),
+      helperToken: "",
+      summary: { id: "workspace-second-generation", entryPath: repo, targetBranch: "main" },
+      createdAt: "2026-07-13T00:00:01.000Z",
+      updatedAt: "2026-07-13T00:00:01.000Z"
+    }, "2026-07-13T00:00:01.000Z");
+
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(await harness.db.getGitWorkspaceBySession(firstSessionId)).toMatchObject({ id: "workspace-first-generation" });
+    expect(await harness.db.getGitWorkspaceBySession(secondSessionId)).toMatchObject({ id: "workspace-second-generation" });
+    harness.db.close();
+  });
+
+  it("rekeys a live legacy session when generation metadata first appears", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "legacy.jsonl", {
+      sessionId: "codex-legacy",
+      cwd: repo,
+      user: "preserve legacy history",
+      assistant: "legacy answer",
+      mtime: new Date("2026-07-13T00:00:00.000Z")
+    });
+    const legacyPane = testPane({ cwd: repo, paneId: "%1", windowId: "@1", pid: 101 });
+    let panes = [legacyPane];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const legacyId = legacyTmuxPaneSessionId(legacyPane);
+    const transcriptPath = join(harness.codexHome, "sessions", "legacy.jsonl");
+    const legacyParserOffset = await harness.db.getParserOffset(`${legacyId}:${transcriptPath}`);
+    await harness.db.upsertGitWorkspace({
+      id: "workspace-legacy",
+      sessionId: legacyId,
+      commonGitDir: join(repo, ".git"),
+      helperToken: "",
+      summary: { id: "workspace-legacy", entryPath: repo, targetBranch: "main" },
+      createdAt: "2026-07-13T00:00:00.000Z",
+      updatedAt: "2026-07-13T00:00:00.000Z"
+    }, "2026-07-13T00:00:00.000Z");
+    await harness.db.setNotificationRule("device-legacy", "session", legacyId, "done_task", true, "2026-07-13T00:00:00.000Z");
+
+    const generationPane = { ...legacyPane, serverPid: 1001, sessionCreatedAt: 1_700_000_001 };
+    panes = [generationPane];
+    await harness.manager.discover();
+    const generationId = tmuxPaneSessionId(generationPane);
+
+    expect(generationId).not.toBe(legacyId);
+    expect(await harness.manager.getSession(legacyId)).toBeNull();
+    expect((await harness.manager.listMessages(generationId, 0)).map((message) => message.text)).toEqual([
+      "preserve legacy history",
+      "legacy answer"
+    ]);
+    expect(await harness.db.getGitWorkspaceBySession(generationId)).toMatchObject({ id: "workspace-legacy" });
+    expect((await harness.db.getNotificationSettings("device-legacy")).sessionRules[generationId]).toEqual(["done_task"]);
+    expect(await harness.db.getParserOffset(`${legacyId}:${transcriptPath}`)).toBe(0);
+    expect(await harness.db.getParserOffset(`${generationId}:${transcriptPath}`)).toBe(legacyParserOffset);
+    harness.db.close();
+  });
+
   it("restores a missing managed session with codex resume", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -3462,6 +3569,8 @@ function testPane(input: {
   paneId: string;
   windowId?: string;
   pid?: number;
+  serverPid?: number;
+  sessionCreatedAt?: number;
   windowName?: string;
   title?: string;
   sessionName?: string;
@@ -3469,6 +3578,8 @@ function testPane(input: {
   return {
     sessionId: "tmux-session",
     sessionName: input.sessionName ?? "work",
+    serverPid: input.serverPid,
+    sessionCreatedAt: input.sessionCreatedAt,
     windowId: input.windowId ?? `@${input.paneId.slice(1)}`,
     windowIndex: Number(input.paneId.slice(1)),
     windowName: input.windowName ?? "codex",

@@ -3,10 +3,28 @@ import {
   codexCommandArgs,
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
+  parsePaneLine,
   tmuxNewCodexResumeWindowArgs,
   tmuxNewCodexWindowArgs,
   tmuxPasteBufferArgs
 } from "../src/tmux/tmuxAdapter.js";
+
+describe("parsePaneLine", () => {
+  it("captures the tmux server generation for stable managed identities", () => {
+    const pane = parsePaneLine([
+      "$3", "muxpilot", "@40", "1", "task", "%40", "0", "1", "/repo", "codex", "Codex", "1234", "120x40",
+      "3156", "1783898706"
+    ].join("\t"));
+
+    expect(pane).toMatchObject({
+      sessionId: "$3",
+      windowId: "@40",
+      paneId: "%40",
+      serverPid: 3156,
+      sessionCreatedAt: 1783898706
+    });
+  });
+});
 
 describe("codexCommandArgs", () => {
   it("launches managed sessions in a neutral root with scoped writable directories", () => {

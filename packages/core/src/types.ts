@@ -74,6 +74,8 @@ export type MessageType =
 export interface TmuxPane {
   sessionId: string;
   sessionName: string;
+  serverPid?: number;
+  sessionCreatedAt?: number;
   windowId: string;
   windowIndex: number;
   windowName: string;

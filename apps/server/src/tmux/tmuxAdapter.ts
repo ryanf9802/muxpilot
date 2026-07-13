@@ -21,7 +21,9 @@ const PANE_FORMAT = [
   "#{pane_current_command}",
   "#{pane_title}",
   "#{pane_pid}",
-  "#{pane_width}x#{pane_height}"
+  "#{pane_width}x#{pane_height}",
+  "#{pid}",
+  "#{session_created}"
 ].join(SEP);
 
 export interface CodexLaunchOptions {
@@ -255,11 +257,13 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function parsePaneLine(line: string): TmuxPane {
+export function parsePaneLine(line: string): TmuxPane {
   const fields = line.split(SEP);
   return {
     sessionId: fields[0] ?? "",
     sessionName: fields[1] ?? "",
+    serverPid: optionalPositiveInteger(fields[13]),
+    sessionCreatedAt: optionalPositiveInteger(fields[14]),
     windowId: fields[2] ?? "",
     windowIndex: Number(fields[3] ?? 0),
     windowName: fields[4] ?? "",
@@ -272,4 +276,9 @@ function parsePaneLine(line: string): TmuxPane {
     pid: Number(fields[11] ?? 0),
     size: fields[12] ?? ""
   };
+}
+
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
