@@ -38,7 +38,12 @@ import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { AppBrand } from "../components/AppBrand.js";
 import { AppLoadingSkeleton, loadingSkeletonVariantForPath } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
-import { installForegroundRecoveryListeners, requestWithTimeout } from "../utils/connectionRecovery.js";
+import {
+  attemptConnectionAutoReload,
+  clearConnectionAutoReload,
+  installForegroundRecoveryListeners,
+  requestWithTimeout
+} from "../utils/connectionRecovery.js";
 import { ContextMenu, ContextMenuCheckboxItem, ContextMenuItem, ContextMenuSeparator, dropdownMenuPosition, submenuPosition, useDismissableContextMenu } from "../components/ContextMenu.js";
 import {
   disablePushSubscription,
@@ -73,7 +78,6 @@ export function AppShell() {
   const [showConnectButton, setShowConnectButton] = useState(false);
   const [showLogoutButton, setShowLogoutButton] = useState(true);
   const [accessMode, setAccessMode] = useState<AccessMode | null>(null);
-  const [retryBusy, setRetryBusy] = useState(false);
   const [createSessionOpen, setCreateSessionOpen] = useState(false);
   const [createSessionCwd, setCreateSessionCwd] = useState("");
   const [createSessionName, setCreateSessionName] = useState("");
@@ -119,6 +123,7 @@ export function AppShell() {
     controller: AbortController;
     promise: Promise<boolean>;
   } | null>(null);
+  const connectionProbeFailureCountRef = useRef(0);
 
   useEffect(() => installCtrlWGuard(), []);
 
@@ -148,6 +153,8 @@ export function AppShell() {
   }, [markUnauthorized]);
 
   const applyMe = useCallback((me: MeResponse) => {
+    connectionProbeFailureCountRef.current = 0;
+    clearConnectionAutoReload(() => window.sessionStorage);
     if (!me.accessGranted) {
       markUnauthorized();
       return;
@@ -182,6 +189,13 @@ export function AppShell() {
       .catch((error) => {
         if (connectionProbeRef.current !== probe) return false;
         markDisconnected(error);
+        connectionProbeFailureCountRef.current += 1;
+        attemptConnectionAutoReload(connectionProbeFailureCountRef.current, {
+          visibilityState: document.visibilityState,
+          online: navigator.onLine,
+          storage: () => window.sessionStorage,
+          reload: () => window.location.reload()
+        });
         return false;
       })
       .finally(() => {
@@ -521,16 +535,6 @@ export function AppShell() {
     return () => document.removeEventListener("keydown", handlePromptHistoryShortcut);
   }, [connectionState, connectOpen, createSessionOpen, openPromptHistory]);
 
-  const retryConnection = useCallback(async () => {
-    if (retryBusy) return;
-    setRetryBusy(true);
-    try {
-      await probeShellConnection(true);
-    } finally {
-      setRetryBusy(false);
-    }
-  }, [probeShellConnection, retryBusy]);
-
   if (connectionState === "checking") {
     return <AppLoadingSkeleton variant={loadingSkeletonVariantForPath(location.pathname)} />;
   }
@@ -548,10 +552,9 @@ export function AppShell() {
             role="status"
             title="Cannot reach muxpilot"
             message="The app is open, but the backend is not responding. Keep this page open while muxpilot reconnects."
-            detail="This can happen after the server restarts or when an installed PWA wakes before the backend is ready."
-            actionLabel={retryBusy ? "Retrying" : "Retry now"}
-            busy={retryBusy}
-            onAction={() => void retryConnection()}
+            detail="This can happen after the server restarts or when an installed PWA wakes with a stale network connection. Muxpilot will retry automatically."
+            actionLabel="Reload app"
+            onAction={() => window.location.reload()}
           />
         </main>
       </div>

@@ -107,7 +107,7 @@ describe("shell connection state", () => {
         title: "Cannot reach muxpilot",
         message: "The app is open, but the backend is not responding.",
         detail: "This can happen after the server restarts.",
-        actionLabel: "Retry now",
+        actionLabel: "Reload app",
         onAction: () => undefined
       })
     );
@@ -116,7 +116,7 @@ describe("shell connection state", () => {
     expect(html).toContain('role="alert"');
     expect(html).toContain("Cannot reach muxpilot");
     expect(html).toContain("The app is open, but the backend is not responding.");
-    expect(html).toContain("Retry now");
+    expect(html).toContain("Reload app");
   });
 });
 

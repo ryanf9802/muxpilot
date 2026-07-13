@@ -1,9 +1,17 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { installForegroundRecoveryListeners, requestWithTimeout } from "./connectionRecovery.js";
+import {
+  CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+  CONNECTION_AUTO_RELOAD_STORAGE_KEY,
+  attemptConnectionAutoReload,
+  clearConnectionAutoReload,
+  installForegroundRecoveryListeners,
+  requestWithTimeout
+} from "./connectionRecovery.js";
 
 afterEach(() => {
+  window.sessionStorage.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -32,6 +40,46 @@ describe("requestWithTimeout", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(controller.signal.aborted).toBe(false);
+  });
+});
+
+describe("connection reload escalation", () => {
+  it("reloads once after repeated visible failures", () => {
+    const reload = vi.fn();
+    const options = {
+      visibilityState: "visible" as const,
+      online: true,
+      storage: () => window.sessionStorage,
+      reload
+    };
+
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD - 1, options)).toBe(false);
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD, options)).toBe(true);
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 1, options)).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload while hidden, offline, or unable to record the guard", () => {
+    const reload = vi.fn();
+    const storage = () => window.sessionStorage;
+
+    expect(attemptConnectionAutoReload(3, { visibilityState: "hidden", online: true, storage, reload })).toBe(false);
+    expect(attemptConnectionAutoReload(3, { visibilityState: "visible", online: false, storage, reload })).toBe(false);
+    expect(attemptConnectionAutoReload(3, {
+      visibilityState: "visible",
+      online: true,
+      storage: () => { throw new Error("Storage unavailable"); },
+      reload
+    })).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("allows a future outage to reload after connectivity succeeds", () => {
+    window.sessionStorage.setItem(CONNECTION_AUTO_RELOAD_STORAGE_KEY, "attempted");
+
+    clearConnectionAutoReload(() => window.sessionStorage);
+
+    expect(window.sessionStorage.getItem(CONNECTION_AUTO_RELOAD_STORAGE_KEY)).toBeNull();
   });
 });
 
