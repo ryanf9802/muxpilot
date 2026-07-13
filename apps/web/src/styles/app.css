@@ -2413,14 +2413,6 @@ select:focus-visible {
   flex: 0 0 auto;
 }
 
-.session-header-branch {
-  min-width: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .git-workspace-chip {
   --git-workspace-state-color: var(--color-success);
   display: inline-flex;
@@ -4136,8 +4128,7 @@ select:focus-visible {
     gap: 0;
   }
 
-  .session-header-branch,
-  .session-header-branch-separator,
+  .session-header-meta-separator,
   .session-header-dirty {
     display: none;
   }

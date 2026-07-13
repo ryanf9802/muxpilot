@@ -583,7 +583,7 @@ describe("shouldQueueComposerInput", () => {
 });
 
 describe("SessionHeaderMeta", () => {
-  it("shows the repo and branch without the activity summary", () => {
+  it("shows the repo without repeating the branch or activity summary", () => {
     const session = {
       repo: repo("muxpilot", "feature/activity-summary"),
       activitySummary: "Header summary display"
@@ -596,11 +596,9 @@ describe("SessionHeaderMeta", () => {
     );
 
     expect(html).toContain("muxpilot");
-    expect(html).toContain("feature/activity-summary");
     expect(html).toContain('class="session-header-repo"');
-    expect(html).toContain('class="session-header-branch"');
-    expect(html).toContain('class="session-header-branch" title="feature/activity-summary"');
-    expect(html).toContain('class="session-header-branch-separator"');
+    expect(html).not.toContain("feature/activity-summary");
+    expect(html).not.toContain("session-header-branch");
     expect(html).not.toContain("Header summary display");
     expect(html).not.toContain("session-header-summary");
   });
@@ -615,11 +613,11 @@ describe("SessionHeaderMeta", () => {
     );
 
     expect(html).toContain("muxpilot");
-    expect(html).toContain("main");
+    expect(html).not.toContain("main");
     expect(html).not.toContain("session-header-summary");
   });
 
-  it("shows the dirty indicator after the branch", () => {
+  it("shows the dirty indicator after the repo", () => {
     const dirtyRepo = repo("muxpilot", "main");
     dirtyRepo.dirty = true;
 
@@ -631,8 +629,9 @@ describe("SessionHeaderMeta", () => {
       })
     );
 
-    expect(html).toContain('title="muxpilot · main · dirty"');
-    expect(html).toContain('<span class="session-header-branch" title="main">main</span><span class="session-header-branch-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
+    expect(html).toContain('title="muxpilot · dirty"');
+    expect(html).toContain('<span class="session-header-repo">muxpilot</span><span class="session-header-meta-separator" aria-hidden="true">·</span><span class="session-header-dirty dirty">dirty</span>');
+    expect(html).not.toContain("main");
   });
 });
 

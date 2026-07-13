@@ -2385,23 +2385,15 @@ export function SkillTextArea({
 
 export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace"> }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
-  const branch = workspace?.targetBranch ?? session.repo.branch ?? "no branch";
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
-  const dirtyLabel = dirty ? " · dirty" : "";
-  const title = `${session.repo.name} · ${branch}${dirtyLabel}`;
+  const title = `${session.repo.name}${dirty ? " · dirty" : ""}`;
 
   return (
     <p className="session-header-meta" title={title}>
       <span className="session-header-repo">{session.repo.name}</span>
-      <span className="session-header-branch-separator" aria-hidden="true">
-        ·
-      </span>
-      <span className="session-header-branch" title={branch}>
-        {branch}
-      </span>
       {dirty ? (
         <>
-          <span className="session-header-branch-separator" aria-hidden="true">
+          <span className="session-header-meta-separator" aria-hidden="true">
             ·
           </span>
           <span className="session-header-dirty dirty">dirty</span>
