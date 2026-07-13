@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "packageManager": "pnpm@10.28.0",
+  "packageManager": "pnpm@11.12.0",
   "scripts": {
     "dev": "node -e \"console.error('Use pnpm app start dev to start or reuse the dev server.'); process.exit(1)\"",
     "app": "node scripts/app.mjs",
