@@ -146,6 +146,33 @@ describe("SessionCard", () => {
     expect(html).toContain(`aria-label="Git workspace: main · ${label}"`);
   });
 
+  it("renders the current target after a session retarget", () => {
+    const session = testSession({
+      id: "retargeted",
+      paneId: "%120",
+      windowName: "retargeted",
+      gitWorkspace: {
+        workflowVersion: 1,
+        id: "workspace-retargeted",
+        state: "idle",
+        entryPath: "/repo",
+        repoRoot: "/repo",
+        targetBranch: "release",
+        targetSha: "3333333333333333333333333333333333333333",
+        sessionBranch: null,
+        worktreePath: null,
+        lastError: null,
+        updatedAt: "2026-07-14T12:00:00.000Z",
+        dependencyLinks: []
+      }
+    });
+
+    const html = renderSessionCard(session);
+    expect(html).toContain("<p>release</p>");
+    expect(html).toContain('aria-label="Git workspace: release · idle"');
+    expect(html).not.toContain("<p>main</p>");
+  });
+
   it("renders obsolete workspace errors as a neutral target state", () => {
     const session = testSession({
       id: "legacy",

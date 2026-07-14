@@ -1938,7 +1938,7 @@ function sameLivePaneProcess(session: ManagedSession, pane: TmuxPane): boolean {
   return session.tmux.pid > 0 && session.tmux.pid === pane.pid;
 }
 
-function sessionChanged(previous: ManagedSession, next: ManagedSession): boolean {
+export function sessionChanged(previous: ManagedSession, next: ManagedSession): boolean {
   return JSON.stringify(sessionDiscoverySnapshot(previous)) !== JSON.stringify(sessionDiscoverySnapshot(next));
 }
 
@@ -1955,7 +1955,8 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     inputMode: session.inputMode,
     models: session.models,
     pinned: session.pinned,
-    archived: session.archived
+    archived: session.archived,
+    gitWorkspace: session.gitWorkspace
   };
 }
 

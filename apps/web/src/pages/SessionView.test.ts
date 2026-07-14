@@ -667,6 +667,20 @@ describe("GitWorkspacePanel", () => {
     expect(html).not.toContain("Push");
   });
 
+  it("renders the current target after a session retarget", () => {
+    const html = renderToStaticMarkup(
+      createElement(GitWorkspacePanel, {
+        workspace: gitWorkspace({ targetBranch: "release", targetSha: "abcdef1234567890" }),
+        onClose: () => undefined
+      })
+    );
+
+    expect(html).toContain("Target branch");
+    expect(html).toContain("release");
+    expect(html).toContain("abcdef12");
+    expect(html).not.toContain("<strong>main</strong>");
+  });
+
   it("shows a blocked local workflow error", () => {
     const html = renderToStaticMarkup(
       createElement(GitWorkspacePanel, {

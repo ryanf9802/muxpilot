@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { TmuxPane } from "@muxpilot/core";
+import type { ManagedSession, TmuxPane } from "@muxpilot/core";
 import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
@@ -12,6 +12,7 @@ import {
   legacyTmuxPaneSessionId,
   managedCodexLaunchOptions,
   normalizeRepositoryApprovalPrefix,
+  sessionChanged,
   SessionManager,
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
@@ -90,6 +91,16 @@ describe("managed Codex launch instructions", () => {
 
     expect(options.writableRoots).not.toContain(dependency.sourcePath);
     expect(JSON.parse(options.environment.MUXPILOT_GIT_DEPENDENCIES)).toEqual([]);
+  });
+});
+
+describe("managed Git workspace session updates", () => {
+  it("detects a target-only workspace change for live UI refresh", () => {
+    const previous = sessionForDiscoveryChange("main");
+    const next = sessionForDiscoveryChange("release");
+
+    expect(sessionChanged(previous, next)).toBe(true);
+    expect(sessionChanged(next, { ...next })).toBe(false);
   });
 });
 
@@ -3459,6 +3470,37 @@ class FakeCodexProcessLookup {
   async resolveForPane(panePid: number): Promise<CodexProcessInfo | null> {
     return this.processes.get(panePid) ?? null;
   }
+}
+
+function sessionForDiscoveryChange(targetBranch: string): ManagedSession {
+  return {
+    tmux: {} as ManagedSession["tmux"],
+    repo: {} as ManagedSession["repo"],
+    status: "waiting",
+    codexSessionId: "codex-session",
+    codexJsonlPath: "/tmp/session.jsonl",
+    discoveryConfidence: "high",
+    lastActivityAt: null,
+    transcriptSyncing: false,
+    inputMode: "default",
+    models: {} as ManagedSession["models"],
+    pinned: false,
+    archived: false,
+    gitWorkspace: {
+      workflowVersion: 1,
+      id: "workspace",
+      state: "idle",
+      entryPath: "/repo",
+      repoRoot: "/repo",
+      targetBranch,
+      targetSha: "1111111111111111111111111111111111111111",
+      sessionBranch: null,
+      worktreePath: null,
+      lastError: null,
+      updatedAt: "2026-07-14T12:00:00.000Z",
+      dependencyLinks: []
+    }
+  } as ManagedSession;
 }
 
 async function writeCodexSession(
