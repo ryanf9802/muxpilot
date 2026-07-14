@@ -162,6 +162,63 @@ describe("interactive Codex approval prompts", () => {
     });
   });
 
+  it("parses patch approval choices from the live terminal form", () => {
+    const prompt = parseInteractiveApprovalPrompt(patchApprovalCapture(1));
+
+    expect(prompt).toEqual({
+      kind: "patch",
+      title: "Would you like to make the following edits?",
+      command: null,
+      reason: null,
+      prefixRule: null,
+      options: [
+        {
+          decision: "approve_once",
+          label: "Approve once",
+          description: "Yes, proceed",
+          menuNumber: 1,
+          selected: true
+        },
+        {
+          decision: "approve_for_session",
+          label: "Allow files for session",
+          description: "Yes, and don't ask again for these files",
+          menuNumber: 2,
+          selected: false
+        },
+        {
+          decision: "deny",
+          label: "Deny",
+          description: "No, and tell Codex what to do differently",
+          menuNumber: 3,
+          selected: false
+        }
+      ]
+    });
+  });
+
+  it("navigates patch approval choices relative to the current selection", () => {
+    const prompt = parseInteractiveApprovalPrompt(patchApprovalCapture(2));
+    expect(prompt).not.toBeNull();
+
+    expect(interactiveApprovalKeys(prompt!, "approve_once")).toEqual(["Up", "Enter"]);
+    expect(interactiveApprovalKeys(prompt!, "approve_for_session")).toEqual(["Enter"]);
+    expect(interactiveApprovalKeys(prompt!, "deny")).toEqual(["Down", "Enter"]);
+    expect(interactiveApprovalKeys(prompt!, "approve_for_prefix")).toBeNull();
+  });
+
+  it("parses a wrapped patch file-trust choice", () => {
+    const capture = patchApprovalCapture(1).replace(
+      "  2. Yes, and don't ask again for these files (a)",
+      "  2. Yes, and don't ask again for these\n     files (a)"
+    );
+
+    expect(parseInteractiveApprovalPrompt(capture)?.options[1]).toMatchObject({
+      decision: "approve_for_session",
+      description: "Yes, and don't ask again for these files"
+    });
+  });
+
   it("uses the newest approval form when the capture includes an older gate", () => {
     const prompt = parseInteractiveApprovalPrompt(`${githubApprovalCapture(1)}\n${commandApprovalCapture(2)}`);
 
@@ -239,5 +296,23 @@ function wrappedCommandApprovalCapture(): string {
     "  2. Yes, and don't ask again for commands that start with `node /home/dev/.codex/skills/.system/openai-docs/scripts/",
     "     fetch-codex-manual.mjs` (p)",
     "  3. No, and tell Codex what to do differently (esc)"
+  ].join("\n");
+}
+
+function patchApprovalCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "›" : " "} ${number}. ${text}`;
+  return [
+    "    399 +        raise HTTPException(status.HTTP_404_NOT_FOUND, detail=\"Sendout not found\")",
+    "    400 +",
+    "    401 +__all__ = [\"resource_messages_router\"]",
+    "",
+    "",
+    "  Would you like to make the following edits?",
+    "",
+    option(1, "Yes, proceed (y)"),
+    option(2, "Yes, and don't ask again for these files (a)"),
+    option(3, "No, and tell Codex what to do differently (esc)"),
+    "",
+    "  Press enter to confirm or esc to cancel"
   ].join("\n");
 }

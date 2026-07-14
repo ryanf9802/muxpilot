@@ -17,10 +17,27 @@ export interface InteractiveApprovalPrompt {
 export function parseInteractiveApprovalPrompt(capture: string): InteractiveApprovalPrompt | null {
   const text = cleanTerminalText(capture);
   const lines = text.split("\n");
-  const appTitleIndex = lastLineIndex(lines, (line) => /^Allow\s+.+\?$/i.test(line.trim()));
-  const commandTitleIndex = lastLineIndex(lines, (line) => /^\s*Would you like to run the following command\?\s*$/i.test(line));
-  if (commandTitleIndex > appTitleIndex) return parseCommandApprovalPrompt(text) ?? parseAppPermissionPrompt(text);
-  return parseAppPermissionPrompt(text) ?? parseCommandApprovalPrompt(text);
+  const parsers = [
+    {
+      titleIndex: lastLineIndex(lines, (line) => /^Allow\s+.+\?$/i.test(line.trim())),
+      parse: parseAppPermissionPrompt
+    },
+    {
+      titleIndex: lastLineIndex(lines, (line) => /^\s*Would you like to run the following command\?\s*$/i.test(line)),
+      parse: parseCommandApprovalPrompt
+    },
+    {
+      titleIndex: lastLineIndex(lines, (line) => /^\s*Would you like to make the following edits\?\s*$/i.test(line)),
+      parse: parsePatchApprovalPrompt
+    }
+  ].sort((first, second) => second.titleIndex - first.titleIndex);
+
+  for (const candidate of parsers) {
+    if (candidate.titleIndex < 0) continue;
+    const prompt = candidate.parse(text);
+    if (prompt) return prompt;
+  }
+  return null;
 }
 
 function parseAppPermissionPrompt(text: string): InteractiveApprovalPrompt | null {
@@ -53,7 +70,7 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
   if (titleIndex < 0) return null;
 
   const promptLines = lines.slice(titleIndex + 1);
-  const options = commandApprovalOptionLines(promptLines)
+  const options = approvalOptionLines(promptLines)
     .map(parseCommandApprovalOption)
     .filter((option): option is InteractiveApprovalOption => Boolean(option));
   const decisions = new Set(options.map((option) => option.decision));
@@ -64,7 +81,7 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
   const command = labeledCommand(promptLines);
   if (!command) return null;
   const reason = labeledValue(promptLines, "Reason");
-  const prefixRule = commandPrefixRule(commandApprovalOptionLines(promptLines));
+  const prefixRule = commandPrefixRule(approvalOptionLines(promptLines));
   return {
     kind: "command",
     title: lines[titleIndex]?.trim() ?? "Command approval required",
@@ -75,7 +92,30 @@ function parseCommandApprovalPrompt(text: string): InteractiveApprovalPrompt | n
   };
 }
 
-function commandApprovalOptionLines(lines: string[]): string[] {
+function parsePatchApprovalPrompt(text: string): InteractiveApprovalPrompt | null {
+  const lines = text.split("\n");
+  if (!isCommandApprovalFooter(lastNonEmptyLine(lines))) return null;
+  const titleIndex = lastLineIndex(lines, (line) => /^\s*Would you like to make the following edits\?\s*$/i.test(line));
+  if (titleIndex < 0) return null;
+
+  const options = approvalOptionLines(lines.slice(titleIndex + 1))
+    .map(parsePatchApprovalOption)
+    .filter((option): option is InteractiveApprovalOption => Boolean(option));
+  const decisions = new Set(options.map((option) => option.decision));
+  if (!decisions.has("approve_once") || !decisions.has("approve_for_session") || !decisions.has("deny")) return null;
+  if (options.filter((option) => option.selected).length !== 1) return null;
+
+  return {
+    kind: "patch",
+    title: lines[titleIndex]?.trim() ?? "Patch approval required",
+    command: null,
+    reason: null,
+    prefixRule: null,
+    options
+  };
+}
+
+function approvalOptionLines(lines: string[]): string[] {
   const options: string[] = [];
   for (const line of lines) {
     if (/^\s*(?:›\s*)?\d+\.\s+/.test(line)) {
@@ -158,9 +198,31 @@ function parseCommandApprovalOption(line: string): InteractiveApprovalOption | n
   };
 }
 
+function parsePatchApprovalOption(line: string): InteractiveApprovalOption | null {
+  const match = line.match(/^\s*(›\s*)?(\d+)\.\s+(.+?)\s*$/);
+  if (!match) return null;
+  const rawLabel = (match[3] ?? "").replace(/\s+\((?:y|a|esc)\)\s*$/i, "").trim();
+  const decision = patchApprovalDecision(rawLabel);
+  if (!decision) return null;
+  return {
+    decision,
+    label: decision === "approve_once" ? "Approve once" : decision === "approve_for_session" ? "Allow files for session" : "Deny",
+    description: rawLabel,
+    menuNumber: Number(match[2]),
+    selected: Boolean(match[1])
+  };
+}
+
 function commandApprovalDecision(label: string): ApprovalDecision | null {
   if (/^Yes,\s*proceed\b/i.test(label)) return "approve_once";
   if (/^Yes,\s*and don['’]t ask again for commands that start with\b/i.test(label)) return "approve_for_prefix";
+  if (/^No,\s*and tell Codex what to do differently\b/i.test(label)) return "deny";
+  return null;
+}
+
+function patchApprovalDecision(label: string): ApprovalDecision | null {
+  if (/^Yes,\s*proceed\b/i.test(label)) return "approve_once";
+  if (/^Yes,\s*and don['’]t ask again for these files\b/i.test(label)) return "approve_for_session";
   if (/^No,\s*and tell Codex what to do differently\b/i.test(label)) return "deny";
   return null;
 }

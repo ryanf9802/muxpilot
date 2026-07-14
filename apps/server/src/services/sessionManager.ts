@@ -2286,8 +2286,10 @@ function interactiveApprovalHasTranscriptContext(
   const payload = recordValue(latestMessage.payload.payload);
   if (!payload) return false;
   if (prompt.kind === "permissions") return payload.type === "function_call";
-  if (prompt.kind !== "command" || payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
+  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
   const input = stringValue(payload.input);
+  if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));
+  if (prompt.kind !== "command") return false;
   return Boolean(
     input &&
       /tools\.exec_command\s*\(/.test(input) &&

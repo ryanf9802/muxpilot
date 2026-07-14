@@ -626,6 +626,74 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces and resolves patch approvals that have no JSONL approval event", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "patch-approval.jsonl");
+    const sentKeys: string[][] = [];
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-14T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-14T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-patch-approval",
+            input: "const patch = '*** Begin Patch'; text(await tools.apply_patch(patch));"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    let capture = [
+      "Working (20s • esc to interrupt)",
+      ...Array.from({ length: 35 }, (_, index) => `    ${index + 1} +patch detail`),
+      patchApprovalCapture(1)
+    ].join("\n");
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: repo, paneId: "%1", title: "[ ! ] Action Required | codex-session" })
+    ];
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      capture = "› ";
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    expect(session.status).toBe("waiting");
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-patch-approval",
+      kind: "patch",
+      title: "Would you like to make the following edits?",
+      command: null,
+      prefixRule: null,
+      options: [
+        { decision: "approve_once", label: "Approve once" },
+        { decision: "approve_for_session", label: "Allow files for session" },
+        { decision: "deny", label: "Deny" }
+      ]
+    });
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_for_session" });
+    expect(sentKeys).toEqual([["Down", "Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    harness.db.close();
+  });
+
   it("recovers a nested terminal approval when the persisted status is waiting", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -3603,6 +3671,19 @@ function commandApprovalCapture(selected: number): string {
     "",
     option(1, "Yes, proceed (y)"),
     option(2, "Yes, and don't ask again for commands that start with `pnpm app restart prod` (p)"),
+    option(3, "No, and tell Codex what to do differently (esc)"),
+    "",
+    "  Press enter to confirm or esc to cancel"
+  ].join("\n");
+}
+
+function patchApprovalCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "›" : " "} ${number}. ${text}`;
+  return [
+    "  Would you like to make the following edits?",
+    "",
+    option(1, "Yes, proceed (y)"),
+    option(2, "Yes, and don't ask again for these files (a)"),
     option(3, "No, and tell Codex what to do differently (esc)"),
     "",
     "  Press enter to confirm or esc to cancel"
