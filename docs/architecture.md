@@ -29,7 +29,7 @@ Codex JSONL files under `~/.codex/sessions` are the preferred transcript source 
 
 SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
 
-Managed Git sessions store only the repository entry point, existing local target branch, dependency link candidates, and path to a skill-owned status file.
+Managed Git sessions store only the repository entry point, current existing local target branch, dependency link candidates, and path to a skill-owned status file. The launch-time target is an initial fallback; a guard-confirmed agent retarget is persisted through that status file and observed by the backend.
 
 ## Components
 
@@ -101,7 +101,7 @@ entry directory + existing local target -> neutral tmux/Codex control directory
 change task -> skill creates private branch/worktree + simple dependency links -> focused checks + iterative same-agent review -> atomic local fast-forward -> cleanup
 ```
 
-Task implementation is concurrent. A repository-local branch lock protects only the final local integration step. If another task lands first, the later task rebases and repeats focused validation and self-review. Conflicts and unfinished changes remain in their task worktree; dirty target checkouts are never changed. Normal workflow helpers do not pull or push.
+Task implementation is concurrent. A per-session operation lock serializes begin, retarget, and finalize actions, while a repository-local branch lock protects the final local integration step across sessions. If another task lands first, or an active task is retargeted, the task rebases when necessary and repeats focused validation and self-review. Conflicts and unfinished changes remain in their task worktree; dirty target checkouts are never changed. Normal workflow helpers do not pull or push.
 
 Restorable session history:
 

@@ -96,6 +96,57 @@ describe("lightweight Git workspace metadata", () => {
     expect((await manager.refresh(workspace)).summary).toMatchObject({ state: "failed", lastError: "Local target branch 'feature' no longer exists" });
     db.close();
   });
+
+  it("observes and persists a valid helper-authored target change", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "main" });
+    const targetSha = await git(root, ["rev-parse", "feature"]);
+    await writeFile(join(workspace.controlPath!, "git-workflow-status.json"), JSON.stringify({
+      version: 1,
+      state: "idle",
+      targetBranch: "feature",
+      targetSha,
+      sessionBranch: null,
+      worktreePath: null,
+      lastError: null,
+      reviewRequired: false,
+      updatedAt: "2026-07-14T12:00:00.000Z"
+    }));
+
+    const refreshed = await manager.refresh(workspace);
+    expect(refreshed).toMatchObject({
+      targetRef: "refs/heads/feature",
+      summary: { targetBranch: "feature", targetSha, state: "idle" }
+    });
+    expect(await db.getGitWorkspace(workspace.id)).toMatchObject({
+      targetRef: "refs/heads/feature",
+      summary: { targetBranch: "feature" }
+    });
+    db.close();
+  });
+
+  it("ignores a status target that is not an existing local branch", async () => {
+    const root = await repository();
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "main" });
+    await writeFile(join(workspace.controlPath!, "git-workflow-status.json"), JSON.stringify({
+      version: 1,
+      state: "idle",
+      targetBranch: "missing",
+      targetSha: "invented",
+      sessionBranch: null,
+      worktreePath: null,
+      lastError: null,
+      updatedAt: "2026-07-14T12:00:00.000Z"
+    }));
+
+    expect((await manager.refresh(workspace)).summary).toMatchObject({ targetBranch: "main", state: "idle" });
+    db.close();
+  });
 });
 
 async function repository(): Promise<string> {

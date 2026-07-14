@@ -103,6 +103,92 @@ describe("standalone local Git workflow helpers", () => {
     expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
     expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
   });
+
+  it("requires the fixed-target bypass and integrates an idle retarget into the selected local branch", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const environment = helperEnvironment(root, []);
+
+    await expect(node("muxpilot-git-target.mjs", environment, ["feature"]))
+      .rejects.toThrow("--bypass=fixed-target");
+    await expect(node("muxpilot-git-target.mjs", environment, ["missing", "--bypass=fixed-target"]))
+      .rejects.toThrow();
+    await git(root, ["update-ref", "refs/remotes/origin/remote-only", "HEAD"]);
+    await expect(node("muxpilot-git-target.mjs", environment, ["remote-only", "--bypass=fixed-target"]))
+      .rejects.toThrow();
+
+    const retarget = await node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"]);
+    expect(retarget).toContain("TARGET_UPDATED previous=refs/heads/main target=refs/heads/feature");
+    const worktree = (await node("muxpilot-git-begin.mjs", environment)).match(/WORKTREE_READY (\S+)/)![1]!;
+    await writeFile(join(worktree, "feature.txt"), "feature task\n");
+    await git(worktree, ["add", "feature.txt"]);
+    await git(worktree, ["commit", "-m", "feature task"]);
+
+    expect(await node("muxpilot-git-finish.mjs", environment)).toContain("INTEGRATED target=refs/heads/feature");
+    expect(await git(root, ["show", "feature:feature.txt"])).toBe("feature task");
+    await expect(git(root, ["show", "main:feature.txt"])).rejects.toThrow();
+  });
+
+  it("preserves and rebases an active worktree after retargeting", async () => {
+    const root = await repository();
+    await git(root, ["switch", "-c", "feature"]);
+    await writeFile(join(root, "feature-base.txt"), "feature base\n");
+    await git(root, ["add", "feature-base.txt"]);
+    await git(root, ["commit", "-m", "feature base"]);
+    await git(root, ["switch", "main"]);
+    const environment = helperEnvironment(root, []);
+    const worktree = (await node("muxpilot-git-begin.mjs", environment)).match(/WORKTREE_READY (\S+)/)![1]!;
+    await writeFile(join(worktree, "task.txt"), "retargeted task\n");
+    await git(worktree, ["add", "task.txt"]);
+    await git(worktree, ["commit", "-m", "retargeted task"]);
+
+    const retarget = await node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"]);
+    expect(retarget).toContain("review=required");
+    expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({
+      state: "worktree",
+      targetBranch: "feature",
+      worktreePath: worktree,
+      reviewRequired: true
+    });
+    await expect(node("muxpilot-git-finish.mjs", environment)).rejects.toThrow("REBASED_REVIEW_REQUIRED");
+    expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({ reviewRequired: false });
+
+    expect(await node("muxpilot-git-finish.mjs", environment)).toContain("INTEGRATED target=refs/heads/feature");
+    expect(await git(root, ["show", "feature:feature-base.txt"])).toBe("feature base");
+    expect(await git(root, ["show", "feature:task.txt"])).toBe("retargeted task");
+    await expect(git(root, ["show", "main:task.txt"])).rejects.toThrow();
+  });
+
+  it("requires a review checkpoint when an active retarget needs no rebase", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const environment = helperEnvironment(root, []);
+    const worktree = (await node("muxpilot-git-begin.mjs", environment)).match(/WORKTREE_READY (\S+)/)![1]!;
+    await writeFile(join(worktree, "task.txt"), "task\n");
+    await git(worktree, ["add", "task.txt"]);
+    await git(worktree, ["commit", "-m", "task"]);
+    await node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"]);
+
+    await expect(node("muxpilot-git-finish.mjs", environment)).rejects.toThrow("RETARGETED_REVIEW_REQUIRED");
+    expect(await node("muxpilot-git-finish.mjs", environment)).toContain("INTEGRATED target=refs/heads/feature");
+  });
+
+  it("serializes target changes with other workflow operations", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const environment = helperEnvironment(root, []);
+    const lock = join(root, "session", "git-workflow-operation.lock");
+    await mkdir(lock, { recursive: true });
+    await writeFile(join(lock, "owner"), `${process.pid}\n${new Date().toISOString()}\n`);
+    let settled = false;
+    const retargeting = node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"])
+      .finally(() => { settled = true; });
+
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 150));
+    expect(settled).toBe(false);
+    await rm(lock, { recursive: true, force: true });
+    expect(await retargeting).toContain("TARGET_UPDATED");
+  });
 });
 
 function helperEnvironment(root: string, dependencies: unknown[]): NodeJS.ProcessEnv & Record<string, string> {
@@ -130,9 +216,9 @@ async function repository(): Promise<string> {
   return root;
 }
 
-async function node(script: string, env: NodeJS.ProcessEnv): Promise<string> {
+async function node(script: string, env: NodeJS.ProcessEnv, args: string[] = []): Promise<string> {
   try {
-    return (await execFileAsync(process.execPath, [join(scripts, script)], { env })).stdout.trim();
+    return (await execFileAsync(process.execPath, [join(scripts, script), ...args], { env })).stdout.trim();
   } catch (error) {
     const value = error as Error & { stderr?: string };
     const stdout = (error as Error & { stdout?: string }).stdout?.trim();

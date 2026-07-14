@@ -6,7 +6,7 @@ if (process.argv[2] !== "localize" || !process.argv[3]) {
   process.exit(2);
 }
 try {
-  const config = configuration();
+  const config = await configuration();
   const status = await readStatus(config);
   if (status?.state !== "worktree" || !(await worktreeExists(status.worktreePath))) throw new Error("No active task worktree");
   const path = await localizeDependency(config, status.worktreePath, process.argv[3]);

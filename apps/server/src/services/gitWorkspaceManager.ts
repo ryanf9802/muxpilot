@@ -29,6 +29,7 @@ interface StatusFile {
   sessionBranch: string | null;
   worktreePath: string | null;
   lastError: string | null;
+  reviewRequired?: boolean;
   updatedAt: string;
 }
 
@@ -147,13 +148,15 @@ export class GitWorkspaceManager {
     try {
       const raw = await readFile(statusPath(workspace), "utf8");
       const status = JSON.parse(raw) as Partial<StatusFile>;
-      if (validStatus(status, previous.targetBranch)) observed = status;
+      if (validStatus(status) && await localTargetSha(previous.repoRoot, status.targetBranch)) observed = status;
     } catch {
       // Status is observational. Missing, malformed, or unreadable files fall
       // back to local Git/worktree state instead of becoming UI errors.
     }
-    const survivingWorktree = !observed && await activeWorktree(previous);
-    const targetSha = await git(previous.repoRoot, ["rev-parse", `refs/heads/${previous.targetBranch}^{commit}`]).catch(() => null);
+    const targetBranch = observed?.targetBranch ?? previous.targetBranch;
+    const currentSummary = { ...previous, targetBranch };
+    const survivingWorktree = !observed && await activeWorktree(currentSummary);
+    const targetSha = await localTargetSha(previous.repoRoot, targetBranch);
     const missingCurrentTarget = !targetSha && !legacy;
     const state = missingCurrentTarget
       ? "failed"
@@ -164,18 +167,20 @@ export class GitWorkspaceManager {
       state,
       entryPath: previous.entryPath,
       repoRoot: previous.repoRoot,
-      targetBranch: previous.targetBranch,
+      targetBranch,
       targetSha: targetSha ?? previous.targetSha ?? "",
       sessionBranch: observed?.sessionBranch ?? (survivingWorktree ? previous.sessionBranch : null),
       worktreePath: observed?.worktreePath ?? (survivingWorktree ? previous.worktreePath : null),
       lastError: missingCurrentTarget
-        ? `Local target branch '${previous.targetBranch}' no longer exists`
+        ? `Local target branch '${targetBranch}' no longer exists`
         : observed && ["blocked", "failed"].includes(observed.state) ? observed.lastError : null,
       updatedAt: observed?.updatedAt ?? (legacy ? "" : workspace.updatedAt),
       dependencyLinks: Array.isArray(previous.dependencyLinks) ? previous.dependencyLinks : []
     };
-    const next = { ...workspace, summary };
-    if (JSON.stringify(next.summary) !== JSON.stringify(workspace.summary)) await this.db.upsertGitWorkspace(next, nowIso());
+    const next = { ...workspace, targetRef: `refs/heads/${targetBranch}`, summary };
+    if (next.targetRef !== workspace.targetRef || JSON.stringify(next.summary) !== JSON.stringify(workspace.summary)) {
+      await this.db.upsertGitWorkspace(next, nowIso());
+    }
     return next;
   }
 
@@ -244,15 +249,27 @@ async function isDirectory(path: string): Promise<boolean> {
   return stat(path).then((value) => value.isDirectory()).catch(() => false);
 }
 
-function validStatus(status: Partial<StatusFile>, targetBranch: string): status is StatusFile {
+function validStatus(status: Partial<StatusFile>): status is StatusFile {
   return status.version === 1
-    && status.targetBranch === targetBranch
+    && typeof status.targetBranch === "string"
+    && status.targetBranch !== ""
     && ["idle", "worktree", "integrating", "blocked", "failed"].includes(String(status.state))
     && typeof status.targetSha === "string"
     && typeof status.updatedAt === "string"
     && (status.sessionBranch === null || typeof status.sessionBranch === "string")
     && (status.worktreePath === null || typeof status.worktreePath === "string")
-    && (status.lastError === null || typeof status.lastError === "string");
+    && (status.lastError === null || typeof status.lastError === "string")
+    && (status.reviewRequired === undefined || typeof status.reviewRequired === "boolean");
+}
+
+async function localTargetSha(repoRoot: string, branch: string): Promise<string | null> {
+  try {
+    await git(repoRoot, ["check-ref-format", "--branch", branch]);
+    await git(repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`]);
+    return await git(repoRoot, ["rev-parse", `refs/heads/${branch}^{commit}`]);
+  } catch {
+    return null;
+  }
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { acquireBranchLock, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { acquireBranchLock, acquireWorkspaceLock, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
 
 const bypasses = process.argv.slice(2).filter((value) => value.startsWith("--bypass=")).map((value) => value.slice(9));
 const allowedBypasses = new Set(["worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target", "local-target-only", "automatic-cleanup", "no-pull-push"]);
@@ -13,10 +13,12 @@ if (bypasses.some((value) => !allowedBypasses.has(value))) {
 }
 
 let release = null;
+let releaseWorkspace = null;
 let config = null;
 let status = null;
 try {
-  config = configuration();
+  releaseWorkspace = await acquireWorkspaceLock();
+  config = await configuration();
   status = await readStatus(config);
   if (!["worktree", "blocked", "failed"].includes(status?.state) || !(await worktreeExists(status.worktreePath)) || !status.sessionBranch) {
     throw new Error("No active task worktree to integrate");
@@ -27,6 +29,12 @@ try {
   const taskHead = await git(worktree, ["rev-parse", "HEAD"]);
   let targetSha = await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]);
   if (taskHead === targetSha) {
+    if (status.reviewRequired) {
+      status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
+      await releaseOperationLock();
+      process.stdout.write("RETARGETED_REVIEW_REQUIRED: the task target changed; rerun focused checks and the self-review loop before retrying integration\n");
+      process.exit(3);
+    }
     if (!bypasses.includes("automatic-cleanup")) {
       await cleanupTask(config, status, worktree, taskHead, targetSha);
     }
@@ -37,6 +45,7 @@ try {
       worktreePath: bypasses.includes("automatic-cleanup") ? worktree : null,
       lastError: null
     });
+    await releaseOperationLock();
     process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${targetSha} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
     process.exit(0);
   }
@@ -59,8 +68,16 @@ try {
       await writeStatus(config, { ...status, state: "blocked", targetSha, lastError: `Rebase conflict: ${error.message}` });
       throw new Error(`REBASE_CONFLICT: resolve the task worktree, rerun focused checks and self-review, then retry finish\n${error.message}`);
     }
-    status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null });
+    status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
+    await releaseOperationLock();
     process.stdout.write("REBASED_REVIEW_REQUIRED: the target advanced; rerun focused checks and the self-review loop before retrying integration\n");
+    process.exit(3);
+  }
+
+  if (status.reviewRequired) {
+    status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
+    await releaseOperationLock();
+    process.stdout.write("RETARGETED_REVIEW_REQUIRED: the task target changed; rerun focused checks and the self-review loop before retrying integration\n");
     process.exit(3);
   }
 
@@ -71,7 +88,8 @@ try {
     release = null;
     try {
       await git(worktree, ["rebase", lockedTarget]);
-      await writeStatus(config, { ...status, state: "worktree", targetSha: lockedTarget, lastError: null });
+      await writeStatus(config, { ...status, state: "worktree", targetSha: lockedTarget, lastError: null, reviewRequired: false });
+      await releaseOperationLock();
       process.stdout.write("REBASED_REVIEW_REQUIRED: another task integrated first; rerun focused checks and the self-review loop\n");
       process.exit(3);
     } catch (error) {
@@ -102,6 +120,7 @@ try {
     worktreePath: bypasses.includes("automatic-cleanup") ? worktree : null,
     lastError: null
   });
+  await releaseOperationLock();
   process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${finalHead} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
 } catch (error) {
   if (release) await release().catch(() => undefined);
@@ -111,8 +130,15 @@ try {
       await writeStatus(config, { ...current, state: "failed", lastError: error.message }).catch(() => undefined);
     }
   }
+  await releaseOperationLock();
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
+}
+
+async function releaseOperationLock() {
+  if (!releaseWorkspace) return;
+  await releaseWorkspace().catch(() => undefined);
+  releaseWorkspace = null;
 }
 
 async function isAncestor(cwd, ancestor, descendant) {

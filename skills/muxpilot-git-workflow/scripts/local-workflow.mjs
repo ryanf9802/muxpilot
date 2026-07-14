@@ -5,11 +5,14 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export function configuration() {
+export async function configuration() {
   const config = {
     workspaceId: process.env.MUXPILOT_GIT_WORKSPACE_ID,
     repoRoot: process.env.MUXPILOT_GIT_REPO_ROOT,
-    targetBranch: process.env.MUXPILOT_GIT_TARGET_BRANCH,
+    targetBranch: await currentTargetBranch(
+      process.env.MUXPILOT_GIT_STATUS_FILE,
+      process.env.MUXPILOT_GIT_TARGET_BRANCH
+    ),
     worktreeRoot: process.env.MUXPILOT_GIT_WORKTREE_ROOT,
     statusFile: process.env.MUXPILOT_GIT_STATUS_FILE,
     dependencies: parseDependencies(process.env.MUXPILOT_GIT_DEPENDENCIES)
@@ -52,6 +55,7 @@ export async function writeStatus(config, value) {
     sessionBranch: value.sessionBranch ?? null,
     worktreePath: value.worktreePath ?? null,
     lastError: value.lastError ?? null,
+    reviewRequired: value.reviewRequired === true,
     updatedAt: new Date().toISOString()
   };
   await mkdir(dirname(config.statusFile), { recursive: true });
@@ -121,6 +125,15 @@ export async function worktreeExists(path) {
 export async function acquireBranchLock(config) {
   const commonDir = resolve(config.repoRoot, await git(config.repoRoot, ["rev-parse", "--git-common-dir"]));
   const lock = join(commonDir, "muxpilot-locks", encodeURIComponent(config.targetBranch));
+  return acquireDirectoryLock(lock, "Timed out waiting for another task to integrate into the target branch");
+}
+
+export async function acquireWorkspaceLock(statusFile = process.env.MUXPILOT_GIT_STATUS_FILE) {
+  if (!statusFile) throw new Error("Missing muxpilot Git configuration: statusFile");
+  return acquireDirectoryLock(join(dirname(statusFile), "git-workflow-operation.lock"), "Timed out waiting for another workflow operation in this session");
+}
+
+async function acquireDirectoryLock(lock, timeoutMessage) {
   await mkdir(dirname(lock), { recursive: true });
   const deadline = Date.now() + 30_000;
   while (true) {
@@ -134,10 +147,23 @@ export async function acquireBranchLock(config) {
         await rm(lock, { recursive: true, force: true });
         continue;
       }
-      if (Date.now() >= deadline) throw new Error("Timed out waiting for another task to integrate into the target branch");
+      if (Date.now() >= deadline) throw new Error(timeoutMessage);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
     }
   }
+}
+
+async function currentTargetBranch(statusFile, fallback) {
+  if (!statusFile) return fallback;
+  try {
+    const status = JSON.parse(await readFile(statusFile, "utf8"));
+    if (status?.version === 1 && typeof status.targetBranch === "string" && status.targetBranch !== "") {
+      return status.targetBranch;
+    }
+  } catch {
+    // The launch-time target remains the fallback until valid workflow status exists.
+  }
+  return fallback;
 }
 
 async function staleLock(lock) {

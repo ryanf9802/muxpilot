@@ -5,7 +5,7 @@ description: Run isolated local Git tasks in short-lived worktrees, self-review 
 
 # Muxpilot Local Git Workflow
 
-Muxpilot supplies a repository entry path and an existing local target branch. The application observes this workflow but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific confirmation process below.
+Muxpilot supplies a repository entry path and an initial existing local target branch. The application observes this workflow but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific confirmation process below.
 
 ## Read-only work
 
@@ -24,9 +24,17 @@ For plans, answers, diagnosis, or review, inspect the repository entry path dire
 
 Integration is entirely local. Normal helpers never create a target branch, pull, push, publish, or reconcile a remote. Multiple tasks may target the same branch; their short final integration steps serialize, and completion order determines landing order.
 
+## Changing the target branch
+
+Treat `muxpilot-git-status.mjs` as authoritative for the current target. The launch-time target is only the fallback before workflow status exists.
+
+Changing the target is a `fixed-target` guard bypass. A user request naming another branch is not itself confirmation. Name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. Then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-target.mjs" <existing-local-branch> --bypass=fixed-target`.
+
+The helper never creates or fetches a branch. If a task worktree exists, it is preserved and finalization rebases it onto the new target when necessary. Any active-worktree retarget invalidates prior validation and review; rerun focused checks and the complete self-review loop before integration, even when Git does not need to rebase.
+
 ## Guard-specific overrides
 
-Muxpilot guards are: `worktree-isolation`, `same-agent-review`, `focused-validation`, `atomic-commits`, `clean-target`, `local-target-only`, `automatic-cleanup`, and `no-pull-push`.
+Muxpilot guards are: `worktree-isolation`, `same-agent-review`, `focused-validation`, `atomic-commits`, `clean-target`, `fixed-target`, `local-target-only`, `automatic-cleanup`, and `no-pull-push`.
 
 When a user instruction conflicts with one or more guards:
 

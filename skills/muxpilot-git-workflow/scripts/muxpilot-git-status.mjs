@@ -2,7 +2,7 @@
 import { configuration, git, readStatus } from "./local-workflow.mjs";
 
 try {
-  const config = configuration();
+  const config = await configuration();
   const status = await readStatus(config);
   const targetSha = await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]);
   process.stdout.write(`${JSON.stringify(status ?? { version: 1, state: "idle", targetBranch: config.targetBranch, targetSha }, null, 2)}\n`);

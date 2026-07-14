@@ -1453,15 +1453,17 @@ export function managedCodexLaunchOptions(
       "This is a local-only muxpilot Git session running from a neutral control directory.",
       "Use $muxpilot-git-workflow for every change task.",
       `Repository entry path: ${summary.entryPath}.`,
-      `Target branch: ${summary.targetBranch}.`,
+      `Initial target branch: ${summary.targetBranch}.`,
       "For change or build tasks, announce the workflow action, run the begin helper, and perform every repository write in its short-lived worktree.",
       helperDir
-        ? `Workflow helpers: begin with node ${JSON.stringify(join(helperDir, "muxpilot-git-begin.mjs"))}; inspect status with node ${JSON.stringify(join(helperDir, "muxpilot-git-status.mjs"))}; finalize with node ${JSON.stringify(join(helperDir, "muxpilot-git-finish.mjs"))}.`
+        ? `Workflow helpers: begin with node ${JSON.stringify(join(helperDir, "muxpilot-git-begin.mjs"))}; inspect status with node ${JSON.stringify(join(helperDir, "muxpilot-git-status.mjs"))}; change target with node ${JSON.stringify(join(helperDir, "muxpilot-git-target.mjs"))}; finalize with node ${JSON.stringify(join(helperDir, "muxpilot-git-finish.mjs"))}.`
         : "Use the helper directory provided by the workflow environment.",
+      "Workflow status is authoritative for the current target after a retarget.",
       "For answers, plans, reviews, and diagnosis, inspect the repository directly without creating a worktree.",
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
       "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Run repository-wide validation only when the user requests it.",
       "User instructions take priority over muxpilot guardrails. If an instruction conflicts with a muxpilot guard, name each exact guard and consequence and obtain explicit confirmation for those guards before bypassing them. Confirmation is operation-scoped; platform safety rules are not muxpilot guards.",
+      "Changing the target branch requires a separately confirmed fixed-target bypass; it changes where current and future task commits integrate, and an active worktree must repeat focused checks and self-review before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "Shared dependency links are writable for test caches. Before installing or changing dependencies, localize the relevant link with the dependency helper.",
