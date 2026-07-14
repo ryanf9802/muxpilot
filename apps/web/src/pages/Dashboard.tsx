@@ -633,7 +633,11 @@ export function SessionCard({
         <div className="card-head">
           <div>
             <h2>{displayName}</h2>
-            {workspace ? <p>{workspace.targetBranch}</p> : null}
+            {workspace ? (
+              <p className="session-card-branch" title={workspace.targetBranch}>
+                {workspace.targetBranch}
+              </p>
+            ) : null}
           </div>
           <span className="session-card-head-actions">
             {session.pinned ? (

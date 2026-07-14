@@ -1263,6 +1263,7 @@ select:focus-visible {
 
 .session-card-shell {
   position: relative;
+  min-width: 0;
 }
 
 .session-card {
@@ -1323,7 +1324,13 @@ select:focus-visible {
   min-width: 0;
 }
 
+.session-card .card-head > div {
+  flex: 1 1 0;
+  overflow: hidden;
+}
+
 .session-card .card-head h2,
+.session-card .session-card-branch,
 .session-card .card-foot > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1332,6 +1339,7 @@ select:focus-visible {
 
 .session-card-head-actions {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 8px;
   min-width: 0;

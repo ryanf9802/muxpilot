@@ -140,8 +140,8 @@ describe("SessionCard", () => {
     });
 
     const html = renderSessionCard(session);
-    expect(html).toContain("<p>main</p>");
-    expect(html).not.toContain(`<p>main · ${label}</p>`);
+    expect(html).toContain('class="session-card-branch" title="main">main</p>');
+    expect(html).not.toContain(`main · ${label}</p>`);
     expect(html).toContain(`class="git-workspace-status-indicator" data-state="${state}"`);
     expect(html).toContain(`aria-label="Git workspace: main · ${label}"`);
   });
@@ -168,9 +168,36 @@ describe("SessionCard", () => {
     });
 
     const html = renderSessionCard(session);
-    expect(html).toContain("<p>release</p>");
+    expect(html).toContain('class="session-card-branch" title="release">release</p>');
     expect(html).toContain('aria-label="Git workspace: release · idle"');
-    expect(html).not.toContain("<p>main</p>");
+    expect(html).not.toContain('class="session-card-branch" title="main">main</p>');
+  });
+
+  it("marks long target branches for truncation while preserving the full name", () => {
+    const targetBranch = "feature/a-very-long-branch-name-that-must-not-expand-the-session-card";
+    const session = testSession({
+      id: "long-branch",
+      paneId: "%121",
+      windowName: "long-branch",
+      gitWorkspace: {
+        workflowVersion: 1,
+        id: "workspace-long-branch",
+        state: "idle",
+        entryPath: "/repo",
+        repoRoot: "/repo",
+        targetBranch,
+        targetSha: "4444444444444444444444444444444444444444",
+        sessionBranch: null,
+        worktreePath: null,
+        lastError: null,
+        updatedAt: "2026-07-14T12:00:00.000Z",
+        dependencyLinks: []
+      }
+    });
+
+    const html = renderSessionCard(session);
+    expect(html).toContain(`class="session-card-branch" title="${targetBranch}"`);
+    expect(html).toContain(`>${targetBranch}</p>`);
   });
 
   it("renders obsolete workspace errors as a neutral target state", () => {
