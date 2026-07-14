@@ -37,6 +37,8 @@ describe("codexCommandArgs", () => {
       "env",
       "MUXPILOT_GIT_WORKSPACE_ID=workspace-1",
       "codex",
+      "-c",
+      "check_for_update_on_startup=false",
       "-C",
       "/tmp/control",
       "-s",
@@ -112,7 +114,9 @@ describe("tmuxNewCodexWindowArgs", () => {
       "make-warnings",
       "-c",
       "/home/dev/workspace/example",
-      "codex"
+      "codex",
+      "-c",
+      "check_for_update_on_startup=false"
     ]);
   });
 
@@ -131,6 +135,8 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-c",
       "/home/dev/workspace/example",
       "codex",
+      "-c",
+      "check_for_update_on_startup=false",
       "resume",
       "codex-session-id"
     ]);
