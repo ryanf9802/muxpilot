@@ -21,7 +21,11 @@ describe("production bundled skill startup", () => {
       await writeFile(skillPath, "outdated");
 
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
-      expect(await readFile(skillPath, "utf8")).toContain("name: muxpilot-git-workflow");
+      const installedSkill = await readFile(skillPath, "utf8");
+      expect(installedSkill).toContain("name: muxpilot-git-workflow");
+      expect(installedSkill).toContain("create or select a local branch for implementation");
+      expect(installedSkill).toContain("`feature` is the intended target and `origin/dev` is only its start point");
+      expect(installedSkill).toContain("Before creating the requested branch or beginning implementation");
     } finally {
       log.mockRestore();
     }

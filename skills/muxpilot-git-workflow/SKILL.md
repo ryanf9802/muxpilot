@@ -13,14 +13,15 @@ For plans, answers, diagnosis, or review, inspect the repository entry path dire
 
 ## Change tasks
 
-1. Tell the user you are creating an isolated task worktree, then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-begin.mjs"`.
-2. Perform every repository write in the returned worktree. Shared dependency directories may be linked there and their real targets are writable for test caches.
-3. Before changing dependency manifests, lockfiles, or installed packages, run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-deps.mjs" localize <relative-dependency-path>` and install into the worktree-local directory.
-4. Follow repository guidance, but default to focused file/module lint, typechecking, and tests. Run repository-wide suites only when the user requests them.
-5. Make clean, logically atomic commits. Do not leave tracked or untracked task changes uncommitted.
-6. Review the complete target-to-task diff yourself. Fix every actionable finding, rerun affected focused checks, commit fixes, and review again. Repeat until a final review finds nothing actionable. Any material change invalidates the prior review.
-7. Run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-finish.mjs"`. If the target advanced, the helper rebases and stops; rerun affected focused checks and the complete self-review loop before retrying. Resolve conflicts in the task worktree, then do the same.
-8. Report completion only after the helper prints `INTEGRATED`. Successful integration removes the worktree and temporary branch. Failed or unfinished work is preserved.
+1. Resolve the intended target using "Changing the target branch" below. Complete any required confirmation, branch creation, and retarget before creating a task worktree.
+2. Tell the user you are creating an isolated task worktree, then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-begin.mjs"`.
+3. Perform every repository content write in the returned worktree. Shared dependency directories may be linked there and their real targets are writable for test caches.
+4. Before changing dependency manifests, lockfiles, or installed packages, run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-deps.mjs" localize <relative-dependency-path>` and install into the worktree-local directory.
+5. Follow repository guidance, but default to focused file/module lint, typechecking, and tests. Run repository-wide suites only when the user requests them.
+6. Make clean, logically atomic commits. Do not leave tracked or untracked task changes uncommitted.
+7. Review the complete target-to-task diff yourself. Fix every actionable finding, rerun affected focused checks, commit fixes, and review again. Repeat until a final review finds nothing actionable. Any material change invalidates the prior review.
+8. Run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-finish.mjs"`. If the target advanced, the helper rebases and stops; rerun affected focused checks and the complete self-review loop before retrying. Resolve conflicts in the task worktree, then do the same.
+9. Report completion only after the helper prints `INTEGRATED`. Successful integration removes the worktree and temporary branch. Failed or unfinished work is preserved.
 
 Integration is entirely local. Normal helpers never create a target branch, pull, push, publish, or reconcile a remote. Multiple tasks may target the same branch; their short final integration steps serialize, and completion order determines landing order.
 
@@ -28,7 +29,11 @@ Integration is entirely local. Normal helpers never create a target branch, pull
 
 Treat `muxpilot-git-status.mjs` as authoritative for the current target. The launch-time target is only the fallback before workflow status exists.
 
-Changing the target is a `fixed-target` guard bypass. A user request naming another branch is not itself confirmation. Name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. Then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-target.mjs" <existing-local-branch> --bypass=fixed-target`.
+Infer target intent before beginning a change task. When a user asks to create or select a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the muxpilot target. In a request to create `feature` from `origin/dev`, `feature` is the intended target and `origin/dev` is only its start point.
+
+If the intended target differs from workflow status, changing it is a `fixed-target` guard bypass. The original request is not itself confirmation. Before creating the requested branch or beginning implementation, name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. If confirmation is declined, leave the branch and workflow state unchanged.
+
+After confirmation, create a requested local branch from the supplied locally available start point without checking it out, fetching, pulling, or pushing. Then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-target.mjs" <existing-local-branch> --bypass=fixed-target`. If the start point is unavailable locally, report the blocker rather than fetching implicitly. If the intended branch is already the current target, no bypass or additional confirmation is required.
 
 The helper never creates or fetches a branch. If a task worktree exists, it is preserved and finalization rebases it onto the new target when necessary. Any active-worktree retarget invalidates prior validation and review; rerun focused checks and the complete self-review loop before integration, even when Git does not need to rebase.
 

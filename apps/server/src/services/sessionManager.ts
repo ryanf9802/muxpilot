@@ -1454,7 +1454,7 @@ export function managedCodexLaunchOptions(
       "Use $muxpilot-git-workflow for every change task.",
       `Repository entry path: ${summary.entryPath}.`,
       `Initial target branch: ${summary.targetBranch}.`,
-      "For change or build tasks, announce the workflow action, run the begin helper, and perform every repository write in its short-lived worktree.",
+      "For change or build tasks, first resolve the intended target and complete any required fixed-target confirmation and retarget, then announce the workflow action, run the begin helper, and perform every repository content write in its short-lived worktree.",
       helperDir
         ? `Workflow helpers: begin with node ${JSON.stringify(join(helperDir, "muxpilot-git-begin.mjs"))}; inspect status with node ${JSON.stringify(join(helperDir, "muxpilot-git-status.mjs"))}; change target with node ${JSON.stringify(join(helperDir, "muxpilot-git-target.mjs"))}; finalize with node ${JSON.stringify(join(helperDir, "muxpilot-git-finish.mjs"))}.`
         : "Use the helper directory provided by the workflow environment.",
@@ -1463,7 +1463,7 @@ export function managedCodexLaunchOptions(
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
       "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Run repository-wide validation only when the user requests it.",
       "User instructions take priority over muxpilot guardrails. If an instruction conflicts with a muxpilot guard, name each exact guard and consequence and obtain explicit confirmation for those guards before bypassing them. Confirmation is operation-scoped; platform safety rules are not muxpilot guards.",
-      "Changing the target branch requires a separately confirmed fixed-target bypass; it changes where current and future task commits integrate, and an active worktree must repeat focused checks and self-review before integration.",
+      "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard, explain that current and future task commits will integrate there, and obtain separate explicit confirmation for the fixed-target bypass. An active worktree must repeat focused checks and self-review after retargeting before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "Shared dependency links are writable for test caches. Before installing or changing dependencies, localize the relevant link with the dependency helper.",

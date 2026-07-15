@@ -59,9 +59,15 @@ describe("managed Codex launch instructions", () => {
     expect(options.writableRoots).toContain("/tmp");
     expect(options.developerInstructions).toContain("/home/dev/.codex/skills/muxpilot-git-workflow/scripts");
     expect(options.developerInstructions).toContain("short-lived worktree");
+    expect(options.developerInstructions).toContain("first resolve the intended target");
+    expect(options.developerInstructions).toContain("confirmation and retarget, then announce");
     expect(options.developerInstructions).toContain("muxpilot-git-begin");
     expect(options.developerInstructions).toContain("muxpilot-git-target");
-    expect(options.developerInstructions).toContain("fixed-target bypass");
+    expect(options.developerInstructions).toContain("branch for implementation");
+    expect(options.developerInstructions).toContain("source ref such as origin/dev is only the start point");
+    expect(options.developerInstructions).toContain("before creating the branch or beginning implementation");
+    expect(options.developerInstructions).toContain("name the fixed-target guard");
+    expect(options.developerInstructions).toContain("confirmation for the fixed-target bypass");
     expect(options.developerInstructions).toContain("Initial target branch: main");
     expect(options.developerInstructions).toContain("obtain explicit confirmation for those guards");
     expect(options.developerInstructions).toContain("Never use an implementation worktree's state to claim that another checkout is clean or dirty");
