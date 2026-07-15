@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import type { GitWorkspaceState, ManagedSession } from "@muxpilot/core";
 import {
   CodexUsagePanel,
@@ -24,6 +25,8 @@ import {
   shouldRefreshDashboardForEvent
 } from "./Dashboard.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+
+const dashboardStyles = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
 
 describe("DASHBOARD_STATUSES", () => {
   it("includes plan-specific filter options", () => {
@@ -200,6 +203,11 @@ describe("SessionCard", () => {
     expect(html).toContain(`>${targetBranch}</p>`);
   });
 
+  it("keeps long branch cards inside narrow dashboard columns", () => {
+    expect(cssRule(".session-card")).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(cssRule(".session-card .card-foot-events")).toContain("flex: 0 0 auto");
+  });
+
   it("renders obsolete workspace errors as a neutral target state", () => {
     const session = testSession({
       id: "legacy",
@@ -240,6 +248,11 @@ describe("SessionCard", () => {
     );
   });
 });
+
+function cssRule(selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return dashboardStyles.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1] ?? "";
+}
 
 describe("dashboardPreviewLines", () => {
   it("falls back to recent prompts when activity summaries are disabled", () => {
