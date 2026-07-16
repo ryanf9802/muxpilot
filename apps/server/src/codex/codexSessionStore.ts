@@ -20,6 +20,7 @@ interface SessionMetaLine {
     timestamp?: string;
     cwd?: string;
     cli_version?: string;
+    source?: unknown;
   };
 }
 
@@ -36,24 +37,29 @@ export class CodexSessionStore {
       }))
     );
 
-    const recent = stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs).slice(0, limit);
-    const parsed = await Promise.all(
-      recent.map(async ({ path, stat: fileStat }) => {
-        const meta = await readSessionMeta(path);
-        if (!meta) return null;
-        return {
-          sessionId: meta.sessionId,
-          path,
-          cwd: meta.cwd,
-          startedAtMs: meta.startedAtMs,
-          updatedAtMs: fileStat.mtimeMs,
-          sizeBytes: fileStat.size,
-          cliVersion: meta.cliVersion
-        } satisfies CodexSessionFile;
-      })
-    );
+    const recent = stats.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+    const sessions: CodexSessionFile[] = [];
+    const batchSize = Math.max(25, Math.min(limit, 200));
+    for (let offset = 0; offset < recent.length && sessions.length < limit; offset += batchSize) {
+      const parsed = await Promise.all(
+        recent.slice(offset, offset + batchSize).map(async ({ path, stat: fileStat }) => {
+          const meta = await readSessionMeta(path);
+          if (!meta) return null;
+          return {
+            sessionId: meta.sessionId,
+            path,
+            cwd: meta.cwd,
+            startedAtMs: meta.startedAtMs,
+            updatedAtMs: fileStat.mtimeMs,
+            sizeBytes: fileStat.size,
+            cliVersion: meta.cliVersion
+          } satisfies CodexSessionFile;
+        })
+      );
+      sessions.push(...parsed.filter((item): item is CodexSessionFile => item !== null));
+    }
 
-    return parsed.filter((item): item is CodexSessionFile => item !== null);
+    return sessions.slice(0, limit);
   }
 
   async findBestForCwd(cwd: string): Promise<CodexSessionFile | null> {
@@ -87,6 +93,7 @@ async function readSessionMeta(
 
   try {
     const event = JSON.parse(firstLine) as SessionMetaLine;
+    if (isSubagentSource(event.payload.source)) return null;
     const sessionId = event.payload.session_id ?? event.payload.id;
     if (!sessionId) return null;
     return {
@@ -98,6 +105,10 @@ async function readSessionMeta(
   } catch {
     return null;
   }
+}
+
+function isSubagentSource(source: unknown): boolean {
+  return Boolean(source && typeof source === "object" && "subagent" in source);
 }
 
 async function readFileChunk(path: string, position: number, length: number): Promise<string> {

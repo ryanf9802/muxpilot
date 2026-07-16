@@ -2480,6 +2480,87 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("keeps a parent pane bound to its root transcript while subagent transcripts grow", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1", pid: 101 });
+    const rootPath = join(harness.codexHome, "sessions", "root.jsonl");
+    const subagentPath = join(harness.codexHome, "sessions", "subagent.jsonl");
+
+    await writeCodexSession(harness.codexHome, "root.jsonl", {
+      sessionId: "codex-root",
+      cwd: repo,
+      user: "root prompt",
+      assistant: "root answer",
+      startedAt: new Date("2026-07-07T00:00:00.000Z"),
+      mtime: new Date("2026-07-07T00:01:00.000Z")
+    });
+    await writeCodexSession(harness.codexHome, "subagent.jsonl", {
+      sessionId: "codex-root",
+      threadId: "codex-subagent",
+      source: {
+        subagent: {
+          thread_spawn: {
+            parent_thread_id: "codex-root",
+            depth: 1,
+            agent_path: "/root/review"
+          }
+        }
+      },
+      cwd: repo,
+      user: "subagent prompt visible in the pane",
+      assistant: "subagent answer visible in the pane",
+      startedAt: new Date("2026-07-07T00:02:00.000Z"),
+      mtime: new Date("2026-07-07T00:03:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "subagent prompt visible in the pane\nsubagent answer visible in the pane\n› ";
+    harness.processLookup.set(pane.pid, {
+      pid: 201,
+      sessionId: "codex-root",
+      startedAtMs: new Date("2026-07-07T00:00:00.000Z").getTime()
+    });
+
+    const candidates = await harness.codexStore.listRecent();
+    expect(candidates.map((candidate) => candidate.path)).toEqual([rootPath]);
+
+    await harness.manager.discover();
+    await harness.manager.catchUpIngest();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session).toMatchObject({
+      codexSessionId: "codex-root",
+      codexJsonlPath: rootPath,
+      transcriptSyncing: false
+    });
+    expect(harness.manager.listMessages(session!.id, 0).map((message) => message.text)).toEqual([
+      "root prompt",
+      "root answer"
+    ]);
+
+    await appendFile(
+      subagentPath,
+      `${JSON.stringify({
+        timestamp: "2026-07-07T00:04:00.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message: "more subagent progress" }
+      })}\n`
+    );
+    await harness.manager.discover();
+    await harness.manager.ingest();
+
+    expect(await harness.manager.getSession(session!.id)).toMatchObject({
+      codexSessionId: "codex-root",
+      codexJsonlPath: rootPath,
+      transcriptSyncing: false
+    });
+    expect(harness.manager.listMessages(session!.id, 0).map((message) => message.text)).toEqual([
+      "root prompt",
+      "root answer"
+    ]);
+    harness.db.close();
+  });
+
   it("binds fresh same-cwd Codex panes by process start time when captures are generic", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "shared-repo");
@@ -3580,7 +3661,16 @@ function sessionForDiscoveryChange(targetBranch: string): ManagedSession {
 async function writeCodexSession(
   codexHome: string,
   name: string,
-  input: { sessionId: string; cwd: string; user: string; assistant: string; startedAt?: Date; mtime: Date }
+  input: {
+    sessionId: string;
+    threadId?: string;
+    source?: unknown;
+    cwd: string;
+    user: string;
+    assistant: string;
+    startedAt?: Date;
+    mtime: Date;
+  }
 ): Promise<void> {
   const path = join(codexHome, "sessions", name);
   const startedAt = input.startedAt ?? input.mtime;
@@ -3590,7 +3680,14 @@ async function writeCodexSession(
       JSON.stringify({
         timestamp: startedAt.toISOString(),
         type: "session_meta",
-        payload: { session_id: input.sessionId, timestamp: startedAt.toISOString(), cwd: input.cwd, cli_version: "test" }
+        payload: {
+          id: input.threadId ?? input.sessionId,
+          session_id: input.sessionId,
+          timestamp: startedAt.toISOString(),
+          cwd: input.cwd,
+          cli_version: "test",
+          source: input.source ?? "cli"
+        }
       }),
       JSON.stringify({
         timestamp: "2026-07-07T00:00:01.000Z",
