@@ -87,7 +87,8 @@ const MESSAGE_BOTTOM_LOAD_THRESHOLD_PX = 120;
 const SESSION_RECONCILE_INTERVAL_MS = 2000;
 const SKILL_REFRESH_INTERVAL_MS = 60_000;
 const SKILL_REFRESH_STALE_MS = 10_000;
-export type ScrollBehavior = "bottom" | "top" | "preserve" | "none";
+// "none" explicitly preserves the viewport; "idle" means there is no pending transcript scroll request.
+export type ScrollBehavior = "bottom" | "top" | "preserve" | "none" | "idle";
 export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live" | "older_page" | "manual_newer";
 export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
@@ -219,6 +220,15 @@ export function scrollBehaviorForTranscriptUpdate(reason: ScrollUpdateReason, is
   if (reason === "manual_newer") return "none";
   if (reason === "live") return isNearBottom ? "bottom" : "none";
   return "bottom";
+}
+
+export function scrollBehaviorForBottomContentUpdate(
+  behavior: ScrollBehavior,
+  bottomContentChanged: boolean,
+  wasNearBottom: boolean
+): ScrollBehavior {
+  if (behavior !== "idle") return behavior;
+  return bottomContentChanged && wasNearBottom ? "bottom" : "none";
 }
 
 export function restoreScrollTopForAnchor(
@@ -573,6 +583,7 @@ export function SessionView() {
   const lastMessageListScrollTopRef = useRef(0);
   const preserveScrollRef = useRef<ScrollAnchorSnapshot | null>(null);
   const scrollBehaviorRef = useRef<ScrollBehavior>("bottom");
+  const bottomContentKeyRef = useRef("");
   const skillsRefreshRunningRef = useRef(false);
   const skillsLastRefreshRef = useRef(0);
   const activeIdRef = useRef(id);
@@ -619,6 +630,16 @@ export function SessionView() {
       (transcriptItems.some((item) => transcriptItemContainsMessageId(item, question.messageId)) ||
         Object.values(expandedRangeItems).some((items) => items.some((item) => transcriptItemContainsMessageId(item, question.messageId))))
   );
+  const bottomContentKey = [
+    id,
+    pendingUserChatMessage?.id ?? "",
+    showTranscriptSyncIndicator ? "sync" : "",
+    showWorkingIndicator ? `working:${session?.status ?? ""}` : "",
+    question && !questionRenderedInline ? `question:${question.messageId}` : "",
+    approval ? `approval:${approval.id}` : "",
+    queuedInputs.map((input) => `${input.id}:${input.status}`).join(","),
+    hasMoreAfter ? "newer" : ""
+  ].join("\0");
 
   const refreshCodexSkills = useCallback(
     async (options: { force?: boolean } = {}) => {
@@ -963,8 +984,10 @@ export function SessionView() {
   useLayoutEffect(() => {
     const container = messageListRef.current;
     if (!container) return;
-    const behavior = scrollBehaviorRef.current;
-    scrollBehaviorRef.current = "none";
+    const bottomContentChanged = bottomContentKeyRef.current !== bottomContentKey;
+    bottomContentKeyRef.current = bottomContentKey;
+    const behavior = scrollBehaviorForBottomContentUpdate(scrollBehaviorRef.current, bottomContentChanged, isNearBottomRef.current);
+    scrollBehaviorRef.current = "idle";
     const preserved = preserveScrollRef.current;
     preserveScrollRef.current = null;
     if (container && behavior === "preserve" && preserved) {
@@ -978,7 +1001,7 @@ export function SessionView() {
       updateMessageListScrollState(container);
       return;
     }
-    if (behavior === "none") return;
+    if (behavior === "none" || behavior === "idle") return;
     scrollMessageListToBottom(container);
     updateMessageListScrollState(container);
     const animationFrame = window.requestAnimationFrame(() => {
@@ -987,7 +1010,7 @@ export function SessionView() {
       if (initialTranscriptSessionId === id && !initialScrollReady) setInitialScrollReady(true);
     });
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [id, initialScrollReady, initialTranscriptSessionId, transcriptItems, showWorkingIndicator, showTranscriptSyncIndicator]);
+  }, [bottomContentKey, id, initialScrollReady, initialTranscriptSessionId, transcriptItems]);
 
   async function trackRefreshRequest<T>(request: () => Promise<T>): Promise<T> {
     return request();

@@ -56,6 +56,7 @@ import {
   isCodexPastedContentPlaceholder,
   scrollMessageListByRatio,
   scrollMessageListToBottom,
+  scrollBehaviorForBottomContentUpdate,
   scrollBehaviorForTranscriptUpdate,
   shouldQueueComposerInput,
   shouldHandleSessionBackShortcut,
@@ -1079,6 +1080,19 @@ describe("session scroll behavior", () => {
   it("only sticks to bottom for live updates when already near bottom", () => {
     expect(scrollBehaviorForTranscriptUpdate("live", true)).toBe("bottom");
     expect(scrollBehaviorForTranscriptUpdate("live", false)).toBe("none");
+  });
+
+  it("keeps newly rendered bottom content visible when already at the bottom", () => {
+    expect(scrollBehaviorForBottomContentUpdate("idle", true, true)).toBe("bottom");
+    expect(scrollBehaviorForBottomContentUpdate("idle", true, false)).toBe("none");
+    expect(scrollBehaviorForBottomContentUpdate("idle", false, true)).toBe("none");
+  });
+
+  it("does not override an explicit transcript scroll behavior", () => {
+    expect(scrollBehaviorForBottomContentUpdate("none", true, true)).toBe("none");
+    expect(scrollBehaviorForBottomContentUpdate("preserve", true, true)).toBe("preserve");
+    expect(scrollBehaviorForBottomContentUpdate("top", true, true)).toBe("top");
+    expect(scrollBehaviorForBottomContentUpdate("bottom", false, false)).toBe("bottom");
   });
 
   it("keeps explicit user bottom actions anchored to the bottom", () => {
