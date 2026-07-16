@@ -49,16 +49,16 @@ const activitySummarizer = new ActivitySummarizer({
   enabled: activitySummariesEnabled,
   onSummaryUpdated: (sessionId) => {
     void db.getSession(sessionId).then((session) => {
-    if (!session) return;
-    const event = {
-      id: eventId(),
-      type: "session.updated" as const,
-      sessionId,
-      payload: session,
-      timestamp: nowIso()
-    };
-    events.publish(event);
-  });
+      if (!session) return;
+      const event = {
+        id: eventId(),
+        type: "session.updated" as const,
+        sessionId,
+        payload: session,
+        timestamp: nowIso()
+      };
+      events.publish(event);
+    });
   },
   logger: app.log
 });

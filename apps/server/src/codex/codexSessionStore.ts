@@ -93,7 +93,7 @@ async function readSessionMeta(
 
   try {
     const event = JSON.parse(firstLine) as SessionMetaLine;
-    if (isSubagentSource(event.payload.source)) return null;
+    if (isSubagentSession(event.payload)) return null;
     const sessionId = event.payload.session_id ?? event.payload.id;
     if (!sessionId) return null;
     return {
@@ -107,8 +107,10 @@ async function readSessionMeta(
   }
 }
 
-function isSubagentSource(source: unknown): boolean {
-  return Boolean(source && typeof source === "object" && "subagent" in source);
+function isSubagentSession(payload: SessionMetaLine["payload"]): boolean {
+  const source = payload.source;
+  if (source && typeof source === "object" && "subagent" in source) return true;
+  return Boolean(payload.id && payload.session_id && payload.id !== payload.session_id);
 }
 
 async function readFileChunk(path: string, position: number, length: number): Promise<string> {

@@ -14,7 +14,6 @@ export async function compactDatabase(dbPath, options = {}) {
   const absolutePath = resolve(dbPath);
   if (!existsSync(absolutePath)) throw new Error(`Database does not exist: ${absolutePath}`);
 
-  const beforeBytes = (await stat(absolutePath)).size;
   const suffix = (options.timestamp ?? new Date().toISOString()).replace(/[:.]/g, "-");
   const backupPath = options.backupPath ?? `${absolutePath}.backup-${suffix}`;
   if (existsSync(backupPath)) throw new Error(`Backup already exists: ${backupPath}`);
@@ -22,9 +21,10 @@ export async function compactDatabase(dbPath, options = {}) {
   let sourceMoved = false;
 
   checkpointDatabase(absolutePath);
-  await cloneFile(absolutePath, workingPath);
+  const beforeBytes = (await stat(absolutePath)).size;
 
   try {
+    await cloneFile(absolutePath, workingPath);
     const eventRowsRemoved = compactWorkingCopy(workingPath);
     await removeSidecars(absolutePath);
     await rename(absolutePath, backupPath);
@@ -156,5 +156,8 @@ function formatBytes(bytes) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
-  await main();
+  await main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
 }

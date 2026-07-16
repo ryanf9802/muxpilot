@@ -27,7 +27,7 @@ tmux is authoritative for live session existence, pane ids, cwd, window names, p
 
 Codex JSONL files under `~/.codex/sessions` are the preferred transcript source because they contain structured user, assistant, and tool events. Terminal capture is used for raw view and recovery previews.
 
-SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, events, and audit records.
+SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, and audit records. WebSocket events are published live and are not retained.
 
 Managed Git sessions store only the repository entry point, current existing local target branch, dependency link candidates, and path to a skill-owned status file. The launch-time target is an initial fallback; a guard-confirmed agent retarget is persisted through that status file and observed by the backend.
 
