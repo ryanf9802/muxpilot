@@ -57,9 +57,8 @@ const activitySummarizer = new ActivitySummarizer({
       payload: session,
       timestamp: nowIso()
     };
-    void db.appendEvent(event);
     events.publish(event);
-    });
+  });
   },
   logger: app.log
 });

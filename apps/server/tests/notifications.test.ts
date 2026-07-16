@@ -55,15 +55,15 @@ describe("matchingNotificationRules", () => {
   it("fires done task from discovered session updates", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     const service = new NotificationService(
       {
         getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
         listSessions: async () => [testSession({ status: "working" })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: "waiting" }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async () => []
       } as never,
       events,
@@ -89,6 +89,9 @@ describe("matchingNotificationRules", () => {
   it("matches rules per device and sends push only when enabled", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     const sendNotification = vi.spyOn(webPush, "sendNotification").mockResolvedValue({} as never);
     const service = new NotificationService(
       {
@@ -99,9 +102,6 @@ describe("matchingNotificationRules", () => {
           "device-push": testNotificationSettings(["done_task"], {}, { pushEnabled: true, soundEnabled: true })
         }),
         getSession: async () => testSession({ status: "waiting" }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async (deviceId: string) => [
           {
             deviceId,
@@ -133,15 +133,15 @@ describe("matchingNotificationRules", () => {
   it("does not fire done task for plan-mode sessions that briefly look waiting", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     const service = new NotificationService(
       {
         getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
         listSessions: async () => [testSession({ status: "working", inputMode: "plan" })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: "waiting", inputMode: "plan" }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async () => []
       } as never,
       events,
@@ -157,6 +157,9 @@ describe("matchingNotificationRules", () => {
   it("uses reconciled startup statuses as the notification baseline", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     let currentStatus: ManagedSession["status"] = "waiting";
     const vapidKeys = webPush.generateVAPIDKeys();
     const service = new NotificationService(
@@ -165,9 +168,6 @@ describe("matchingNotificationRules", () => {
         listSessions: async () => [testSession({ status: currentStatus })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
         getSession: async () => testSession({ status: currentStatus }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async () => []
       } as never,
       events,
@@ -219,6 +219,9 @@ describe("matchingNotificationRules", () => {
   it("does not alert for an already-actionable status present at startup", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     const vapidKeys = webPush.generateVAPIDKeys();
     const service = new NotificationService(
       {
@@ -226,9 +229,6 @@ describe("matchingNotificationRules", () => {
         listSessions: async () => [testSession({ status: "question" })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["approval_gate"]) }),
         getSession: async () => testSession({ status: "question" }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async () => []
       } as never,
       events,
@@ -252,15 +252,15 @@ describe("matchingNotificationRules", () => {
   it("uses transcript replay statuses as a silent notification baseline", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
     const service = new NotificationService(
       {
         getPushVapidKeys: async () => webPush.generateVAPIDKeys(),
         listSessions: async () => [testSession({ status: "working" })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["status_change"]) }),
         getSession: async () => testSession({ status: "waiting" }),
-        appendEvent: async (event: SessionEvent) => {
-          appendedEvents.push(event);
-        },
         listPushSubscriptions: async () => []
       } as never,
       events,
@@ -302,6 +302,41 @@ describe("matchingNotificationRules", () => {
     });
     await vi.waitFor(() => expect(appendedEvents).toHaveLength(1));
     service.stop();
+  });
+
+  it("deduplicates rapid identical notifications per device, rule, and status", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    let now = 1_000;
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
+        getSession: async () => testSession({ status: "waiting" }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never,
+      { nowMs: () => now }
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    expect(triggeredEvents).toHaveLength(1);
+
+    now += 60_000;
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    expect(triggeredEvents).toHaveLength(2);
   });
 });
 

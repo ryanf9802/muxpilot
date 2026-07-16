@@ -16,17 +16,25 @@ import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 
 type NotificationSeverity = NotificationTriggeredPayload["severity"];
+const DEFAULT_DUPLICATE_WINDOW_MS = 60_000;
+
+interface NotificationServiceOptions {
+  duplicateWindowMs?: number;
+  nowMs?: () => number;
+}
 
 export class NotificationService {
   private readonly knownStatuses = new Map<string, SessionStatus>();
   private readonly syncingSessions = new Set<string>();
+  private readonly lastTriggeredAt = new Map<string, number>();
   private unsubscribe: (() => void) | null = null;
   private vapidKeys: PushVapidKeys | null = null;
 
   constructor(
     private readonly db: AppDatabase,
     private readonly events: EventBus,
-    private readonly logger: Pick<Logger, "warn" | "error">
+    private readonly logger: Pick<Logger, "warn" | "error">,
+    private readonly options: NotificationServiceOptions = {}
   ) {}
 
   async start(): Promise<void> {
@@ -99,9 +107,10 @@ export class NotificationService {
     await Promise.all(
       Object.entries(settingsByDevice).map(async ([deviceId, settings]) => {
         const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus, { inputMode: session?.inputMode ?? null });
-        if (matchedRules.length === 0) return;
+        const rules = matchedRules.filter((rule) => this.shouldTrigger(deviceId, sessionId, rule, nextStatus));
+        if (rules.length === 0) return;
 
-        const payload = notificationPayload(deviceId, session, sessionId, previousStatus, nextStatus, matchedRules);
+        const payload = notificationPayload(deviceId, session, sessionId, previousStatus, nextStatus, rules);
         const triggeredEvent: SessionEvent = {
           id: eventId(),
           type: "notification.triggered",
@@ -109,11 +118,25 @@ export class NotificationService {
           payload,
           timestamp: nowIso()
         };
-        await this.db.appendEvent(triggeredEvent);
         this.events.publish(triggeredEvent);
         if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload);
       })
     );
+  }
+
+  private shouldTrigger(
+    deviceId: string,
+    sessionId: string,
+    rule: NotificationRuleType,
+    status: SessionStatus
+  ): boolean {
+    const now = (this.options.nowMs ?? Date.now)();
+    const key = [deviceId, sessionId, rule, status].join("\u0000");
+    const previous = this.lastTriggeredAt.get(key);
+    const duplicateWindowMs = this.options.duplicateWindowMs ?? DEFAULT_DUPLICATE_WINDOW_MS;
+    if (previous !== undefined && now - previous < duplicateWindowMs) return false;
+    this.lastTriggeredAt.set(key, now);
+    return true;
   }
 
   private async sendPushNotifications(deviceId: string, payload: NotificationTriggeredPayload): Promise<void> {

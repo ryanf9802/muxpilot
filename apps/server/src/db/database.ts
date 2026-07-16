@@ -19,7 +19,6 @@ import type {
   SessionModelSettings,
   SessionModelSelections,
   SessionDirectorySuggestion,
-  SessionEvent,
   SessionStatus,
   TranscriptItem,
   TranscriptRangeKind,
@@ -96,14 +95,6 @@ export interface MessagePage {
   messages: ChatMessage[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
-}
-
-interface EventRow {
-  id: string;
-  type: SessionEvent["type"];
-  session_id: string;
-  payload_json: string;
-  timestamp: string;
 }
 
 interface SessionSummaryRow {
@@ -577,10 +568,6 @@ export class AppDatabase {
 
   resetParserOffset(source: string): Promise<void> {
     return this.call("resetParserOffset", source) as Promise<void>;
-  }
-
-  appendEvent(event: SessionEvent): Promise<void> {
-    return this.call("appendEvent", event) as Promise<void>;
   }
 
   addAudit(actor: string, action: string, target: string, result: string, timestamp: string): Promise<void> {
@@ -2044,12 +2031,6 @@ export class SyncAppDatabase {
 
   resetParserOffset(source: string): void {
     this.db.prepare("DELETE FROM parser_offsets WHERE source = ?").run(source);
-  }
-
-  appendEvent(event: SessionEvent): void {
-    this.db
-      .prepare("INSERT INTO events (id, type, session_id, payload_json, timestamp) VALUES (?, ?, ?, ?, ?)")
-      .run(event.id, event.type, event.sessionId, JSON.stringify(event.payload), event.timestamp);
   }
 
   addAudit(actor: string, action: string, target: string, result: string, timestamp: string): void {

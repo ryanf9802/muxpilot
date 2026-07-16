@@ -1304,7 +1304,6 @@ export class SessionManager {
       payload,
       timestamp: nowIso()
     };
-    void this.db.appendEvent(event);
     this.events.publish(event);
   }
 
