@@ -315,6 +315,8 @@ Use `pnpm app ...` for normal operation. The app runs on the host machine under 
 | `pnpm app logs prod --process all --follow` | Follow production supervisor, backend, and web logs        |
 | `pnpm db:reset:dev`                         | Reset dev SQLite state                                     |
 | `pnpm db:reset:prod`                        | Reset production SQLite state                              |
+| `pnpm db:compact:dev`                       | Compact a stopped development database                     |
+| `pnpm db:compact:prod`                      | Compact a stopped production database                      |
 | `pnpm pwa:setup`                            | Create/reuse HTTPS/PWA certificates and write `.env.local` |
 | `pnpm pwa:trust`                            | Run the phone trust-file helper                            |
 | `pnpm pwa:certs:status`                     | Print PWA certificate status                               |

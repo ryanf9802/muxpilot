@@ -43,6 +43,8 @@ pnpm app stop
 
 `pnpm app restart all` and `pnpm restart` restart only modes that are already running. They do not start a stopped environment.
 
+To remove unused transient event history and compact SQLite, stop production and run `pnpm db:compact:prod`. The command verifies the compacted copy before installing it and retains the original database as a timestamped backup.
+
 ## Updating
 
 ```bash

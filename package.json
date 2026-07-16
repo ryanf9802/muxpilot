@@ -24,6 +24,8 @@
     "db:reset": "node scripts/reset-dbs.mjs",
     "db:reset:dev": "node scripts/reset-dbs.mjs --dev",
     "db:reset:prod": "node scripts/reset-dbs.mjs --prod",
+    "db:compact:dev": "node --experimental-sqlite scripts/compact-dbs.mjs --dev",
+    "db:compact:prod": "node --experimental-sqlite scripts/compact-dbs.mjs --prod",
     "dev:server": "pnpm --filter @muxpilot/server dev",
     "dev:web": "pnpm --filter @muxpilot/web dev",
     "build": "pnpm -r build",

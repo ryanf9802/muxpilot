@@ -24,6 +24,7 @@ pnpm restart
 pnpm dev:server
 pnpm dev:web
 pnpm db:reset:dev
+pnpm db:compact:dev
 ```
 
 Always use `pnpm app start dev` for the development server. It checks whether the local backend and frontend are already running, reuses a healthy supervised server, starts the dev supervisor when needed, and forces dev state into `./data/dev/muxpilot.db`. Started processes run in the background with PID and log files under `data/runtime/dev/`.
@@ -31,6 +32,8 @@ Codex and other automated agents must only interact with the dev server. Product
 Use `pnpm app stop dev` to stop the dev server only. `pnpm app restart dev` stops and starts it again. `pnpm restart` restarts only environments that are already running, leaving stopped development or production servers down.
 
 `pnpm db:reset:dev` removes the development SQLite database and its WAL/SHM files. It refuses to run while the development ports are active unless `--force` is passed through to `scripts/reset-dbs.mjs`.
+
+`pnpm db:compact:dev` removes unused transient event history and vacuums a stopped development database. It verifies the compacted copy and retains the original database as a timestamped backup.
 
 Loopback development uses trusted local operator access. To test the phone/LAN flow, run:
 
