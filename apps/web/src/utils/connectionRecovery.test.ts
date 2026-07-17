@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   CONNECTION_AUTO_RELOAD_STORAGE_KEY,
+  FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+  FOREGROUND_RECOVERY_COALESCE_MS,
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
   installForegroundRecoveryListeners,
@@ -48,7 +50,6 @@ describe("connection reload escalation", () => {
     const reload = vi.fn();
     const options = {
       visibilityState: "visible" as const,
-      online: true,
       storage: () => window.sessionStorage,
       reload
     };
@@ -59,15 +60,25 @@ describe("connection reload escalation", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
-  it("does not reload while hidden, offline, or unable to record the guard", () => {
+  it("reloads immediately for a failed foreground probe", () => {
+    const reload = vi.fn();
+
+    expect(attemptConnectionAutoReload(1, {
+      visibilityState: "visible",
+      failureThreshold: FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+      storage: () => window.sessionStorage,
+      reload
+    })).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reload while hidden or unable to record the guard", () => {
     const reload = vi.fn();
     const storage = () => window.sessionStorage;
 
-    expect(attemptConnectionAutoReload(3, { visibilityState: "hidden", online: true, storage, reload })).toBe(false);
-    expect(attemptConnectionAutoReload(3, { visibilityState: "visible", online: false, storage, reload })).toBe(false);
+    expect(attemptConnectionAutoReload(3, { visibilityState: "hidden", storage, reload })).toBe(false);
     expect(attemptConnectionAutoReload(3, {
       visibilityState: "visible",
-      online: true,
       storage: () => { throw new Error("Storage unavailable"); },
       reload
     })).toBe(false);
@@ -84,19 +95,34 @@ describe("connection reload escalation", () => {
 });
 
 describe("installForegroundRecoveryListeners", () => {
-  it("recovers for visible, pageshow, and online events", () => {
+  it("coalesces foreground signals and identifies a new hidden-to-visible cycle", async () => {
+    vi.useFakeTimers();
     const recover = vi.fn();
+    let visibilityState: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibilityState);
     const removeListeners = installForegroundRecoveryListeners(recover);
 
+    visibilityState = "hidden";
+    document.dispatchEvent(new Event("visibilitychange"));
+    visibilityState = "visible";
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("pageshow"));
     window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
 
-    expect(recover).toHaveBeenCalledTimes(3);
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(recover).toHaveBeenLastCalledWith({ startsNewCycle: true });
+
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
+
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(recover).toHaveBeenLastCalledWith({ startsNewCycle: false });
     removeListeners();
   });
 
-  it("ignores hidden visibility changes and removes every listener", () => {
+  it("ignores hidden visibility changes, cancels pending recovery, and removes every listener", async () => {
+    vi.useFakeTimers();
     const recover = vi.fn();
     const visibilityState = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
     const removeListeners = installForegroundRecoveryListeners(recover);
@@ -109,6 +135,7 @@ describe("installForegroundRecoveryListeners", () => {
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("pageshow"));
     window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
     expect(recover).not.toHaveBeenCalled();
   });
 });

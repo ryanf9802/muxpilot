@@ -29,7 +29,7 @@ describe("api client request headers", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/me",
-      expect.objectContaining({ credentials: "include", signal: controller.signal })
+      expect.objectContaining({ credentials: "include", signal: controller.signal, cache: "no-store" })
     );
   });
 

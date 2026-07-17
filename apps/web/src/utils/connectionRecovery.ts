@@ -1,5 +1,11 @@
 export const CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD = 3;
+export const FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD = 1;
 export const CONNECTION_AUTO_RELOAD_STORAGE_KEY = "muxpilot.connection-auto-reload.v1";
+export const FOREGROUND_RECOVERY_COALESCE_MS = 50;
+
+export interface ForegroundRecoveryEvent {
+  startsNewCycle: boolean;
+}
 
 export function requestWithTimeout<T>(
   request: (signal: AbortSignal) => Promise<T>,
@@ -14,15 +20,14 @@ export function attemptConnectionAutoReload(
   failureCount: number,
   options: {
     visibilityState: DocumentVisibilityState;
-    online: boolean;
+    failureThreshold?: number;
     storage: () => Pick<Storage, "getItem" | "setItem">;
     reload: () => void;
   }
 ): boolean {
   if (
-    failureCount < CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD
+    failureCount < (options.failureThreshold ?? CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD)
     || options.visibilityState !== "visible"
-    || !options.online
   ) return false;
 
   try {
@@ -45,18 +50,44 @@ export function clearConnectionAutoReload(storage: () => Pick<Storage, "removeIt
   }
 }
 
-export function installForegroundRecoveryListeners(onRecover: () => void): () => void {
-  const handleVisibilityChange = () => {
-    if (document.visibilityState === "visible") onRecover();
+export function installForegroundRecoveryListeners(onRecover: (event: ForegroundRecoveryEvent) => void): () => void {
+  let sawHidden = document.visibilityState === "hidden";
+  let startsNewCycle = false;
+  let recoveryTimer: number | null = null;
+
+  const scheduleRecovery = (nextCycle: boolean) => {
+    startsNewCycle ||= nextCycle;
+    if (recoveryTimer !== null) return;
+    recoveryTimer = window.setTimeout(() => {
+      recoveryTimer = null;
+      const event = { startsNewCycle };
+      startsNewCycle = false;
+      onRecover(event);
+    }, FOREGROUND_RECOVERY_COALESCE_MS);
   };
 
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "hidden") {
+      sawHidden = true;
+      return;
+    }
+    scheduleRecovery(sawHidden);
+    sawHidden = false;
+  };
+  const handlePageShow = (event: PageTransitionEvent) => {
+    scheduleRecovery(sawHidden || event.persisted);
+    sawHidden = false;
+  };
+  const handleOnline = () => scheduleRecovery(false);
+
   document.addEventListener("visibilitychange", handleVisibilityChange);
-  window.addEventListener("pageshow", onRecover);
-  window.addEventListener("online", onRecover);
+  window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("online", handleOnline);
 
   return () => {
+    if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
-    window.removeEventListener("pageshow", onRecover);
-    window.removeEventListener("online", onRecover);
+    window.removeEventListener("pageshow", handlePageShow);
+    window.removeEventListener("online", handleOnline);
   };
 }

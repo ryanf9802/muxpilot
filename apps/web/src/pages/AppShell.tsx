@@ -41,6 +41,8 @@ import { Modal } from "../components/Modal.js";
 import {
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
+  CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+  FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   installForegroundRecoveryListeners,
   requestWithTimeout
 } from "../utils/connectionRecovery.js";
@@ -167,7 +169,10 @@ export function AppShell() {
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
   }, [markUnauthorized]);
 
-  const probeShellConnection = useCallback((supersede = false): Promise<boolean> => {
+  const probeShellConnection = useCallback((
+    supersede = false,
+    autoReloadFailureThreshold = CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD
+  ): Promise<boolean> => {
     const activeProbe = connectionProbeRef.current;
     if (activeProbe && !supersede) return activeProbe.promise;
     if (activeProbe) {
@@ -189,10 +194,11 @@ export function AppShell() {
       .catch((error) => {
         if (connectionProbeRef.current !== probe) return false;
         markDisconnected(error);
+        if (isUnauthorizedError(error)) return false;
         connectionProbeFailureCountRef.current += 1;
         attemptConnectionAutoReload(connectionProbeFailureCountRef.current, {
           visibilityState: document.visibilityState,
-          online: navigator.onLine,
+          failureThreshold: autoReloadFailureThreshold,
           storage: () => window.sessionStorage,
           reload: () => window.location.reload()
         });
@@ -243,12 +249,16 @@ export function AppShell() {
     };
   }, [probeShellConnection]);
 
-  useEffect(() => installForegroundRecoveryListeners(() => {
+  useEffect(() => installForegroundRecoveryListeners(({ startsNewCycle }) => {
+    if (startsNewCycle) {
+      connectionProbeFailureCountRef.current = 0;
+      clearConnectionAutoReload(() => window.sessionStorage);
+    }
     if (connectionStateRef.current === "connected") {
       setConnectionEpoch((epoch) => epoch + 1);
       setShellSocketEpoch((epoch) => epoch + 1);
     }
-    void probeShellConnection(true);
+    void probeShellConnection(true, FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD);
   }), [probeShellConnection]);
 
   useEffect(() => {
