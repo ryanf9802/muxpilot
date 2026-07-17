@@ -171,6 +171,9 @@ export class SessionManager {
       const existing = currentExisting ?? migratingLegacy;
       const lookupId = existing?.id ?? sessionId;
       const processInfo = await this.codexProcessLookup?.resolveForPane(pane.pid).catch(() => null) ?? null;
+      const include = await this.shouldIncludePane(pane, processInfo);
+      if (!include) continue;
+
       const match = await claimCodexFile(
         pane,
         existing,
@@ -180,11 +183,6 @@ export class SessionManager {
         (lines) => this.tmux.capturePane(pane.paneId, lines, false),
         growingCodexFilePaths
       );
-      const include = await this.shouldIncludePane(pane, match);
-      if (!include) {
-        if (match) codexClaims.delete(match.path);
-        continue;
-      }
 
       seen.add(sessionId);
       let repo = await loadRepoMetadata(pane.cwd);
@@ -1307,8 +1305,8 @@ export class SessionManager {
     this.events.publish(event);
   }
 
-  private async shouldIncludePane(pane: TmuxPane, match: CodexSessionFile | null): Promise<boolean> {
-    if (match) return true;
+  private async shouldIncludePane(pane: TmuxPane, processInfo: CodexProcessInfo | null): Promise<boolean> {
+    if (processInfo) return true;
     if (looksLikeCodexPane(pane)) return true;
     if (pane.currentCommand !== "node") return false;
 

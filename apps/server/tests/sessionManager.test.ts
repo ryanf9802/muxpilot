@@ -2951,6 +2951,35 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("excludes a non-Codex pane even when its cwd has an unclaimed Codex session file", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "prompt",
+      assistant: "answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+
+    harness.tmux.listPanes = async () => [
+      testPane({
+        cwd: repo,
+        paneId: "%1",
+        currentCommand: "nvim",
+        windowName: "nvim",
+        title: "RyansTower"
+      })
+    ];
+
+    await harness.manager.discover();
+
+    expect(harness.manager.listSessions(true)).toEqual([]);
+    harness.db.close();
+  });
+
   it("rejects input when the tmux pane is no longer live", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -3365,6 +3394,7 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.createCodexResumeWindowInMuxpilotSession = async (cwd, name, codexSessionId) => {
       resumeCalls.push({ cwd, name, codexSessionId });
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: "shell", title: "node", pid: 456, sessionName: "muxpilot" });
+      harness.processLookup.set(pane.pid, { pid: 457, sessionId: codexSessionId, startedAtMs: null });
       panes = [pane];
       return pane;
     };
@@ -3803,6 +3833,7 @@ function testPane(input: {
   windowName?: string;
   title?: string;
   sessionName?: string;
+  currentCommand?: string;
 }): TmuxPane {
   return {
     sessionId: "tmux-session",
@@ -3816,7 +3847,7 @@ function testPane(input: {
     paneIndex: 0,
     paneActive: true,
     cwd: input.cwd,
-    currentCommand: "node",
+    currentCommand: input.currentCommand ?? "node",
     title: input.title ?? "codex",
     pid: input.pid ?? 123,
     size: "120x40"
