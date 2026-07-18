@@ -219,9 +219,7 @@ export class SessionManager {
       const latestQuestionMessage = await this.db.latestQuestionMessage(lookupId);
       const status = resolveSessionStatus(
         inferredStatus,
-        existing?.status,
         inputMode,
-        latestMessage,
         latestQuestionMessage,
         await this.latestQuestionAnswerMessage(lookupId, latestQuestionMessage),
         await this.db.latestPlanReadyMessage(lookupId),
@@ -414,15 +412,11 @@ export class SessionManager {
       }
       await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
       if (result.complete && currentSession.transcriptSyncing) {
-        const latestMessage = await this.db.latestMessage(session.id);
         const latestQuestionMessage = await this.db.latestQuestionMessage(session.id);
         const latestUserMessage = await this.db.latestUserMessage(session.id);
-        const baselineStatus = latestMessage?.type === "approval_request" ? "approval" : currentSession.status;
         const status = resolveSessionStatus(
-          baselineStatus,
-          baselineStatus,
+          currentSession.status,
           currentSession.inputMode,
-          latestMessage,
           latestQuestionMessage,
           await this.latestQuestionAnswerMessage(session.id, latestQuestionMessage),
           await this.db.latestPlanReadyMessage(session.id),
@@ -711,6 +705,10 @@ export class SessionManager {
       return this.repositoryScopedApproval(sessionId, approval);
     }
     if (session.status !== "approval") return null;
+    if (!(await this.isApprovalGateVisible(session))) {
+      this.liveApprovals.delete(sessionId);
+      return null;
+    }
     const liveApproval = this.liveApprovals.get(sessionId);
     if (liveApproval) return this.repositoryScopedApproval(sessionId, liveApproval);
     const message = await this.db.latestApprovalMessage(sessionId);
@@ -1174,12 +1172,11 @@ export class SessionManager {
   }
 
   private async isApprovalGateVisible(session: ManagedSession): Promise<boolean> {
-    if (looksLikeApprovalScreen(`${session.tmux.title}\n${session.tmux.windowName}`)) return true;
     try {
       const capture = await this.tmux.capturePane(session.tmux.paneId, 100, false);
       return looksLikeApprovalScreen(capture);
     } catch {
-      return false;
+      return looksLikeApprovalScreen(`${session.tmux.title}\n${session.tmux.windowName}`);
     }
   }
 
@@ -1390,9 +1387,7 @@ export class SessionNotFoundError extends Error {
 
 function resolveSessionStatus(
   inferredStatus: SessionStatus,
-  previousStatus: SessionStatus | undefined,
   inputMode: CollaborationMode,
-  latestMessage: ChatMessage | null,
   latestQuestionMessage: ChatMessage | null,
   latestQuestionAnswerMessage: ChatMessage | null,
   latestPlanReadyMessage: ChatMessage | null,
@@ -1402,8 +1397,6 @@ function resolveSessionStatus(
 ): SessionStatus {
   const pendingStatus = preservePendingStatus(
     inferredStatus,
-    previousStatus,
-    latestMessage,
     latestQuestionMessage,
     latestQuestionAnswerMessage,
     latestPlanReadyMessage,
@@ -1502,8 +1495,6 @@ function historyResultPreference(first: SessionHistoryResult, second: SessionHis
 
 function preservePendingStatus(
   inferredStatus: SessionStatus,
-  previousStatus: SessionStatus | undefined,
-  latestMessage: ChatMessage | null,
   latestQuestionMessage: ChatMessage | null,
   latestQuestionAnswerMessage: ChatMessage | null,
   latestPlanReadyMessage: ChatMessage | null,
@@ -1511,7 +1502,6 @@ function preservePendingStatus(
   answeredPlanMessageIds: Set<string>,
   answeredQuestionMessageIds: Set<string>
 ): SessionStatus {
-  if (inferredStatus !== "approval" && previousStatus === "approval" && latestMessage?.type === "approval_request") return "approval";
   if (
     activeQuestionMessage(
       latestQuestionMessage,
@@ -2282,7 +2272,12 @@ function interactiveApprovalHasTranscriptContext(
   if (!latestMessage || latestMessage.type !== "tool_call") return false;
   const payload = recordValue(latestMessage.payload.payload);
   if (!payload) return false;
-  if (prompt.kind === "permissions") return payload.type === "function_call";
+  if (payload.type === "function_call") {
+    if (prompt.kind === "permissions") return true;
+    const name = stringValue(payload.name)?.replace(/^_+/, "");
+    if (prompt.kind === "patch") return name === "apply_patch";
+    return prompt.kind === "command" && name === "exec_command";
+  }
   if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
   const input = stringValue(payload.input);
   if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));

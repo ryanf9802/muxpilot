@@ -223,14 +223,6 @@ function timestampsAreNear(first: string, second: string): boolean {
 }
 
 function extractApproval(event: RawEvent, timestamp: string): ParsedApproval | null {
-  if (event.type === "response_item" && event.payload?.type === "function_call") {
-    return approvalFromFunctionCall(event, timestamp);
-  }
-
-  if (event.type === "response_item" && event.payload?.type === "custom_tool_call") {
-    return approvalFromCustomToolCall(event, timestamp);
-  }
-
   if (event.type !== "event_msg") return null;
 
   if (event.payload?.type === "exec_approval_request") {
@@ -242,72 +234,6 @@ function extractApproval(event: RawEvent, timestamp: string): ParsedApproval | n
   }
 
   return null;
-}
-
-function approvalFromCustomToolCall(event: RawEvent, timestamp: string): ParsedApproval | null {
-  if (event.payload?.name !== "exec") return null;
-  const input = stringValue(event.payload.input);
-  if (!input || !/tools\.exec_command\s*\(/.test(input)) return null;
-  if (!/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return null;
-
-  const command = quotedJsProperty(input, "cmd") ?? quotedJsProperty(input, "command");
-  const prefixRule = quotedJsArrayProperty(input, "prefix_rule");
-  return {
-    id: stringValue(event.payload.call_id) ?? approvalId(`${timestamp}:exec:${command ?? ""}`),
-    kind: "command",
-    title: "Command approval required",
-    command,
-    toolName: "exec_command",
-    cwd: quotedJsProperty(input, "workdir") ?? quotedJsProperty(input, "cwd"),
-    reason: quotedJsProperty(input, "justification"),
-    prefixRule,
-    options: approvalOptions(prefixRule),
-    createdAt: timestamp
-  };
-}
-
-function quotedJsProperty(input: string, name: string): string | null {
-  const match = input.match(
-    new RegExp(`(?:^|[,{]\\s*)["']?${name}["']?\\s*:\\s*(["'])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1`)
-  );
-  if (!match?.[2]) return null;
-  return match[2].replace(/\\([\\'"`])/g, "$1");
-}
-
-function quotedJsArrayProperty(input: string, name: string): string[] | null {
-  const match = input.match(new RegExp(`(?:^|[,{]\\s*)["']?${name}["']?\\s*:\\s*\\[([^\\]]*)\\]`, "s"));
-  if (!match?.[1]) return null;
-  const values = [...match[1].matchAll(/(["'])((?:\\.|(?!\1)[\s\S])*?)\1/g)]
-    .map((item) => item[2]?.replace(/\\([\\'"`])/g, "$1") ?? "")
-    .filter(Boolean);
-  return values.length > 0 ? values : null;
-}
-
-function approvalFromFunctionCall(event: RawEvent, timestamp: string): ParsedApproval | null {
-  const args = parseJsonObject(event.payload?.arguments);
-  if (!args) return null;
-
-  const sandbox = stringValue(args.sandbox_permissions);
-  if (sandbox !== "require_escalated") return null;
-
-  const toolName = stringValue(event.payload?.name);
-  const command = commandText(args.cmd) ?? commandText(args.command);
-  const kind: ApprovalKind = toolName === "apply_patch" ? "patch" : toolName === "exec_command" ? "command" : "tool";
-  const title = kind === "command" ? "Command approval required" : kind === "patch" ? "Patch approval required" : "Tool approval required";
-  const id = stringValue(event.payload?.call_id) ?? approvalId(`${timestamp}:${toolName ?? ""}:${command ?? ""}`);
-
-  return {
-    id,
-    kind,
-    title,
-    command,
-    toolName,
-    cwd: stringValue(args.cwd),
-    reason: stringValue(args.justification),
-    prefixRule: stringArray(args.prefix_rule),
-    options: approvalOptions(stringArray(args.prefix_rule)),
-    createdAt: timestamp
-  };
 }
 
 function approvalFromEventPayload(

@@ -437,7 +437,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("keeps a reparsed approval pending until it is resolved", async () => {
+  it("does not surface a reparsed escalated call without a live approval gate", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -481,19 +481,55 @@ describe("SessionManager transcript isolation", () => {
     expect(session).toBeDefined();
 
     await harness.manager.ingest();
-    expect((await harness.manager.getPendingApproval(session.id))?.prefixRule).toEqual(["tmux", "list-panes"]);
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
 
     await harness.db.resetParserOffset(`${session.id}:${path}`);
     await harness.manager.ingest();
     await harness.manager.discover();
 
-    const approval = await harness.manager.getPendingApproval(session.id);
-    expect(approval?.command).toContain("tmux list-panes");
-    expect(approval?.prefixRule).toEqual(["tmux", "list-panes"]);
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
 
     harness.tmux.capturePane = async () => "Command approval required\nallow and don't ask again";
-    await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
-    expect(sentKeys).toEqual([[]]);
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    expect(sentKeys).toEqual([]);
+    harness.db.close();
+  });
+
+  it("does not restore a historical structured approval after the pane has continued", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "historical-approval.jsonl");
+    await writeFile(path, [
+      JSON.stringify({
+        timestamp: "2026-07-07T00:00:00.000Z",
+        type: "session_meta",
+        payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-07T00:00:01.000Z",
+        type: "event_msg",
+        payload: {
+          type: "exec_approval_request",
+          approval_id: "approval-historical",
+          command: ["pnpm", "test"],
+          prefix_rule: ["pnpm", "test"]
+        }
+      }),
+      ""
+    ].join("\n"));
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "Ready\n› ";
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
     harness.db.close();
   });
@@ -540,7 +576,6 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.ingest();
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
-    capture = "Ready\n› ";
 
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
       id: "call-app-approval",

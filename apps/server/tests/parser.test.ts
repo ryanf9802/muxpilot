@@ -79,7 +79,7 @@ describe("parseCodexJsonl", () => {
     expect(result.messages.map((message) => message.payload.type)).toEqual(["event_msg", "event_msg"]);
   });
 
-  it("maps escalated function calls into approval requests", async () => {
+  it("keeps escalated function calls as tool transcript context", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
     await writeFile(
@@ -108,18 +108,10 @@ describe("parseCodexJsonl", () => {
     const result = await parseCodexJsonl(path, 0);
 
     expect(result.messages).toHaveLength(1);
-    expect(result.messages[0]?.type).toBe("approval_request");
-    expect(result.messages[0]?.payload.approval).toMatchObject({
-      id: "call_123",
-      kind: "command",
-      command: "npm install",
-      cwd: "/repo",
-      reason: "Install dependencies",
-      prefixRule: ["npm", "install"]
-    });
+    expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
   });
 
-  it("maps escalated wrapped custom tool calls into approval requests", async () => {
+  it("keeps escalated wrapped custom tool calls as tool transcript context", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
     await writeFile(
@@ -150,15 +142,7 @@ describe("parseCodexJsonl", () => {
     const result = await parseCodexJsonl(path, 0);
 
     expect(result.messages).toHaveLength(1);
-    expect(result.messages[0]).toMatchObject({ type: "approval_request", role: "system" });
-    expect(result.messages[0]?.payload.approval).toMatchObject({
-      id: "call-wrapped-approval",
-      kind: "command",
-      command: "node fetch-codex-manual.mjs",
-      cwd: "/repo",
-      reason: "Fetch the official manual",
-      prefixRule: ["node", "fetch-codex-manual.mjs"]
-    });
+    expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
   });
 
   it("keeps non-escalated wrapped custom exec calls as tool transcript context", async () => {
@@ -187,7 +171,7 @@ describe("parseCodexJsonl", () => {
     expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
   });
 
-  it("maps escalated wrapped calls with quoted keys and a dynamic command into approval requests", async () => {
+  it("keeps escalated wrapped calls with quoted keys and a dynamic command as tool context", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");
     await writeFile(
@@ -219,14 +203,7 @@ describe("parseCodexJsonl", () => {
     const result = await parseCodexJsonl(path, 0);
 
     expect(result.messages).toHaveLength(1);
-    expect(result.messages[0]).toMatchObject({ type: "approval_request", role: "system" });
-    expect(result.messages[0]?.payload.approval).toMatchObject({
-      id: "call-dynamic-approval",
-      command: null,
-      cwd: "/repo",
-      reason: "Run the lint suite",
-      prefixRule: ["make", "lint"]
-    });
+    expect(result.messages[0]).toMatchObject({ type: "tool_call", role: "tool" });
   });
 
   it("maps request_user_input calls into question requests", async () => {
