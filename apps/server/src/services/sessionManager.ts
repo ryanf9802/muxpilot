@@ -2285,7 +2285,7 @@ function interactiveApprovalHasTranscriptContext(
   return Boolean(
     input &&
       /tools\.exec_command\s*\(/.test(input) &&
-      /sandbox_permissions\s*:\s*["']require_escalated["']/.test(input)
+      /["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)
   );
 }
 

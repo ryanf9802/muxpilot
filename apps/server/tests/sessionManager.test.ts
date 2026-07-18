@@ -618,7 +618,13 @@ describe("SessionManager transcript isolation", () => {
             type: "custom_tool_call",
             name: "exec",
             call_id: "call-command-approval",
-            input: "const r = await tools.exec_command({ sandbox_permissions: 'require_escalated' });"
+            input: [
+              "const r = await tools.exec_command({",
+              '  "cmd":"pnpm app restart prod",',
+              '  "sandbox_permissions":"require_escalated",',
+              '  "prefix_rule":["pnpm","app","restart","prod"]',
+              "});"
+            ].join("\n")
           }
         }),
         ""
@@ -635,6 +641,10 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
     expect(session?.status).toBe("waiting");
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "session.updated") publishedStatuses.push((event.payload as ManagedSession).status);
+    });
     capture = [
       "Working (20s • esc to interrupt)",
       commandApprovalCapture(1).replace(
@@ -645,6 +655,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.ingest();
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(publishedStatuses).toContain("approval");
 
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
       kind: "command",
@@ -664,6 +675,7 @@ describe("SessionManager transcript isolation", () => {
     expect(await harness.db.hasRepositoryApprovalRule("/repo/.git", ["pnpm", "app", "restart", "prod"])).toBe(false);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
+    unsubscribe();
     harness.db.close();
   });
 
