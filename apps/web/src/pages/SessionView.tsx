@@ -74,10 +74,12 @@ import type {
 import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
+import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
+import { copyText } from "../utils/clipboard.js";
 import { codeMirrorComposerFieldAttributes, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
@@ -2606,27 +2608,6 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-async function copyText(value: string): Promise<void> {
-  try {
-    if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
-    await navigator.clipboard.writeText(value);
-  } catch {
-    fallbackCopy(value);
-  }
-}
-
-function fallbackCopy(value: string): void {
-  const input = document.createElement("textarea");
-  input.value = value;
-  input.setAttribute("readonly", "true");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.append(input);
-  input.select();
-  document.execCommand("copy");
-  input.remove();
-}
-
 export function ApprovalBanner({
   approval,
   busy,
@@ -3330,6 +3311,17 @@ export function copyableMessageText(message: ChatMessage): string {
 const markdownComponents: Components = {
   a(props) {
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
+  },
+  pre({ children }) {
+    const code = children && typeof children === "object" && "props" in children
+      ? children as { props: { children?: ReactNode; className?: string } }
+      : null;
+    return (
+      <CodeBlock
+        text={codeBlockText(code?.props.children ?? children)}
+        codeClassName={code?.props.className}
+      />
+    );
   }
 };
 
@@ -3432,7 +3424,7 @@ function PlainText({ text, skillNames = [] }: { text: string; skillNames?: strin
     <div className="rendered">
       {parts.map((part, index) => {
         if (part.startsWith("```")) {
-          return <pre key={index}>{part.replace(/^```[^\n]*\n?/, "").replace(/```$/, "")}</pre>;
+          return <CodeBlock key={index} text={part.replace(/^```[^\n]*\n?/, "").replace(/```$/, "")} />;
         }
         return part
           .split("\n\n")

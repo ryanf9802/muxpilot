@@ -3549,15 +3549,71 @@ select:focus-visible {
   font-size: inherit;
 }
 
-.rendered pre {
+.code-block {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  margin: 8px 0 0;
+  cursor: text;
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.code-block pre {
   max-width: 100%;
   overflow: auto;
-  margin: 8px 0 0;
-  padding: 10px;
+  margin: 0;
+  padding: 10px 10px 48px;
   background: color-mix(in srgb, var(--color-input) 72%, black);
   border: 1px solid var(--color-border);
   border-radius: 8px;
   white-space: pre-wrap;
+}
+
+.code-block code {
+  padding: 0;
+  overflow-wrap: normal;
+  word-break: normal;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: inherit;
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.code-block-copy {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 9px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  cursor: pointer;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.code-block-copy:hover,
+.code-block-copy:focus-visible {
+  color: var(--color-text);
+}
+
+.code-block-menu {
+  cursor: default;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .tool-output {

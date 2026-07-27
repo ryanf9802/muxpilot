@@ -1990,6 +1990,34 @@ describe("MarkdownBlock", () => {
     expect(html).toContain('target="_blank"');
     expect(html).toContain('rel="noopener noreferrer"');
   });
+
+  it("renders fenced assistant code with the shared copyable code block", () => {
+    const html = renderToStaticMarkup(createElement(MarkdownBlock, { text: "```ts\nconst answer = 42;\n```" }));
+
+    expect(html).toContain('class="code-block"');
+    expect(html).toContain('class="language-ts"');
+    expect(html).toContain('aria-label="Copy code block"');
+    expect(html).toContain("const answer = 42;");
+  });
+
+  it("leaves inline code as inline code", () => {
+    const html = renderToStaticMarkup(createElement(MarkdownBlock, { text: "Use `const answer = 42` inline." }));
+
+    expect(html).toContain("<code>const answer = 42</code>");
+    expect(html).not.toContain('class="code-block"');
+  });
+});
+
+describe("UserText code blocks", () => {
+  it("renders fenced user code with the shared copyable code block", () => {
+    const html = renderToStaticMarkup(createElement(UserText, { text: "Before\n\n```\nuser code\n```\n\nAfter" }));
+
+    expect(html).toContain('class="code-block"');
+    expect(html).toContain('aria-label="Copy code block"');
+    expect(html).toContain("user code");
+    expect(html).toContain("Before");
+    expect(html).toContain("After");
+  });
 });
 
 describe("copyableMessageText", () => {
