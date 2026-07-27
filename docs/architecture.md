@@ -97,7 +97,7 @@ Supported actions include interrupt, input-mode switch, proposed-plan choice, re
 Managed Git session creation and integration:
 
 ```text
-entry directory + existing local target -> neutral tmux/Codex control directory
+entry directory + existing local target -> neutral tmux/Codex control directory + repository skill links
 change task -> skill creates private branch/worktree + simple dependency links -> focused checks + iterative same-agent review -> atomic local fast-forward -> cleanup
 ```
 

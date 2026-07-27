@@ -41,6 +41,16 @@ describe("discoverCodexSkills", () => {
     ]);
   });
 
+  it("discovers workspace skills from the canonical .agents skills directory", async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), "muxpilot-skills-"));
+    const workspace = await mkdtemp(join(tmpdir(), "muxpilot-workspace-"));
+    await writeSkill(workspace, ".agents/skills/repo-helper/SKILL.md", "repo-helper", "Help with this repository");
+
+    await expect(discoverCodexSkills(codexHome, [workspace])).resolves.toEqual([
+      expect.objectContaining({ name: "repo-helper", description: "Help with this repository", source: "workspace" })
+    ]);
+  });
+
   it("discovers workspace skills when only a nested cwd is available", async () => {
     const codexHome = await mkdtemp(join(tmpdir(), "muxpilot-skills-"));
     const workspace = await mkdtemp(join(tmpdir(), "muxpilot-workspace-"));

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -35,6 +35,60 @@ describe("lightweight Git workspace metadata", () => {
     const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
     await expect(manager.provision({ sessionName: "task", entryPath: root, targetBranch: "missing" }))
       .rejects.toThrow("Local target branch 'missing' does not exist");
+    db.close();
+  });
+
+  it("exposes applicable repository skill roots in the neutral control directory", async () => {
+    const root = await repository();
+    const entryPath = join(root, "apps", "api");
+    await mkdir(join(root, ".agents", "skills", "root-skill"), { recursive: true });
+    await mkdir(join(root, ".codex", "skills", "_shared"), { recursive: true });
+    await mkdir(join(entryPath, ".codex", "skills", "nested-skill"), { recursive: true });
+    await writeFile(join(root, ".agents", "skills", "root-skill", "SKILL.md"), "# root\n");
+    await writeFile(join(root, ".codex", "skills", "_shared", "review.md"), "# shared\n");
+    await writeFile(join(entryPath, ".codex", "skills", "nested-skill", "SKILL.md"), "# nested\n");
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath, targetBranch: "main" });
+
+    const controlPath = await manager.ensureControlPath(workspace);
+    const linkRoot = join(controlPath, ".agents", "skills");
+    const links = (await readdir(linkRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isSymbolicLink());
+    const linksWithTargets = await Promise.all(links.map(async (entry) => ({
+      name: entry.name,
+      target: await readlink(join(linkRoot, entry.name))
+    })));
+    const targets = linksWithTargets.map((entry) => entry.target).sort();
+
+    expect(targets).toEqual([
+      join(entryPath, ".codex", "skills"),
+      join(root, ".agents", "skills"),
+      join(root, ".codex", "skills")
+    ].sort());
+    const legacyLink = linksWithTargets.find((entry) => entry.target === join(root, ".codex", "skills"));
+    expect(legacyLink).toBeDefined();
+    expect(await readFile(join(linkRoot, legacyLink!.name, "_shared", "review.md"), "utf8")).toBe("# shared\n");
+    db.close();
+  });
+
+  it("reconciles only muxpilot-owned workspace skill links when restoring a control directory", async () => {
+    const root = await repository();
+    await mkdir(join(root, ".codex", "skills", "repo-skill"), { recursive: true });
+    const db = new AppDatabase(join(root, "muxpilot.db"));
+    const manager = new GitWorkspaceManager(db, { worktreeRoot: join(root, "worktrees"), sessionRoot: join(root, "sessions") });
+    const workspace = await manager.provision({ sessionName: "task", entryPath: root, targetBranch: "main" });
+    const controlPath = await manager.ensureControlPath(workspace);
+    const linkRoot = join(controlPath, ".agents", "skills");
+    const staleLink = join(linkRoot, "muxpilot-repo-skills-stale");
+    const sessionSkill = join(linkRoot, "session-skill");
+    await symlink(root, staleLink, "dir");
+    await mkdir(sessionSkill);
+
+    await manager.ensureControlPath(workspace);
+
+    await expect(lstat(staleLink)).rejects.toThrow();
+    expect((await lstat(sessionSkill)).isDirectory()).toBe(true);
     db.close();
   });
 

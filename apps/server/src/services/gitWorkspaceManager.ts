@@ -7,6 +7,7 @@ import type { GitDependencyLink, GitRepositoryProbe, GitWorkspaceSummary } from 
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
+import { exposeWorkspaceSkillsInControl } from "./workspaceSkillRoots.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -138,6 +139,7 @@ export class GitWorkspaceManager {
   async ensureControlPath(workspace: StoredGitWorkspace): Promise<string> {
     const path = workspace.controlPath ?? join(this.options.sessionRoot, workspace.id);
     await mkdir(path, { recursive: true });
+    await exposeWorkspaceSkillsInControl(path, workspace.summary.entryPath, workspace.summary.repoRoot);
     return path;
   }
 

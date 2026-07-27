@@ -253,7 +253,8 @@ export function registerRoutes(
       await reply.code(404).send({ error: "Session not found" });
       return;
     }
-    const workspaceRoots = [session.repo.root, session.tmux.cwd].filter((path): path is string => Boolean(path));
+    const workspaceRoots = [session.gitWorkspace?.entryPath, session.repo.root, session.tmux.cwd]
+      .filter((path): path is string => Boolean(path));
     return { skills: await discoverCodexSkills(config.codexHome, workspaceRoots) };
   });
 

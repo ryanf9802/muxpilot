@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { CodexSkill } from "@muxpilot/core";
+import { workspaceSkillRootCandidates } from "./workspaceSkillRoots.js";
 
 interface PluginManifest {
   name?: unknown;
@@ -44,7 +45,7 @@ async function discoverLocalSkills(skillsRoot: string): Promise<CodexSkill[]> {
 
 async function discoverWorkspaceSkills(workspaceRoots: string[]): Promise<CodexSkill[]> {
   const roots = workspaceSkillRootCandidates(workspaceRoots);
-  const groups = await Promise.all(roots.map((root) => discoverSkillsInRoot(join(root, ".codex", "skills"), "workspace")));
+  const groups = await Promise.all(roots.map((root) => discoverSkillsInRoot(root, "workspace")));
   return groups.flat();
 }
 
@@ -182,22 +183,4 @@ function dedupeAndSortSkills(skills: CodexSkill[]): CodexSkill[] {
     byName.set(skill.name, skill);
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function uniqueResolvedPaths(paths: string[]): string[] {
-  return [...new Set(paths.filter(Boolean).map((path) => resolve(path)))];
-}
-
-function workspaceSkillRootCandidates(paths: string[]): string[] {
-  const candidates: string[] = [];
-  for (const path of uniqueResolvedPaths(paths)) {
-    let current = path;
-    for (let depth = 0; depth < 5; depth += 1) {
-      candidates.push(current);
-      const parent = dirname(current);
-      if (parent === current) break;
-      current = parent;
-    }
-  }
-  return uniqueResolvedPaths(candidates);
 }
