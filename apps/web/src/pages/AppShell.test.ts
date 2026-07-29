@@ -20,6 +20,7 @@ import {
   isPromptHistoryShortcut,
   isSessionTransferFileName,
   importTargetBranchValue,
+  isSessionHistoryResultActive,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
   nextSessionStoplightSeverity,
@@ -28,6 +29,7 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
+  sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
   sessionDirectorySuggestionsFromSessions,
@@ -236,6 +238,24 @@ describe("session history helpers", () => {
 
   it("falls back to Codex identity for unmanaged results", () => {
     expect(sessionHistoryResultKey({ ...managed, gitWorkspace: null })).toBe("codex:codex-1");
+  });
+
+  it("labels non-missing, non-archived results as active sessions that open", () => {
+    for (const status of ["working", "waiting", "planning", "unknown"] as const) {
+      const result = { status, archived: false };
+      expect(isSessionHistoryResultActive(result)).toBe(true);
+      expect(sessionHistoryResultActionLabel(result)).toBe("Open");
+    }
+  });
+
+  it("labels missing or archived results as sessions that resume", () => {
+    for (const result of [
+      { status: "missing" as const, archived: false },
+      { status: "waiting" as const, archived: true }
+    ]) {
+      expect(isSessionHistoryResultActive(result)).toBe(false);
+      expect(sessionHistoryResultActionLabel(result)).toBe("Resume");
+    }
   });
 });
 

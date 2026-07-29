@@ -1065,28 +1065,40 @@ export function AppShell() {
                   {sessionHistoryLoading ? <p className="prompt-history-muted">Searching sessions</p> : null}
                   {!sessionHistoryLoading && !sessionHistoryError && sessionHistoryResults.length === 0 ? <p className="prompt-history-muted">No restorable sessions</p> : null}
                   {!sessionHistoryLoading
-                    ? sessionHistoryResults.map((result, index) => (
-                        <button
-                          key={sessionHistoryResultKey(result)}
-                          type="button"
-                          role="option"
-                          aria-selected={index === sessionHistorySelectedIndex}
-                          className={index === sessionHistorySelectedIndex ? "session-history-result session-history-result-selected" : "session-history-result"}
-                          disabled={Boolean(sessionHistoryRestoreId)}
-                          onMouseEnter={() => setSessionHistorySelectedIndex(index)}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => void restoreHistorySession(result)}
-                        >
-                          <span className="session-history-result-main">
-                            <strong>{result.sessionName}</strong>
-                            <span>{sessionHistoryResultMeta(result)}</span>
-                          </span>
-                          <span className="session-history-result-prompt">{sessionHistoryPromptPreview(result)}</span>
-                          <span className="session-history-result-action" aria-hidden="true">
-                            {sessionHistoryRestoreId === result.sessionId ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}
-                          </span>
-                        </button>
-                      ))
+                    ? sessionHistoryResults.map((result, index) => {
+                        const active = isSessionHistoryResultActive(result);
+                        const actionLabel = sessionHistoryResultActionLabel(result);
+                        return (
+                          <button
+                            key={sessionHistoryResultKey(result)}
+                            type="button"
+                            role="option"
+                            aria-selected={index === sessionHistorySelectedIndex}
+                            className={index === sessionHistorySelectedIndex ? "session-history-result session-history-result-selected" : "session-history-result"}
+                            disabled={Boolean(sessionHistoryRestoreId)}
+                            onMouseEnter={() => setSessionHistorySelectedIndex(index)}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => void restoreHistorySession(result)}
+                          >
+                            <span className="session-history-result-main">
+                              <span className="session-history-result-title">
+                                <strong>{result.sessionName}</strong>
+                                {active ? <span className="session-history-result-active">Active</span> : null}
+                              </span>
+                              <span className="session-history-result-meta">{sessionHistoryResultMeta(result)}</span>
+                            </span>
+                            <span className="session-history-result-prompt">{sessionHistoryPromptPreview(result)}</span>
+                            <span className="session-history-result-action">
+                              {sessionHistoryRestoreId === result.sessionId
+                                ? <LoaderCircle className="spin" size={15} aria-hidden="true" />
+                                : active
+                                  ? <Eye size={15} aria-hidden="true" />
+                                  : <Play size={15} aria-hidden="true" />}
+                              {actionLabel}
+                            </span>
+                          </button>
+                        );
+                      })
                     : null}
                 </div>
               </div>
@@ -1926,6 +1938,14 @@ export function sessionHistoryResultMeta(result: Pick<SessionHistoryResult, "rep
 
 export function sessionHistoryResultKey(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
   return sessionHistoryIdentity(result);
+}
+
+export function isSessionHistoryResultActive(result: Pick<SessionHistoryResult, "status" | "archived">): boolean {
+  return !result.archived && result.status !== "missing";
+}
+
+export function sessionHistoryResultActionLabel(result: Pick<SessionHistoryResult, "status" | "archived">): "Open" | "Resume" {
+  return isSessionHistoryResultActive(result) ? "Open" : "Resume";
 }
 
 export function isMuxpilotManagedSessionBranch(branch: string): boolean {

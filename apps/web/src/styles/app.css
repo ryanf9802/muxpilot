@@ -1951,8 +1951,15 @@ select:focus-visible {
   min-width: 0;
 }
 
-.session-history-result-main strong,
-.session-history-result-main span,
+.session-history-result-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.session-history-result-title strong,
+.session-history-result-meta,
 .session-history-result-prompt {
   min-width: 0;
   overflow: hidden;
@@ -1960,10 +1967,28 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.session-history-result-main span,
+.session-history-result-title strong {
+  display: block;
+}
+
+.session-history-result-meta,
 .session-history-result-prompt {
   color: var(--color-text-muted);
   font-size: 0.82rem;
+}
+
+.session-history-result-active {
+  flex: none;
+  padding: 1px 6px;
+  color: color-mix(in srgb, var(--color-text) 78%, var(--color-success));
+  background: var(--color-success-soft);
+  border: 1px solid color-mix(in srgb, var(--color-success) 42%, var(--color-border));
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.35;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 
 .session-history-result-prompt {
@@ -1971,13 +1996,18 @@ select:focus-visible {
 }
 
 .session-history-result-action {
-  display: grid;
+  display: inline-flex;
   grid-column: 2;
   grid-row: 1 / span 2;
-  place-items: center;
-  width: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 68px;
   height: 30px;
+  padding: 0 7px;
   color: var(--color-brand);
+  font-size: 0.76rem;
+  font-weight: 750;
 }
 
 .connect-content {
