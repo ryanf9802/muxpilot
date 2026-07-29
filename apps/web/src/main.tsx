@@ -5,8 +5,12 @@ import { AppRecoveryPage, AppShell } from "./pages/AppShell.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { AccessPage } from "./pages/Login.js";
 import { SessionView } from "./pages/SessionView.js";
+import { urlWithoutConnectionRecoveryToken } from "./utils/connectionRecovery.js";
 import "react-toastify/dist/ReactToastify.css";
 import "./styles/app.css";
+
+const cleanRecoveryUrl = urlWithoutConnectionRecoveryToken(window.location.href);
+if (cleanRecoveryUrl) window.history.replaceState(window.history.state, "", cleanRecoveryUrl);
 
 if (import.meta.env.PROD && typeof navigator !== "undefined" && "serviceWorker" in navigator) {
   window.addEventListener("load", () => {

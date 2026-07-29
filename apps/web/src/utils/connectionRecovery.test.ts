@@ -2,14 +2,19 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CONNECTION_AUTO_RELOAD_DELAYS_MS,
   CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   CONNECTION_AUTO_RELOAD_STORAGE_KEY,
+  CONNECTION_RECOVERY_QUERY_PARAM,
   FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   FOREGROUND_RECOVERY_COALESCE_MS,
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
+  connectionRecoveryUrl,
+  forceConnectionAutoReload,
   installForegroundRecoveryListeners,
-  requestWithTimeout
+  requestWithTimeout,
+  urlWithoutConnectionRecoveryToken
 } from "./connectionRecovery.js";
 
 afterEach(() => {
@@ -46,18 +51,36 @@ describe("requestWithTimeout", () => {
 });
 
 describe("connection reload escalation", () => {
-  it("reloads once after repeated visible failures", () => {
+  it("performs three delayed reload attempts without entering a reload loop", () => {
+    let now = 1_000;
     const reload = vi.fn();
     const options = {
       visibilityState: "visible" as const,
       storage: () => window.sessionStorage,
+      currentUrl: () => "https://muxpilot.test/sessions/abc?view=chat#latest",
+      now: () => now,
       reload
     };
 
     expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD - 1, options)).toBe(false);
     expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD, options)).toBe(true);
     expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 1, options)).toBe(false);
-    expect(reload).toHaveBeenCalledTimes(1);
+    expect(reload).toHaveBeenLastCalledWith(
+      `/sessions/abc?view=chat&${CONNECTION_RECOVERY_QUERY_PARAM}=1000-1#latest`
+    );
+
+    now += CONNECTION_AUTO_RELOAD_DELAYS_MS[1] - 1;
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 2, options)).toBe(false);
+    now += 1;
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 3, options)).toBe(true);
+
+    now += CONNECTION_AUTO_RELOAD_DELAYS_MS[2] - 1;
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 4, options)).toBe(false);
+    now += 1;
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 5, options)).toBe(true);
+    now += CONNECTION_AUTO_RELOAD_DELAYS_MS[2];
+    expect(attemptConnectionAutoReload(CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD + 6, options)).toBe(false);
+    expect(reload).toHaveBeenCalledTimes(3);
   });
 
   it("reloads immediately for a failed foreground probe", () => {
@@ -67,6 +90,8 @@ describe("connection reload escalation", () => {
       visibilityState: "visible",
       failureThreshold: FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
       storage: () => window.sessionStorage,
+      currentUrl: () => "https://muxpilot.test/",
+      now: () => 1_000,
       reload
     })).toBe(true);
     expect(reload).toHaveBeenCalledTimes(1);
@@ -76,10 +101,18 @@ describe("connection reload escalation", () => {
     const reload = vi.fn();
     const storage = () => window.sessionStorage;
 
-    expect(attemptConnectionAutoReload(3, { visibilityState: "hidden", storage, reload })).toBe(false);
+    expect(attemptConnectionAutoReload(3, {
+      visibilityState: "hidden",
+      storage,
+      currentUrl: () => "https://muxpilot.test/",
+      now: () => 1_000,
+      reload
+    })).toBe(false);
     expect(attemptConnectionAutoReload(3, {
       visibilityState: "visible",
       storage: () => { throw new Error("Storage unavailable"); },
+      currentUrl: () => "https://muxpilot.test/",
+      now: () => 1_000,
       reload
     })).toBe(false);
     expect(reload).not.toHaveBeenCalled();
@@ -91,6 +124,34 @@ describe("connection reload escalation", () => {
     clearConnectionAutoReload(() => window.sessionStorage);
 
     expect(window.sessionStorage.getItem(CONNECTION_AUTO_RELOAD_STORAGE_KEY)).toBeNull();
+  });
+
+  it("forces a route-preserving manual reload even when storage is unavailable", () => {
+    const reload = vi.fn();
+
+    forceConnectionAutoReload({
+      storage: () => { throw new Error("Storage unavailable"); },
+      currentUrl: () => "https://muxpilot.test/sessions/abc?view=chat#latest",
+      now: () => 1_000,
+      reload
+    });
+
+    expect(reload).toHaveBeenCalledWith(
+      `/sessions/abc?view=chat&${CONNECTION_RECOVERY_QUERY_PARAM}=1000-manual#latest`
+    );
+  });
+});
+
+describe("connection recovery URLs", () => {
+  it("adds, replaces, and removes only the temporary recovery token", () => {
+    const current = "https://muxpilot.test/sessions/abc?view=chat#latest";
+    const recovery = connectionRecoveryUrl(current, "first");
+    const replaced = connectionRecoveryUrl(`https://muxpilot.test${recovery}`, "second");
+
+    expect(recovery).toBe(`/sessions/abc?view=chat&${CONNECTION_RECOVERY_QUERY_PARAM}=first#latest`);
+    expect(replaced).toBe(`/sessions/abc?view=chat&${CONNECTION_RECOVERY_QUERY_PARAM}=second#latest`);
+    expect(urlWithoutConnectionRecoveryToken(`https://muxpilot.test${replaced}`)).toBe("/sessions/abc?view=chat#latest");
+    expect(urlWithoutConnectionRecoveryToken(current)).toBeNull();
   });
 });
 
@@ -117,7 +178,21 @@ describe("installForegroundRecoveryListeners", () => {
     await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
 
     expect(recover).toHaveBeenCalledTimes(2);
-    expect(recover).toHaveBeenLastCalledWith({ startsNewCycle: false });
+    expect(recover).toHaveBeenLastCalledWith({ startsNewCycle: true });
+    removeListeners();
+  });
+
+  it("starts a new recovery cycle when Chrome freezes and resumes the page", async () => {
+    vi.useFakeTimers();
+    const recover = vi.fn();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const removeListeners = installForegroundRecoveryListeners(recover);
+
+    document.dispatchEvent(new Event("freeze"));
+    document.dispatchEvent(new Event("resume"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
+
+    expect(recover).toHaveBeenCalledWith({ startsNewCycle: true });
     removeListeners();
   });
 

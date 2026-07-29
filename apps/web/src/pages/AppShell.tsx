@@ -43,6 +43,7 @@ import {
   clearConnectionAutoReload,
   CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+  forceConnectionAutoReload,
   installForegroundRecoveryListeners,
   requestWithTimeout
 } from "../utils/connectionRecovery.js";
@@ -200,7 +201,9 @@ export function AppShell() {
           visibilityState: document.visibilityState,
           failureThreshold: autoReloadFailureThreshold,
           storage: () => window.sessionStorage,
-          reload: () => window.location.reload()
+          currentUrl: () => window.location.href,
+          now: () => Date.now(),
+          reload: (url) => window.location.replace(url)
         });
         return false;
       })
@@ -210,6 +213,16 @@ export function AppShell() {
     connectionProbeRef.current = probe;
     return probe.promise;
   }, [applyMe, markDisconnected]);
+
+  const restartConnection = useCallback(() => {
+    connectionProbeFailureCountRef.current = 0;
+    forceConnectionAutoReload({
+      storage: () => window.sessionStorage,
+      currentUrl: () => window.location.href,
+      now: () => Date.now(),
+      reload: (url) => window.location.replace(url)
+    });
+  }, []);
 
   const handleConnectedRequestFailure = useCallback((error: unknown) => {
     if (isUnauthorizedError(error)) {
@@ -563,8 +576,8 @@ export function AppShell() {
             title="Cannot reach muxpilot"
             message="The app is open, but the backend is not responding. Keep this page open while muxpilot reconnects."
             detail="This can happen after the server restarts or when an installed PWA wakes with a stale network connection. Muxpilot will retry automatically."
-            actionLabel="Reload app"
-            onAction={() => window.location.reload()}
+            actionLabel="Restart connection"
+            onAction={restartConnection}
           />
         </main>
       </div>
