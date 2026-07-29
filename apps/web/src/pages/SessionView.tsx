@@ -105,6 +105,37 @@ export interface PendingUserMessage {
   matchAfter?: string;
 }
 
+interface RefreshOwner {
+  token: number;
+  queued: boolean;
+}
+
+export class LatestGenerationRefreshGate {
+  private owner: RefreshOwner | null = null;
+  private latestToken = Number.NEGATIVE_INFINITY;
+
+  async run(token: number, refresh: () => Promise<boolean>): Promise<void> {
+    if (token < this.latestToken) return;
+    if (token > this.latestToken) this.latestToken = token;
+    if (this.owner?.token === token) {
+      this.owner.queued = true;
+      return;
+    }
+
+    const owner: RefreshOwner = { token, queued: false };
+    this.owner = owner;
+    try {
+      let canRepeat: boolean;
+      do {
+        owner.queued = false;
+        canRepeat = await refresh();
+      } while (owner.queued && canRepeat && this.latestToken === token);
+    } finally {
+      if (this.owner === owner) this.owner = null;
+    }
+  }
+}
+
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
 export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
 export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (any-hover: hover) and (any-pointer: fine)";
@@ -574,8 +605,7 @@ export function SessionView() {
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
   const loadingSearchPageRef = useRef(false);
-  const liveTailRefreshRunningRef = useRef(false);
-  const liveTailRefreshQueuedRef = useRef(false);
+  const liveTailRefreshGateRef = useRef(new LatestGenerationRefreshGate());
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
   const initialTranscriptSessionIdRef = useRef<string | null>(null);
@@ -929,8 +959,6 @@ export function SessionView() {
       transcriptSourceKeyRef.current = null;
       loadingOlderRef.current = false;
       loadingNewerRef.current = false;
-      liveTailRefreshRunningRef.current = false;
-      liveTailRefreshQueuedRef.current = false;
       isNearBottomRef.current = true;
       lastMessageListScrollTopRef.current = 0;
       preserveScrollRef.current = null;
@@ -953,7 +981,7 @@ export function SessionView() {
         if (event.type === "queue.updated") void loadQueuedInputs(id, token);
         if (shouldReconcileSessionForEvent(event)) {
           scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
-          void Promise.all([loadSession(id, token), loadApproval(id, token), loadQuestion(id, token), loadQueuedInputs(id, token)]);
+          void reconcileLiveSession(id, token);
         }
       }
     };
@@ -1061,34 +1089,22 @@ export function SessionView() {
 
   async function refreshLiveTailMessages(targetId = id, token = requestTokenRef.current) {
     if (hasMoreAfterRef.current) return;
-    if (liveTailRefreshRunningRef.current) {
-      liveTailRefreshQueuedRef.current = true;
-      return;
-    }
-
-    liveTailRefreshRunningRef.current = true;
-    try {
-      do {
-        liveTailRefreshQueuedRef.current = false;
-        scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
-        const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
-        if (!isCurrentTranscriptResponse(targetId, token, response)) return;
-        const sourceChanged = acceptTranscriptSource(response);
-        if (shouldResetInitialTranscriptForLiveTail(sourceChanged, initialTranscriptSessionIdRef.current, targetId)) {
-          scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
-          markInitialTranscriptSessionId(targetId);
-          setInitialScrollReady(false);
-        }
-        setTranscriptItems((current) => (sourceChanged ? appendUniqueTranscriptItems([], response.items) : replaceTranscriptTail(current, response.items)));
-        reconcilePendingUserMessage(response.items);
-        setHasMoreBefore((current) => current || response.hasMoreBefore);
-        setHasMoreAfterState(response.hasMoreAfter);
-      } while (liveTailRefreshQueuedRef.current && !hasMoreAfterRef.current);
-    } finally {
-      if (isCurrentRequest(targetId, token)) {
-        liveTailRefreshRunningRef.current = false;
+    await liveTailRefreshGateRef.current.run(token, async () => {
+      scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
+      const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
+      if (!isCurrentTranscriptResponse(targetId, token, response)) return false;
+      const sourceChanged = acceptTranscriptSource(response);
+      if (shouldResetInitialTranscriptForLiveTail(sourceChanged, initialTranscriptSessionIdRef.current, targetId)) {
+        scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
+        markInitialTranscriptSessionId(targetId);
+        setInitialScrollReady(false);
       }
-    }
+      setTranscriptItems((current) => (sourceChanged ? appendUniqueTranscriptItems([], response.items) : replaceTranscriptTail(current, response.items)));
+      reconcilePendingUserMessage(response.items);
+      setHasMoreBefore((current) => current || response.hasMoreBefore);
+      setHasMoreAfterState(response.hasMoreAfter);
+      return !response.hasMoreAfter;
+    });
   }
 
   async function loadEarliestMessages(targetId = id, token = requestTokenRef.current) {

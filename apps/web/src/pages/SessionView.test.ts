@@ -25,6 +25,7 @@ import {
   inputModeAction,
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
+  LatestGenerationRefreshGate,
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
@@ -788,6 +789,81 @@ describe("shouldReconcileSessionForEvent", () => {
   it("leaves message append events on the direct append path", () => {
     expect(shouldReconcileSessionForEvent({ type: "message.appended" })).toBe(false);
     expect(shouldReconcileSessionForEvent({ type: "connected" })).toBe(false);
+  });
+});
+
+describe("LatestGenerationRefreshGate", () => {
+  it("lets a new generation refresh while an obsolete request is still in flight", async () => {
+    const gate = new LatestGenerationRefreshGate();
+    const first = deferred<void>();
+    const second = deferred<void>();
+    let secondGenerationCalls = 0;
+
+    const obsoleteRun = gate.run(1, async () => {
+      await first.promise;
+      return true;
+    });
+    const currentRun = gate.run(2, async () => {
+      secondGenerationCalls += 1;
+      if (secondGenerationCalls === 1) await second.promise;
+      return true;
+    });
+
+    await Promise.resolve();
+    expect(secondGenerationCalls).toBe(1);
+
+    first.resolve();
+    await obsoleteRun;
+    await gate.run(2, async () => {
+      throw new Error("Same-generation refreshes should use the active owner");
+    });
+    second.resolve();
+    await currentRun;
+
+    expect(secondGenerationCalls).toBe(2);
+
+    let obsoleteRestarted = false;
+    await gate.run(1, async () => {
+      obsoleteRestarted = true;
+      return true;
+    });
+    expect(obsoleteRestarted).toBe(false);
+  });
+
+  it("coalesces repeated requests and stops when refreshing cannot continue", async () => {
+    const gate = new LatestGenerationRefreshGate();
+    const first = deferred<void>();
+    let calls = 0;
+
+    const activeRun = gate.run(7, async () => {
+      calls += 1;
+      await first.promise;
+      return false;
+    });
+    await gate.run(7, async () => {
+      throw new Error("Queued refresh callback should not replace the active callback");
+    });
+    first.resolve();
+    await activeRun;
+
+    expect(calls).toBe(1);
+  });
+
+  it("releases the generation after a failed refresh", async () => {
+    const gate = new LatestGenerationRefreshGate();
+
+    await expect(
+      gate.run(3, async () => {
+        throw new Error("network failed");
+      })
+    ).rejects.toThrow("network failed");
+
+    let recovered = false;
+    await gate.run(3, async () => {
+      recovered = true;
+      return true;
+    });
+    expect(recovered).toBe(true);
   });
 });
 
@@ -1758,6 +1834,16 @@ function queuedInput(overrides: Partial<QueuedInput> = {}): QueuedInput {
     sentAt: null,
     ...overrides
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("WorkingIndicator", () => {
