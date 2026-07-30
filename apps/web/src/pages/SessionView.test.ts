@@ -26,6 +26,7 @@ import {
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
+  loadingSessionFromLocationState,
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
@@ -53,6 +54,7 @@ import {
   secondsUntil,
   sessionCreateSessionCwd,
   SessionHeaderMeta,
+  SessionLoadingView,
   isNearMessageListBottom,
   isCodexPastedContentPlaceholder,
   scrollMessageListByRatio,
@@ -1007,6 +1009,33 @@ describe("session scroll behavior", () => {
     expect(restoringSessionIdFromLocationState({ restoringSessionId: "session-a" })).toBe("session-a");
     expect(restoringSessionIdFromLocationState({ restoringSessionId: 1 })).toBeNull();
     expect(restoringSessionIdFromLocationState(null)).toBeNull();
+  });
+
+  it("retains only the matching loading session snapshot from route state", () => {
+    const session = managedSession();
+    expect(loadingSessionFromLocationState({ loadingSession: session }, "session-a")).toBe(session);
+    expect(loadingSessionFromLocationState({ loadingSession: session }, "session-b")).toBeNull();
+    expect(loadingSessionFromLocationState({ loadingSession: { id: "session-a" } }, "session-a")).toBeNull();
+    expect(loadingSessionFromLocationState(null, "session-a")).toBeNull();
+  });
+
+  it("keeps navigation and labels interactive while session content loads", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionLoadingView, {
+        session: managedSession(),
+        onBack: () => undefined,
+        onNewSession: () => undefined
+      })
+    );
+
+    expect(html).toContain("<h1>codex</h1>");
+    expect(html).toContain("muxpilot");
+    expect(html).toContain('aria-label="Back"');
+    expect(html).toContain('aria-label="New session"');
+    expect(html).toContain('aria-label="Interrupt session unavailable while loading"');
+    expect(html).toContain('aria-label="Kill session unavailable while loading"');
+    expect(html).toContain("loading-message-list");
+    expect(html).toContain("loading-composer");
   });
 
   it("hides the initial message list until the bottom scroll has been applied", () => {

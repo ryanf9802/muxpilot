@@ -495,6 +495,23 @@ export function restoringSessionIdFromLocationState(state: unknown): string | nu
   return typeof value === "string" ? value : null;
 }
 
+export function loadingSessionFromLocationState(state: unknown, routeSessionId: string): ManagedSession | null {
+  if (!state || typeof state !== "object") return null;
+  const value = (state as { loadingSession?: unknown }).loadingSession;
+  if (!value || typeof value !== "object") return null;
+  const loadingSession = value as Partial<ManagedSession>;
+  if (
+    loadingSession.id !== routeSessionId ||
+    !loadingSession.tmux ||
+    !loadingSession.repo ||
+    !loadingSession.models ||
+    (loadingSession.inputMode !== "default" && loadingSession.inputMode !== "plan")
+  ) {
+    return null;
+  }
+  return loadingSession as ManagedSession;
+}
+
 export function shouldHideInitialMessageList(initialTranscriptSessionId: string | null, routeSessionId: string, initialScrollReady: boolean): boolean {
   return initialTranscriptSessionId === routeSessionId && !initialScrollReady;
 }
@@ -1550,9 +1567,20 @@ export function SessionView() {
     await loadQueuedInputs(targetId, token);
   }
 
-  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId, restoringSessionId)) return <SessionLoadingSkeleton />;
+  const loadingSession = session ?? loadingSessionFromLocationState(location.state, id);
+  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId, restoringSessionId)) {
+    return (
+      <SessionLoadingView
+        session={loadingSession}
+        onBack={() => navigate("/")}
+        onNewSession={() => openCreateSession(loadingSession ? sessionCreateSessionCwd(loadingSession) : "")}
+      />
+    );
+  }
   const readySession = session;
-  if (!readySession) return <SessionLoadingSkeleton />;
+  if (!readySession) {
+    return <SessionLoadingView session={loadingSession} onBack={() => navigate("/")} onNewSession={() => openCreateSession()} />;
+  }
   const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
 
   return (
@@ -1817,6 +1845,81 @@ export function SessionView() {
         />
       ) : null}
     </section>
+  );
+}
+
+export function SessionLoadingView({
+  session,
+  onBack,
+  onNewSession
+}: {
+  session: ManagedSession | null;
+  onBack: () => void;
+  onNewSession: () => void;
+}) {
+  const workspace = session ? normalizeGitWorkspaceSummary(session.gitWorkspace) : null;
+  return (
+    <SessionLoadingSkeleton
+      header={
+        <div className="session-header">
+          <button className="icon-button" onClick={onBack} aria-label="Back">
+            <ArrowLeft size={19} />
+          </button>
+          <div className="session-title">
+            <h1>{session ? sessionDisplayName(session) : "Loading session"}</h1>
+            {session ? <SessionHeaderMeta session={session} /> : <p className="session-header-meta">Starting session</p>}
+          </div>
+          {session ? <StatusPill status={session.status} /> : null}
+          {session ? <TmuxCommandButton session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
+          {session ? <ModeToggle mode={session.inputMode} busy onChange={() => undefined} /> : null}
+        </div>
+      }
+      actions={
+        <div className="actions">
+          <div className="actions-main">
+            <button
+              className="session-new-session-button"
+              type="button"
+              onClick={onNewSession}
+              aria-label="New session"
+              title="New session"
+            >
+              <Plus size={18} />
+              <span className="session-new-session-button-label">New session</span>
+            </button>
+            {workspace ? (
+              <button
+                className="git-workspace-chip"
+                type="button"
+                disabled
+                aria-label={`Git workspace ${workspace.targetBranch} loading`}
+              >
+                <GitBranch size={14} />
+                <span>{workspace.targetBranch}</span>
+              </button>
+            ) : null}
+            <button type="button" disabled aria-label="Interrupt session unavailable while loading" title="Interrupt">
+              <Pause size={16} />
+              <span className="session-action-label">Interrupt</span>
+            </button>
+            <button className="danger" type="button" disabled aria-label="Kill session unavailable while loading" title="Kill session">
+              <Skull size={16} />
+              <span className="session-action-label">Kill</span>
+            </button>
+          </div>
+          <div className="actions-jump">
+            <button type="button" disabled aria-label="Jump to top unavailable while loading" title="Jump to top">
+              <ArrowUpToLine size={16} />
+              <span className="session-action-label">Top</span>
+            </button>
+            <button type="button" disabled aria-label="Jump to bottom unavailable while loading" title="Jump to bottom">
+              <ArrowDownToLine size={16} />
+              <span className="session-action-label">Bottom</span>
+            </button>
+          </div>
+        </div>
+      }
+    />
   );
 }
 

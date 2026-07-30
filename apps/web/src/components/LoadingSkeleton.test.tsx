@@ -48,6 +48,20 @@ describe("loading skeleton regions", () => {
     expect(accessHtml).toContain("Checking access");
   });
 
+  it("keeps supplied session navigation outside the placeholder-only regions", () => {
+    const sessionHtml = renderToStaticMarkup(
+      createElement(SessionLoadingSkeleton, {
+        header: createElement("button", { type: "button", "aria-label": "Back" }, "Back"),
+        actions: createElement("button", { type: "button", "aria-label": "New session" }, "New session")
+      })
+    );
+
+    expect(sessionHtml).toContain('aria-label="Back"');
+    expect(sessionHtml).toContain('aria-label="New session"');
+    expect(sessionHtml).toContain("loading-message-list");
+    expect(sessionHtml).toContain("loading-composer");
+  });
+
   it("announces dashboard session and usage regions independently", () => {
     const sessionsHtml = renderToStaticMarkup(createElement(DashboardSessionsSkeleton));
     const usageHtml = renderToStaticMarkup(createElement(UsagePanelSkeleton, { chart: true }));

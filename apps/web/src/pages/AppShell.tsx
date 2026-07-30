@@ -700,7 +700,9 @@ export function AppShell() {
       const response = await api.restoreSession(result.sessionId);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
-      navigate(`/sessions/${response.session.id}`, { state: { restoringSessionId: response.session.id } });
+      navigate(`/sessions/${response.session.id}`, {
+        state: { restoringSessionId: response.session.id, loadingSession: response.session }
+      });
       void loadSessions().catch(handleConnectedRequestFailure);
     } catch (error) {
       handleConnectedRequestFailure(error);
@@ -748,7 +750,7 @@ export function AppShell() {
       const response = await api.createSession(request);
       setCreateSessionOpen(false);
       await loadSessions();
-      navigate(`/sessions/${response.session.id}`);
+      navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
     } catch (error) {
       setCreateSessionError(error instanceof Error ? error.message : "Could not create session.");
     } finally {
@@ -769,10 +771,6 @@ export function AppShell() {
     const rect = event.currentTarget.getBoundingClientRect();
     setNotificationSettingsSubmenuOpen(false);
     setNotificationMenu(dropdownMenuPosition(rect, { width: GLOBAL_NOTIFICATION_MENU_WIDTH, height: GLOBAL_NOTIFICATION_MENU_HEIGHT, edge: MENU_EDGE }));
-  }
-
-  if (sessionHistoryRestoreId) {
-    return <AppLoadingSkeleton variant="session" label="Restoring session" />;
   }
 
   async function toggleGlobalNotification(type: NotificationRuleType, enabled: boolean) {

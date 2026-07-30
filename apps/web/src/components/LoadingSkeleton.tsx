@@ -1,4 +1,5 @@
 import { AppBrand } from "./AppBrand.js";
+import type { ReactNode } from "react";
 
 export type LoadingSkeletonVariant = "dashboard" | "session" | "access";
 
@@ -129,36 +130,48 @@ export function UsagePanelSkeleton({ announce = true, chart = false }: { announc
   );
 }
 
-export function SessionLoadingSkeleton({ announce = true, label = "Loading session" }: { announce?: boolean; label?: string }) {
+export function SessionLoadingSkeleton({
+  announce = true,
+  label = "Loading session",
+  header,
+  actions
+}: {
+  announce?: boolean;
+  label?: string;
+  header?: ReactNode;
+  actions?: ReactNode;
+}) {
   return (
     <section
       className="session-view loading-session-skeleton"
-      role={announce ? "status" : undefined}
-      aria-live={announce ? "polite" : undefined}
       aria-busy={announce ? "true" : undefined}
     >
-      {announce ? <span className="sr-only">{label}</span> : null}
-      <div className="session-header" aria-hidden="true">
-        <SkeletonBlock className="skeleton-icon skeleton-back" />
-        <div className="session-title loading-session-title">
-          <SkeletonBlock className="skeleton-line skeleton-line-session-title" />
-          <SkeletonBlock className="skeleton-line skeleton-line-session-meta" />
+      {announce ? <span className="sr-only" role="status" aria-live="polite">{label}</span> : null}
+      {header ?? (
+        <div className="session-header" aria-hidden="true">
+          <SkeletonBlock className="skeleton-icon skeleton-back" />
+          <div className="session-title loading-session-title">
+            <SkeletonBlock className="skeleton-line skeleton-line-session-title" />
+            <SkeletonBlock className="skeleton-line skeleton-line-session-meta" />
+          </div>
+          <SkeletonBlock className="skeleton-pill" />
+          <SkeletonBlock className="skeleton-session-command" />
+          <SkeletonBlock className="skeleton-mode-toggle" />
         </div>
-        <SkeletonBlock className="skeleton-pill" />
-        <SkeletonBlock className="skeleton-session-command" />
-        <SkeletonBlock className="skeleton-mode-toggle" />
-      </div>
-      <div className="actions" aria-hidden="true">
-        <div className="actions-main">
-          <SkeletonBlock className="skeleton-action skeleton-action-square" />
-          <SkeletonBlock className="skeleton-action" />
-          <SkeletonBlock className="skeleton-action skeleton-action-short" />
+      )}
+      {actions ?? (
+        <div className="actions" aria-hidden="true">
+          <div className="actions-main">
+            <SkeletonBlock className="skeleton-action skeleton-action-square" />
+            <SkeletonBlock className="skeleton-action" />
+            <SkeletonBlock className="skeleton-action skeleton-action-short" />
+          </div>
+          <div className="actions-jump">
+            <SkeletonBlock className="skeleton-action skeleton-action-short" />
+            <SkeletonBlock className="skeleton-action skeleton-action-short" />
+          </div>
         </div>
-        <div className="actions-jump">
-          <SkeletonBlock className="skeleton-action skeleton-action-short" />
-          <SkeletonBlock className="skeleton-action skeleton-action-short" />
-        </div>
-      </div>
+      )}
       <div className="transcript-pane" aria-hidden="true">
         <div className="message-list loading-message-list">
           <MessageSkeleton className="loading-message-assistant" lines={3} />
