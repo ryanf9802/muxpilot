@@ -75,6 +75,10 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("focused file/module checks");
     expect(options.developerInstructions).toContain("explicitly requests a PR-style review of a branch or ref");
     expect(options.developerInstructions).toContain("muxpilot-git-run.mjs --heavy");
+    expect(options.developerInstructions).toContain("entire repository, workspace, application, package, or multi-project configuration");
+    expect(options.developerInstructions).toContain("longer than one minute");
+    expect(options.developerInstructions).toContain("When uncertain, treat the command as heavyweight");
+    expect(options.developerInstructions).toContain("does not authorize repository-wide validation");
     expect(options.developerInstructions).toContain("writable for test caches");
   });
 

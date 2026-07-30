@@ -28,6 +28,9 @@ describe("production bundled skill startup", () => {
       expect(installedSkill).toContain("Before creating the requested branch or beginning implementation");
       expect(installedSkill).toContain("explicitly requests a PR-style review of a branch or ref");
       expect(installedSkill).toContain("muxpilot-git-run.mjs");
+      expect(installedSkill).toContain("Treat a command as heavyweight when any of these conditions applies");
+      expect(installedSkill).toContain("When uncertain, use the heavyweight wrapper");
+      expect(installedSkill).toContain("does not authorize repository-wide validation");
       await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"))).resolves.toBeUndefined();
     } finally {
       log.mockRestore();

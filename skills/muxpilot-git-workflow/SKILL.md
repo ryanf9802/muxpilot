@@ -17,14 +17,27 @@ For plans, answers, diagnosis, or review, inspect the repository entry path dire
 2. Tell the user you are creating an isolated task worktree, then run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-begin.mjs"`.
 3. Perform every repository content write in the returned worktree. Shared dependency directories may be linked there and their real targets are writable for test caches.
 4. Before changing dependency manifests, lockfiles, or installed packages, run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-deps.mjs" localize <relative-dependency-path>` and install into the worktree-local directory.
-5. Follow repository guidance, but default to focused file/module lint, typechecking, and tests. Do not treat the same-agent review in step 7 as a PR-style review. Run repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref.
-6. Run heavyweight validation through `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-run.mjs" --heavy -- <command>`. The helper limits concurrent heavyweight work across muxpilot sessions and forwards command output, signals, and the exit status.
+5. Follow repository guidance, but default to focused file/module lint, typechecking, and tests. Do not treat the same-agent self-review step below as a PR-style review. Run repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref.
+6. Classify validation using "Heavyweight commands" below. Run every heavyweight command through `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-run.mjs" --heavy -- <command>`. The helper limits concurrent heavyweight work across muxpilot sessions and forwards command output, signals, and the exit status.
 7. Make clean, logically atomic commits. Do not leave tracked or untracked task changes uncommitted.
 8. Review the complete target-to-task diff yourself. Fix every actionable finding, rerun affected focused checks, commit fixes, and review again. Repeat until a final review finds nothing actionable. Any material change invalidates the prior review.
 9. Run `node "$MUXPILOT_GIT_HELPER_DIR/muxpilot-git-finish.mjs"`. If the target advanced, the helper rebases and stops; rerun affected focused checks and the complete self-review loop before retrying. Resolve conflicts in the task worktree, then do the same.
 10. Report completion only after the helper prints `INTEGRATED`. Successful integration removes the worktree and temporary branch. Failed or unfinished work is preserved.
 
 Integration is entirely local. Normal helpers never create a target branch, pull, push, publish, or reconcile a remote. Multiple tasks may target the same branch; their short final integration steps serialize, and completion order determines landing order.
+
+## Heavyweight commands
+
+Treat a command as heavyweight when any of these conditions applies:
+
+- It scans, lints, typechecks, tests, formats, or builds an entire repository, workspace, application, package, or multi-project configuration rather than selected files or a single test target.
+- It is a static-analysis, security, dependency, or container-image scan, including Semgrep, CodeQL, Trivy, or an equivalent scanner.
+- It starts Docker or Docker Compose, launches multiple test workers/shards/projects, produces a production bundle, or otherwise fans out into many child processes.
+- Based on the repository, command flags, or prior output, it can reasonably run for more than one minute, use more than about 1 GiB of memory, or sustain multiple CPU cores.
+
+The following are normally not heavyweight: inspecting files or Git state, syntax-only checks, linting selected files, and running one explicitly selected test file or test case without parallel workers.
+
+When uncertain, use the heavyweight wrapper. The wrapper only schedules an already-authorized command; it does not authorize repository-wide validation. Do not broaden a focused check into a repository-wide command merely because the wrapper is available.
 
 ## Changing the target branch
 
