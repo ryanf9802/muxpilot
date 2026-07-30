@@ -91,7 +91,8 @@ export class SessionManager {
     private readonly codexProcessLookup: CodexProcessLookup | null = null,
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
     private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
-    private readonly gitWorktreeRoot: string | null = null
+    private readonly gitWorktreeRoot: string | null = null,
+    private readonly managedEnvironment: Record<string, string> = {}
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -493,7 +494,9 @@ export class SessionManager {
       cwd,
       name,
       source.codexSessionId,
-      launchWorkspace ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot) : {}
+      launchWorkspace
+        ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+        : { environment: this.managedEnvironment }
     );
     const session = await this.rebindRestoredSession(source, launch.pane);
     this.finishSessionInitialization(session.id, launch.ready);
@@ -917,7 +920,9 @@ export class SessionManager {
   async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName);
+    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, {
+      environment: this.managedEnvironment
+    });
     const session = await this.persistInitializingSession(launch.pane, directory);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
@@ -944,7 +949,7 @@ export class SessionManager {
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
-      managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot)
+      managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
     );
     const sessionId = tmuxPaneSessionId(launch.pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
@@ -1444,7 +1449,8 @@ function restoreSessionName(session: ManagedSession): string {
 export function managedCodexLaunchOptions(
   workspace: StoredGitWorkspace,
   codexHome: string | null = process.env.CODEX_HOME ?? null,
-  worktreeRoot: string | null = null
+  worktreeRoot: string | null = null,
+  managedEnvironment: Record<string, string> = {}
 ) {
   const summary = workspace.summary;
   const helperDir = codexHome ? join(codexHome, "skills", "muxpilot-git-workflow", "scripts") : null;
@@ -1470,7 +1476,7 @@ export function managedCodexLaunchOptions(
       "Workflow status is authoritative for the current target after a retarget.",
       "For answers, plans, reviews, and diagnosis, inspect the repository directly without creating a worktree.",
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
-      "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Run repository-wide validation only when the user requests it.",
+      "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Do not treat this same-agent self-review as a PR-style review. Run repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref. Run heavyweight validation through muxpilot-git-run.mjs --heavy -- <command> so concurrent sessions share the validation lease.",
       "User instructions take priority over muxpilot guardrails. If an instruction conflicts with a muxpilot guard, name each exact guard and consequence and obtain explicit confirmation for those guards before bypassing them. Confirmation is operation-scoped; platform safety rules are not muxpilot guards.",
       "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard, explain that current and future task commits will integrate there, and obtain separate explicit confirmation for the fixed-target bypass. An active worktree must repeat focused checks and self-review after retargeting before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
@@ -1479,6 +1485,7 @@ export function managedCodexLaunchOptions(
       "Create clean atomic commits and run the finish helper before reporting completion."
     ].join(" "),
     environment: {
+      ...managedEnvironment,
       ...(codexHome ? { CODEX_HOME: codexHome, MUXPILOT_GIT_HELPER_DIR: helperDir! } : {}),
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
       MUXPILOT_GIT_REPO_ROOT: summary.repoRoot,

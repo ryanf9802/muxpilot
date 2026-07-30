@@ -37,7 +37,16 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_WEB_PROTOCOL",
   "MUXPILOT_WEB_PORT",
   "MUXPILOT_DATA_DIR",
-  "MUXPILOT_DB_PATH"
+  "MUXPILOT_DB_PATH",
+  "MUXPILOT_RESOURCE_GOVERNOR",
+  "MUXPILOT_AGENT_MEMORY_SOFT_PERCENT",
+  "MUXPILOT_AGENT_MEMORY_HARD_PERCENT",
+  "MUXPILOT_AGENT_CPU_PERCENT",
+  "MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT",
+  "MUXPILOT_DOCKER_MEMORY_HARD_PERCENT",
+  "MUXPILOT_DOCKER_CPU_PERCENT",
+  "MUXPILOT_SESSION_TASKS_MAX",
+  "MUXPILOT_HEAVY_VALIDATION_CONCURRENCY"
 ];
 
 const MODE_CONFIG = {
@@ -349,8 +358,8 @@ function prepareMode(mode) {
 
 async function inspectPreparedMode(details) {
   const { state, urls } = details;
-  const [backendActive, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
-    endpointActive(`${urls.backendUrl}/healthz`),
+  const [backendHealth, webActive, backendPortOccupied, webPortOccupied] = await Promise.all([
+    readJsonEndpoint(`${urls.backendUrl}/healthz`),
     endpointActive(urls.webUrl),
     portOccupied("127.0.0.1", urls.backendPort),
     portOccupied("127.0.0.1", urls.webPort)
@@ -358,7 +367,8 @@ async function inspectPreparedMode(details) {
   const pids = readStatePids(details.mode, { includeStale: true });
 
   return {
-    backendActive,
+    backendActive: Boolean(backendHealth),
+    backendHealth,
     webActive,
     backendPortOccupied,
     webPortOccupied,
@@ -388,6 +398,24 @@ function printStatus(mode, details, status) {
   console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
   console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
   console.log(`  runtime: ${state.dir}`);
+  const governor = process.env.MUXPILOT_RESOURCE_GOVERNOR ?? "auto";
+  const dockerGuardSocket = resolve(process.env.MUXPILOT_DATA_DIR ?? config.dataDir, "runtime", "docker-guard.sock");
+  console.log(`  resource governor: ${governor}`);
+  if (governor !== "off") {
+    const dockerGuardActive = status.backendHealth
+      ? status.backendHealth.dockerGuardActive === true
+      : existsSync(dockerGuardSocket);
+    console.log(`    agents: memory ${process.env.MUXPILOT_AGENT_MEMORY_SOFT_PERCENT ?? "50"}% soft / ${process.env.MUXPILOT_AGENT_MEMORY_HARD_PERCENT ?? "60"}% hard, cpu ${process.env.MUXPILOT_AGENT_CPU_PERCENT ?? "75"}%, tasks ${process.env.MUXPILOT_SESSION_TASKS_MAX ?? "768"}`);
+    console.log(`    docker: memory ${process.env.MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT ?? "15"}% soft / ${process.env.MUXPILOT_DOCKER_MEMORY_HARD_PERCENT ?? "20"}% hard, cpu ${process.env.MUXPILOT_DOCKER_CPU_PERCENT ?? "25"}%, proxy ${dockerGuardActive ? "active" : "inactive"}`);
+    console.log(`    heavyweight validation concurrency: ${process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY ?? "1"}`);
+    const live = status.backendHealth?.resourceGovernor;
+    if (live) {
+      console.log(`    managed sessions: ${live.busySessions} busy, ${live.idleSessions} idle`);
+      if (live.busyMemoryHighBytes !== null) {
+        console.log(`    current busy-session share: ${formatBytes(live.busyMemoryHighBytes)} soft / ${formatBytes(live.busyMemoryMaxBytes)} hard, cpu ${live.busyCpuPercent}%`);
+      }
+    }
+  }
   console.log(`  logs:`);
   console.log(`    supervisor: ${state.supervisorLogPath}`);
   console.log(`    server: ${state.serverLogPath}`);
@@ -553,6 +581,39 @@ async function endpointActive(url) {
     });
     request.on("error", () => resolveActive(false));
   });
+}
+
+async function readJsonEndpoint(url) {
+  return new Promise((resolveJson) => {
+    const parsed = new URL(url);
+    const get = parsed.protocol === "https:" ? httpsGet : httpGet;
+    const request = get(parsed, { rejectUnauthorized: false, timeout: HEALTH_CHECK_TIMEOUT_MS }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => {
+        if ((response.statusCode ?? 500) >= 500) {
+          resolveJson(null);
+          return;
+        }
+        try {
+          resolveJson(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          resolveJson(null);
+        }
+      });
+    });
+    request.on("timeout", () => {
+      request.destroy();
+      resolveJson(null);
+    });
+    request.on("error", () => resolveJson(null));
+  });
+}
+
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return "unknown";
+  if (value >= 1024 ** 3) return `${Math.round(value / 1024 ** 3 * 10) / 10} GiB`;
+  return `${Math.round(value / 1024 ** 2)} MiB`;
 }
 
 function findListeningPids(port) {

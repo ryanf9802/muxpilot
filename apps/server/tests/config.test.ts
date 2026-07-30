@@ -96,4 +96,32 @@ describe("config LAN access validation", () => {
     expect(parseConfig({ MUXPILOT_SESSION_FILE_KEY: "correct horse battery staple" }).sessionFileKey).toBe("correct horse battery staple");
     expect(() => parseConfig({ MUXPILOT_SESSION_FILE_KEY: "too-short" })).toThrow();
   });
+
+  it("uses conservative resource defaults and accepts environment overrides", () => {
+    const defaults = parseConfig({});
+    expect(defaults).toMatchObject({
+      resourceGovernor: "auto",
+      agentMemorySoftPercent: 50,
+      agentMemoryHardPercent: 60,
+      agentCpuPercent: 75,
+      dockerMemorySoftPercent: 15,
+      dockerMemoryHardPercent: 20,
+      dockerCpuPercent: 25,
+      sessionTasksMax: 768,
+      heavyValidationConcurrency: 1
+    });
+
+    const overridden = parseConfig({
+      MUXPILOT_RESOURCE_GOVERNOR: "off",
+      MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "40",
+      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "2"
+    });
+    expect(overridden.resourceGovernor).toBe("off");
+    expect(overridden.agentMemorySoftPercent).toBe(40);
+    expect(overridden.heavyValidationConcurrency).toBe(2);
+    expect(() => parseConfig({
+      MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "70",
+      MUXPILOT_AGENT_MEMORY_HARD_PERCENT: "60"
+    })).toThrow();
+  });
 });

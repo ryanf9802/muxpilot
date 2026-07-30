@@ -20,6 +20,9 @@ import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 import { SessionTransferService } from "./services/sessionTransfer.js";
+import { ResourceGovernor } from "./services/resourceGovernor.js";
+import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
+import { join } from "node:path";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -62,6 +65,25 @@ const activitySummarizer = new ActivitySummarizer({
   },
   logger: app.log
 });
+let dockerProxy: DockerResourceProxy | null = null;
+const managedEnvironment: Record<string, string> = {
+  MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency)
+};
+if (config.resourceGovernor !== "off") {
+  dockerProxy = new DockerResourceProxy({
+    socketPath: join(config.dataDir, "runtime", "docker-guard.sock"),
+    memorySoftPercent: config.dockerMemorySoftPercent,
+    memoryHardPercent: config.dockerMemoryHardPercent,
+    cpuPercent: config.dockerCpuPercent
+  }, app.log);
+  try {
+    await dockerProxy.start();
+    managedEnvironment.DOCKER_HOST = dockerProxy.dockerHost();
+  } catch (error) {
+    app.log.warn({ err: error }, "Docker resource proxy is unavailable; managed sessions will use their normal Docker configuration");
+    dockerProxy = null;
+  }
+}
 const manager = new SessionManager(
   db,
   tmux,
@@ -75,8 +97,16 @@ const manager = new SessionManager(
   codexProcessResolver,
   gitWorkspaces,
   config.codexHome,
-  config.gitWorktreeRoot
+  config.gitWorktreeRoot,
+  managedEnvironment
 );
+const resourceGovernor = new ResourceGovernor({
+  enabled: config.resourceGovernor !== "off",
+  agentMemorySoftPercent: config.agentMemorySoftPercent,
+  agentMemoryHardPercent: config.agentMemoryHardPercent,
+  agentCpuPercent: config.agentCpuPercent,
+  sessionTasksMax: config.sessionTasksMax
+}, () => db.listSessions(), app.log);
 const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
 await sessionTransfers.initialize();
 const access = createAccessControl(config, {
@@ -105,12 +135,17 @@ app.addContentTypeParser(
 access.register(app);
 registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers);
 
-app.get("/healthz", async () => ({ ok: true }));
+app.get("/healthz", async () => ({
+  ok: true,
+  resourceGovernor: resourceGovernor.snapshot(),
+  dockerGuardActive: Boolean(dockerProxy)
+}));
 
 let closing = false;
 
 await manager.discoverNow();
 manager.start({ runInitialTick: false });
+resourceGovernor.start();
 pwaTrustServer.start();
 void startNotificationsAfterStartupCatchup();
 
@@ -131,9 +166,11 @@ async function startNotificationsAfterStartupCatchup(): Promise<void> {
 const close = async () => {
   closing = true;
   manager.stop();
+  await resourceGovernor.stop();
   notifications.stop();
   codexUsage.stop();
   await pwaTrustServer.close();
+  await dockerProxy?.close();
   await db.close();
   await app.close();
 };

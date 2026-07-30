@@ -56,6 +56,15 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_LOG_LEVEL`: Pino log level, default `info`.
 - `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
+- `MUXPILOT_RESOURCE_GOVERNOR`: `auto` (default) applies best-effort systemd cgroup and Docker limits to muxpilot-launched sessions; `off` disables both controls.
+- `MUXPILOT_AGENT_MEMORY_SOFT_PERCENT`: shared `MemoryHigh` pool for busy agent sessions, default `50`.
+- `MUXPILOT_AGENT_MEMORY_HARD_PERCENT`: shared `MemoryMax` pool for busy agent sessions, default `60`.
+- `MUXPILOT_AGENT_CPU_PERCENT`: shared percentage of host logical CPU capacity for busy agent sessions, default `75`.
+- `MUXPILOT_SESSION_TASKS_MAX`: per-session process/thread ceiling, default `768`.
+- `MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT`: shared Docker memory-reservation pool for containers created through managed sessions, default `15`.
+- `MUXPILOT_DOCKER_MEMORY_HARD_PERCENT`: shared Docker hard-memory pool, default `20`.
+- `MUXPILOT_DOCKER_CPU_PERCENT`: shared Docker CPU pool, default `25`.
+- `MUXPILOT_HEAVY_VALIDATION_CONCURRENCY`: number of heavyweight scan/test commands allowed concurrently across muxpilot sessions, default `1`.
 - `MUXPILOT_INPUT_SUBMIT_KEYS`: tmux keys sent after pasting a chat message, default `Enter`.
 - `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: tmux key sequence used to cycle Codex between Normal and Plan input modes, default `BTab` for Shift+Tab.
 - Plan-action and question-option buttons use Codex menu selection keys directly; they do not use `MUXPILOT_INPUT_SUBMIT_KEYS`.
@@ -81,6 +90,15 @@ These are available for unusual local setups but are not needed for normal deskt
 ```
 
 The built-in pricing table covers `gpt-4.1`, `gpt-4.1-mini`, and `gpt-4.1-nano` family names used by the summary feature. Unknown models are recorded as unpriced instead of failing.
+
+## Resource Controls
+
+On systemd-based Linux and WSL 2, muxpilot divides the configured agent pools across sessions whose status is initializing, working, generating, executing, planning, or unknown. Sessions that remain idle for five seconds fall back to a 512 MiB soft limit, 1 GiB hard limit, and 25% CPU quota. Hard memory limits are lowered only after current use fits, unless Linux reports less than 8% memory available. Muxpilot restores the scopes it changed to unlimited during a clean shutdown.
+
+Managed sessions receive a muxpilot-owned `DOCKER_HOST` Unix socket. Containers created through that socket are labeled, constrained to the shared Docker pool, capped at 512 processes, and rebalanced as managed containers start and stop. Explicit caller limits are preserved when they are stricter. Existing unrelated containers are not changed. If the Docker daemon is unavailable, Docker commands return a clear proxy error while non-Docker work remains available.
+
+Use `pnpm app status` to see the effective pool settings and whether the Docker proxy socket is active. Resource settings are environment-only; changing them requires restarting muxpilot.
+
 ## Git Workspace Storage
 
 Managed Git session worktrees live outside the repository entry checkout by default:

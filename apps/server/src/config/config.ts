@@ -25,6 +25,8 @@ const booleanFlag = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+const percentage = z.coerce.number().positive().max(100);
+
 const schema = z.object({
   lanEnabled: booleanFlag,
   host: z.string().default("127.0.0.1"),
@@ -57,6 +59,15 @@ const schema = z.object({
   logLevel: z.string().default("info"),
   discoveryIntervalMs: z.coerce.number().int().positive().default(1000),
   parserIntervalMs: z.coerce.number().int().positive().default(1000),
+  resourceGovernor: z.enum(["auto", "off"]).default("auto"),
+  agentMemorySoftPercent: percentage.default(50),
+  agentMemoryHardPercent: percentage.default(60),
+  agentCpuPercent: percentage.default(75),
+  dockerMemorySoftPercent: percentage.default(15),
+  dockerMemoryHardPercent: percentage.default(20),
+  dockerCpuPercent: percentage.default(25),
+  sessionTasksMax: z.coerce.number().int().positive().default(768),
+  heavyValidationConcurrency: z.coerce.number().int().positive().default(1),
   openaiApiKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
     z.string().optional()
@@ -76,6 +87,21 @@ const schema = z.object({
     approveForPrefix: keySequence(["Down", "Enter"]),
     deny: keySequence(["Escape"])
   })
+}).superRefine((value, context) => {
+  if (value.agentMemoryHardPercent < value.agentMemorySoftPercent) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["agentMemoryHardPercent"],
+      message: "agent hard memory percent must be at least the soft percent"
+    });
+  }
+  if (value.dockerMemoryHardPercent < value.dockerMemorySoftPercent) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["dockerMemoryHardPercent"],
+      message: "Docker hard memory percent must be at least the soft percent"
+    });
+  }
 });
 
 export type AppConfig = z.infer<typeof schema>;
@@ -104,6 +130,15 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     logLevel: env.MUXPILOT_LOG_LEVEL,
     discoveryIntervalMs: env.MUXPILOT_DISCOVERY_INTERVAL_MS,
     parserIntervalMs: env.MUXPILOT_PARSER_INTERVAL_MS,
+    resourceGovernor: env.MUXPILOT_RESOURCE_GOVERNOR,
+    agentMemorySoftPercent: env.MUXPILOT_AGENT_MEMORY_SOFT_PERCENT,
+    agentMemoryHardPercent: env.MUXPILOT_AGENT_MEMORY_HARD_PERCENT,
+    agentCpuPercent: env.MUXPILOT_AGENT_CPU_PERCENT,
+    dockerMemorySoftPercent: env.MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT,
+    dockerMemoryHardPercent: env.MUXPILOT_DOCKER_MEMORY_HARD_PERCENT,
+    dockerCpuPercent: env.MUXPILOT_DOCKER_CPU_PERCENT,
+    sessionTasksMax: env.MUXPILOT_SESSION_TASKS_MAX,
+    heavyValidationConcurrency: env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY,
     openaiApiKey: env.OPENAI_API_KEY,
     summaryModel: env.MUXPILOT_SUMMARY_MODEL,
     summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,

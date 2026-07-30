@@ -1,0 +1,114 @@
+import { request as httpRequest, createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DockerResourceProxy } from "../src/services/dockerResourceProxy.js";
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("DockerResourceProxy", () => {
+  it("labels creates, preserves stricter limits, and reports daemon failures clearly", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const received: Array<{ url: string; payload: Record<string, any> }> = [];
+    const daemon = createServer((request, response) => {
+      if (request.url === "/events") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.write('{"status":"one"}\n');
+        setTimeout(() => response.end('{"status":"two"}\n'), 10);
+        return;
+      }
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        received.push({
+          url: request.url ?? "",
+          payload: JSON.parse(Buffer.concat(chunks).toString("utf8"))
+        });
+        response.writeHead(request.url?.includes("/create") ? 201 : 200, { "content-type": "application/json" });
+        response.end(JSON.stringify(request.url?.includes("/create") ? { Id: "managed-container" } : {}));
+      });
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket,
+      daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15,
+      memoryHardPercent: 20,
+      cpuPercent: 25
+    }, logger);
+    await proxy.start();
+
+    const strictMemory = 64 * 1024 ** 2;
+    const created = await request(proxySocket, "POST", "/v1.47/containers/create", {
+      Image: "example",
+      HostConfig: { Memory: strictMemory }
+    });
+    expect(created.status).toBe(201);
+    expect(received[0]?.payload.Labels).toMatchObject({
+      "com.muxpilot.managed": "true",
+      "com.muxpilot.resource-pool": "shared"
+    });
+    expect(received[0]?.payload.HostConfig.Memory).toBe(strictMemory);
+    expect(received[0]?.payload.HostConfig.MemoryReservation).toBe(strictMemory);
+    expect(received[0]?.payload.HostConfig.NanoCpus).toBeGreaterThan(0);
+    expect(received[0]?.payload.HostConfig.PidsLimit).toBe(512);
+
+    await request(proxySocket, "POST", "/v1.47/containers/managed-container/update", {
+      Memory: strictMemory / 2,
+      PidsLimit: 100
+    });
+    expect(received[1]?.payload).toMatchObject({
+      Memory: strictMemory / 2,
+      MemoryReservation: strictMemory / 2,
+      PidsLimit: 100
+    });
+    expect((await request(proxySocket, "GET", "/events")).body).toBe(
+      '{"status":"one"}\n{"status":"two"}\n'
+    );
+
+    await proxy.close();
+    const failedProxy = new DockerResourceProxy({
+      socketPath: proxySocket,
+      daemonSocketPath: join(root, "missing.sock"),
+      memorySoftPercent: 15,
+      memoryHardPercent: 20,
+      cpuPercent: 25
+    }, logger);
+    await failedProxy.start();
+    const failed = await request(proxySocket, "GET", "/version");
+    expect(failed.status).toBe(502);
+    expect(failed.body).toContain("could not reach");
+    await failedProxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+});
+
+function request(socketPath: string, method: string, path: string, payload?: object) {
+  const body = payload ? Buffer.from(JSON.stringify(payload)) : Buffer.alloc(0);
+  return new Promise<{ status: number; body: string }>((resolve, reject) => {
+    const next = httpRequest({
+      socketPath,
+      method,
+      path,
+      headers: { "content-type": "application/json", "content-length": String(body.length) }
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      response.on("end", () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString("utf8")
+      }));
+    });
+    next.on("error", reject);
+    next.end(body);
+  });
+}

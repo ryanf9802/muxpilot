@@ -73,6 +73,8 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("Never use an implementation worktree's state to claim that another checkout is clean or dirty");
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("focused file/module checks");
+    expect(options.developerInstructions).toContain("explicitly requests a PR-style review of a branch or ref");
+    expect(options.developerInstructions).toContain("muxpilot-git-run.mjs --heavy");
     expect(options.developerInstructions).toContain("writable for test caches");
   });
 

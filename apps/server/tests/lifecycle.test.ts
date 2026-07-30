@@ -26,6 +26,9 @@ describe("production bundled skill startup", () => {
       expect(installedSkill).toContain("create or select a local branch for implementation");
       expect(installedSkill).toContain("`feature` is the intended target and `origin/dev` is only its start point");
       expect(installedSkill).toContain("Before creating the requested branch or beginning implementation");
+      expect(installedSkill).toContain("explicitly requests a PR-style review of a branch or ref");
+      expect(installedSkill).toContain("muxpilot-git-run.mjs");
+      await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"))).resolves.toBeUndefined();
     } finally {
       log.mockRestore();
     }
