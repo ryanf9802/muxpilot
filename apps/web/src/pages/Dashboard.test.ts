@@ -115,6 +115,13 @@ describe("SessionCard", () => {
     expect(html).not.toContain("dirty");
   });
 
+  it("renders initializing sessions with the neutral loading status", () => {
+    const html = renderSessionCard(testSession({ id: "a", paneId: "%111", windowName: "starting", initializing: true }));
+
+    expect(html).toContain('class="status status-loading"');
+    expect(html).not.toContain("status-yellow");
+  });
+
   it.each([
     ["idle", "idle"],
     ["worktree", "isolated"],
@@ -472,6 +479,7 @@ describe("dashboard status filters", () => {
       testSession({ id: "a", paneId: "%111", windowName: "approval", status: "approval" }),
       testSession({ id: "b", paneId: "%112", windowName: "question", status: "question" }),
       testSession({ id: "c", paneId: "%113", windowName: "working", status: "working" }),
+      testSession({ id: "e", paneId: "%115", windowName: "starting", status: "unknown", initializing: true }),
       testSession({ id: "d", paneId: "%114", windowName: "waiting", status: "waiting" })
     ];
 
@@ -593,7 +601,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "pinned" | "gitWorkspace">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -618,6 +626,7 @@ function testSession(
     codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
+    initializing: input.initializing ?? false,
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: input.recentUserPrompts ?? [],

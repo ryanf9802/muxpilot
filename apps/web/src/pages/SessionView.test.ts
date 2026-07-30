@@ -43,7 +43,6 @@ import {
   relativeLineNumber,
   retainLatestSentQueuedUserMessage,
   replaceTranscriptTail,
-  restoringSessionIdFromLocationState,
   loadComposerDraft,
   loadVimModePreference,
   sessionWithPendingInputMode,
@@ -998,17 +997,9 @@ describe("session scroll behavior", () => {
     expect(shouldShowSessionLoading({ id: "session-a" }, "session-a", "session-a")).toBe(false);
   });
 
-  it("keeps restored sessions loading while discovery is not ready", () => {
-    expect(shouldShowSessionLoading({ id: "session-a", status: "missing" }, "session-a", "session-a", "session-a")).toBe(true);
-    expect(shouldShowSessionLoading({ id: "session-a", status: "unknown" }, "session-a", "session-a", "session-a")).toBe(true);
-    expect(shouldShowSessionLoading({ id: "session-a", status: "waiting" }, "session-a", "session-a", "session-a")).toBe(false);
-    expect(shouldShowSessionLoading({ id: "session-a", status: "missing" }, "session-a", "session-a", "session-b")).toBe(false);
-  });
-
-  it("reads the restoring session id from route state", () => {
-    expect(restoringSessionIdFromLocationState({ restoringSessionId: "session-a" })).toBe("session-a");
-    expect(restoringSessionIdFromLocationState({ restoringSessionId: 1 })).toBeNull();
-    expect(restoringSessionIdFromLocationState(null)).toBeNull();
+  it("keeps initializing sessions loading after the initial transcript is ready", () => {
+    expect(shouldShowSessionLoading({ id: "session-a", initializing: true }, "session-a", "session-a")).toBe(true);
+    expect(shouldShowSessionLoading({ id: "session-a", initializing: false }, "session-a", "session-a")).toBe(false);
   });
 
   it("retains only the matching loading session snapshot from route state", () => {
@@ -1032,6 +1023,11 @@ describe("session scroll behavior", () => {
     expect(html).toContain("muxpilot");
     expect(html).toContain('aria-label="Back"');
     expect(html).toContain('aria-label="New session"');
+    expect(html).toContain('class="status status-loading"');
+    expect(html).toContain(">loading<");
+    expect(html).not.toContain("status-red");
+    expect(html).not.toContain("status-yellow");
+    expect(html).not.toContain("status-green");
     expect(html).toContain('aria-label="Interrupt session unavailable while loading"');
     expect(html).toContain('aria-label="Kill session unavailable while loading"');
     expect(html).toContain("loading-message-list");

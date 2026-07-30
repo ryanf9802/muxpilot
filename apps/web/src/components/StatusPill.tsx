@@ -10,6 +10,14 @@ export function StatusPill({ status }: { status: SessionStatus }) {
   );
 }
 
+export function LoadingStatusPill() {
+  return (
+    <span className="status status-loading" aria-label="loading" title="loading">
+      <span className="status-text">loading</span>
+    </span>
+  );
+}
+
 function statusLabel(status: SessionStatus): string {
   if (status === "executing" || status === "generating") return "working";
   if (status === "plan_ready") return "plan ready";

@@ -33,6 +33,11 @@ export interface CodexLaunchOptions {
   environment?: Record<string, string>;
 }
 
+export interface CodexPaneLaunch {
+  pane: TmuxPane;
+  ready: Promise<void>;
+}
+
 export class TmuxAdapter {
   constructor(private readonly inputSubmitKeys: string[] = ["Enter"]) {}
 
@@ -45,31 +50,31 @@ export class TmuxAdapter {
       .map(parsePaneLine);
   }
 
-  async createCodexWindowInMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions = {}): Promise<TmuxPane> {
+  async createCodexWindowInMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions = {}): Promise<CodexPaneLaunch> {
     if (await this.hasSession("muxpilot")) return this.createCodexWindow("muxpilot", cwd, name, options);
     return this.createMuxpilotSession(cwd, name, options);
   }
 
-  async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): Promise<TmuxPane> {
+  async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): Promise<CodexPaneLaunch> {
     if (await this.hasSession("muxpilot")) return this.createCodexResumeWindow("muxpilot", cwd, name, codexSessionId, options);
     return this.createMuxpilotResumeSession(cwd, name, codexSessionId, options);
   }
 
-  private async createCodexWindow(targetSessionId: string, cwd: string, name: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+  private async createCodexWindow(targetSessionId: string, cwd: string, name: string, options: CodexLaunchOptions): Promise<CodexPaneLaunch> {
     const { stdout } = await execFileAsync("tmux", tmuxNewCodexWindowArgs(targetSessionId, cwd, name, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex window");
-    return this.prepareCodexPane(parsePaneLine(line));
+    return this.launchCodexPane(parsePaneLine(line));
   }
 
-  private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+  private async createCodexResumeWindow(targetSessionId: string, cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<CodexPaneLaunch> {
     const { stdout } = await execFileAsync("tmux", tmuxNewCodexResumeWindowArgs(targetSessionId, cwd, name, codexSessionId, options));
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex window");
-    return this.prepareCodexPane(parsePaneLine(line));
+    return this.launchCodexPane(parsePaneLine(line));
   }
 
-  private async createMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+  private async createMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions): Promise<CodexPaneLaunch> {
     const { stdout } = await execFileAsync("tmux", [
       "new-session",
       "-d",
@@ -86,10 +91,10 @@ export class TmuxAdapter {
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the new Codex session");
-    return this.prepareCodexPane(parsePaneLine(line));
+    return this.launchCodexPane(parsePaneLine(line));
   }
 
-  private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<TmuxPane> {
+  private async createMuxpilotResumeSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions): Promise<CodexPaneLaunch> {
     const { stdout } = await execFileAsync("tmux", [
       "new-session",
       "-d",
@@ -106,22 +111,25 @@ export class TmuxAdapter {
     ]);
     const line = stdout.trim().split("\n").find(Boolean);
     if (!line) throw new Error("tmux did not return a pane for the resumed Codex session");
-    return this.prepareCodexPane(parsePaneLine(line));
+    return this.launchCodexPane(parsePaneLine(line));
   }
 
-  private async prepareCodexPane(pane: TmuxPane): Promise<TmuxPane> {
+  private launchCodexPane(pane: TmuxPane): CodexPaneLaunch {
+    return { pane, ready: this.prepareCodexPane(pane) };
+  }
+
+  private async prepareCodexPane(pane: TmuxPane): Promise<void> {
     const deadline = Date.now() + CODEX_STARTUP_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const capture = await this.capturePane(pane.paneId, 40).catch(() => "");
       if (isCodexDirectoryTrustPrompt(capture)) {
         await this.sendKeys(pane.paneId, ["Enter"]);
         await delay(250);
-        return pane;
+        return;
       }
-      if (isCodexReadyScreen(capture)) return pane;
+      if (isCodexReadyScreen(capture)) return;
       await delay(CODEX_STARTUP_POLL_INTERVAL_MS);
     }
-    return pane;
   }
 
   private async hasSession(sessionName: string): Promise<boolean> {

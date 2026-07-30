@@ -32,6 +32,39 @@ describe("matchingNotificationRules", () => {
     expect(matchingNotificationRules(settings, "a", "working", "working")).toEqual([]);
   });
 
+  it("seeds initializing session status without notifying", async () => {
+    const events = new EventBus();
+    const appendedEvents: SessionEvent[] = [];
+    const vapidKeys = webPush.generateVAPIDKeys();
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") appendedEvents.push(event);
+    });
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => vapidKeys,
+        listSessions: async () => [],
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["status_change"]) }),
+        getSession: async () => testSession({ status: "waiting" }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    await service.start();
+
+    events.publish({
+      id: "event-initializing",
+      type: "session.updated",
+      sessionId: "a",
+      payload: testSession({ status: "unknown", initializing: true }),
+      timestamp: "2026-07-08T00:00:00.000Z"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(appendedEvents).toEqual([]);
+
+    service.stop();
+  });
+
   it("combines overlapping global and session rules once", () => {
     const settings = {
       globalRules: ["status_change" as const, "done_task" as const],

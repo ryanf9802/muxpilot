@@ -24,7 +24,7 @@ import type {
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, eventSocket, notificationDeviceId } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
-import { StatusPill } from "../components/StatusPill.js";
+import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/LoadingSkeleton.js";
@@ -403,13 +403,13 @@ export function Dashboard() {
           <ContextMenuItem
             icon={menu.session.pinned ? <PinOff size={16} /> : <Pin size={16} />}
             onClick={() => void setSessionPinned(menu.session, !menu.session.pinned)}
-            disabled={Boolean(busyAction)}
+            disabled={Boolean(busyAction) || menu.session.initializing === true}
             aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "pin"}
             data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "pin" ? true : undefined}
           >
             {menu.session.pinned ? "Unpin" : "Pin"}
           </ContextMenuItem>
-          <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction)}>
+          <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction) || menu.session.initializing === true}>
             Rename
           </ContextMenuItem>
           <ContextMenuItem
@@ -419,7 +419,7 @@ export function Dashboard() {
             onMouseEnter={() => setNotifySubmenuOpen(true)}
             onFocus={() => setNotifySubmenuOpen(true)}
             onClick={() => setNotifySubmenuOpen(true)}
-            disabled={Boolean(busyAction)}
+            disabled={Boolean(busyAction) || menu.session.initializing === true}
           >
             Notify
             <ChevronRight className="menu-chevron" size={16} />
@@ -428,7 +428,7 @@ export function Dashboard() {
             className="danger"
             icon={<Skull size={16} />}
             onClick={() => void killPane(menu.session)}
-            disabled={Boolean(busyAction)}
+            disabled={Boolean(busyAction) || menu.session.initializing === true}
             aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill"}
             data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? true : undefined}
           >
@@ -443,7 +443,7 @@ export function Dashboard() {
               <NotificationRuleMenu
                 enabledRules={sessionNotificationRules(notificationSettings, menu.session.id)}
                 onToggle={(type, enabled) => void toggleSessionNotification(menu.session.id, type, enabled)}
-                disabled={notificationToggleBusy}
+                disabled={notificationToggleBusy || menu.session.initializing === true}
               />
             </ContextMenu>
           ) : null}
@@ -552,7 +552,7 @@ export function dashboardStatusFilterFromSearchParams(params: Pick<URLSearchPara
 
 export function filterSessionsByDashboardStatus(sessions: ManagedSession[], filter: DashboardStatusFilter): ManagedSession[] {
   if (filter.kind !== "severity") return sessions;
-  return sessions.filter((session) => sessionStatusSeverity(session.status) === filter.severity);
+  return sessions.filter((session) => !session.initializing && sessionStatusSeverity(session.status) === filter.severity);
 }
 
 export function shouldRefreshDashboardForEvent(event: Pick<SessionEvent, "type"> | { type: string }): boolean {
@@ -645,7 +645,7 @@ export function SessionCard({
                 <Pin size={14} />
               </span>
             ) : null}
-            <StatusPill status={session.status} />
+            {session.initializing ? <LoadingStatusPill /> : <StatusPill status={session.status} />}
           </span>
         </div>
         <div className="preview">

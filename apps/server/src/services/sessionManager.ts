@@ -245,6 +245,7 @@ export class SessionManager {
         codexJsonlPath: nextCodexJsonlPath,
         discoveryConfidence: match ? "high" : looksLikeCodexPane(pane) ? "medium" : "low",
         status,
+        initializing: existing?.initializing === true,
         lastActivityAt: sourceChanged ? null : existing?.lastActivityAt ?? null,
         preview: sourceChanged ? "" : existing?.preview ?? "",
         recentUserPrompts: sourceChanged ? [] : existing?.recentUserPrompts ?? [],
@@ -293,7 +294,7 @@ export class SessionManager {
     for (const session of await this.db.listSessions(true)) {
       if (!seen.has(session.id)) {
       }
-      if (!seen.has(session.id) && session.status !== "missing") {
+      if (!seen.has(session.id) && !session.initializing && session.status !== "missing") {
         this.liveApprovals.delete(session.id);
         await this.db.setSessionStatus(session.id, "missing", now);
         this.publish("status.changed", session.id, { status: "missing" });
@@ -488,13 +489,14 @@ export class SessionManager {
       ? await this.gitWorkspaces!.get(storedGitWorkspace.id) ?? storedGitWorkspace
       : null;
     const name = restoreSessionName(source);
-    const pane = await this.tmux.createCodexResumeWindowInMuxpilotSession(
+    const launch = await this.tmux.createCodexResumeWindowInMuxpilotSession(
       cwd,
       name,
       source.codexSessionId,
       launchWorkspace ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot) : {}
     );
-    const session = await this.rebindRestoredSession(source, pane);
+    const session = await this.rebindRestoredSession(source, launch.pane);
+    this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
     return { session, restored: true };
@@ -915,45 +917,10 @@ export class SessionManager {
   async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    const pane = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName);
-    await this.discover();
-
-    const sessionId = tmuxPaneSessionId(pane);
-    const discovered = await this.db.getSession(sessionId);
-    if (discovered) {
-      await this.db.addAudit("local", "create_session", discovered.id, "ok", nowIso());
-      this.publish("session.updated", discovered.id, discovered);
-      return discovered;
-    }
-
-    const now = nowIso();
-    const repo = await loadRepoMetadata(pane.cwd);
-    const session: ManagedSession = {
-      id: sessionId,
-      tmux: pane,
-      repo,
-      codexSessionId: null,
-      codexJsonlPath: null,
-      discoveryConfidence: "medium",
-      status: "unknown",
-      lastActivityAt: null,
-      preview: "",
-      recentUserPrompts: [],
-      activitySummary: null,
-      activitySummaryGeneratedAt: null,
-      activitySummarySourceSequence: null,
-      inputMode: "default",
-      models: emptySessionModels(),
-      transcriptSize: 0,
-      transcriptSyncing: false,
-      unreadCount: 0,
-      pinned: false,
-      archived: false,
-      gitWorkspace: null
-    };
-    await this.db.upsertSession(session, now);
-    await this.recordTouchedRepository(session, now);
-    await this.db.addAudit("local", "create_session", session.id, "ok", now);
+    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName);
+    const session = await this.persistInitializingSession(launch.pane, directory);
+    this.finishSessionInitialization(session.id, launch.ready);
+    await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
     return session;
   }
@@ -974,18 +941,68 @@ export class SessionManager {
       targetBranch: request.workspace.targetBranch
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
-    const pane = await this.tmux.createCodexWindowInMuxpilotSession(
+    const launch = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
       managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot)
     );
-    const sessionId = tmuxPaneSessionId(pane);
+    const sessionId = tmuxPaneSessionId(launch.pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
-    await this.discover();
-    const session = await this.db.getSession(sessionId);
-    if (!session) throw new CreateSessionError("Managed session was created but could not be discovered", 500);
+    const session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary);
+    this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
+    this.publish("session.updated", session.id, session);
     return session;
+  }
+
+  private async persistInitializingSession(
+    pane: TmuxPane,
+    repoPath: string,
+    gitWorkspace: GitWorkspaceSummary | null = null
+  ): Promise<ManagedSession> {
+    const now = nowIso();
+    const session: ManagedSession = {
+      id: tmuxPaneSessionId(pane),
+      tmux: pane,
+      repo: await loadRepoMetadata(repoPath),
+      codexSessionId: null,
+      codexJsonlPath: null,
+      discoveryConfidence: "medium",
+      status: "unknown",
+      initializing: true,
+      lastActivityAt: null,
+      preview: "",
+      recentUserPrompts: [],
+      activitySummary: null,
+      activitySummaryGeneratedAt: null,
+      activitySummarySourceSequence: null,
+      inputMode: "default",
+      models: emptySessionModels(),
+      transcriptSize: 0,
+      transcriptSyncing: false,
+      unreadCount: 0,
+      pinned: false,
+      archived: false,
+      gitWorkspace
+    };
+    await this.db.upsertSession(session, now);
+    await this.recordTouchedRepository(session, now);
+    return session;
+  }
+
+  private finishSessionInitialization(sessionId: string, ready: Promise<void>): void {
+    void ready
+      .catch((error) => {
+        console.error(`Muxpilot session ${sessionId} readiness check failed`, error);
+      })
+      .then(async () => {
+        await this.runDiscoverTick();
+        const session = await this.db.setSessionInitializing(sessionId, false, nowIso());
+        if (session) this.publish("session.updated", sessionId, session);
+      })
+      .catch((error) => {
+        console.error(`Muxpilot session ${sessionId} initialization finalization failed`, error);
+      });
   }
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
@@ -1243,6 +1260,7 @@ export class SessionManager {
       codexJsonlPath: source.codexJsonlPath,
       discoveryConfidence: "medium",
       status: "unknown",
+      initializing: true,
       lastActivityAt: source.lastActivityAt,
       preview: source.preview,
       recentUserPrompts: source.recentUserPrompts,
@@ -1937,6 +1955,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     codexJsonlPath: session.codexJsonlPath,
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
+    initializing: session.initializing === true,
     lastActivityAt: session.lastActivityAt,
     transcriptSyncing: session.transcriptSyncing === true,
     inputMode: session.inputMode,

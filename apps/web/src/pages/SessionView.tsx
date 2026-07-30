@@ -76,7 +76,7 @@ import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUse
 import { api, eventSocket } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
-import { StatusPill } from "../components/StatusPill.js";
+import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
 import { copyText } from "../utils/clipboard.js";
@@ -480,19 +480,11 @@ function messageCreatedAtOrAfterPending(message: ChatMessage, pending: PendingUs
 }
 
 export function shouldShowSessionLoading(
-  session: (Pick<ManagedSession, "id"> & Partial<Pick<ManagedSession, "status">>) | null,
+  session: (Pick<ManagedSession, "id"> & Partial<Pick<ManagedSession, "initializing">>) | null,
   routeSessionId: string,
-  initialTranscriptSessionId: string | null,
-  restoringSessionId: string | null = null
+  initialTranscriptSessionId: string | null
 ): boolean {
-  if (restoringSessionId === routeSessionId && (!session || session.status === "missing" || session.status === "unknown")) return true;
-  return !session || session.id !== routeSessionId || initialTranscriptSessionId !== routeSessionId;
-}
-
-export function restoringSessionIdFromLocationState(state: unknown): string | null {
-  if (!state || typeof state !== "object") return null;
-  const value = (state as { restoringSessionId?: unknown }).restoringSessionId;
-  return typeof value === "string" ? value : null;
+  return !session || session.initializing === true || session.id !== routeSessionId || initialTranscriptSessionId !== routeSessionId;
 }
 
 export function loadingSessionFromLocationState(state: unknown, routeSessionId: string): ManagedSession | null {
@@ -571,10 +563,6 @@ export function SessionView() {
     accessMode
   } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
-  const [restoringSessionId, setRestoringSessionId] = useState<string | null>(() => {
-    const value = restoringSessionIdFromLocationState(location.state);
-    return value === id ? value : null;
-  });
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
   const [initialTranscriptSessionId, setInitialTranscriptSessionId] = useState<string | null>(null);
   const [initialScrollReady, setInitialScrollReady] = useState(false);
@@ -1007,16 +995,6 @@ export function SessionView() {
       socket.close();
     };
   }, [connectionEpoch, id]);
-
-  useEffect(() => {
-    const value = restoringSessionIdFromLocationState(location.state);
-    setRestoringSessionId(value === id ? value : null);
-  }, [id, location.state]);
-
-  useEffect(() => {
-    if (restoringSessionId !== id) return;
-    if (session && session.status !== "missing" && session.status !== "unknown") setRestoringSessionId(null);
-  }, [id, restoringSessionId, session?.status]);
 
   function updateComposerText(value: string) {
     setText(value);
@@ -1568,7 +1546,7 @@ export function SessionView() {
   }
 
   const loadingSession = session ?? loadingSessionFromLocationState(location.state, id);
-  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId, restoringSessionId)) {
+  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId)) {
     return (
       <SessionLoadingView
         session={loadingSession}
@@ -1869,7 +1847,7 @@ export function SessionLoadingView({
             <h1>{session ? sessionDisplayName(session) : "Loading session"}</h1>
             {session ? <SessionHeaderMeta session={session} /> : <p className="session-header-meta">Starting session</p>}
           </div>
-          {session ? <StatusPill status={session.status} /> : null}
+          <LoadingStatusPill />
           {session ? <TmuxCommandButton session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
           {session ? <ModeToggle mode={session.inputMode} busy onChange={() => undefined} /> : null}
         </div>

@@ -262,7 +262,7 @@ export function registerRoutes(
     const query = request.query as { includeArchived?: string; includeAll?: string; status?: string; q?: string };
     let sessions = await manager.listSessions(query.includeArchived === "true");
     if (query.includeAll !== "true") sessions = sessions.filter((session) => session.status !== "missing");
-    if (query.status) sessions = sessions.filter((session) => session.status === query.status);
+    if (query.status) sessions = sessions.filter((session) => !session.initializing && session.status === query.status);
     if (query.q) {
       const q = query.q.toLowerCase();
       sessions = sessions.filter((session) =>

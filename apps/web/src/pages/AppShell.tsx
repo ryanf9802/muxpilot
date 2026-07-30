@@ -700,9 +700,7 @@ export function AppShell() {
       const response = await api.restoreSession(result.sessionId);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
-      navigate(`/sessions/${response.session.id}`, {
-        state: { restoringSessionId: response.session.id, loadingSession: response.session }
-      });
+      navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
       void loadSessions().catch(handleConnectedRequestFailure);
     } catch (error) {
       handleConnectedRequestFailure(error);
@@ -749,8 +747,8 @@ export function AppShell() {
         : { cwd, name, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
       setCreateSessionOpen(false);
-      await loadSessions();
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
+      void loadSessions().catch(handleConnectedRequestFailure);
     } catch (error) {
       setCreateSessionError(error instanceof Error ? error.message : "Could not create session.");
     } finally {

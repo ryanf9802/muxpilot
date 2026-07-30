@@ -30,9 +30,10 @@ export function isSessionStatusSeverity(value: string | null): value is SessionS
   return value === "red" || value === "yellow" || value === "green";
 }
 
-export function countSessionStatuses(sessions: readonly Pick<ManagedSession, "status">[]): SessionStoplightCounts {
+export function countSessionStatuses(sessions: readonly Pick<ManagedSession, "status" | "initializing">[]): SessionStoplightCounts {
   const counts: SessionStoplightCounts = { red: 0, yellow: 0, green: 0 };
   for (const session of sessions) {
+    if (session.initializing) continue;
     counts[sessionStatusSeverity(session.status)] += 1;
   }
   return counts;

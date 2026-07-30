@@ -3220,8 +3220,9 @@ describe("SessionManager transcript isolation", () => {
       createCalls.push({ cwd, name });
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
       panes = [...panes, pane];
-      return pane;
+      return { pane, ready: pendingReadiness() };
     };
+    await harness.manager.discover();
 
     const created = await harness.manager.createSessionInDirectory(repo, "new-work");
 
@@ -3229,6 +3230,7 @@ describe("SessionManager transcript isolation", () => {
     expect(created.tmux.sessionName).toBe("muxpilot");
     expect(created.tmux.paneId).toBe("%2");
     expect(created.tmux.windowName).toBe("new-work");
+    expect(created.initializing).toBe(true);
     expect(harness.manager.listSessions(true).map((session) => session.tmux.paneId).sort()).toEqual(["%1", "%2"]);
     harness.db.close();
   });
@@ -3244,13 +3246,37 @@ describe("SessionManager transcript isolation", () => {
       createCalls.push({ cwd, name });
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
       panes = [...panes, pane];
-      return pane;
+      return { pane, ready: pendingReadiness() };
     };
 
     const created = await harness.manager.createSessionInDirectory(repo, "My Session!");
 
     expect(createCalls).toEqual([{ cwd: repo, name: "My-Session!" }]);
     expect(created.tmux.windowName).toBe("My-Session!");
+    harness.db.close();
+  });
+
+  it("returns the allocated session before readiness and clears initialization afterward", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let resolveReady: (() => void) | null = null;
+    const ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    const pane = testPane({ cwd: repo, paneId: "%2", windowId: "@2", windowName: "new-work", title: "new-work", pid: 456, sessionName: "muxpilot" });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready });
+
+    const created = await harness.manager.createSessionInDirectory(repo, "new-work");
+
+    expect(created.initializing).toBe(true);
+    harness.tmux.listPanes = async () => [];
+    await harness.manager.discoverNow();
+    expect((await harness.manager.getSession(created.id))?.status).toBe("unknown");
+    harness.tmux.listPanes = async () => [pane];
+    resolveReady?.();
+    await expect.poll(async () => (await harness.manager.getSession(created.id))?.initializing).toBe(false);
     harness.db.close();
   });
 
@@ -3291,7 +3317,7 @@ describe("SessionManager transcript isolation", () => {
       createCalls.push({ cwd, name });
       const pane = testPane({ cwd, paneId: "%1", windowId: "@1", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
       panes = [pane];
-      return pane;
+      return { pane, ready: pendingReadiness() };
     };
 
     const created = await harness.manager.createSessionInDirectory(repo, "new-work");
@@ -3443,7 +3469,7 @@ describe("SessionManager transcript isolation", () => {
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: "shell", title: "node", pid: 456, sessionName: "muxpilot" });
       harness.processLookup.set(pane.pid, { pid: 457, sessionId: codexSessionId, startedAtMs: null });
       panes = [pane];
-      return pane;
+      return { pane, ready: pendingReadiness() };
     };
 
     const restored = await harness.manager.restoreSession(original!.id);
@@ -3453,6 +3479,7 @@ describe("SessionManager transcript isolation", () => {
     expect(restored.session.tmux.paneId).toBe("%2");
     expect(restored.session.codexSessionId).toBe("codex-restorable");
     expect(restored.session.status).toBe("unknown");
+    expect(restored.session.initializing).toBe(true);
     expect(await harness.manager.getSession(original!.id)).toBeNull();
     expect(harness.manager.listMessages(restored.session.id, 0).map((message) => message.text)).toEqual(["restore this session", "ready"]);
     expect(appendedMessages).toEqual([]);
@@ -3539,7 +3566,7 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.createCodexResumeWindowInMuxpilotSession = async (cwd) => {
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: "restore-race", pid: 456, sessionName: "muxpilot" });
       panes = [pane];
-      return pane;
+      return { pane, ready: pendingReadiness() };
     };
 
     const restored = await harness.manager.restoreSession(original!.id);
@@ -3868,6 +3895,10 @@ function patchApprovalCapture(selected: number): string {
     "",
     "  Press enter to confirm or esc to cancel"
   ].join("\n");
+}
+
+function pendingReadiness(): Promise<void> {
+  return new Promise(() => undefined);
 }
 
 function testPane(input: {

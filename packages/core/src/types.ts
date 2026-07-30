@@ -160,6 +160,7 @@ export interface ManagedSession {
   codexJsonlPath: string | null;
   discoveryConfidence: "high" | "medium" | "low";
   status: SessionStatus;
+  initializing?: boolean;
   lastActivityAt: string | null;
   preview: string;
   recentUserPrompts: string[];

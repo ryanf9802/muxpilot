@@ -41,6 +41,7 @@ describe("countSessionStatuses", () => {
         { status: "question" },
         { status: "working" },
         { status: "unknown" },
+        { status: "missing", initializing: true },
         { status: "waiting" }
       ])
     ).toEqual({ red: 2, yellow: 2, green: 1 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { StatusPill } from "./StatusPill.js";
+import { LoadingStatusPill, StatusPill } from "./StatusPill.js";
 
 describe("StatusPill", () => {
   it("labels question and plan ready statuses distinctly", () => {
@@ -22,5 +22,15 @@ describe("StatusPill", () => {
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "approval" }))).toContain('class="status status-red"');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "working" }))).toContain('class="status status-yellow"');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "waiting" }))).toContain('class="status status-green"');
+  });
+
+  it("renders loading outside the normal status severities", () => {
+    const html = renderToStaticMarkup(createElement(LoadingStatusPill));
+
+    expect(html).toContain('class="status status-loading"');
+    expect(html).toContain(">loading<");
+    expect(html).not.toContain("status-red");
+    expect(html).not.toContain("status-yellow");
+    expect(html).not.toContain("status-green");
   });
 });

@@ -282,6 +282,10 @@ export class AppDatabase {
     return this.call("setSessionPinned", sessionId, pinned, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  setSessionInitializing(sessionId: string, initializing: boolean, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionInitializing", sessionId, initializing, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   setSessionInputMode(sessionId: string, inputMode: CollaborationMode, updatedAt: string): Promise<ManagedSession | null> {
     return this.call("setSessionInputMode", sessionId, inputMode, updatedAt) as Promise<ManagedSession | null>;
   }
@@ -603,7 +607,11 @@ export class SyncAppDatabase {
 
   upsertSession(session: ManagedSession, updatedAt: string): void {
     const existing = this.getSession(session.id);
-    const nextSession = { ...session, pinned: existing?.pinned ?? session.pinned ?? false };
+    const nextSession = {
+      ...session,
+      initializing: existing ? existing.initializing === true : session.initializing === true,
+      pinned: existing?.pinned ?? session.pinned ?? false
+    };
     this.db
       .prepare(
         `INSERT INTO managed_sessions
@@ -744,6 +752,16 @@ export class SyncAppDatabase {
     const existing = this.getSession(sessionId);
     if (!existing) return null;
     const next = { ...existing, pinned };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  setSessionInitializing(sessionId: string, initializing: boolean, updatedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, initializing };
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
@@ -2076,6 +2094,7 @@ export class SyncAppDatabase {
     return {
       ...session,
       status: row.status,
+      initializing: session.initializing === true,
       lastActivityAt: row.last_activity_at ?? this.latestMessageAt(row.id),
       preview: recentUserPrompts[0] ?? "",
       recentUserPrompts,

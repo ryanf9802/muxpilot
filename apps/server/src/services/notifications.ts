@@ -71,6 +71,10 @@ export class NotificationService {
     if (event.type === "session.updated") {
       const session = event.payload as Partial<ManagedSession>;
       if (typeof session.id === "string" && isSessionStatus(session.status)) {
+        if (session.initializing === true) {
+          this.knownStatuses.set(session.id, session.status);
+          return;
+        }
         if (session.transcriptSyncing === true) {
           this.knownStatuses.set(session.id, session.status);
           this.syncingSessions.add(session.id);

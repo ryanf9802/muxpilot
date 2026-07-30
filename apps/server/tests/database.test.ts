@@ -274,6 +274,22 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("hydrates and updates session initialization state", async () => {
+    const db = await tempDb();
+    const legacySession = { ...testSession("session-initializing") };
+    delete (legacySession as Partial<ManagedSession>).initializing;
+    db.upsertSession(legacySession as ManagedSession, "2026-07-07T00:00:00.000Z");
+
+    expect(db.getSession(legacySession.id)?.initializing).toBe(false);
+    expect(db.setSessionInitializing(legacySession.id, true, "2026-07-07T00:00:01.000Z")?.initializing).toBe(true);
+    db.upsertSession({ ...legacySession, initializing: false }, "2026-07-07T00:00:01.500Z");
+    expect(db.getSession(legacySession.id)?.initializing).toBe(true);
+    expect(db.setSessionInitializing(legacySession.id, false, "2026-07-07T00:00:02.000Z")?.initializing).toBe(false);
+    db.upsertSession({ ...legacySession, initializing: true }, "2026-07-07T00:00:02.500Z");
+    expect(db.getSession(legacySession.id)?.initializing).toBe(false);
+    db.close();
+  });
+
   it("persists session pin state across session upserts", async () => {
     const db = await tempDb();
     const session = testSession("session-pinned");
