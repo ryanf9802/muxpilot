@@ -3264,13 +3264,25 @@ describe("SessionManager transcript isolation", () => {
     const ready = new Promise<void>((resolve) => {
       resolveReady = resolve;
     });
-    const pane = testPane({ cwd: repo, paneId: "%2", windowId: "@2", windowName: "new-work", title: "new-work", pid: 456, sessionName: "muxpilot" });
+    const pane = testPane({
+      cwd: repo,
+      paneId: "%2",
+      windowId: "@2",
+      windowName: "new-work",
+      title: "new-work",
+      pid: 456,
+      sessionName: "muxpilot",
+      currentCommand: "codex"
+    });
     harness.tmux.listPanes = async () => [pane];
     harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready });
+    await harness.manager.discoverNow();
+    expect((await harness.manager.getSession(tmuxPaneSessionId(pane)))?.initializing).toBe(false);
 
     const created = await harness.manager.createSessionInDirectory(repo, "new-work");
 
     expect(created.initializing).toBe(true);
+    expect((await harness.manager.getSession(created.id))?.initializing).toBe(true);
     harness.tmux.listPanes = async () => [];
     await harness.manager.discoverNow();
     expect((await harness.manager.getSession(created.id))?.status).toBe("unknown");

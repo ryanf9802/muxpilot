@@ -1006,7 +1006,10 @@ export function SessionView() {
     saveVimModePreference(enabled);
   }
 
+  const sessionLoading = shouldShowSessionLoading(session, id, initialTranscriptSessionId);
+
   useLayoutEffect(() => {
+    if (sessionLoading) return;
     const container = messageListRef.current;
     if (!container) return;
     const bottomContentChanged = bottomContentKeyRef.current !== bottomContentKey;
@@ -1035,7 +1038,7 @@ export function SessionView() {
       if (initialTranscriptSessionId === id && !initialScrollReady) setInitialScrollReady(true);
     });
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [bottomContentKey, id, initialScrollReady, initialTranscriptSessionId, transcriptItems]);
+  }, [bottomContentKey, id, initialScrollReady, initialTranscriptSessionId, sessionLoading, transcriptItems]);
 
   async function trackRefreshRequest<T>(request: () => Promise<T>): Promise<T> {
     return request();
@@ -1546,7 +1549,7 @@ export function SessionView() {
   }
 
   const loadingSession = session ?? loadingSessionFromLocationState(location.state, id);
-  if (shouldShowSessionLoading(session, id, initialTranscriptSessionId)) {
+  if (sessionLoading) {
     return (
       <SessionLoadingView
         session={loadingSession}

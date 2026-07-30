@@ -986,8 +986,9 @@ export class SessionManager {
       gitWorkspace
     };
     await this.db.upsertSession(session, now);
-    await this.recordTouchedRepository(session, now);
-    return session;
+    const persisted = requireSession(await this.db.setSessionInitializing(session.id, true, now));
+    await this.recordTouchedRepository(persisted, now);
+    return persisted;
   }
 
   private finishSessionInitialization(sessionId: string, ready: Promise<void>): void {
