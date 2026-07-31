@@ -596,7 +596,7 @@ export class SessionManager {
 
     if (portable.workspaceMode === "git") {
       if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
-      const targetBranch = mapping.targetBranch ?? portable.targetBranch;
+      const targetBranch = portable.gitBranchId ? portable.targetBranch : mapping.targetBranch ?? portable.targetBranch;
       if (!targetBranch) throw new SessionRestoreError("A local target branch is required for the imported Git session");
       const workspace = await this.gitWorkspaces.provision({ sessionName: portable.sessionName, entryPath: destination, targetBranch });
       await this.gitWorkspaces.bind(workspace.id, placeholderId);
@@ -619,7 +619,7 @@ export class SessionManager {
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     if (portable.workspaceMode !== "git") return;
     if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
-    const targetBranch = mapping.targetBranch ?? portable.targetBranch;
+    const targetBranch = portable.gitBranchId ? portable.targetBranch : mapping.targetBranch ?? portable.targetBranch;
     if (!targetBranch) throw new SessionRestoreError(`A local target branch is required for '${portable.sessionName}'`);
     const probe = await this.gitWorkspaces.probe(destination);
     if (!probe.isGit || !probe.repoRoot) throw new SessionRestoreError(`Destination for '${portable.sessionName}' is not a Git repository`);

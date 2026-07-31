@@ -52,6 +52,7 @@ export class GitWorkspaceManager {
       const currentBranch = bare ? null : (await git(repoRoot, ["branch", "--show-current"])) || null;
       const dirty = bare ? false : Boolean(await git(repoRoot, ["status", "--porcelain"]));
       const localBranches = lines(await git(repoRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]));
+      const remotes = lines(await git(repoRoot, ["remote"]).catch(() => ""));
       return {
         isGit: true,
         bare,
@@ -60,7 +61,8 @@ export class GitWorkspaceManager {
         repoName: basename(repoRoot),
         currentBranch,
         dirty,
-        localBranches
+        localBranches,
+        remotes
       };
     } catch {
       return {
@@ -71,7 +73,8 @@ export class GitWorkspaceManager {
         repoName: basename(path),
         currentBranch: null,
         dirty: false,
-        localBranches: []
+        localBranches: [],
+        remotes: []
       };
     }
   }

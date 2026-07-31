@@ -100,11 +100,13 @@ The History tab searches restorable sessions that muxpilot has managed before. S
 
 ### Moving Sessions Between Hosts
 
-The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the Codex transcripts and portable session preferences, then resumes all imported sessions in tmux.
+The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the complete Codex rollout transcripts and portable session preferences, then resumes all imported sessions in tmux. A resumed agent retains the history saved in that rollout, including tool activity and compaction summaries, but not live processes or other transient machine state.
 
 Single-session plaintext exports use the session name as the filename. Multi-session exports use a generic session-count filename, and encrypted exports use a non-identifying timestamped filename. Filenames are descriptive only: all identity and restoration metadata lives inside the archive, so a `.mpsession` file can be renamed without affecting import.
 
-Project files are not included. Clone or copy the relevant repositories first; Git sessions also require a local target branch on the destination. Host-specific worktrees, queued inputs, notification rules, dependencies, and local files referenced by a transcript are intentionally excluded.
+For managed Git sessions, current exports also include the committed local target branch. Muxpilot packages the objects not reachable from its upstream, or the full reachable branch when no usable upstream exists. Import creates, reuses, or safely fast-forwards the same branch name and restores its tracking configuration when the destination has the same remote name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting existing upstream.
+
+Clone or copy the relevant repositories first. Dirty files, staged and untracked changes, stashes, active task worktrees, Git LFS payloads, submodule repositories, queued inputs, notification rules, dependencies, machine-wide Codex configuration, and live terminals are intentionally excluded. Older format-v2 files remain importable and continue to require an existing destination target branch.
 
 Set the same `MUXPILOT_SESSION_FILE_KEY` value (at least 16 characters) on both hosts to encrypt exports and decrypt imports. When the variable is unset, exports are plaintext. Plaintext files remain importable when a key is configured. Import/export controls and APIs are available only from the muxpilot host browser.
 

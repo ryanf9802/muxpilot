@@ -1536,6 +1536,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
         void api.gitRepositoryProbe(target.path).then((probe) => {
           if (cancelled) return;
           setMappingProbes((current) => ({ ...current, [target.sourceCwd]: { path: target.path, probe, busy: false, error: null } }));
+          if (preview.formatVersion !== 2) return;
           setMappings((current) => {
             const mapping = current[target.sourceCwd];
             if (!mapping || mapping.destinationCwd.trim() !== target.path) return current;
@@ -1610,7 +1611,9 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
         mappings: preview.mappings.map((requirement) => ({
           sourceCwd: requirement.sourceCwd,
           destinationCwd: mappings[requirement.sourceCwd]?.destinationCwd.trim() ?? "",
-          ...(requirement.workspaceMode === "git" ? { targetBranch: mappings[requirement.sourceCwd]?.targetBranch.trim() } : {})
+          ...(preview.formatVersion === 2 && requirement.workspaceMode === "git"
+            ? { targetBranch: mappings[requirement.sourceCwd]?.targetBranch.trim() }
+            : {})
         }))
       });
       setResult(imported);
@@ -1635,8 +1638,12 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
     if (!value?.destinationCwd.trim()) return false;
     if (requirement.workspaceMode !== "git") return true;
     const mappingProbe = mappingProbes[requirement.sourceCwd];
-    return Boolean(mappingProbe?.path === value.destinationCwd.trim() && mappingProbe.probe?.isGit && targetBranchSuggestions(mappingProbe.probe).some((suggestion) => suggestion.value === value.targetBranch));
+    if (!(mappingProbe?.path === value.destinationCwd.trim() && mappingProbe.probe?.isGit && !mappingProbe.probe.bare)) return false;
+    return preview?.formatVersion === 3
+      || targetBranchSuggestions(mappingProbe.probe).some((suggestion) => suggestion.value === value.targetBranch);
   }) ?? false;
+  const selectedWithActiveWork = portableSessions.filter((session) =>
+    selected.has(session.id) && session.gitWorkspace?.sessionBranch && session.gitWorkspace.worktreePath);
 
   return (
     <Modal
@@ -1666,6 +1673,9 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
               ))}
               {!portableSessions.length ? <p className="prompt-history-muted">No portable sessions found.</p> : null}
             </div>
+            {selectedWithActiveWork.length ? <p className="session-git-probe-note dialog-error">
+              Unfinished task-worktree changes are not included. Only the committed target branch will be exported for {selectedWithActiveWork.map((session) => session.tmux.windowName || session.repo.name).join(", ")}.
+            </p> : null}
             <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary" disabled={busy || selected.size === 0} aria-busy={busy} data-busy={busy || undefined} onClick={() => void exportSelected()}>{busy ? "Exporting" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
           </div>
         ) : (
@@ -1713,7 +1723,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
                   <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
                   <label className="rename-field"><span>Destination directory</span><input {...noAutofillTextField} value={mappings[requirement.sourceCwd]?.destinationCwd ?? ""} onChange={(event) => updateImportDestination(requirement.sourceCwd, requirement.workspaceMode, event.target.value)} /></label>
-                  {requirement.workspaceMode === "git" ? <>
+                  {requirement.workspaceMode === "git" && preview.formatVersion === 2 ? <>
                     <label className="rename-field">
                       <span>Local target branch</span>
                       <select
@@ -1730,11 +1740,30 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
                     {mappingProbes[requirement.sourceCwd]?.error ? <p className="session-git-probe-note dialog-error">{mappingProbes[requirement.sourceCwd]!.error}</p> : null}
                     {mappingProbes[requirement.sourceCwd]?.probe && !mappingProbes[requirement.sourceCwd]!.probe!.isGit ? <p className="session-git-probe-note dialog-error">Destination is not a Git repository.</p> : null}
                   </> : null}
+                  {requirement.workspaceMode === "git" && preview.formatVersion === 3 ? <>
+                    {requirement.branches.map((branch) => {
+                      const probe = mappingProbes[requirement.sourceCwd]?.probe;
+                      const upstreamUnavailable = Boolean(branch.upstreamRemote && probe?.isGit && !probe.remotes.includes(branch.upstreamRemote));
+                      return <div className="session-transfer-result" key={branch.branchName}>
+                        <strong>{branch.branchName}</strong>
+                        <span>{branch.tipSha.slice(0, 12)} · {branch.bundleMode.replace("_", " ")}
+                          {branch.upstreamRemote ? ` · upstream ${branch.upstreamRemote}:${branch.upstreamMergeRef?.replace(/^refs\/heads\//, "")}` : " · no upstream"}
+                          {upstreamUnavailable ? ` · remote ${branch.upstreamRemote} unavailable; upstream will be omitted` : ""}
+                        </span>
+                      </div>;
+                    })}
+                    {mappingProbes[requirement.sourceCwd]?.error ? <p className="session-git-probe-note dialog-error">{mappingProbes[requirement.sourceCwd]!.error}</p> : null}
+                    {mappingProbes[requirement.sourceCwd]?.probe && !mappingProbes[requirement.sourceCwd]!.probe!.isGit ? <p className="session-git-probe-note dialog-error">Destination is not a Git repository.</p> : null}
+                    {mappingProbes[requirement.sourceCwd]?.probe?.bare ? <p className="session-git-probe-note dialog-error">Destination is a bare Git repository.</p> : null}
+                  </> : null}
                 </div>)}
               </div>
               <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
             </> : null}
-            {result ? <><div className="session-transfer-results">{result.results.map((item) => <div className="session-transfer-result" key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}</div><div className="dialog-actions"><button type="button" className="primary" onClick={onClose}>Done</button></div></> : null}
+            {result ? <><div className="session-transfer-results">
+              {result.branches.map((item) => <div className="session-transfer-result" key={`${item.destinationCwd}:${item.branchName}`}><strong>{item.branchName}</strong><span>{item.status.replaceAll("_", " ")} · upstream {item.upstreamStatus.replaceAll("_", " ")}{item.warning ? ` · ${item.warning}` : ""}</span></div>)}
+              {result.results.map((item) => <div className="session-transfer-result" key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
+            </div><div className="dialog-actions"><button type="button" className="primary" onClick={onClose}>Done</button></div></> : null}
           </div>
         )}
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}

@@ -447,6 +447,7 @@ export interface GitRepositoryProbe {
   currentBranch: string | null;
   dirty: boolean;
   localBranches: string[];
+  remotes: string[];
 }
 
 export interface SessionHistoryPromptMatch {
@@ -499,17 +500,29 @@ export interface SessionTransferPreviewSession {
   lastActivityAt: string | null;
 }
 
+export interface SessionTransferPreviewBranch {
+  branchName: string;
+  tipSha: string;
+  objectFormat: "sha1" | "sha256";
+  bundleMode: "upstream_delta" | "full" | "none";
+  upstreamRemote: string | null;
+  upstreamMergeRef: string | null;
+  upstreamBaseSha: string | null;
+}
+
 export interface SessionTransferMappingRequirement {
   sourceCwd: string;
   repoName: string;
   workspaceMode: "directory" | "git";
   targetBranch: string | null;
+  branches: SessionTransferPreviewBranch[];
 }
 
 export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
+  formatVersion: 2 | 3;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
@@ -533,8 +546,18 @@ export interface SessionTransferImportResult {
   error: string | null;
 }
 
+export interface SessionTransferImportBranchResult {
+  sourceCwd: string;
+  destinationCwd: string;
+  branchName: string;
+  status: "created" | "fast_forwarded" | "reused" | "kept_newer";
+  upstreamStatus: "restored" | "kept_existing" | "unavailable" | "none";
+  warning: string | null;
+}
+
 export interface SessionTransferImportResponse {
   results: SessionTransferImportResult[];
+  branches: SessionTransferImportBranchResult[];
 }
 
 export interface SessionDirectorySuggestion {

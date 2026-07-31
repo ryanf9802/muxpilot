@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gunzipSync } from "node:zlib";
-import { extract } from "tar-stream";
+import { promisify } from "node:util";
+import { gzipSync, gunzipSync } from "node:zlib";
+import { extract, pack } from "tar-stream";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { AppDatabase } from "../src/db/database.js";
@@ -10,6 +12,7 @@ import type { SessionManager } from "../src/services/sessionManager.js";
 import { SessionTransferError, SessionTransferService, sessionTransferFilename } from "../src/services/sessionTransfer.js";
 
 const roots: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -28,13 +31,14 @@ describe.sequential("SessionTransferService", () => {
     expect(file[8]).toBe(0);
     const entries = await tarEntries(gunzipSync(file.subarray(9)));
     expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "sessions/0002.jsonl"]);
-    expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({ formatVersion: 2 });
+    expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({ formatVersion: 3, gitBranches: [] });
     expect([...entries.keys()].join(" ")).not.toContain(fixture.sessions[0]!.codexSessionId);
 
     const preview = await service.inspect(file);
     expect(preview.encrypted).toBe(false);
+    expect(preview.formatVersion).toBe(3);
     expect(preview.sessions).toHaveLength(2);
-    expect(preview.mappings).toEqual([{ sourceCwd: fixture.root, repoName: "fixture", workspaceMode: "directory", targetBranch: null }]);
+    expect(preview.mappings).toEqual([{ sourceCwd: fixture.root, repoName: "fixture", workspaceMode: "directory", targetBranch: null, branches: [] }]);
     await service.cancel(preview.token);
     await expect(service.inspect(Buffer.concat([Buffer.from("MPSESSN1", "ascii"), Buffer.from([0])]))).rejects.toMatchObject({ statusCode: 400 });
   });
@@ -70,6 +74,66 @@ describe.sequential("SessionTransferService", () => {
     expect(archive.filename).toBe("Release-notes-Q3.mpsession");
     expect(sessionTransferFilename(["..."], false, "2026-07-11T12:00:00.000Z")).toBe("muxpilot-session.mpsession");
     expect(sessionTransferFilename(["a".repeat(120)], false, "2026-07-11T12:00:00.000Z")).toBe(`${"a".repeat(80)}.mpsession`);
+  });
+
+  it("includes committed managed Git branch state in format v3", async () => {
+    const fixture = await createFixture(1);
+    await git(fixture.root, ["init", "-b", "main"]);
+    await git(fixture.root, ["config", "user.email", "muxpilot@example.com"]);
+    await git(fixture.root, ["config", "user.name", "Muxpilot"]);
+    await git(fixture.root, ["add", "."]);
+    await git(fixture.root, ["commit", "-m", "local branch"]);
+    const session = fixture.sessions[0]!;
+    session.gitWorkspace = {
+      workflowVersion: 1,
+      id: "workspace-1",
+      state: "idle",
+      entryPath: fixture.root,
+      repoRoot: fixture.root,
+      targetBranch: "main",
+      targetSha: await git(fixture.root, ["rev-parse", "main"]),
+      sessionBranch: null,
+      worktreePath: null,
+      lastError: null,
+      updatedAt: "2026-07-11T12:01:00.000Z",
+      dependencyLinks: []
+    };
+
+    const archive = await transferService(fixture.sessions).export([session.id]);
+    const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
+    expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "git/0001.bundle"]);
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    expect(manifest.gitBranches).toEqual([expect.objectContaining({
+      branchName: "main",
+      bundleMode: "full",
+      upstreamRemote: null
+    })]);
+
+    const preview = await transferService(fixture.sessions).inspect(archive.contents);
+    expect(preview.mappings[0]?.branches).toEqual([expect.objectContaining({
+      branchName: "main",
+      tipSha: session.gitWorkspace.targetSha
+    })]);
+  });
+
+  it("continues to inspect legacy format-v2 archives", async () => {
+    const fixture = await createFixture(1);
+    const service = transferService(fixture.sessions);
+    const current = await service.export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(current.contents.subarray(9)));
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    manifest.formatVersion = 2;
+    delete manifest.gitBranches;
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const legacy = Buffer.concat([
+      Buffer.from("MPSESSN2", "ascii"),
+      Buffer.from([0]),
+      gzipSync(await tarArchive(entries))
+    ]);
+
+    const preview = await service.inspect(legacy);
+    expect(preview.formatVersion).toBe(2);
+    expect(preview.mappings[0]).toMatchObject({ targetBranch: null, branches: [] });
   });
 });
 
@@ -128,4 +192,22 @@ async function tarEntries(archive: Buffer): Promise<Map<string, Buffer>> {
   tar.end(archive);
   await completed;
   return entries;
+}
+
+async function tarArchive(entries: Map<string, Buffer>): Promise<Buffer> {
+  const tar = pack();
+  const chunks: Buffer[] = [];
+  const completed = new Promise<Buffer>((resolve, reject) => {
+    tar.on("data", (chunk: Buffer) => chunks.push(chunk));
+    tar.on("end", () => resolve(Buffer.concat(chunks)));
+    tar.on("error", reject);
+  });
+  for (const [name, contents] of entries) tar.entry({ name, mode: 0o600 }, contents);
+  tar.finalize();
+  return completed;
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, { cwd });
+  return stdout.trim();
 }

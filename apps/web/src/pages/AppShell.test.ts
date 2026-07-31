@@ -53,6 +53,7 @@ describe("shell connection state", () => {
       repoName: "repo",
       currentBranch: "main",
       dirty: false,
+      remotes: ["origin"],
       localBranches: [
         "main",
         "local-only",
@@ -139,6 +140,7 @@ describe("session transfer branch selection", () => {
     repoName: "repo",
     currentBranch: "main",
     dirty: false,
+    remotes: ["origin"],
     localBranches: ["main", "release", "muxpilot/1234567890ABCDEF/g1"]
   };
 
