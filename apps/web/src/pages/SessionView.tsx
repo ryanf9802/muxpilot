@@ -23,7 +23,7 @@ import {
 import { cursorLineDown, insertNewlineAndIndent } from "@codemirror/commands";
 import { minimalSetup } from "codemirror";
 import { getCM, Vim, vim } from "@replit/codemirror-vim";
-import { EditorState, Prec, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
@@ -2237,6 +2237,8 @@ function VimPromptEditor({
   const rebuildFocusedRef = useRef(false);
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
   const skillNamesKey = useMemo(() => [...skillNames].sort().join("\0"), [skillNames]);
+  const skillHighlightCompartment = useMemo(() => new Compartment(), []);
+  const placeholderCompartment = useMemo(() => new Compartment(), []);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -2325,7 +2327,8 @@ function VimPromptEditor({
       minimalSetup,
       EditorView.lineWrapping,
       EditorView.contentAttributes.of(codeMirrorComposerFieldAttributes),
-      codeMirrorSkillHighlightExtension(skillNames),
+      skillHighlightCompartment.of(codeMirrorSkillHighlightExtension(skillNames)),
+      placeholderCompartment.of(placeholder ? codeMirrorPlaceholder(placeholder) : []),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
       EditorView.updateListener.of((update) => {
@@ -2348,7 +2351,6 @@ function VimPromptEditor({
     ];
 
     if (vimEnabled) extensions.splice(1, 0, vim({ status: true }), vimRelativeLineNumbers());
-    if (placeholder) extensions.push(codeMirrorPlaceholder(placeholder));
 
     const view = new EditorView({
       parent: root,
@@ -2369,7 +2371,23 @@ function VimPromptEditor({
       view.destroy();
       if (viewRef.current === view) viewRef.current = null;
     };
-  }, [disabled, placeholder, skillNamesKey, vimEnabled]);
+  }, [disabled, placeholderCompartment, skillHighlightCompartment, vimEnabled]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: placeholderCompartment.reconfigure(placeholder ? codeMirrorPlaceholder(placeholder) : [])
+    });
+  }, [placeholder, placeholderCompartment]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: skillHighlightCompartment.reconfigure(codeMirrorSkillHighlightExtension(skillNames))
+    });
+  }, [skillHighlightCompartment, skillNamesKey]);
 
   return (
     <div
