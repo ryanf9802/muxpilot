@@ -54,6 +54,42 @@ describe("interactive Codex approval prompts", () => {
     expect(interactiveApprovalKeys(prompt!, "approve_for_prefix")).toBeNull();
   });
 
+  it("parses app sign-in choices from the live terminal form", () => {
+    const prompt = parseInteractiveApprovalPrompt(appSignInCapture(1));
+
+    expect(prompt).toEqual({
+      kind: "permissions",
+      title: "Finish App Sign In",
+      command: null,
+      reason: null,
+      prefixRule: null,
+      options: [
+        {
+          decision: "approve_once",
+          label: "I already signed in",
+          description: "Continue after completing app sign-in.",
+          menuNumber: 1,
+          selected: true
+        },
+        {
+          decision: "deny",
+          label: "Back",
+          description: "Return without completing app sign-in.",
+          menuNumber: 2,
+          selected: false
+        }
+      ]
+    });
+  });
+
+  it("navigates relative to the selected app sign-in choice", () => {
+    const prompt = parseInteractiveApprovalPrompt(appSignInCapture(2));
+    expect(prompt).not.toBeNull();
+
+    expect(interactiveApprovalKeys(prompt!, "approve_once")).toEqual(["Up", "Enter"]);
+    expect(interactiveApprovalKeys(prompt!, "deny")).toEqual(["Enter"]);
+  });
+
   it("parses command approval choices from the live terminal form", () => {
     const prompt = parseInteractiveApprovalPrompt(commandApprovalCapture(1));
 
@@ -235,8 +271,28 @@ describe("interactive Codex approval prompts", () => {
   it("does not treat a normal composer or unrelated picker as an approval", () => {
     expect(parseInteractiveApprovalPrompt("Ready\n› ")).toBeNull();
     expect(parseInteractiveApprovalPrompt("Choose an option?\n› 1. Continue\nenter to submit | esc to cancel")).toBeNull();
+    expect(parseInteractiveApprovalPrompt(`${appSignInCapture(1)}\n\n• Sign-in was only an example.\n\n› `)).toBeNull();
   });
 });
+
+function appSignInCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;
+  return [
+    "• Opened https://chatgpt.com/apps/slack/example in your browser.",
+    "",
+    "  Finish App Sign In",
+    "",
+    "  Sign in to the app on ChatGPT in the browser window that just opened.",
+    "  Then return here and select \"I already signed in\".",
+    "",
+    "  Sign-in URL:",
+    "  https://chatgpt.com/apps/slack/example",
+    "",
+    option(1, "I already signed in"),
+    option(2, "Back"),
+    "  Use tab / ↑ ↓ to move, enter to select, esc to close"
+  ].join("\n");
+}
 
 function githubApprovalCapture(selected: number): string {
   const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;

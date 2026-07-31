@@ -640,6 +640,69 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces and resolves app sign-in prompts from nested connector calls", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "app-sign-in.jsonl");
+    const sentKeys: string[][] = [];
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-31T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-31T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-app-sign-in",
+            input: [
+              "const r = await tools.mcp__codex_apps__slack_slack_search_public_and_private({",
+              '  query: "patch notes"',
+              "});"
+            ].join("\n")
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    let capture = appSignInCapture(1);
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      capture = "› ";
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("waiting");
+    await harness.manager.ingest();
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-app-sign-in",
+      kind: "permissions",
+      title: "Finish App Sign In",
+      toolName: "codex_apps.slack.slack_search_public_and_private",
+      options: [
+        { decision: "approve_once", label: "I already signed in" },
+        { decision: "deny", label: "Back" }
+      ]
+    });
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_once" });
+    expect(sentKeys).toEqual([["Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
   it("surfaces and resolves wrapped custom command approvals despite working cues", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -3915,6 +3978,28 @@ function appApprovalCapture(selected: number): string {
     option(3, "Always allow            Run the tool and remember this choice for future tool calls."),
     option(4, "Cancel                  Cancel this tool call"),
     "  enter to submit | esc to cancel"
+  ].join("\n");
+}
+
+function appSignInCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;
+  return [
+    "◦ Calling",
+    '  └ codex_apps.slack.slack_search_public_and_private({"query":"patch notes"})',
+    "",
+    "• Opened https://chatgpt.com/apps/slack/example in your browser.",
+    "",
+    "  Finish App Sign In",
+    "",
+    "  Sign in to the app on ChatGPT in the browser window that just opened.",
+    "  Then return here and select \"I already signed in\".",
+    "",
+    "  Sign-in URL:",
+    "  https://chatgpt.com/apps/slack/example",
+    "",
+    option(1, "I already signed in"),
+    option(2, "Back"),
+    "  Use tab / ↑ ↓ to move, enter to select, esc to close"
   ].join("\n");
 }
 

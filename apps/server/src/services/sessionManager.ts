@@ -2331,6 +2331,7 @@ function interactiveApprovalHasTranscriptContext(
   }
   if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
   const input = stringValue(payload.input);
+  if (prompt.kind === "permissions") return toolCallName(payload)?.startsWith("codex_apps.") ?? false;
   if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));
   if (prompt.kind !== "command") return false;
   return Boolean(
@@ -2346,13 +2347,20 @@ function stringArraysEqual(first: string[] | null, second: string[] | null): boo
 }
 
 function toolCallName(payload: Record<string, unknown> | null): string | null {
-  if (!payload || payload.type !== "function_call") return null;
-  const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
-  const namespace = stringValue(payload.namespace)
-    ?.replace(/^mcp__codex_apps__/, "codex_apps.")
-    .replace(/__/g, ".");
-  if (namespace && name) return `${namespace}.${name}`;
-  return name ?? namespace ?? null;
+  if (!payload) return null;
+  if (payload.type === "function_call") {
+    const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
+    const namespace = stringValue(payload.namespace)
+      ?.replace(/^mcp__codex_apps__/, "codex_apps.")
+      .replace(/__/g, ".");
+    if (namespace && name) return `${namespace}.${name}`;
+    return name ?? namespace ?? null;
+  }
+  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return null;
+  const input = stringValue(payload.input);
+  const nestedAppCall = input?.match(/tools\.mcp__codex_apps__([A-Za-z0-9]+)_([A-Za-z0-9_]+)\s*\(/);
+  if (!nestedAppCall?.[1] || !nestedAppCall[2]) return null;
+  return `codex_apps.${nestedAppCall[1]}.${nestedAppCall[2]}`;
 }
 
 function approvalOptions(value: unknown, prefixRule: string[] | null): ApprovalRequest["options"] {

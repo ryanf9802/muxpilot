@@ -19,6 +19,10 @@ export function parseInteractiveApprovalPrompt(capture: string): InteractiveAppr
   const lines = text.split("\n");
   const parsers = [
     {
+      titleIndex: lastLineIndex(lines, (line) => /^Finish App Sign In$/i.test(line.trim())),
+      parse: parseAppSignInPrompt
+    },
+    {
       titleIndex: lastLineIndex(lines, (line) => /^Allow\s+.+\?$/i.test(line.trim())),
       parse: parseAppPermissionPrompt
     },
@@ -38,6 +42,32 @@ export function parseInteractiveApprovalPrompt(capture: string): InteractiveAppr
     if (prompt) return prompt;
   }
   return null;
+}
+
+function parseAppSignInPrompt(text: string): InteractiveApprovalPrompt | null {
+  const lines = text.split("\n");
+  if (!isAppSignInFooter(lastNonEmptyLine(lines))) return null;
+  const titleIndex = lastLineIndex(lines, (line) => /^Finish App Sign In$/i.test(line.trim()));
+  if (titleIndex < 0) return null;
+  const title = lines[titleIndex]?.trim();
+  if (!title) return null;
+
+  const options = lines
+    .slice(titleIndex + 1)
+    .map(parseAppSignInOption)
+    .filter((option): option is InteractiveApprovalOption => Boolean(option));
+  if (
+    options.length !== 2 ||
+    options[0]?.menuNumber !== 1 ||
+    options[1]?.menuNumber !== 2 ||
+    options[0]?.decision !== "approve_once" ||
+    options[1]?.decision !== "deny" ||
+    options.filter((option) => option.selected).length !== 1
+  ) {
+    return null;
+  }
+
+  return { kind: "permissions", title, command: null, reason: null, prefixRule: null, options };
 }
 
 function parseAppPermissionPrompt(text: string): InteractiveApprovalPrompt | null {
@@ -135,6 +165,10 @@ function isCommandApprovalFooter(line: string): boolean {
   return /^\s*Press enter to confirm or esc to cancel\s*$/i.test(line);
 }
 
+function isAppSignInFooter(line: string): boolean {
+  return /^\s*Use tab \/ ↑ ↓ to move, enter to select, esc to close\s*$/i.test(line);
+}
+
 function lastLineIndex(lines: string[], predicate: (line: string) => boolean): number {
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (predicate(lines[index] ?? "")) return index;
@@ -172,6 +206,19 @@ function parseAppApprovalOption(line: string): InteractiveApprovalOption | null 
     decision,
     label: canonicalApprovalLabel(decision),
     description: match[4]?.trim() ?? "",
+    menuNumber: Number(match[2]),
+    selected: Boolean(match[1])
+  };
+}
+
+function parseAppSignInOption(line: string): InteractiveApprovalOption | null {
+  const match = line.match(/^\s*(›\s*)?(\d+)\.\s+(I already signed in|Back)\s*$/i);
+  if (!match) return null;
+  const signedIn = /^I already signed in$/i.test(match[3] ?? "");
+  return {
+    decision: signedIn ? "approve_once" : "deny",
+    label: signedIn ? "I already signed in" : "Back",
+    description: signedIn ? "Continue after completing app sign-in." : "Return without completing app sign-in.",
     menuNumber: Number(match[2]),
     selected: Boolean(match[1])
   };
