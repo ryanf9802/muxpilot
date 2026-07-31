@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { basename } from "node:path";
 import { promisify } from "node:util";
-import type { ManagedSession, SessionStatus } from "@muxpilot/core";
+import type { ManagedSession, SessionResourceUsage, SessionStatus } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const BUSY_STATUSES = new Set<SessionStatus>([
@@ -52,8 +52,13 @@ interface Logger {
 
 export interface SystemdController {
   scopeForPid(pid: number): Promise<string | null>;
-  memoryCurrent(scope: string): Promise<number | null>;
+  metrics(scope: string): Promise<ScopeResourceMetrics>;
   setProperties(scope: string, properties: string[]): Promise<void>;
+}
+
+export interface ScopeResourceMetrics {
+  memoryCurrentBytes: number | null;
+  cpuUsageNsec: number | null;
 }
 
 export class ResourceGovernor {
@@ -61,6 +66,8 @@ export class ResourceGovernor {
   private running = false;
   private readonly managedScopes = new Set<string>();
   private readonly idleSince = new Map<string, number>();
+  private readonly cpuSamples = new Map<string, { usageNsec: number; sampledAtMs: number }>();
+  private resourceUsage = new Map<string, SessionResourceUsage>();
   private currentSnapshot: ResourceGovernorSnapshot;
 
   constructor(
@@ -82,6 +89,10 @@ export class ResourceGovernor {
 
   snapshot(): ResourceGovernorSnapshot {
     return { ...this.currentSnapshot };
+  }
+
+  usageForSession(sessionId: string): SessionResourceUsage | null {
+    return this.resourceUsage.get(sessionId) ?? null;
   }
 
   start(): void {
@@ -127,17 +138,33 @@ export class ResourceGovernor {
         tasksMax: this.config.sessionTasksMax
       };
       const emergency = await memoryAvailablePercent().then((value) => value !== null && value < 8);
+      const nextResourceUsage = new Map<string, SessionResourceUsage>();
+      const sampledScopes = new Set<string>();
       await Promise.all(sessions.map(async (session) => {
         const scope = await this.controller.scopeForPid(session.tmux.pid);
         if (!scope) return;
         this.managedScopes.add(scope);
+        sampledScopes.add(scope);
         const allocation = allocations.get(session.id)!;
+        const sampledAtMs = Date.now();
+        const metrics = await this.controller.metrics(scope);
+        const cpuPercent = this.cpuPercentForSample(scope, metrics.cpuUsageNsec, sampledAtMs);
+        if (metrics.memoryCurrentBytes !== null) {
+          nextResourceUsage.set(session.id, {
+            memoryCurrentBytes: metrics.memoryCurrentBytes,
+            memoryHighBytes: allocation.memoryHighBytes,
+            memoryMaxBytes: allocation.memoryMaxBytes,
+            cpuPercent,
+            cpuLimitPercent: allocation.cpuPercent,
+            sampledAt: new Date(sampledAtMs).toISOString()
+          });
+        }
         const properties = [
           `CPUQuota=${formatPercent(allocation.cpuPercent)}`,
           `MemoryHigh=${allocation.memoryHighBytes}`,
           `TasksMax=${allocation.tasksMax}`
         ];
-        const current = await this.controller.memoryCurrent(scope);
+        const current = metrics.memoryCurrentBytes;
         if (emergency || (current !== null && current <= allocation.memoryMaxBytes)) {
           properties.push(`MemoryMax=${allocation.memoryMaxBytes}`);
         }
@@ -145,11 +172,24 @@ export class ResourceGovernor {
       }).map((operation) => operation.catch((error) => {
         this.logger.warn({ err: error }, "could not apply resource limits to a session scope");
       })));
+      for (const scope of this.cpuSamples.keys()) {
+        if (!sampledScopes.has(scope)) this.cpuSamples.delete(scope);
+      }
+      this.resourceUsage = nextResourceUsage;
     } catch (error) {
+      this.resourceUsage = new Map();
       this.logger.warn({ err: error }, "resource governor reconciliation failed");
     } finally {
       this.running = false;
     }
+  }
+
+  private cpuPercentForSample(scope: string, usageNsec: number | null, sampledAtMs: number): number | null {
+    if (usageNsec === null) return null;
+    const previous = this.cpuSamples.get(scope);
+    this.cpuSamples.set(scope, { usageNsec, sampledAtMs });
+    if (!previous || usageNsec < previous.usageNsec || sampledAtMs <= previous.sampledAtMs) return null;
+    return Math.max(0, (usageNsec - previous.usageNsec) / ((sampledAtMs - previous.sampledAtMs) * 1_000_000) * 100);
   }
 }
 
@@ -202,17 +242,35 @@ export class UserSystemdController implements SystemdController {
     return unit.endsWith(".scope") ? unit : null;
   }
 
-  async memoryCurrent(scope: string): Promise<number | null> {
+  async metrics(scope: string): Promise<ScopeResourceMetrics> {
     const { stdout } = await execFileAsync("systemctl", [
-      "--user", "show", scope, "--property=MemoryCurrent", "--value"
+      "--user", "show", scope, "--property=MemoryCurrent", "--property=CPUUsageNSec"
     ], { timeout: 2000 });
-    const value = Number(stdout.trim());
-    return Number.isFinite(value) && value >= 0 ? value : null;
+    return parseSystemdMetrics(stdout);
   }
 
   async setProperties(scope: string, properties: string[]): Promise<void> {
     await execFileAsync("systemctl", ["--user", "set-property", "--runtime", scope, ...properties], { timeout: 2000 });
   }
+}
+
+export function parseSystemdMetrics(output: string): ScopeResourceMetrics {
+  const properties = Object.fromEntries(
+    output.trim().split(/\r?\n/).map((line) => {
+      const separator = line.indexOf("=");
+      return separator >= 0 ? [line.slice(0, separator), line.slice(separator + 1)] : [line, ""];
+    })
+  );
+  return {
+    memoryCurrentBytes: nonnegativeNumber(properties.MemoryCurrent),
+    cpuUsageNsec: nonnegativeNumber(properties.CPUUsageNSec)
+  };
+}
+
+function nonnegativeNumber(value: string | undefined): number | null {
+  if (!value?.trim()) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function formatPercent(value: number): string {

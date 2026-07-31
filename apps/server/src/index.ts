@@ -107,6 +107,7 @@ const resourceGovernor = new ResourceGovernor({
   agentCpuPercent: config.agentCpuPercent,
   sessionTasksMax: config.sessionTasksMax
 }, () => db.listSessions(), app.log);
+manager.setResourceUsageLookup(resourceGovernor);
 const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
 await sessionTransfers.initialize();
 const access = createAccessControl(config, {

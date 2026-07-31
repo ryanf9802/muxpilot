@@ -1350,6 +1350,29 @@ select:focus-visible {
   min-width: 0;
 }
 
+.session-resource-indicator {
+  --session-resource-color: var(--color-success);
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  background: conic-gradient(
+    var(--session-resource-color) 0 var(--session-memory-fill),
+    color-mix(in srgb, var(--color-text-muted) 18%, transparent) var(--session-memory-fill) 360deg
+  );
+  border: 1px solid color-mix(in srgb, var(--session-resource-color) 58%, var(--color-border));
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 2px var(--color-surface);
+}
+
+.session-resource-indicator[data-level="medium"] {
+  --session-resource-color: var(--color-warning);
+}
+
+.session-resource-indicator[data-level="high"] {
+  --session-resource-color: var(--color-error);
+}
+
 .session-pin-indicator {
   display: inline-flex;
   align-items: center;

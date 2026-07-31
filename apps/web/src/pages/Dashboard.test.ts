@@ -122,6 +122,52 @@ describe("SessionCard", () => {
     expect(html).not.toContain("status-yellow");
   });
 
+  it("renders memory usage before status with CPU and memory tooltip details", () => {
+    const session = testSession({
+      id: "resources",
+      paneId: "%117",
+      windowName: "resources",
+      resourceUsage: {
+        memoryCurrentBytes: 1024 ** 3,
+        memoryHighBytes: 3 * 1024 ** 3,
+        memoryMaxBytes: 4 * 1024 ** 3,
+        cpuPercent: 125.4,
+        cpuLimitPercent: 300,
+        sampledAt: "2026-07-31T00:00:00.000Z"
+      }
+    });
+
+    const html = renderSessionCard(session);
+    expect(html).toContain('class="session-resource-indicator"');
+    expect(html).toContain('data-level="normal"');
+    expect(html).toContain("--session-memory-fill:90deg");
+    expect(html).toContain("Memory: 1 GiB of 4 GiB (25%) · soft limit 3 GiB");
+    expect(html).toContain("CPU: 125.4% of one core · limit 300%");
+    expect(html.indexOf("session-resource-indicator")).toBeLessThan(html.indexOf("status status-"));
+    expect(cssRule(".session-resource-indicator")).toContain("conic-gradient");
+  });
+
+  it("omits the resource indicator when telemetry is unavailable or invalid", () => {
+    expect(renderSessionCard(testSession({
+      id: "unmanaged",
+      paneId: "%116",
+      windowName: "unmanaged"
+    }))).not.toContain("session-resource-indicator");
+    expect(renderSessionCard(testSession({
+      id: "invalid-resources",
+      paneId: "%115",
+      windowName: "invalid-resources",
+      resourceUsage: {
+        memoryCurrentBytes: 1024,
+        memoryHighBytes: 0,
+        memoryMaxBytes: 0,
+        cpuPercent: null,
+        cpuLimitPercent: 0,
+        sampledAt: "2026-07-31T00:00:00.000Z"
+      }
+    }))).not.toContain("session-resource-indicator");
+  });
+
   it.each([
     ["idle", "idle"],
     ["worktree", "isolated"],
@@ -601,7 +647,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace" | "resourceUsage">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -639,6 +685,7 @@ function testSession(
     unreadCount: 0,
     pinned: input.pinned ?? false,
     archived: false,
-    gitWorkspace: input.gitWorkspace ?? null
+    gitWorkspace: input.gitWorkspace ?? null,
+    resourceUsage: input.resourceUsage ?? null
   };
 }

@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent
@@ -645,6 +646,7 @@ export function SessionCard({
                 <Pin size={14} />
               </span>
             ) : null}
+            <SessionResourceIndicator usage={session.resourceUsage} />
             {session.initializing ? <LoadingStatusPill /> : <StatusPill status={session.status} />}
           </span>
         </div>
@@ -692,6 +694,47 @@ export function SessionCard({
         <EllipsisVertical size={18} />
       </button>
     </div>
+  );
+}
+
+function SessionResourceIndicator({ usage }: { usage: ManagedSession["resourceUsage"] }) {
+  if (
+    !usage ||
+    !Number.isFinite(usage.memoryCurrentBytes) ||
+    !Number.isFinite(usage.memoryMaxBytes) ||
+    usage.memoryCurrentBytes < 0 ||
+    usage.memoryMaxBytes <= 0
+  ) {
+    return null;
+  }
+  const memoryPercent = Math.max(0, usage.memoryCurrentBytes / usage.memoryMaxBytes * 100);
+  const fillPercent = Math.min(100, memoryPercent);
+  const level = memoryPercent >= 85 ? "high" : memoryPercent >= 60 ? "medium" : "normal";
+  const cpu = usage.cpuPercent === null
+    ? "collecting sample"
+    : `${formatResourcePercent(usage.cpuPercent)} of one core`;
+  const memory = [
+    `Memory: ${formatResourceBytes(usage.memoryCurrentBytes)} of ${formatResourceBytes(usage.memoryMaxBytes)} (${formatResourcePercent(memoryPercent)})`,
+    Number.isFinite(usage.memoryHighBytes) && usage.memoryHighBytes > 0
+      ? `soft limit ${formatResourceBytes(usage.memoryHighBytes)}`
+      : null
+  ].filter(Boolean).join(" · ");
+  const label = [
+    memory,
+    `CPU: ${cpu} · limit ${formatResourcePercent(usage.cpuLimitPercent)}`
+  ].join("\n");
+  return (
+    <span
+      className="session-resource-indicator"
+      data-level={level}
+      role="meter"
+      title={label}
+      aria-label={label.replace("\n", ". ")}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(fillPercent * 10) / 10}
+      style={{ "--session-memory-fill": `${fillPercent * 3.6}deg` } as CSSProperties}
+    />
   );
 }
 
@@ -828,6 +871,15 @@ function formatSessionCount(count: number): string {
 
 function formatTranscriptSize(count: number): string {
   return `${count} event${count === 1 ? "" : "s"}`;
+}
+
+function formatResourceBytes(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${Math.round(bytes / 1024 ** 3 * 10) / 10} GiB`;
+  return `${Math.max(0, Math.round(bytes / 1024 ** 2))} MiB`;
+}
+
+function formatResourcePercent(percent: number): string {
+  return `${Math.round(percent * 10) / 10}%`;
 }
 
 function clampMenuPosition(x: number, y: number): { x: number; y: number } {

@@ -148,6 +148,43 @@ describe("repository approval prefixes", () => {
   });
 });
 
+describe("session resource telemetry", () => {
+  it("decorates API-facing sessions without persisting unavailable telemetry", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+    await writeCodexSession(harness.codexHome, "resources.jsonl", {
+      sessionId: "codex-resources",
+      cwd: repo,
+      user: "resource prompt",
+      assistant: "resource answer",
+      mtime: new Date("2026-07-31T00:00:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [pane];
+    await harness.manager.discover();
+    const session = (await harness.manager.listSessions(true))[0]!;
+    const resourceUsage = {
+      memoryCurrentBytes: 1024 ** 3,
+      memoryHighBytes: 2 * 1024 ** 3,
+      memoryMaxBytes: 3 * 1024 ** 3,
+      cpuPercent: 50,
+      cpuLimitPercent: 300,
+      sampledAt: "2026-07-31T00:00:00.000Z"
+    };
+    harness.manager.setResourceUsageLookup({
+      usageForSession: (sessionId) => sessionId === session.id ? resourceUsage : null
+    });
+
+    expect((await harness.manager.getSession(session.id))?.resourceUsage).toEqual(resourceUsage);
+    expect((await harness.manager.listSessions(true))[0]?.resourceUsage).toEqual(resourceUsage);
+    expect((await harness.db.getSession(session.id))?.resourceUsage).toBeUndefined();
+    harness.manager.setResourceUsageLookup({ usageForSession: () => null });
+    expect((await harness.manager.getSession(session.id))?.resourceUsage).toBeNull();
+    harness.db.close();
+  });
+});
+
 describe("SessionManager transcript isolation", () => {
   it("clears stale messages when a tmux pane binds to a new Codex session file", async () => {
     const harness = await createHarness();

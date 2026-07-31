@@ -13,6 +13,7 @@ import type {
   QuestionRequest,
   QueuedInput,
   ResolveApprovalRequest,
+  SessionResourceUsage,
   SessionHistoryResult,
   SessionAction,
   SessionDirectorySuggestion,
@@ -61,6 +62,10 @@ interface SessionManagerStartOptions {
   runInitialTick?: boolean;
 }
 
+interface SessionResourceUsageLookup {
+  usageForSession(sessionId: string): SessionResourceUsage | null;
+}
+
 interface IngestSessionResult {
   incomplete: boolean;
   progressed: boolean;
@@ -77,6 +82,7 @@ export class SessionManager {
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
   private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
+  private resourceUsageLookup: SessionResourceUsageLookup | null = null;
 
   constructor(
     private readonly db: AppDatabase,
@@ -113,6 +119,10 @@ export class SessionManager {
   async reconcileNow(): Promise<void> {
     await this.runDiscoverTick();
     await this.runIngestTick();
+  }
+
+  setResourceUsageLookup(lookup: SessionResourceUsageLookup | null): void {
+    this.resourceUsageLookup = lookup;
   }
 
   async discoverNow(): Promise<void> {
@@ -453,15 +463,24 @@ export class SessionManager {
   }
 
   listSessions(includeArchived = false): Promise<ManagedSession[]> {
-    return this.db.listSessions(includeArchived);
+    const sessions = this.db.listSessions(includeArchived) as Promise<ManagedSession[]> | ManagedSession[];
+    const decorate = (values: ManagedSession[]) => values.map((session) => this.withResourceUsage(session));
+    return (Array.isArray(sessions) ? decorate(sessions) : sessions.then(decorate)) as Promise<ManagedSession[]>;
   }
 
   getSession(sessionId: string): Promise<ManagedSession | null> {
-    return this.db.getSession(sessionId);
+    const result = this.db.getSession(sessionId) as Promise<ManagedSession | null> | ManagedSession | null;
+    const decorate = (session: ManagedSession | null) => session ? this.withResourceUsage(session) : null;
+    return (isPromiseLike(result) ? result.then(decorate) : decorate(result)) as Promise<ManagedSession | null>;
   }
 
   listQueuedInputs(sessionId: string): Promise<QueuedInput[]> {
     return this.db.listQueuedInputs(sessionId);
+  }
+
+  private withResourceUsage(session: ManagedSession): ManagedSession {
+    if (!this.resourceUsageLookup) return session;
+    return { ...session, resourceUsage: this.resourceUsageLookup.usageForSession(session.id) };
   }
 
   async listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
@@ -1509,6 +1528,10 @@ function collapseHistoryByIdentity(results: SessionHistoryResult[], limit: numbe
     }
   }
   return [...byIdentity.values()].slice(0, limit);
+}
+
+function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
+  return Boolean(value && typeof (value as Promise<T>).then === "function");
 }
 
 function historyResultPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {

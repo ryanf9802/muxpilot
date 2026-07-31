@@ -3,6 +3,7 @@ import type { ManagedSession, SessionStatus } from "@muxpilot/core";
 import { cpus } from "node:os";
 import {
   allocateSessionResources,
+  parseSystemdMetrics,
   ResourceGovernor,
   type SystemdController
 } from "../src/services/resourceGovernor.js";
@@ -44,16 +45,31 @@ describe("allocateSessionResources", () => {
   });
 });
 
+describe("parseSystemdMetrics", () => {
+  it("parses available cgroup counters and treats unavailable values as missing", () => {
+    expect(parseSystemdMetrics("CPUUsageNSec=2500000000\nMemoryCurrent=1073741824\n")).toEqual({
+      memoryCurrentBytes: 1073741824,
+      cpuUsageNsec: 2500000000
+    });
+    expect(parseSystemdMetrics("CPUUsageNSec=[not set]\nMemoryCurrent=infinity\n")).toEqual({
+      memoryCurrentBytes: null,
+      cpuUsageNsec: null
+    });
+  });
+});
+
 describe("ResourceGovernor", () => {
   it("sets the tmux scope and restores it on shutdown", async () => {
     const properties: string[][] = [];
+    let metrics = { memoryCurrentBytes: 2 * 1024 ** 3, cpuUsageNsec: 1_000_000_000 };
     const controller: SystemdController = {
       scopeForPid: vi.fn(async () => "tmux-spawn-test.scope"),
-      memoryCurrent: vi.fn(async () => 0),
+      metrics: vi.fn(async () => metrics),
       setProperties: vi.fn(async (_scope, next) => { properties.push(next); })
     };
     const logger = { info: vi.fn(), warn: vi.fn() };
     const governor = new ResourceGovernor(config, async () => [session("one", "working")], logger, controller);
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
 
     await governor.reconcile();
     expect(governor.snapshot()).toMatchObject({
@@ -62,14 +78,27 @@ describe("ResourceGovernor", () => {
       idleSessions: 0,
       tasksMax: 768
     });
+    expect(governor.usageForSession("one")).toMatchObject({
+      memoryCurrentBytes: 2 * 1024 ** 3,
+      cpuPercent: null
+    });
+
+    metrics = { memoryCurrentBytes: 3 * 1024 ** 3, cpuUsageNsec: 3_000_000_000 };
+    now.mockReturnValue(3000);
+    await governor.reconcile();
+    expect(governor.usageForSession("one")).toMatchObject({
+      memoryCurrentBytes: 3 * 1024 ** 3,
+      cpuPercent: 100
+    });
     await governor.stop();
+    now.mockRestore();
 
     expect(properties[0]).toEqual(expect.arrayContaining([
       `CPUQuota=${Math.max(1, Math.round(75 * cpus().length * 100) / 100)}%`,
       "TasksMax=768"
     ]));
     expect(properties[0]?.some((property) => property.startsWith("MemoryMax="))).toBe(true);
-    expect(properties[1]).toEqual([
+    expect(properties[2]).toEqual([
       "CPUQuota=infinity",
       "MemoryHigh=infinity",
       "MemoryMax=infinity",

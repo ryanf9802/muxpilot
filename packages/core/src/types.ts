@@ -151,6 +151,14 @@ export function normalizeGitWorkspaceSummary(value: unknown): GitWorkspaceSummar
   };
 }
 
+export interface SessionResourceUsage {
+  memoryCurrentBytes: number;
+  memoryHighBytes: number;
+  memoryMaxBytes: number;
+  cpuPercent: number | null;
+  cpuLimitPercent: number;
+  sampledAt: string;
+}
 
 export interface ManagedSession {
   id: string;
@@ -175,6 +183,7 @@ export interface ManagedSession {
   pinned: boolean;
   archived: boolean;
   gitWorkspace?: GitWorkspaceSummary | null;
+  resourceUsage?: SessionResourceUsage | null;
 }
 
 export interface ChatMessage {
