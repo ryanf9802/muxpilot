@@ -1316,6 +1316,7 @@ select:focus-visible {
 }
 
 .session-card .card-head {
+  align-items: flex-start;
   padding-right: 44px;
 }
 

@@ -258,6 +258,7 @@ describe("SessionCard", () => {
 
   it("keeps long branch cards inside narrow dashboard columns", () => {
     expect(cssRule(".session-card")).toContain("grid-template-columns: minmax(0, 1fr)");
+    expect(cssRule(".session-card .card-head")).toContain("align-items: flex-start");
     expect(cssRule(".session-card .card-foot-events")).toContain("flex: 0 0 auto");
   });
 
