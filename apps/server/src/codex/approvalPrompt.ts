@@ -52,8 +52,7 @@ function parseAppSignInPrompt(text: string): InteractiveApprovalPrompt | null {
   const title = lines[titleIndex]?.trim();
   if (!title) return null;
 
-  const options = lines
-    .slice(titleIndex + 1)
+  const options = appSignInOptionLines(lines.slice(titleIndex + 1))
     .map(parseAppSignInOption)
     .filter((option): option is InteractiveApprovalOption => Boolean(option));
   if (
@@ -161,6 +160,19 @@ function approvalOptionLines(lines: string[]): string[] {
   return options;
 }
 
+function appSignInOptionLines(lines: string[]): string[] {
+  const options: string[] = [];
+  for (const line of lines) {
+    if (/^\s*(?:›\s*)?\d+\.\s+/.test(line)) {
+      options.push(line.trim());
+      continue;
+    }
+    if (options.length === 0 || !line.trim() || isAppSignInFooter(line)) continue;
+    options[options.length - 1] = `${options[options.length - 1]} ${line.trim()}`;
+  }
+  return options;
+}
+
 function isCommandApprovalFooter(line: string): boolean {
   return /^\s*Press enter to confirm or esc to cancel\s*$/i.test(line);
 }
@@ -212,14 +224,17 @@ function parseAppApprovalOption(line: string): InteractiveApprovalOption | null 
 }
 
 function parseAppSignInOption(line: string): InteractiveApprovalOption | null {
-  const match = line.match(/^\s*(›\s*)?(\d+)\.\s+(I already signed in|Back)\s*$/i);
+  const match = line.match(/^\s*(›\s*)?(\d+)\.\s+(.+?)\s*$/);
   if (!match) return null;
-  const signedIn = /^I already signed in$/i.test(match[3] ?? "");
+  const menuNumber = Number(match[2]);
+  const decision = menuNumber === 1 ? "approve_once" : menuNumber === 2 ? "deny" : null;
+  const label = match[3]?.trim();
+  if (!decision || !label) return null;
   return {
-    decision: signedIn ? "approve_once" : "deny",
-    label: signedIn ? "I already signed in" : "Back",
-    description: signedIn ? "Continue after completing app sign-in." : "Return without completing app sign-in.",
-    menuNumber: Number(match[2]),
+    decision,
+    label,
+    description: "",
+    menuNumber,
     selected: Boolean(match[1])
   };
 }

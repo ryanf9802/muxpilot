@@ -67,19 +67,33 @@ describe("interactive Codex approval prompts", () => {
         {
           decision: "approve_once",
           label: "I already signed in",
-          description: "Continue after completing app sign-in.",
+          description: "",
           menuNumber: 1,
           selected: true
         },
         {
           decision: "deny",
           label: "Back",
-          description: "Return without completing app sign-in.",
+          description: "",
           menuNumber: 2,
           selected: false
         }
       ]
     });
+  });
+
+  it("preserves caller-provided app sign-in option labels", () => {
+    const prompt = parseInteractiveApprovalPrompt(
+      appSignInCapture(1, ["Continue after signing in", "Return to the conversation"]).replace(
+        "Continue after signing in",
+        "Continue after signing\n     in"
+      )
+    );
+
+    expect(prompt?.options.map(({ decision, label }) => ({ decision, label }))).toEqual([
+      { decision: "approve_once", label: "Continue after signing in" },
+      { decision: "deny", label: "Return to the conversation" }
+    ]);
   });
 
   it("navigates relative to the selected app sign-in choice", () => {
@@ -275,7 +289,10 @@ describe("interactive Codex approval prompts", () => {
   });
 });
 
-function appSignInCapture(selected: number): string {
+function appSignInCapture(
+  selected: number,
+  labels: readonly [confirm: string, cancel: string] = ["I already signed in", "Back"]
+): string {
   const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;
   return [
     "• Opened https://chatgpt.com/apps/slack/example in your browser.",
@@ -288,8 +305,8 @@ function appSignInCapture(selected: number): string {
     "  Sign-in URL:",
     "  https://chatgpt.com/apps/slack/example",
     "",
-    option(1, "I already signed in"),
-    option(2, "Back"),
+    option(1, labels[0]),
+    option(2, labels[1]),
     "  Use tab / ↑ ↓ to move, enter to select, esc to close"
   ].join("\n");
 }
