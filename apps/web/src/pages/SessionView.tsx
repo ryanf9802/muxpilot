@@ -7,6 +7,7 @@ import {
   Copy,
   HelpCircle,
   GitBranch,
+  Gauge,
   ListChecks,
   LoaderCircle,
   MessageSquare,
@@ -59,6 +60,7 @@ import type {
   CodexSkill,
   CollaborationMode,
   GitWorkspaceSummary,
+  HeavyCommand,
   ManagedSession,
   PlanActionChoice,
   QuestionAnswerRequest,
@@ -516,6 +518,122 @@ export function shouldResetInitialTranscriptForLiveTail(
   return sourceChanged || initialTranscriptSessionId !== routeSessionId;
 }
 
+const HEAVY_STATE_PRIORITY: Record<HeavyCommand["state"], number> = {
+  terminating: 4,
+  stalled: 3,
+  running: 2,
+  waiting: 1
+};
+
+export function HeavyCommandIndicator({ commands, onOpen }: { commands: HeavyCommand[]; onOpen: () => void }) {
+  if (commands.length === 0) return null;
+  const primary = [...commands].sort((left, right) => HEAVY_STATE_PRIORITY[right.state] - HEAVY_STATE_PRIORITY[left.state])[0]!;
+  const reference = primary.lastOutputAt ?? primary.startedAt ?? primary.queuedAt;
+  const elapsed = compactDuration(Date.now() - Date.parse(reference));
+  const title = `${heavyStateLabel(primary.state)}: ${primary.commandDisplay} · ${primary.startedAt ? `silent ${elapsed}` : `waiting ${elapsed}`}${commands.length > 1 ? ` · ${commands.length} active` : ""}`;
+  return (
+    <button
+      type="button"
+      className="heavy-command-indicator"
+      data-state={primary.state}
+      onClick={onOpen}
+      title={title}
+      aria-label={`Open heavyweight command details. ${title}`}
+    >
+      <Gauge size={15} aria-hidden="true" />
+      {commands.length > 1 ? <span>{commands.length}</span> : null}
+    </button>
+  );
+}
+
+export function HeavyCommandsModal({
+  open,
+  commands,
+  outputs,
+  error,
+  terminatingRun,
+  onClose,
+  onTerminate
+}: {
+  open: boolean;
+  commands: HeavyCommand[];
+  outputs: Record<string, string>;
+  error: string;
+  terminatingRun: string | null;
+  onClose: () => void;
+  onTerminate: (runId: string) => void;
+}) {
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!open) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [open]);
+  return (
+    <Modal open={open} onClose={onClose} title="Heavyweight commands" panelClassName="heavy-command-modal">
+      {error ? <p className="error-text" role="alert">{error}</p> : null}
+      {commands.length === 0 ? <p className="muted">No heavyweight commands are active.</p> : (
+        <div className="heavy-command-list">
+          {commands.map((command) => {
+            const silence = command.lastOutputAt ? compactDuration(now - Date.parse(command.lastOutputAt)) : null;
+            const elapsed = compactDuration(now - Date.parse(command.startedAt ?? command.queuedAt));
+            return (
+              <article className="heavy-command-detail" key={command.runId} data-state={command.state}>
+                <div className="heavy-command-detail-head">
+                  <span className="heavy-command-state">{heavyStateLabel(command.state)}</span>
+                  <span>{command.startedAt ? `${elapsed} running` : `${elapsed} waiting`}</span>
+                </div>
+                <code className="heavy-command-command">{command.commandDisplay}</code>
+                <dl className="heavy-command-facts">
+                  <div><dt>Working directory</dt><dd>{command.cwd}</dd></div>
+                  <div><dt>Slot / PID</dt><dd>{command.slot ?? "queued"} / {command.childPid ?? "not started"}</dd></div>
+                  <div><dt>Output silence</dt><dd>{silence ?? "not started"}</dd></div>
+                  <div><dt>Limits</dt><dd>warn {compactDuration(command.deadlines.inactivityWarnMs)} silent · stop {compactDuration(command.deadlines.inactivityTimeoutMs)} silent · {compactDuration(command.deadlines.runtimeTimeoutMs)} total · {compactDuration(command.deadlines.terminationGraceMs)} grace</dd></div>
+                  <div><dt>Package manager</dt><dd>{command.packageDiagnostics?.declared ?? "not declared"} · {command.packageDiagnostics?.resolvedVersion ?? "version unavailable"} · {command.packageDiagnostics?.resolvedPath ?? "path unavailable"}</dd></div>
+                  <div><dt>Package store</dt><dd>{command.packageDiagnostics?.storePath ?? "unavailable"}</dd></div>
+                  <div><dt>Cache paths</dt><dd>{formatHeavyCachePaths(command)}</dd></div>
+                  <div><dt>Log</dt><dd>{command.logPath ?? "unavailable"}</dd></div>
+                </dl>
+                {command.packageDiagnostics?.warnings.length ? <p className="heavy-command-warning">{command.packageDiagnostics.warnings.join(" · ")}</p> : null}
+                <pre className="heavy-command-output" aria-label={`Live output for ${command.commandDisplay}`}>{outputs[command.runId] ?? "Loading output…"}</pre>
+                <div className="heavy-command-actions">
+                  {confirming === command.runId ? (
+                    <>
+                      <span>Terminate this command and its process group?</span>
+                      <button type="button" className="danger-button" disabled={terminatingRun === command.runId} onClick={() => { setConfirming(null); onTerminate(command.runId); }}>Terminate</button>
+                      <button type="button" onClick={() => setConfirming(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <button type="button" disabled={command.state === "terminating"} onClick={() => setConfirming(command.runId)}>{command.state === "terminating" ? "Terminating…" : "Terminate command"}</button>
+                  )}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function heavyStateLabel(state: HeavyCommand["state"]): string {
+  return { waiting: "Waiting for slot", running: "Running", stalled: "Output stalled", terminating: "Terminating" }[state];
+}
+
+function compactDuration(milliseconds: number): string {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return "now";
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function formatHeavyCachePaths(command: HeavyCommand): string {
+  const entries = Object.entries(command.packageDiagnostics?.cachePaths ?? {});
+  return entries.length ? entries.map(([name, value]) => `${name}=${value.path} (${value.writable ? "writable" : "not writable"})`).join(" · ") : "not configured";
+}
+
 interface TranscriptSourceIdentity {
   sessionId: string;
   codexSessionId: string | null;
@@ -580,6 +698,11 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
+  const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
+  const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
+  const [heavyCommandError, setHeavyCommandError] = useState("");
+  const [terminatingHeavyRun, setTerminatingHeavyRun] = useState<string | null>(null);
   const [inputModeError, setInputModeError] = useState("");
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
@@ -945,6 +1068,11 @@ export function SessionView() {
       setActionBusy(null);
       setInputModeError("");
       setCopiedTmuxCommand(false);
+      setHeavyCommands([]);
+      setHeavyCommandsOpen(false);
+      setHeavyOutputs({});
+      setHeavyCommandError("");
+      setTerminatingHeavyRun(null);
       setComposerFocused(false);
       setTranscriptFindOpen(false);
       setTranscriptFindQuery("");
@@ -995,6 +1123,47 @@ export function SessionView() {
       socket.close();
     };
   }, [connectionEpoch, id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const response = await api.heavyCommands(id);
+        if (cancelled) return;
+        setHeavyCommands(response.commands.map((command) =>
+          command.runId === terminatingHeavyRun ? { ...command, state: "terminating" } : command
+        ));
+        setHeavyCommandError("");
+        if (heavyCommandsOpen) {
+          const outputs = await Promise.all(response.commands.map(async (command) => {
+            try {
+              const result = await api.heavyCommandOutput(id, command.runId);
+              return [command.runId, `${result.truncated ? "[showing the last 128 KiB]\n" : ""}${result.output}`] as const;
+            }
+            catch { return [command.runId, "Output is unavailable."] as const; }
+          }));
+          if (!cancelled) setHeavyOutputs(Object.fromEntries(outputs));
+        }
+      } catch (error) {
+        if (!cancelled) setHeavyCommandError(error instanceof Error ? error.message : "Unable to load heavyweight commands");
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 2_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [heavyCommandsOpen, id, terminatingHeavyRun]);
+
+  async function terminateHeavyCommand(runId: string) {
+    setTerminatingHeavyRun(runId);
+    setHeavyCommands((commands) => commands.map((command) => command.runId === runId ? { ...command, state: "terminating" } : command));
+    try {
+      await api.terminateHeavyCommand(id, runId);
+      setHeavyCommandError("");
+    } catch (error) {
+      setHeavyCommandError(error instanceof Error ? error.message : "Unable to terminate heavyweight command");
+      setTerminatingHeavyRun(null);
+    }
+  }
 
   function updateComposerText(value: string) {
     setText(value);
@@ -1574,11 +1743,24 @@ export function SessionView() {
           <h1>{sessionDisplayName(readySession)}</h1>
           <SessionHeaderMeta session={readySession} />
         </div>
-        <StatusPill status={readySession.status} />
+        <div className="session-header-state">
+          <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
+          <StatusPill status={readySession.status} />
+        </div>
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
       </div>
+
+      <HeavyCommandsModal
+        open={heavyCommandsOpen}
+        commands={heavyCommands}
+        outputs={heavyOutputs}
+        error={heavyCommandError}
+        terminatingRun={terminatingHeavyRun}
+        onClose={() => setHeavyCommandsOpen(false)}
+        onTerminate={(runId) => void terminateHeavyCommand(runId)}
+      />
 
       <div className="actions">
         <div className="actions-main">

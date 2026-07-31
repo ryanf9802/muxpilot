@@ -8,6 +8,8 @@ import type {
   ConnectivityResponse,
   CreateSessionRequest,
   GitRepositoryProbe,
+  HeavyCommandOutputResponse,
+  HeavyCommandsResponse,
   MuxpilotGitSkillStatus,
   ManagedSession,
   MeResponse,
@@ -151,6 +153,9 @@ export const api = {
     }),
   codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
+  heavyCommands: (id: string) => json<HeavyCommandsResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands`),
+  heavyCommandOutput: (id: string, runId: string) => json<HeavyCommandOutputResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/output`),
+  terminateHeavyCommand: (id: string, runId: string) => json<{ accepted: true }>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/terminate`, { method: "POST" }),
   messages: (id: string, query: MessageQuery = {}) =>
     json<TranscriptPageResponse>(`/api/sessions/${id}/messages${messageQueryString(query)}`),
   messageSearch: (id: string, query: string, limit = 100) =>

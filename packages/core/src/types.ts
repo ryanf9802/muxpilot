@@ -160,6 +160,52 @@ export interface SessionResourceUsage {
   sampledAt: string;
 }
 
+export type HeavyCommandState = "waiting" | "running" | "stalled" | "terminating";
+
+export interface HeavyCommandPackageDiagnostics {
+  declared: string | null;
+  resolvedPath: string | null;
+  resolvedVersion: string | null;
+  storePath: string | null;
+  cachePaths: Record<string, { path: string; writable: boolean }>;
+  warnings: string[];
+}
+
+export interface HeavyCommand {
+  runId: string;
+  workspaceId: string;
+  state: HeavyCommandState;
+  command: string[];
+  commandDisplay: string;
+  cwd: string;
+  childPid: number | null;
+  slot: number | null;
+  queuedAt: string;
+  startedAt: string | null;
+  lastOutputAt: string | null;
+  heartbeatAt: string;
+  logPath: string | null;
+  deadlines: {
+    inactivityWarnMs: number;
+    inactivityTimeoutMs: number;
+    runtimeTimeoutMs: number;
+    terminationGraceMs: number;
+  };
+  packageDiagnostics: HeavyCommandPackageDiagnostics | null;
+  terminationReason: string | null;
+}
+
+export interface HeavyCommandsResponse {
+  commands: HeavyCommand[];
+  sampledAt: string;
+}
+
+export interface HeavyCommandOutputResponse {
+  runId: string;
+  output: string;
+  truncated: boolean;
+}
+
 export interface ManagedSession {
   id: string;
   tmux: TmuxPane;

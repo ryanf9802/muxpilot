@@ -51,11 +51,16 @@ describe("DockerResourceProxy", () => {
     const created = await request(proxySocket, "POST", "/v1.47/containers/create", {
       Image: "example",
       HostConfig: { Memory: strictMemory }
+    }, {
+      "x-muxpilot-heavy-run": "mabc123-012345abcdef",
+      "x-muxpilot-workspace": "workspace_123"
     });
     expect(created.status).toBe(201);
     expect(received[0]?.payload.Labels).toMatchObject({
       "com.muxpilot.managed": "true",
-      "com.muxpilot.resource-pool": "shared"
+      "com.muxpilot.resource-pool": "shared",
+      "com.muxpilot.heavy-run": "mabc123-012345abcdef",
+      "com.muxpilot.workspace": "workspace_123"
     });
     expect(received[0]?.payload.HostConfig.Memory).toBe(strictMemory);
     expect(received[0]?.payload.HostConfig.MemoryReservation).toBe(strictMemory);
@@ -92,14 +97,14 @@ describe("DockerResourceProxy", () => {
   });
 });
 
-function request(socketPath: string, method: string, path: string, payload?: object) {
+function request(socketPath: string, method: string, path: string, payload?: object, headers: Record<string, string> = {}) {
   const body = payload ? Buffer.from(JSON.stringify(payload)) : Buffer.alloc(0);
   return new Promise<{ status: number; body: string }>((resolve, reject) => {
     const next = httpRequest({
       socketPath,
       method,
       path,
-      headers: { "content-type": "application/json", "content-length": String(body.length) }
+      headers: { "content-type": "application/json", "content-length": String(body.length), ...headers }
     }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));

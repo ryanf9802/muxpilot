@@ -9,6 +9,8 @@ const UPDATE_PATH = /\/containers\/([^/]+)\/update(?:\?|$)/;
 const ACTION_PATH = /\/containers\/([^/]+)\/(start|stop|kill|restart|delete)(?:\?|$)/;
 const DELETE_PATH = /\/containers\/([^/?]+)(?:\?|$)/;
 const MAX_MUTATED_BODY_BYTES = 16 * 1024 * 1024;
+const HEAVY_RUN_ID = /^[a-z0-9]+-[a-f0-9]{12}$/;
+const WORKSPACE_ID = /^[A-Za-z0-9_-]{6,128}$/;
 
 export interface DockerResourceProxyConfig {
   socketPath: string;
@@ -100,10 +102,14 @@ export class DockerResourceProxy {
       Labels?: Record<string, string>;
       HostConfig?: DockerLimits & Record<string, unknown>;
     };
+    const heavyRun = headerValue(request, "x-muxpilot-heavy-run");
+    const workspace = headerValue(request, "x-muxpilot-workspace");
     payload.Labels = {
       ...payload.Labels,
       "com.muxpilot.managed": "true",
-      "com.muxpilot.resource-pool": "shared"
+      "com.muxpilot.resource-pool": "shared",
+      ...(heavyRun && HEAVY_RUN_ID.test(heavyRun) ? { "com.muxpilot.heavy-run": heavyRun } : {}),
+      ...(workspace && WORKSPACE_ID.test(workspace) ? { "com.muxpilot.workspace": workspace } : {})
     };
     const requested = pickLimits(payload.HostConfig ?? {});
     payload.HostConfig = {
@@ -207,6 +213,11 @@ export class DockerResourceProxy {
     upstream.on("error", () => socket.destroy());
     upstream.end();
   }
+}
+
+function headerValue(request: IncomingMessage, name: string): string | null {
+  const value = request.headers[name];
+  return typeof value === "string" ? value : Array.isArray(value) ? value[0] ?? null : null;
 }
 
 function effectiveLimits(requested: DockerLimits, allowance: DockerLimits): DockerLimits {

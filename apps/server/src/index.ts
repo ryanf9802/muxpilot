@@ -22,6 +22,7 @@ import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 import { SessionTransferService } from "./services/sessionTransfer.js";
 import { ResourceGovernor } from "./services/resourceGovernor.js";
 import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
+import { HeavyCommandService } from "./services/heavyCommands.js";
 import { join } from "node:path";
 
 const config = loadConfig();
@@ -67,7 +68,12 @@ const activitySummarizer = new ActivitySummarizer({
 });
 let dockerProxy: DockerResourceProxy | null = null;
 const managedEnvironment: Record<string, string> = {
-  MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency)
+  MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
+  MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
+  MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: String(config.heavyValidationInactivityWarnMs),
+  MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS: String(config.heavyValidationInactivityTimeoutMs),
+  MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS: String(config.heavyValidationRuntimeTimeoutMs),
+  MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS: String(config.heavyValidationTerminationGraceMs)
 };
 if (config.resourceGovernor !== "off") {
   dockerProxy = new DockerResourceProxy({
@@ -100,6 +106,7 @@ const manager = new SessionManager(
   config.gitWorktreeRoot,
   managedEnvironment
 );
+const heavyCommands = new HeavyCommandService(config.heavyValidationDir, config.gitSessionRoot);
 const resourceGovernor = new ResourceGovernor({
   enabled: config.resourceGovernor !== "off",
   agentMemorySoftPercent: config.agentMemorySoftPercent,
@@ -134,7 +141,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands);
 
 app.get("/healthz", async () => ({
   ok: true,

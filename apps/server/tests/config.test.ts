@@ -108,7 +108,11 @@ describe("config LAN access validation", () => {
       dockerMemoryHardPercent: 20,
       dockerCpuPercent: 25,
       sessionTasksMax: 768,
-      heavyValidationConcurrency: 2
+      heavyValidationConcurrency: 2,
+      heavyValidationInactivityWarnMs: 60_000,
+      heavyValidationInactivityTimeoutMs: 600_000,
+      heavyValidationRuntimeTimeoutMs: 1_800_000,
+      heavyValidationTerminationGraceMs: 30_000
     });
 
     const overridden = parseConfig({
@@ -122,6 +126,10 @@ describe("config LAN access validation", () => {
     expect(() => parseConfig({
       MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "70",
       MUXPILOT_AGENT_MEMORY_HARD_PERCENT: "60"
+    })).toThrow();
+    expect(() => parseConfig({
+      MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: "1000",
+      MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS: "1000"
     })).toThrow();
   });
 });

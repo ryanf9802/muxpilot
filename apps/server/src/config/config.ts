@@ -1,7 +1,7 @@
 import { config as loadDotenv } from "dotenv";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -68,6 +68,11 @@ const schema = z.object({
   dockerCpuPercent: percentage.default(25),
   sessionTasksMax: z.coerce.number().int().positive().default(768),
   heavyValidationConcurrency: z.coerce.number().int().positive().default(2),
+  heavyValidationDir: z.string().default(join(tmpdir(), `muxpilot-heavy-validation-${process.getuid?.() ?? "user"}`)),
+  heavyValidationInactivityWarnMs: z.coerce.number().int().positive().default(60_000),
+  heavyValidationInactivityTimeoutMs: z.coerce.number().int().positive().default(600_000),
+  heavyValidationRuntimeTimeoutMs: z.coerce.number().int().positive().default(1_800_000),
+  heavyValidationTerminationGraceMs: z.coerce.number().int().positive().default(30_000),
   openaiApiKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
     z.string().optional()
@@ -100,6 +105,13 @@ const schema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["dockerMemoryHardPercent"],
       message: "Docker hard memory percent must be at least the soft percent"
+    });
+  }
+  if (value.heavyValidationInactivityTimeoutMs <= value.heavyValidationInactivityWarnMs) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["heavyValidationInactivityTimeoutMs"],
+      message: "heavyweight inactivity timeout must be greater than its warning threshold"
     });
   }
 });
@@ -139,6 +151,11 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     dockerCpuPercent: env.MUXPILOT_DOCKER_CPU_PERCENT,
     sessionTasksMax: env.MUXPILOT_SESSION_TASKS_MAX,
     heavyValidationConcurrency: env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY,
+    heavyValidationDir: env.MUXPILOT_HEAVY_VALIDATION_DIR,
+    heavyValidationInactivityWarnMs: env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS,
+    heavyValidationInactivityTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS,
+    heavyValidationRuntimeTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS,
+    heavyValidationTerminationGraceMs: env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS,
     openaiApiKey: env.OPENAI_API_KEY,
     summaryModel: env.MUXPILOT_SUMMARY_MODEL,
     summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,
@@ -164,6 +181,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     codexHome: resolve(parsed.codexHome),
     gitWorktreeRoot: resolve(parsed.gitWorktreeRoot),
     gitSessionRoot: resolve(parsed.gitSessionRoot),
+    heavyValidationDir: resolve(parsed.heavyValidationDir),
     pwaTrustDir: parsed.pwaTrustDir ? resolve(parsed.pwaTrustDir) : undefined
   };
 }

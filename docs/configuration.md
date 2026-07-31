@@ -65,6 +65,13 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DOCKER_MEMORY_HARD_PERCENT`: shared Docker hard-memory pool, default `20`.
 - `MUXPILOT_DOCKER_CPU_PERCENT`: shared Docker CPU pool, default `25`.
 - `MUXPILOT_HEAVY_VALIDATION_CONCURRENCY`: number of heavyweight scan/test commands allowed concurrently across muxpilot sessions, default `2`.
+- `MUXPILOT_HEAVY_VALIDATION_DIR`: shared lease and live-command metadata directory. The default is a per-user directory under the system temporary directory; relative overrides are resolved when muxpilot starts.
+- `MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS`: child-output silence before a visible warning, default `60000` (1 minute).
+- `MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS`: child-output silence before termination, default `600000` (10 minutes).
+- `MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS`: maximum command runtime after a slot is acquired, default `1800000` (30 minutes). Queue time is excluded.
+- `MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS`: time between process-group `SIGTERM` and `SIGKILL`, default `30000` (30 seconds).
+
+Per-run overrides can be placed before `--`, for example `muxpilot-git-run.mjs --heavy --runtime-timeout 20m --inactivity-timeout 5m -- make lint`. The runner emits queue/start/heartbeat/warning/termination lifecycle messages, records live state for the session UI, and retains the latest 20 command logs (up to 50 MiB each) in the session control directory.
 - `MUXPILOT_INPUT_SUBMIT_KEYS`: tmux keys sent after pasting a chat message, default `Enter`.
 - `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: tmux key sequence used to cycle Codex between Normal and Plan input modes, default `BTab` for Shift+Tab.
 - Plan-action and question-option buttons use Codex menu selection keys directly; they do not use `MUXPILOT_INPUT_SUBMIT_KEYS`.

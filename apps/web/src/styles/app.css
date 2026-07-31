@@ -2480,6 +2480,59 @@ select:focus-visible {
   flex: 0 0 auto;
 }
 
+.session-header-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: center;
+}
+
+.heavy-command-indicator {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--color-success);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.heavy-command-indicator[data-state="waiting"] { color: var(--color-text-muted); }
+.heavy-command-indicator[data-state="stalled"] { color: var(--color-warning); }
+.heavy-command-indicator[data-state="terminating"] { color: var(--color-error); }
+.heavy-command-indicator span { font-size: 11px; font-weight: 700; }
+
+.heavy-command-modal { width: min(860px, calc(100vw - 28px)); }
+.heavy-command-list { display: grid; gap: 12px; overflow: auto; }
+.heavy-command-detail {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-success);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+}
+.heavy-command-detail[data-state="waiting"] { border-left-color: var(--color-text-muted); }
+.heavy-command-detail[data-state="stalled"] { border-left-color: var(--color-warning); }
+.heavy-command-detail[data-state="terminating"] { border-left-color: var(--color-error); }
+.heavy-command-detail-head,
+.heavy-command-actions { display: flex; align-items: center; gap: 8px; }
+.heavy-command-detail-head { justify-content: space-between; color: var(--color-text-muted); font-size: 12px; }
+.heavy-command-state { color: var(--color-text); font-weight: 700; }
+.heavy-command-command { overflow-wrap: anywhere; }
+.heavy-command-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 0; }
+.heavy-command-facts div { min-width: 0; }
+.heavy-command-facts dt { color: var(--color-text-muted); font-size: 11px; text-transform: uppercase; }
+.heavy-command-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; font-size: 12px; }
+.heavy-command-output { max-height: 260px; min-height: 72px; margin: 0; padding: 10px; overflow: auto; white-space: pre-wrap; background: var(--color-surface); border-radius: 6px; font-size: 11px; }
+.heavy-command-warning { margin: 0; color: var(--color-warning); font-size: 12px; }
+.heavy-command-actions { justify-content: flex-end; flex-wrap: wrap; }
+
 .git-workspace-chip {
   --git-workspace-state-color: var(--color-success);
   display: inline-flex;
@@ -4331,6 +4384,10 @@ select:focus-visible {
   .session-header .status-text {
     display: none;
   }
+
+  .session-header-state { gap: 5px; }
+  .heavy-command-indicator { min-width: 24px; height: 24px; padding: 0 5px; }
+  .heavy-command-facts { grid-template-columns: minmax(0, 1fr); }
 
   .tmux-command-button {
     min-height: 32px;

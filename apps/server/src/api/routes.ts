@@ -42,6 +42,7 @@ import type { NotificationService } from "../services/notifications.js";
 import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
+import type { HeavyCommandService } from "../services/heavyCommands.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const inputBodySchema = z
@@ -139,7 +140,8 @@ export function registerRoutes(
   codexUsage?: CodexUsageService,
   activitySummarizer?: ActivitySummarizer,
   notificationService?: NotificationService,
-  sessionTransfers?: SessionTransferService
+  sessionTransfers?: SessionTransferService,
+  heavyCommands?: HeavyCommandService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -350,6 +352,35 @@ export function registerRoutes(
     const session = await manager.getSession(id);
     if (!session) return reply.code(404).send({ error: "Session not found" });
     return { session };
+  });
+
+  app.get("/api/sessions/:id/heavy-commands", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const session = await manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: "Session not found" });
+    if (!heavyCommands || !session.gitWorkspace) return { commands: [], sampledAt: new Date().toISOString() };
+    return heavyCommands.list(session.gitWorkspace.id);
+  });
+
+  app.get("/api/sessions/:id/heavy-commands/:runId/output", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, runId } = request.params as { id: string; runId: string };
+    const session = await manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: "Session not found" });
+    if (!heavyCommands || !session.gitWorkspace) return reply.code(404).send({ error: "Heavyweight command not found" });
+    const output = await heavyCommands.output(session.gitWorkspace.id, runId);
+    if (!output) return reply.code(404).send({ error: "Heavyweight command not found" });
+    return output;
+  });
+
+  app.post("/api/sessions/:id/heavy-commands/:runId/terminate", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, runId } = request.params as { id: string; runId: string };
+    const session = await manager.getSession(id);
+    if (!session) return reply.code(404).send({ error: "Session not found" });
+    if (!heavyCommands || !session.gitWorkspace) return reply.code(404).send({ error: "Heavyweight command not found" });
+    const result = await heavyCommands.terminate(session.gitWorkspace.id, runId);
+    if (result === "missing") return reply.code(404).send({ error: "Heavyweight command not found" });
+    if (result === "inactive") return reply.code(409).send({ error: "Heavyweight command is no longer active" });
+    return reply.code(202).send({ accepted: true });
   });
 
   app.get("/api/sessions/:id/messages", { preHandler: access.requireAccess }, async (request, reply) => {

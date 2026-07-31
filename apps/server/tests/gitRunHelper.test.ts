@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createConnection } from "node:net";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -43,15 +44,17 @@ describe("heavyweight validation helper", () => {
     expect(events.slice(0, 2).every((event) => event.endsWith("-start"))).toBe(true);
   });
 
-  it("serializes commands and reaps a stale lease", async () => {
+  it("serializes commands and reaps a stale socket-backed lease", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
     const leases = join(root, "leases");
     const output = join(root, "events.txt");
     await mkdir(join(leases, "slot-0"), { recursive: true });
     await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({
-      pid: 999_999_999,
-      startedAt: Date.now()
+      version: 2,
+      runId: "stale-run",
+      controlSocket: join(leases, "runs", "stale-run", "control.sock"),
+      heartbeatAt: Date.now()
     }));
     const environment = {
       ...process.env,
@@ -88,4 +91,104 @@ describe("heavyweight validation helper", () => {
       env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
     })).rejects.toMatchObject({ code: 7 });
   });
+
+  it("warns and exits 124 after the configured child-output inactivity timeout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const promise = execFileAsync(process.execPath, [
+      helper,
+      "--heavy",
+      "--inactivity-warn", "30ms",
+      "--inactivity-timeout", "80ms",
+      "--runtime-timeout", "2s",
+      "--termination-grace", "20ms",
+      "--",
+      process.execPath, "-e", "setTimeout(() => {}, 5000)"
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases"),
+        MUXPILOT_HEAVY_VALIDATION_CONSOLE_HEARTBEAT_MS: "20",
+        MUXPILOT_HEAVY_VALIDATION_OWNER_HEARTBEAT_MS: "20"
+      }
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: 124,
+      stderr: expect.stringContaining("INACTIVITY_WARNING")
+    });
+    await promise.catch((error: { stderr: string }) => {
+      expect(error.stderr).toContain("TERMINATING");
+      expect(error.stderr).toContain("LEASE_RELEASED");
+    });
+  });
+
+  it("accepts operator termination over its private control socket and exits 143", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--termination-grace", "20ms", "--", process.execPath, "-e", "setTimeout(() => {}, 5000)"
+    ], { env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: leases } });
+    const outcome = run.then(() => null, (error) => error as { code: number; stderr: string });
+    const runId = await waitForRun(leases);
+    const response = await control(join(leases, "runs", runId, "control.sock"), { action: "terminate" });
+    expect(response).toMatchObject({ ok: true, accepted: true, state: "terminating" });
+    expect(await outcome).toMatchObject({ code: 143, stderr: expect.stringContaining("TERMINATING") });
+  });
+
+  it("tees lifecycle and child output into private retained session logs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const controlRoot = join(root, "session-control");
+    await mkdir(controlRoot);
+    await execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", "console.log('child-visible-output')"], {
+      env: {
+        ...process.env,
+        MUXPILOT_GIT_STATUS_FILE: join(controlRoot, "git-workflow-status.json"),
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases")
+      }
+    });
+    const logRoot = join(controlRoot, "heavy-commands");
+    const logs = (await readdir(logRoot)).filter((entry) => entry.endsWith(".log"));
+    expect(logs).toHaveLength(1);
+    expect((await stat(logRoot)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(logRoot, logs[0]!))).mode & 0o777).toBe(0o600);
+    const contents = await readFile(join(logRoot, logs[0]!), "utf8");
+    expect(contents).toContain("WAITING_FOR_SLOT");
+    expect(contents).toContain("COMMAND_STARTED");
+    expect(contents).toContain("child-visible-output");
+    expect(contents).toContain("LEASE_RELEASED");
+  });
 });
+
+async function waitForRun(leases: string): Promise<string> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    const entries = await readdir(join(leases, "runs")).catch(() => []);
+    for (const entry of entries) {
+      const owner = await readFile(join(leases, "runs", entry, "owner.json"), "utf8").then(JSON.parse).catch(() => null);
+      if (owner?.state === "running") return entry;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  throw new Error("heavyweight run did not become active");
+}
+
+function control(path: string, request: object): Promise<Record<string, unknown>> {
+  return new Promise((resolveResponse, reject) => {
+    const socket = createConnection(path);
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (input.includes("\n")) {
+        socket.end();
+        resolveResponse(JSON.parse(input.trim()));
+      }
+    });
+    socket.once("error", reject);
+  });
+}

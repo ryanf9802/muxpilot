@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
+import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
   activeSkillToken,
   ApprovalBanner,
@@ -20,6 +20,8 @@ import {
   groupEventStacks,
   groupStackableMessages,
   GitWorkspacePanel,
+  HeavyCommandIndicator,
+  HeavyCommandsModal,
   isDesktopVimAvailable,
   isPlanModeMessage,
   inputModeAction,
@@ -92,6 +94,50 @@ import {
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
+
+describe("heavyweight command UI", () => {
+  const command: HeavyCommand = {
+    runId: "mabc123-012345abcdef",
+    workspaceId: "workspace-a",
+    state: "stalled",
+    command: ["make", "lint"],
+    commandDisplay: "make lint",
+    cwd: "/workspace",
+    childPid: 2,
+    slot: 0,
+    queuedAt: new Date().toISOString(),
+    startedAt: new Date().toISOString(),
+    lastOutputAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    logPath: "/session/heavy-commands/run.log",
+    deadlines: { inactivityWarnMs: 60_000, inactivityTimeoutMs: 600_000, runtimeTimeoutMs: 1_800_000, terminationGraceMs: 30_000 },
+    packageDiagnostics: { declared: "pnpm@10.30.3", resolvedPath: "/bin/pnpm", resolvedVersion: "11.0.0", storePath: "/store", cachePaths: {}, warnings: ["version mismatch"] },
+    terminationReason: null
+  };
+
+  it("shows state and active count in the compact chat-header indicator", () => {
+    const html = renderToStaticMarkup(createElement(HeavyCommandIndicator, { commands: [command, { ...command, runId: "mabc123-fedcba543210", state: "running" }], onOpen: vi.fn() }));
+    expect(html).toContain("data-state=\"stalled\"");
+    expect(html).toContain(">2<");
+    expect(html).toContain("Open heavyweight command details");
+  });
+
+  it("renders active command details, live output, and a terminate control", () => {
+    const html = renderToStaticMarkup(createElement(HeavyCommandsModal, {
+      open: true,
+      commands: [command],
+      outputs: { [command.runId]: "lint is still running" },
+      error: "",
+      terminatingRun: null,
+      onClose: vi.fn(),
+      onTerminate: vi.fn()
+    }));
+    expect(html).toContain("Heavyweight commands");
+    expect(html).toContain("make lint");
+    expect(html).toContain("lint is still running");
+    expect(html).toContain("Terminate command");
+  });
+});
 
 function installLocalStorage(): Storage {
   const values = new Map<string, string>();
