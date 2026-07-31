@@ -407,7 +407,7 @@ function printStatus(mode, details, status) {
       : existsSync(dockerGuardSocket);
     console.log(`    agents: memory ${process.env.MUXPILOT_AGENT_MEMORY_SOFT_PERCENT ?? "50"}% soft / ${process.env.MUXPILOT_AGENT_MEMORY_HARD_PERCENT ?? "60"}% hard, cpu ${process.env.MUXPILOT_AGENT_CPU_PERCENT ?? "75"}%, tasks ${process.env.MUXPILOT_SESSION_TASKS_MAX ?? "768"}`);
     console.log(`    docker: memory ${process.env.MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT ?? "15"}% soft / ${process.env.MUXPILOT_DOCKER_MEMORY_HARD_PERCENT ?? "20"}% hard, cpu ${process.env.MUXPILOT_DOCKER_CPU_PERCENT ?? "25"}%, proxy ${dockerGuardActive ? "active" : "inactive"}`);
-    console.log(`    heavyweight validation concurrency: ${process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY ?? "1"}`);
+    console.log(`    heavyweight validation concurrency: ${process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY ?? "2"}`);
     const live = status.backendHealth?.resourceGovernor;
     if (live) {
       console.log(`    managed sessions: ${live.busySessions} busy, ${live.idleSessions} idle`);

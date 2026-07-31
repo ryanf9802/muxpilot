@@ -108,17 +108,17 @@ describe("config LAN access validation", () => {
       dockerMemoryHardPercent: 20,
       dockerCpuPercent: 25,
       sessionTasksMax: 768,
-      heavyValidationConcurrency: 1
+      heavyValidationConcurrency: 2
     });
 
     const overridden = parseConfig({
       MUXPILOT_RESOURCE_GOVERNOR: "off",
       MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "40",
-      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "2"
+      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "3"
     });
     expect(overridden.resourceGovernor).toBe("off");
     expect(overridden.agentMemorySoftPercent).toBe(40);
-    expect(overridden.heavyValidationConcurrency).toBe(2);
+    expect(overridden.heavyValidationConcurrency).toBe(3);
     expect(() => parseConfig({
       MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "70",
       MUXPILOT_AGENT_MEMORY_HARD_PERCENT: "60"

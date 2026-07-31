@@ -14,6 +14,35 @@ afterEach(async () => {
 });
 
 describe("heavyweight validation helper", () => {
+  it("allows two heavyweight commands by default", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const output = join(root, "events.txt");
+    const environment = {
+      ...process.env,
+      MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases"),
+      MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+    };
+    delete environment.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY;
+    const script = [
+      "const fs=require('node:fs');",
+      "const file=process.argv[1], id=process.argv[2], started=Date.now();",
+      "fs.appendFileSync(file,id+'-start\\n');",
+      "const timer=setInterval(()=>{",
+      "const starts=fs.readFileSync(file,'utf8').split('\\n').filter(line=>line.endsWith('-start')).length;",
+      "if(starts>=2||Date.now()-started>1000){clearInterval(timer);fs.appendFileSync(file,id+'-end\\n')}",
+      "},10)"
+    ].join("");
+    const run = (id: string) => execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", script, output, id
+    ], { env: environment });
+
+    await Promise.all([run("one"), run("two")]);
+
+    const events = (await readFile(output, "utf8")).trim().split("\n");
+    expect(events.slice(0, 2).every((event) => event.endsWith("-start"))).toBe(true);
+  });
+
   it("serializes commands and reaps a stale lease", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);

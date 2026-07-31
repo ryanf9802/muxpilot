@@ -10,7 +10,7 @@ if (args[0] !== "--heavy" || args[1] !== "--" || args.length < 3) {
   fail("usage: muxpilot-git-run.mjs --heavy -- <command> [args...]");
 }
 
-const concurrency = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY, 1);
+const concurrency = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY, 2);
 const leaseRoot = process.env.MUXPILOT_HEAVY_VALIDATION_DIR ?? join(tmpdir(), `muxpilot-heavy-validation-${process.getuid?.() ?? "user"}`);
 const pollMs = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_POLL_MS, 250);
 const staleMs = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_STALE_MS, 12 * 60 * 60 * 1000);

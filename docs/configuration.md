@@ -64,7 +64,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT`: shared Docker memory-reservation pool for containers created through managed sessions, default `15`.
 - `MUXPILOT_DOCKER_MEMORY_HARD_PERCENT`: shared Docker hard-memory pool, default `20`.
 - `MUXPILOT_DOCKER_CPU_PERCENT`: shared Docker CPU pool, default `25`.
-- `MUXPILOT_HEAVY_VALIDATION_CONCURRENCY`: number of heavyweight scan/test commands allowed concurrently across muxpilot sessions, default `1`.
+- `MUXPILOT_HEAVY_VALIDATION_CONCURRENCY`: number of heavyweight scan/test commands allowed concurrently across muxpilot sessions, default `2`.
 - `MUXPILOT_INPUT_SUBMIT_KEYS`: tmux keys sent after pasting a chat message, default `Enter`.
 - `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: tmux key sequence used to cycle Codex between Normal and Plan input modes, default `BTab` for Shift+Tab.
 - Plan-action and question-option buttons use Codex menu selection keys directly; they do not use `MUXPILOT_INPUT_SUBMIT_KEYS`.

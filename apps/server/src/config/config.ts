@@ -67,7 +67,7 @@ const schema = z.object({
   dockerMemoryHardPercent: percentage.default(20),
   dockerCpuPercent: percentage.default(25),
   sessionTasksMax: z.coerce.number().int().positive().default(768),
-  heavyValidationConcurrency: z.coerce.number().int().positive().default(1),
+  heavyValidationConcurrency: z.coerce.number().int().positive().default(2),
   openaiApiKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
     z.string().optional()
