@@ -183,6 +183,14 @@ export interface HeavyCommand {
   queuedAt: string;
   startedAt: string | null;
   lastOutputAt: string | null;
+  lastActivityAt?: string | null;
+  activity?: {
+    processCount: number;
+    cpuTicks: number;
+    ioBytes: number;
+    runningContainers: number;
+    createdContainers: number;
+  };
   heartbeatAt: string;
   logPath: string | null;
   deadlines: {

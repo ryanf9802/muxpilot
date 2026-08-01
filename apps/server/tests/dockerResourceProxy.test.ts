@@ -95,6 +95,54 @@ describe("DockerResourceProxy", () => {
     await failedProxy.close();
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
+
+  it("times out a stuck container start with a clear gateway timeout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const daemon = createServer(() => { /* deliberately never responds */ });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      lifecycleStartTimeoutMs: 30
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    const response = await request(proxySocket, "POST", "/v1.47/containers/stuck/start");
+    expect(response.status).toBe(504);
+    expect(response.body).toContain("timed out waiting");
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
+  it("reaps containers whose heavyweight owner disappeared", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const deleted: string[] = [];
+    const daemon = createServer((request, response) => {
+      if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify([{ Id: "orphan", State: "created", Labels: { "com.muxpilot.managed": "true", "com.muxpilot.heavy-run": "mabc123-012345abcdef" } }]));
+      } else if (request.method === "DELETE") {
+        deleted.push(request.url ?? "");
+        response.writeHead(204); response.end();
+      } else { response.writeHead(200); response.end("{}"); }
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      heavyValidationDir: join(root, "heavy"), orphanReapIntervalMs: 10, orphanGraceMs: 1
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(deleted).toContain("/containers/orphan?force=true");
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
 });
 
 function request(socketPath: string, method: string, path: string, payload?: object, headers: Record<string, string> = {}) {

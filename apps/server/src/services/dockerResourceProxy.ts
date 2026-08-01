@@ -1,5 +1,5 @@
 import { request as httpRequest, createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { dirname } from "node:path";
 import type { Duplex } from "node:stream";
@@ -19,6 +19,10 @@ export interface DockerResourceProxyConfig {
   memoryHardPercent: number;
   cpuPercent: number;
   pidsLimit?: number;
+  lifecycleStartTimeoutMs?: number;
+  heavyValidationDir?: string;
+  orphanReapIntervalMs?: number;
+  orphanGraceMs?: number;
 }
 
 interface ManagedContainer {
@@ -43,6 +47,8 @@ interface Logger {
 export class DockerResourceProxy {
   private readonly daemonSocketPath: string;
   private readonly containers = new Map<string, ManagedContainer>();
+  private readonly orphanFirstSeen = new Map<string, number>();
+  private orphanTimer: NodeJS.Timeout | null = null;
   private server = createServer((request, response) => void this.handle(request, response));
 
   constructor(private readonly config: DockerResourceProxyConfig, private readonly logger: Logger) {
@@ -62,10 +68,15 @@ export class DockerResourceProxy {
       });
     });
     await chmod(this.config.socketPath, 0o600);
+    if (this.config.heavyValidationDir) {
+      this.orphanTimer = setInterval(() => void this.reapOrphans(), this.config.orphanReapIntervalMs ?? 15_000);
+      void this.reapOrphans();
+    }
     this.logger.info({ socketPath: this.config.socketPath }, "Docker resource proxy started");
   }
 
   async close(): Promise<void> {
+    if (this.orphanTimer) clearInterval(this.orphanTimer);
     const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
     this.server.closeAllConnections();
     await closed;
@@ -86,12 +97,14 @@ export class DockerResourceProxy {
         await this.handleUpdate(request, response);
         return;
       }
-      await forwardStreaming(this.daemonSocketPath, request, response, () => this.observeLifecycle(request));
+      const start = request.method === "POST" && (request.url ?? "").match(ACTION_PATH)?.[2] === "start";
+      await forwardStreaming(this.daemonSocketPath, request, response, () => this.observeLifecycle(request), start ? this.config.lifecycleStartTimeoutMs ?? 60_000 : undefined);
     } catch (error) {
       this.logger.warn({ err: error }, "Docker proxy request failed");
-      if (!response.headersSent) response.writeHead(502, { "content-type": "application/json" });
+      const timedOut = error instanceof DockerLifecycleTimeout;
+      if (!response.headersSent) response.writeHead(timedOut ? 504 : 502, { "content-type": "application/json" });
       response.end(JSON.stringify({
-        message: `muxpilot Docker guard could not reach ${this.daemonSocketPath}`
+        message: timedOut ? error.message : `muxpilot Docker guard could not reach ${this.daemonSocketPath}`
       }));
     }
   }
@@ -193,6 +206,52 @@ export class DockerResourceProxy {
     };
   }
 
+  private async reapOrphans(): Promise<void> {
+    try {
+      const filters = encodeURIComponent(JSON.stringify({ label: ["com.muxpilot.managed=true", "com.muxpilot.heavy-run"] }));
+      const response = await rawDockerRequest(this.daemonSocketPath, "GET", `/containers/json?all=1&filters=${filters}`, Buffer.alloc(0), {}, 5_000);
+      if (response.statusCode >= 300) return;
+      const containers = JSON.parse(response.body.toString("utf8")) as Array<{ Id?: string; Labels?: Record<string, string>; State?: string }>;
+      const present = new Set<string>();
+      for (const container of containers) {
+        const id = container.Id;
+        const runId = container.Labels?.["com.muxpilot.heavy-run"];
+        if (!id || !runId || !HEAVY_RUN_ID.test(runId)) continue;
+        present.add(id);
+        const abnormal = await this.abnormallyEnded(runId);
+        if (!abnormal) { this.orphanFirstSeen.delete(id); continue; }
+        const firstSeen = this.orphanFirstSeen.get(id) ?? Date.now();
+        this.orphanFirstSeen.set(id, firstSeen);
+        if (Date.now() - firstSeen < (this.config.orphanGraceMs ?? 60_000)) continue;
+        const removed = await rawDockerRequest(this.daemonSocketPath, "DELETE", `/containers/${encodeURIComponent(id)}?force=true`, Buffer.alloc(0), {}, 5_000);
+        if (removed.statusCode < 300 || removed.statusCode === 404) {
+          this.orphanFirstSeen.delete(id);
+          this.containers.delete(id);
+          this.logger.info({ containerId: id, runId }, "Removed orphaned heavyweight container");
+        }
+      }
+      for (const id of this.orphanFirstSeen.keys()) if (!present.has(id)) this.orphanFirstSeen.delete(id);
+    } catch (error) {
+      this.logger.warn({ err: error }, "Docker heavyweight orphan reaper failed");
+    }
+  }
+
+  private async abnormallyEnded(runId: string): Promise<boolean> {
+    const root = this.config.heavyValidationDir;
+    if (!root) return false;
+    try {
+      const owner = JSON.parse(await readFile(`${root}/runs/${runId}/owner.json`, "utf8")) as Record<string, unknown>;
+      if (owner.state === "completed" && !owner.terminationReason) return false;
+      if (["waiting", "running", "stalled", "terminating"].includes(String(owner.state))) {
+        const heartbeat = Date.parse(String(owner.heartbeatAt));
+        return !Number.isFinite(heartbeat) || Date.now() - heartbeat > 60_000;
+      }
+      return true;
+    } catch {
+      return true;
+    }
+  }
+
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     const upstream = httpRequest({
       socketPath: this.daemonSocketPath,
@@ -250,7 +309,8 @@ async function forwardStreaming(
   socketPath: string,
   incoming: IncomingMessage,
   outgoing: ServerResponse,
-  onSuccess: () => void
+  onSuccess: () => void,
+  timeoutMs?: number
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const upstream = httpRequest({
@@ -267,8 +327,13 @@ async function forwardStreaming(
       });
     });
     upstream.on("error", reject);
+    if (timeoutMs) upstream.setTimeout(timeoutMs, () => upstream.destroy(new DockerLifecycleTimeout(timeoutMs)));
     incoming.pipe(upstream);
   });
+}
+
+class DockerLifecycleTimeout extends Error {
+  constructor(timeoutMs: number) { super(`muxpilot Docker guard timed out waiting ${Math.ceil(timeoutMs / 1_000)}s for the container start operation`); }
 }
 
 async function rawDockerRequest(
@@ -276,7 +341,8 @@ async function rawDockerRequest(
   method: string,
   path: string,
   body: Buffer,
-  headers: Record<string, string | string[] | undefined> = {}
+  headers: Record<string, string | string[] | undefined> = {},
+  timeoutMs?: number
 ): Promise<{ statusCode: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
   return new Promise((resolve, reject) => {
     const request = httpRequest({ socketPath, method, path, headers }, (response) => {
@@ -289,6 +355,7 @@ async function rawDockerRequest(
       }));
     });
     request.on("error", reject);
+    if (timeoutMs) request.setTimeout(timeoutMs, () => request.destroy(new Error(`Docker API request timed out after ${timeoutMs}ms`)));
     request.end(body);
   });
 }

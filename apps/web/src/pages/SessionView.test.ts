@@ -108,6 +108,8 @@ describe("heavyweight command UI", () => {
     queuedAt: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     lastOutputAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
+    activity: { processCount: 3, cpuTicks: 20, ioBytes: 40, runningContainers: 1, createdContainers: 2 },
     heartbeatAt: new Date().toISOString(),
     logPath: "/session/heavy-commands/run.log",
     deadlines: { inactivityWarnMs: 60_000, inactivityTimeoutMs: 600_000, runtimeTimeoutMs: 1_800_000, terminationGraceMs: 30_000 },
@@ -136,6 +138,9 @@ describe("heavyweight command UI", () => {
     expect(html).toContain("make lint");
     expect(html).toContain("lint is still running");
     expect(html).toContain("Terminate command");
+    expect(html).toContain("No observed progress");
+    expect(html).toContain("3 processes");
+    expect(html).toContain("1 running / 2 created containers");
   });
 });
 

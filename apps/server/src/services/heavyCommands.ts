@@ -67,7 +67,7 @@ export class HeavyCommandService {
     if (!details?.isFile() || details.isSymbolicLink() || details.size > MAX_OWNER_BYTES) return null;
     try {
       const owner = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-      if (owner.version !== 2 || owner.runId !== runId || owner.workspaceId !== workspaceId) return null;
+      if (![2, 3].includes(Number(owner.version)) || owner.runId !== runId || owner.workspaceId !== workspaceId) return null;
       if (typeof owner.state !== "string" || !Array.isArray(owner.command) || !owner.command.every((part) => typeof part === "string")) return null;
       if (typeof owner.cwd !== "string" || typeof owner.commandDisplay !== "string" || typeof owner.queuedAt !== "string" || typeof owner.heartbeatAt !== "string") return null;
       const heartbeatAt = Date.parse(owner.heartbeatAt);
@@ -75,6 +75,7 @@ export class HeavyCommandService {
       if (ACTIVE_STATES.has(owner.state) && Date.now() - heartbeatAt > 60_000) return null;
       if (owner.startedAt !== null && typeof owner.startedAt !== "string") return null;
       if (owner.lastOutputAt !== null && typeof owner.lastOutputAt !== "string") return null;
+      if (owner.version === 3 && (owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string" || !validActivity(owner.activity))) return null;
       if (owner.logPath !== null && typeof owner.logPath !== "string") return null;
       if (owner.childPid !== null && (!Number.isInteger(owner.childPid) || Number(owner.childPid) <= 0)) return null;
       if (owner.slot !== null && (!Number.isInteger(owner.slot) || Number(owner.slot) < 0)) return null;
@@ -86,6 +87,13 @@ export class HeavyCommandService {
       return null;
     }
   }
+}
+
+function validActivity(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const activity = value as Record<string, unknown>;
+  return ["processCount", "cpuTicks", "ioBytes", "runningContainers", "createdContainers"]
+    .every((key) => Number.isFinite(activity[key]) && Number(activity[key]) >= 0);
 }
 
 function validDeadlines(value: unknown): boolean {

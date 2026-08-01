@@ -528,9 +528,9 @@ const HEAVY_STATE_PRIORITY: Record<HeavyCommand["state"], number> = {
 export function HeavyCommandIndicator({ commands, onOpen }: { commands: HeavyCommand[]; onOpen: () => void }) {
   if (commands.length === 0) return null;
   const primary = [...commands].sort((left, right) => HEAVY_STATE_PRIORITY[right.state] - HEAVY_STATE_PRIORITY[left.state])[0]!;
-  const reference = primary.lastOutputAt ?? primary.startedAt ?? primary.queuedAt;
+  const reference = primary.lastActivityAt ?? primary.lastOutputAt ?? primary.startedAt ?? primary.queuedAt;
   const elapsed = compactDuration(Date.now() - Date.parse(reference));
-  const title = `${heavyStateLabel(primary.state)}: ${primary.commandDisplay} · ${primary.startedAt ? `silent ${elapsed}` : `waiting ${elapsed}`}${commands.length > 1 ? ` · ${commands.length} active` : ""}`;
+  const title = `${heavyStateLabel(primary.state)}: ${primary.commandDisplay} · ${primary.startedAt ? `progress ${elapsed} ago` : `waiting ${elapsed}`}${commands.length > 1 ? ` · ${commands.length} active` : ""}`;
   return (
     <button
       type="button"
@@ -577,6 +577,7 @@ export function HeavyCommandsModal({
         <div className="heavy-command-list">
           {commands.map((command) => {
             const silence = command.lastOutputAt ? compactDuration(now - Date.parse(command.lastOutputAt)) : null;
+            const activityAge = command.lastActivityAt ? compactDuration(now - Date.parse(command.lastActivityAt)) : silence;
             const elapsed = compactDuration(now - Date.parse(command.startedAt ?? command.queuedAt));
             return (
               <article className="heavy-command-detail" key={command.runId} data-state={command.state}>
@@ -589,7 +590,8 @@ export function HeavyCommandsModal({
                   <div><dt>Working directory</dt><dd>{command.cwd}</dd></div>
                   <div><dt>Slot / PID</dt><dd>{command.slot ?? "queued"} / {command.childPid ?? "not started"}</dd></div>
                   <div><dt>Output silence</dt><dd>{silence ?? "not started"}</dd></div>
-                  <div><dt>Limits</dt><dd>warn {compactDuration(command.deadlines.inactivityWarnMs)} silent · stop {compactDuration(command.deadlines.inactivityTimeoutMs)} silent · {compactDuration(command.deadlines.runtimeTimeoutMs)} total · {compactDuration(command.deadlines.terminationGraceMs)} grace</dd></div>
+                  <div><dt>Observed activity</dt><dd>{activityAge ?? "not started"} ago · {command.activity?.processCount ?? "?"} processes · {command.activity?.runningContainers ?? "?"} running / {command.activity?.createdContainers ?? "?"} created containers</dd></div>
+                  <div><dt>Limits</dt><dd>warn {compactDuration(command.deadlines.inactivityWarnMs)} idle · stop {compactDuration(command.deadlines.inactivityTimeoutMs)} idle · {compactDuration(command.deadlines.runtimeTimeoutMs)} total · {compactDuration(command.deadlines.terminationGraceMs)} grace</dd></div>
                   <div><dt>Package manager</dt><dd>{command.packageDiagnostics?.declared ?? "not declared"} · {command.packageDiagnostics?.resolvedVersion ?? "version unavailable"} · {command.packageDiagnostics?.resolvedPath ?? "path unavailable"}</dd></div>
                   <div><dt>Package store</dt><dd>{command.packageDiagnostics?.storePath ?? "unavailable"}</dd></div>
                   <div><dt>Cache paths</dt><dd>{formatHeavyCachePaths(command)}</dd></div>
@@ -618,7 +620,7 @@ export function HeavyCommandsModal({
 }
 
 function heavyStateLabel(state: HeavyCommand["state"]): string {
-  return { waiting: "Waiting for slot", running: "Running", stalled: "Output stalled", terminating: "Terminating" }[state];
+  return { waiting: "Waiting for slot", running: "Running", stalled: "No observed progress", terminating: "Terminating" }[state];
 }
 
 function compactDuration(milliseconds: number): string {

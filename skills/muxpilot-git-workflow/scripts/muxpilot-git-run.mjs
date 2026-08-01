@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, constants, createWriteStream, existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, createWriteStream, existsSync, readFileSync, readdirSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -30,6 +30,11 @@ let leasePath = null;
 let child = null;
 let childStartedAt = null;
 let lastOutputAt = null;
+let lastActivityAt = null;
+let activity = { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 };
+let previousActivity = null;
+let lastDockerSampleAt = 0;
+let dockerActivity = { runningContainers: 0, createdContainers: 0 };
 let warned = false;
 let terminationReason = null;
 let desiredExitCode = null;
@@ -57,7 +62,7 @@ consoleTimer = setInterval(() => {
     lifecycle("WAITING_FOR_SLOT", `run=${runId} waited=${formatElapsed(now - startedWaitingAt)}`);
     return;
   }
-  lifecycle("RUNNING", `run=${runId} elapsed=${formatElapsed(now - childStartedAt)} silent=${formatElapsed(now - lastOutputAt)} state=${state}`);
+  lifecycle("RUNNING", `run=${runId} elapsed=${formatElapsed(now - childStartedAt)} output_silent=${formatElapsed(now - lastOutputAt)} progress_idle=${formatElapsed(now - lastActivityAt)} state=${state} processes=${activity.processCount} containers=${activity.runningContainers}`);
 }, consoleHeartbeatMs);
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -78,6 +83,7 @@ try {
   for (const message of packageDiagnostics.messages) lifecycle(message.level, message.text);
   childStartedAt = Date.now();
   lastOutputAt = childStartedAt;
+  lastActivityAt = childStartedAt;
 
   const childEnvironment = {
     ...process.env,
@@ -241,14 +247,24 @@ function probeSocket(path) {
 function runWatchdog() {
   if (!childStartedAt || state === "terminating") return;
   const now = Date.now();
-  const silentFor = now - lastOutputAt;
-  if (!warned && silentFor >= inactivityWarnMs) {
+  const sampled = sampleActivity();
+  const progressed = sampled.runningContainers > 0 || !previousActivity
+    || sampled.cpuTicks > previousActivity.cpuTicks || sampled.ioBytes > previousActivity.ioBytes;
+  activity = sampled;
+  previousActivity = sampled;
+  if (progressed) {
+    lastActivityAt = now;
+    if (state === "stalled") state = "running";
+    warned = false;
+  }
+  const idleFor = now - lastActivityAt;
+  if (!warned && idleFor >= inactivityWarnMs) {
     warned = true;
     state = "stalled";
-    lifecycle("INACTIVITY_WARNING", `run=${runId} silent=${formatElapsed(silentFor)} timeout=${formatElapsed(inactivityTimeoutMs)}`);
+    lifecycle("INACTIVITY_WARNING", `run=${runId} progress_idle=${formatElapsed(idleFor)} output_silent=${formatElapsed(now - lastOutputAt)} timeout=${formatElapsed(inactivityTimeoutMs)}`);
     void updateOwner();
   }
-  if (silentFor >= inactivityTimeoutMs) requestTermination(`no child output for ${formatElapsed(silentFor)}`, 124);
+  if (idleFor >= inactivityTimeoutMs) requestTermination(`no observed process, I/O, output, or running-container progress for ${formatElapsed(idleFor)}`, 124);
   else if (now - childStartedAt >= runtimeTimeoutMs) requestTermination(`runtime exceeded ${formatElapsed(runtimeTimeoutMs)}`, 124);
 }
 
@@ -278,7 +294,9 @@ function signalProcessGroup(signal) {
 
 function relayChildOutput(destination, chunk) {
   lastOutputAt = Date.now();
+  lastActivityAt = lastOutputAt;
   if (state === "stalled") state = "running";
+  warned = false;
   destination.write(chunk);
   writeLog(chunk);
 }
@@ -290,7 +308,7 @@ function updateOwner() {
 
 async function writeOwner() {
   const owner = {
-    version: 2,
+    version: 3,
     runId,
     workspaceId,
     state,
@@ -305,6 +323,8 @@ async function writeOwner() {
     queuedAt: new Date(startedWaitingAt).toISOString(),
     startedAt: childStartedAt ? new Date(childStartedAt).toISOString() : null,
     lastOutputAt: lastOutputAt ? new Date(lastOutputAt).toISOString() : null,
+    lastActivityAt: lastActivityAt ? new Date(lastActivityAt).toISOString() : null,
+    activity,
     heartbeatAt: new Date().toISOString(),
     deadlines: {
       inactivityWarnMs,
@@ -441,7 +461,15 @@ async function pruneRunRecords() {
     } catch { /* malformed and legacy records are left for stale cleanup */ }
   }
   completed.sort((left, right) => right.finishedAt - left.finishedAt);
-  for (const old of completed.slice(19)) await rm(join(runsRoot, old.entry), { recursive: true, force: true });
+  for (const old of completed.slice(19)) {
+    if (!hasDockerContainers(old.entry)) await rm(join(runsRoot, old.entry), { recursive: true, force: true });
+  }
+}
+
+function hasDockerContainers(candidateRunId) {
+  if (!resolveExecutable("docker")) return false;
+  const result = spawnSync("docker", ["ps", "-aq", "--filter", `label=com.muxpilot.heavy-run=${candidateRunId}`], { encoding: "utf8", timeout: 2_000, env: process.env });
+  return result.status !== 0 || Boolean(result.stdout.trim());
 }
 
 async function cleanupDockerContainers() {
@@ -450,8 +478,39 @@ async function cleanupDockerContainers() {
   const ids = list.status === 0 ? list.stdout.trim().split(/\s+/).filter(Boolean) : [];
   if (!ids.length) return;
   lifecycle("DOCKER_CLEANUP", `run=${runId} containers=${ids.length}`);
-  spawnSync("docker", ["stop", "--time", String(Math.max(1, Math.ceil(terminationGraceMs / 1000))), ...ids], { timeout: terminationGraceMs + 10_000, env: process.env });
-  spawnSync("docker", ["rm", "--force", ...ids], { timeout: 15_000, env: process.env });
+  const removed = spawnSync("docker", ["rm", "--force", ...ids], { encoding: "utf8", timeout: 15_000, env: process.env });
+  lifecycle(removed.status === 0 ? "DOCKER_CLEANUP_COMPLETE" : "DOCKER_CLEANUP_FAILED", `run=${runId} containers=${ids.length}${removed.stderr ? ` detail=${removed.stderr.trim()}` : ""}`);
+}
+
+function sampleActivity() {
+  let processCount = 0;
+  let cpuTicks = 0;
+  let ioBytes = 0;
+  if (child?.pid && process.platform === "linux") {
+    for (const entry of readdirSync("/proc").filter((value) => /^\d+$/.test(value))) {
+      try {
+        const statText = readFileSync(`/proc/${entry}/stat`, "utf8");
+        const tail = statText.slice(statText.lastIndexOf(")") + 2).split(" ");
+        if (Number(tail[2]) !== child.pid) continue;
+        processCount += 1;
+        cpuTicks += Number(tail[11]) + Number(tail[12]);
+        const io = readFileSync(`/proc/${entry}/io`, "utf8");
+        ioBytes += Number(io.match(/^read_bytes:\s+(\d+)/m)?.[1] ?? 0) + Number(io.match(/^write_bytes:\s+(\d+)/m)?.[1] ?? 0);
+      } catch { /* process exited during sampling or proc entry is restricted */ }
+    }
+  }
+  if (Date.now() - lastDockerSampleAt >= 5_000 && resolveExecutable("docker")) {
+    lastDockerSampleAt = Date.now();
+    const result = spawnSync("docker", ["ps", "-a", "--filter", `label=com.muxpilot.heavy-run=${runId}`, "--format", "{{.State}}"], { encoding: "utf8", timeout: 1_000, env: process.env });
+    if (result.status === 0) {
+      dockerActivity = { runningContainers: 0, createdContainers: 0 };
+      for (const value of result.stdout.trim().split(/\s+/).filter(Boolean)) {
+        if (value === "running" || value === "restarting") dockerActivity.runningContainers += 1;
+        if (value === "created") dockerActivity.createdContainers += 1;
+      }
+    }
+  }
+  return { processCount, cpuTicks, ioBytes, ...dockerActivity };
 }
 
 function appendDockerHeader(existing, name, value) {

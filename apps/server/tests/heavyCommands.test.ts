@@ -31,6 +31,13 @@ describe("HeavyCommandService", () => {
     expect((await service.list("workspace-b")).commands).toHaveLength(0);
     expect((await service.output("workspace-a", runId))?.output).toBe("visible output");
     expect(await service.output("workspace-b", runId)).toBeNull();
+
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", logPath), version: 3, state: "waiting", startedAt: null,
+      lastOutputAt: null, lastActivityAt: null,
+      activity: { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    expect((await service.list("workspace-a")).commands[0]).toMatchObject({ state: "waiting", lastActivityAt: null });
   });
 
   it("rejects malformed owners and sends termination over the private control socket", async () => {

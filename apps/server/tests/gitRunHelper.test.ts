@@ -123,6 +123,16 @@ describe("heavyweight validation helper", () => {
     });
   });
 
+  it("treats silent process-group CPU work as progress", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const result = await execFileAsync(process.execPath, [
+      helper, "--heavy", "--inactivity-warn", "30ms", "--inactivity-timeout", "80ms", "--runtime-timeout", "2s", "--",
+      process.execPath, "-e", "const end=Date.now()+250; while(Date.now()<end){}"
+    ], { env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") } });
+    expect(result.stderr).not.toContain("INACTIVITY_WARNING");
+  });
+
   it("accepts operator termination over its private control socket and exits 143", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
