@@ -1,4 +1,5 @@
 import { request as httpRequest, createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createConnection } from "node:net";
 import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { dirname } from "node:path";
@@ -244,7 +245,8 @@ export class DockerResourceProxy {
       if (owner.state === "completed" && !owner.terminationReason) return false;
       if (["waiting", "running", "stalled", "terminating"].includes(String(owner.state))) {
         const heartbeat = Date.parse(String(owner.heartbeatAt));
-        return !Number.isFinite(heartbeat) || Date.now() - heartbeat > 60_000;
+        if (!Number.isFinite(heartbeat) || Date.now() - heartbeat > 60_000) return true;
+        return !await probeControlSocket(`${root}/runs/${runId}/control.sock`);
       }
       return true;
     } catch {
@@ -272,6 +274,23 @@ export class DockerResourceProxy {
     upstream.on("error", () => socket.destroy());
     upstream.end();
   }
+}
+
+function probeControlSocket(path: string): Promise<boolean> {
+  return new Promise((resolveProbe) => {
+    const socket = createConnection(path);
+    let settled = false;
+    const finish = (alive: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveProbe(alive);
+    };
+    socket.setTimeout(500, () => finish(false));
+    socket.once("connect", () => socket.write(`${JSON.stringify({ action: "probe" })}\n`));
+    socket.on("data", () => finish(true));
+    socket.once("error", () => finish(false));
+  });
 }
 
 function headerValue(request: IncomingMessage, name: string): string | null {

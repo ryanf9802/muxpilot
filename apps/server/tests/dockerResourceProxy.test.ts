@@ -1,5 +1,5 @@
 import { request as httpRequest, createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -121,11 +121,17 @@ describe("DockerResourceProxy", () => {
     roots.push(root);
     const daemonSocket = join(root, "daemon.sock");
     const proxySocket = join(root, "proxy.sock");
+    const heavyRoot = join(root, "heavy");
+    const runId = "mabc123-012345abcdef";
+    await mkdir(join(heavyRoot, "runs", runId), { recursive: true });
+    await writeFile(join(heavyRoot, "runs", runId, "owner.json"), JSON.stringify({
+      state: "running", heartbeatAt: new Date().toISOString()
+    }));
     const deleted: string[] = [];
     const daemon = createServer((request, response) => {
       if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ Id: "orphan", State: "created", Labels: { "com.muxpilot.managed": "true", "com.muxpilot.heavy-run": "mabc123-012345abcdef" } }]));
+        response.end(JSON.stringify([{ Id: "orphan", State: "created", Labels: { "com.muxpilot.managed": "true", "com.muxpilot.heavy-run": runId } }]));
       } else if (request.method === "DELETE") {
         deleted.push(request.url ?? "");
         response.writeHead(204); response.end();
@@ -135,7 +141,7 @@ describe("DockerResourceProxy", () => {
     const proxy = new DockerResourceProxy({
       socketPath: proxySocket, daemonSocketPath: daemonSocket,
       memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
-      heavyValidationDir: join(root, "heavy"), orphanReapIntervalMs: 10, orphanGraceMs: 1
+      heavyValidationDir: heavyRoot, orphanReapIntervalMs: 10, orphanGraceMs: 1
     }, { info: vi.fn(), warn: vi.fn() });
     await proxy.start();
     await new Promise((resolve) => setTimeout(resolve, 80));
