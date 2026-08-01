@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { lstat, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -188,6 +188,34 @@ describe("standalone local Git workflow helpers", () => {
     expect(settled).toBe(false);
     await rm(lock, { recursive: true, force: true });
     expect(await retargeting).toContain("TARGET_UPDATED");
+  });
+
+  it("installs localized Node dependencies transactionally and restores the shared link on failure", async () => {
+    const root = await repository();
+    const shared = join(root, "shared-node-modules");
+    await mkdir(shared);
+    await writeFile(join(root, "package.json"), JSON.stringify({ packageManager: "pnpm@10.30.3" }));
+    await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    await git(root, ["add", "package.json", "pnpm-lock.yaml"]);
+    await git(root, ["commit", "-m", "add package metadata"]);
+    const environment = helperEnvironment(root, [{ kind: "node", relativePath: "node_modules", sourcePath: shared, linked: true }]);
+    const worktree = (await node("muxpilot-git-begin.mjs", environment)).match(/WORKTREE_READY (\S+)/)![1]!;
+    const bin = join(root, "fake-bin");
+    await mkdir(bin);
+    const corepack = join(bin, "corepack");
+    await writeFile(corepack, "#!/bin/sh\nmkdir -p node_modules\ntouch node_modules/.installed\n");
+    await chmod(corepack, 0o755);
+    const installed = await node("muxpilot-git-deps.mjs", { ...environment, PATH: `${bin}:${environment.PATH}` }, ["localize", "node_modules"]);
+    expect(installed).toContain("install=frozen");
+    expect((await lstat(join(worktree, "node_modules"))).isDirectory()).toBe(true);
+    expect(await stat(join(worktree, "node_modules", ".installed"))).toBeTruthy();
+
+    await rm(join(worktree, "node_modules"), { recursive: true, force: true });
+    await import("node:fs/promises").then(({ symlink }) => symlink(shared, join(worktree, "node_modules"), "dir"));
+    await writeFile(corepack, "#!/bin/sh\nexit 9\n");
+    await expect(node("muxpilot-git-deps.mjs", { ...environment, PATH: `${bin}:${environment.PATH}` }, ["localize", "node_modules"]))
+      .rejects.toThrow("Managed dependency install failed");
+    expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(true);
   });
 });
 
