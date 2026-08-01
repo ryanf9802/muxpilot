@@ -119,7 +119,7 @@ try {
   process.exitCode = desiredExitCode ?? 1;
 } finally {
   clearRuntimeTimers();
-  if (terminationReason) await cleanupDockerContainers();
+  if (terminationReason || (process.exitCode ?? 0) !== 0) await cleanupDockerContainers();
   if (leasePath) {
     await rm(leasePath, { recursive: true, force: true });
     lifecycle("LEASE_RELEASED", `run=${runId} slot=${slot}`);
@@ -333,7 +333,8 @@ async function writeOwner() {
       terminationGraceMs
     },
     packageDiagnostics,
-    terminationReason
+    terminationReason,
+    exitCode: state === "completed" ? process.exitCode ?? null : null
   };
   const temporary = join(runDir, `owner-${process.pid}-${randomBytes(3).toString("hex")}.tmp`);
   await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 });

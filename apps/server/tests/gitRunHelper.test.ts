@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConnection } from "node:net";
@@ -90,6 +90,21 @@ describe("heavyweight validation helper", () => {
     ], {
       env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
     })).rejects.toMatchObject({ code: 7 });
+  });
+
+  it("force-removes labeled containers after a failed Docker command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    const cleanup = join(root, "cleanup.txt");
+    await mkdir(bin);
+    const docker = join(bin, "docker");
+    await writeFile(docker, `#!/bin/sh\nif [ "$1" = ps ]; then echo fake-container; exit 0; fi\nif [ "$1" = rm ]; then echo "$@" > "${cleanup}"; exit 0; fi\nexit 7\n`);
+    await chmod(docker, 0o755);
+    await expect(execFileAsync(process.execPath, [helper, "--heavy", "--", "docker", "run", "example"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
+    })).rejects.toMatchObject({ code: 7 });
+    expect(await readFile(cleanup, "utf8")).toContain("rm --force fake-container");
   });
 
   it("warns and exits 124 after the configured child-output inactivity timeout", async () => {

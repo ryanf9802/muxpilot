@@ -242,7 +242,7 @@ export class DockerResourceProxy {
     if (!root) return false;
     try {
       const owner = JSON.parse(await readFile(`${root}/runs/${runId}/owner.json`, "utf8")) as Record<string, unknown>;
-      if (owner.state === "completed" && !owner.terminationReason) return false;
+      if (owner.state === "completed" && !owner.terminationReason && (owner.exitCode === 0 || owner.exitCode === undefined)) return false;
       if (["waiting", "running", "stalled", "terminating"].includes(String(owner.state))) {
         const heartbeat = Date.parse(String(owner.heartbeatAt));
         if (!Number.isFinite(heartbeat) || Date.now() - heartbeat > 60_000) return true;
