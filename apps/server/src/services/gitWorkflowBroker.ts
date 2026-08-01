@@ -41,11 +41,14 @@ export class GitWorkflowBroker {
     await rm(this.socketPath, { force: true });
     this.server = createServer((socket) => {
       let input = "";
+      let handled = false;
       socket.setEncoding("utf8");
       socket.on("data", (chunk) => {
+        if (handled) return;
         input += chunk;
-        if (input.length > MAX_REQUEST_BYTES) socket.destroy(new Error("request too large"));
+        if (input.length > MAX_REQUEST_BYTES) { handled = true; socket.destroy(new Error("request too large")); return; }
         if (!input.includes("\n")) return;
+        handled = true;
         const operation = this.queue.then(() => this.handle(input.trim()));
         this.queue = operation.then(() => undefined, () => undefined);
         void operation.then(
@@ -87,7 +90,9 @@ export class GitWorkflowBroker {
   private async handle(raw: string): Promise<object> {
     const request = JSON.parse(raw) as Partial<FinishRequest>;
     if (request.action !== "finish" || typeof request.workspaceId !== "string" || typeof request.token !== "string"
-      || typeof request.targetSha !== "string" || typeof request.taskHead !== "string") throw new Error("invalid broker request");
+      || typeof request.targetSha !== "string" || typeof request.taskHead !== "string"
+      || (request.cleanTargetBypass !== undefined && typeof request.cleanTargetBypass !== "boolean")
+      || (request.retainWorktree !== undefined && typeof request.retainWorktree !== "boolean")) throw new Error("invalid broker request");
     const workspace = await this.db.getGitWorkspace(request.workspaceId);
     if (!workspace || !workspace.helperToken || !timingSafeToken(workspace.helperToken, request.token)) throw new Error("unauthorized broker request");
     return this.finish(workspace, request as FinishRequest);

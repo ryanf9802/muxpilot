@@ -75,7 +75,7 @@ export class HeavyCommandService {
       if (ACTIVE_STATES.has(owner.state) && Date.now() - heartbeatAt > 60_000) return null;
       if (owner.startedAt !== null && typeof owner.startedAt !== "string") return null;
       if (owner.lastOutputAt !== null && typeof owner.lastOutputAt !== "string") return null;
-      if (owner.version === 3 && (owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string" || !validActivity(owner.activity))) return null;
+      if (owner.version === 3 && ((owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string") || !validActivity(owner.activity))) return null;
       if (owner.logPath !== null && typeof owner.logPath !== "string") return null;
       if (owner.childPid !== null && (!Number.isInteger(owner.childPid) || Number(owner.childPid) <= 0)) return null;
       if (owner.slot !== null && (!Number.isInteger(owner.slot) || Number(owner.slot) < 0)) return null;
