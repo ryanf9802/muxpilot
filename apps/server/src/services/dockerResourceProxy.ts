@@ -8,6 +8,7 @@ import type { Duplex } from "node:stream";
 const CREATE_PATH = /\/containers\/create(?:\?|$)/;
 const UPDATE_PATH = /\/containers\/([^/]+)\/update(?:\?|$)/;
 const ACTION_PATH = /\/containers\/([^/]+)\/(start|stop|kill|restart|delete)(?:\?|$)/;
+const ATTACH_PATH = /\/containers\/[^/]+\/attach(?:\/ws)?(?:\?|$)/;
 const DELETE_PATH = /\/containers\/([^/?]+)(?:\?|$)/;
 const MAX_MUTATED_BODY_BYTES = 16 * 1024 * 1024;
 const HEAVY_RUN_ID = /^[a-z0-9]+-[a-f0-9]{12}$/;
@@ -287,13 +288,32 @@ export class DockerResourceProxy {
   }
 
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    let timedOut = false;
     const upstream = httpRequest({
       socketPath: this.daemonSocketPath,
       method: request.method,
       path: request.url,
       headers: request.headers
+    }, (response) => {
+      clearTimeout(timer);
+      socket.write(
+        `HTTP/${response.httpVersion} ${response.statusCode} ${response.statusMessage}\r\n` +
+        Object.entries(response.headers).map(([key, value]) => `${key}: ${value}\r\n`).join("") +
+        "\r\n"
+      );
+      response.pipe(socket);
     });
+    const timer = ATTACH_PATH.test(request.url ?? "") ? setTimeout(() => {
+      timedOut = true;
+      this.logger.warn({ url: request.url }, "Docker attach handshake timed out");
+      upstream.destroy();
+      socket.end(
+        "HTTP/1.1 504 Gateway Timeout\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n" +
+        JSON.stringify({ message: `muxpilot Docker guard timed out waiting ${Math.ceil((this.config.lifecycleStartTimeoutMs ?? 60_000) / 1_000)}s for the container attach handshake` })
+      );
+    }, this.config.lifecycleStartTimeoutMs ?? 60_000) : undefined;
     upstream.on("upgrade", (response, upstreamSocket, upstreamHead) => {
+      clearTimeout(timer);
       socket.write(
         `HTTP/${response.httpVersion} ${response.statusCode} ${response.statusMessage}\r\n` +
         Object.entries(response.headers).map(([key, value]) => `${key}: ${value}\r\n`).join("") +
@@ -303,7 +323,7 @@ export class DockerResourceProxy {
       if (head.length) upstreamSocket.write(head);
       upstreamSocket.pipe(socket).pipe(upstreamSocket);
     });
-    upstream.on("error", () => socket.destroy());
+    upstream.on("error", () => { clearTimeout(timer); if (!timedOut) socket.destroy(); });
     upstream.end();
   }
 }

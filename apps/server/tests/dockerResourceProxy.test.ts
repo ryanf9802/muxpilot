@@ -1,4 +1,5 @@
 import { request as httpRequest, createServer } from "node:http";
+import { createConnection, type Socket } from "node:net";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -125,6 +126,29 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
+  it("times out a stuck pre-start attach upgrade", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    let daemonUpgrade: Socket | null = null;
+    const daemon = createServer();
+    daemon.on("upgrade", (_request, socket) => { daemonUpgrade = socket; });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      lifecycleStartTimeoutMs: 30
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    const response = await upgrade(proxySocket, "/v1.47/containers/stuck/attach?stream=1");
+    expect(response).toContain("504 Gateway Timeout");
+    expect(response).toContain("attach handshake");
+    await proxy.close();
+    daemonUpgrade?.destroy();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
   it("reaps containers whose heavyweight owner disappeared", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);
@@ -178,5 +202,18 @@ function request(socketPath: string, method: string, path: string, payload?: obj
     });
     next.on("error", reject);
     next.end(body);
+  });
+}
+
+function upgrade(socketPath: string, path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(1_000, () => socket.destroy(new Error("upgrade test timed out")));
+    socket.once("connect", () => socket.write(`GET ${path} HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n`));
+    socket.on("data", (chunk) => { response += chunk; });
+    socket.once("end", () => resolve(response));
+    socket.once("error", reject);
   });
 }
