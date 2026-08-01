@@ -96,12 +96,20 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
-  it("times out a stuck container start with a clear gateway timeout", async () => {
+  it("times out a start acknowledged by Docker that remains created", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);
     const daemonSocket = join(root, "daemon.sock");
     const proxySocket = join(root, "proxy.sock");
-    const daemon = createServer(() => { /* deliberately never responds */ });
+    const daemon = createServer((request, response) => {
+      if (request.url?.endsWith("/start")) {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ State: { Status: request.url?.includes("/running/json") ? "running" : "created" } }));
+    });
     await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
     const proxy = new DockerResourceProxy({
       socketPath: proxySocket, daemonSocketPath: daemonSocket,
@@ -112,6 +120,7 @@ describe("DockerResourceProxy", () => {
     const response = await request(proxySocket, "POST", "/v1.47/containers/stuck/start");
     expect(response.status).toBe(504);
     expect(response.body).toContain("timed out waiting");
+    expect((await request(proxySocket, "POST", "/v1.47/containers/running/start")).status).toBe(204);
     await proxy.close();
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });

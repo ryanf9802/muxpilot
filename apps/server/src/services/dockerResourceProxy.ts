@@ -99,7 +99,18 @@ export class DockerResourceProxy {
         return;
       }
       const start = request.method === "POST" && (request.url ?? "").match(ACTION_PATH)?.[2] === "start";
-      await forwardStreaming(this.daemonSocketPath, request, response, () => this.observeLifecycle(request), start ? this.config.lifecycleStartTimeoutMs ?? 60_000 : undefined);
+      if (start) {
+        const timeoutMs = this.config.lifecycleStartTimeoutMs ?? 60_000;
+        const startedAt = Date.now();
+        const forwarded = await forwardRequest(this.daemonSocketPath, request, undefined, timeoutMs);
+        const id = (request.url ?? "").match(ACTION_PATH)?.[1];
+        if (forwarded.statusCode < 300 && id) await this.waitForStarted(id, Math.max(1, timeoutMs - (Date.now() - startedAt)));
+        response.writeHead(forwarded.statusCode, forwarded.headers);
+        response.end(forwarded.body);
+        if (forwarded.statusCode < 300) this.observeLifecycle(request);
+      } else {
+        await forwardStreaming(this.daemonSocketPath, request, response, () => this.observeLifecycle(request));
+      }
     } catch (error) {
       this.logger.warn({ err: error }, "Docker proxy request failed");
       const timedOut = error instanceof DockerLifecycleTimeout;
@@ -254,6 +265,27 @@ export class DockerResourceProxy {
     }
   }
 
+  private async waitForStarted(id: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const remaining = Math.max(1, deadline - Date.now());
+      try {
+        const inspected = await rawDockerRequest(
+          this.daemonSocketPath, "GET", `/containers/${encodeURIComponent(id)}/json`, Buffer.alloc(0), {}, Math.min(1_000, remaining)
+        );
+        if (inspected.statusCode === 404) return;
+        if (inspected.statusCode < 300) {
+          const container = JSON.parse(inspected.body.toString("utf8")) as { State?: { Status?: string } };
+          if (container.State?.Status && container.State.Status !== "created") return;
+        }
+      } catch {
+        // Retry bounded inspection until the lifecycle deadline expires.
+      }
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(100, Math.max(1, deadline - Date.now()))));
+    }
+    throw new DockerLifecycleTimeout(timeoutMs);
+  }
+
   private handleUpgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
     const upstream = httpRequest({
       socketPath: this.daemonSocketPath,
@@ -317,19 +349,18 @@ function pickLimits(hostConfig: DockerLimits): DockerLimits {
   );
 }
 
-async function forwardRequest(socketPath: string, incoming: IncomingMessage, replacementBody?: Buffer) {
+async function forwardRequest(socketPath: string, incoming: IncomingMessage, replacementBody?: Buffer, timeoutMs?: number) {
   const body = replacementBody ?? await readBody(incoming);
   const headers = { ...incoming.headers, "content-length": String(body.length) };
   delete headers["transfer-encoding"];
-  return rawDockerRequest(socketPath, incoming.method ?? "GET", incoming.url ?? "/", body, headers);
+  return rawDockerRequest(socketPath, incoming.method ?? "GET", incoming.url ?? "/", body, headers, timeoutMs);
 }
 
 async function forwardStreaming(
   socketPath: string,
   incoming: IncomingMessage,
   outgoing: ServerResponse,
-  onSuccess: () => void,
-  timeoutMs?: number
+  onSuccess: () => void
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const upstream = httpRequest({
@@ -346,7 +377,6 @@ async function forwardStreaming(
       });
     });
     upstream.on("error", reject);
-    if (timeoutMs) upstream.setTimeout(timeoutMs, () => upstream.destroy(new DockerLifecycleTimeout(timeoutMs)));
     incoming.pipe(upstream);
   });
 }
@@ -364,17 +394,21 @@ async function rawDockerRequest(
   timeoutMs?: number
 ): Promise<{ statusCode: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
   return new Promise((resolve, reject) => {
+    let timer: NodeJS.Timeout | null = null;
     const request = httpRequest({ socketPath, method, path, headers }, (response) => {
       const chunks: Buffer[] = [];
       response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      response.on("end", () => resolve({
-        statusCode: response.statusCode ?? 502,
-        headers: response.headers,
-        body: Buffer.concat(chunks)
-      }));
+      response.on("end", () => {
+        if (timer) clearTimeout(timer);
+        resolve({ statusCode: response.statusCode ?? 502, headers: response.headers, body: Buffer.concat(chunks) });
+      });
     });
-    request.on("error", reject);
-    if (timeoutMs) request.setTimeout(timeoutMs, () => request.destroy(new Error(`Docker API request timed out after ${timeoutMs}ms`)));
+    request.on("error", (error) => { if (timer) clearTimeout(timer); reject(error); });
+    if (timeoutMs) timer = setTimeout(() => request.destroy(
+      path.match(ACTION_PATH)?.[2] === "start"
+        ? new DockerLifecycleTimeout(timeoutMs)
+        : new Error(`Docker API request timed out after ${timeoutMs}ms`)
+    ), timeoutMs);
     request.end(body);
   });
 }
