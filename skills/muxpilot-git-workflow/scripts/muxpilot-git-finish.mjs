@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { acquireBranchLock, acquireWorkspaceLock, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { acquireBranchLock, acquireWorkspaceLock, brokerFinish, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
 
 const bypasses = process.argv.slice(2).filter((value) => value.startsWith("--bypass=")).map((value) => value.slice(9));
 const allowedBypasses = new Set(["worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target", "local-target-only", "automatic-cleanup", "no-pull-push"]);
@@ -79,6 +79,25 @@ try {
     await releaseOperationLock();
     process.stdout.write("RETARGETED_REVIEW_REQUIRED: the task target changed; rerun focused checks and the self-review loop before retrying integration\n");
     process.exit(3);
+  }
+
+  const brokerResult = await brokerFinish(config, {
+    targetSha,
+    taskHead: await git(worktree, ["rev-parse", "HEAD"]),
+    cleanTargetBypass: bypasses.includes("clean-target"),
+    retainWorktree: bypasses.includes("automatic-cleanup")
+  });
+  if (brokerResult) {
+    if (!brokerResult.ok && brokerResult.reviewRequired) {
+      await writeStatus(config, { ...status, state: "worktree", targetSha: await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]), lastError: null, reviewRequired: false });
+      await releaseOperationLock();
+      process.stdout.write("RETARGETED_REVIEW_REQUIRED: the target changed during broker validation; rerun focused checks and self-review\n");
+      process.exit(3);
+    }
+    if (!brokerResult.ok) throw new Error(brokerResult.error || "Git workflow broker rejected integration");
+    await releaseOperationLock();
+    process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${brokerResult.sha} worktree=${brokerResult.retained ? "retained" : "removed"} broker=authenticated\n`);
+    process.exit(0);
   }
 
   release = await acquireBranchLock(config);

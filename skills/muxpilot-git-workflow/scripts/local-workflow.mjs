@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { lstat, mkdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { createConnection } from "node:net";
 
 const execFileAsync = promisify(execFile);
 
@@ -193,6 +194,42 @@ export async function targetCheckout(config) {
     if (branch === `refs/heads/${config.targetBranch}`) path = candidate;
   }
   return path;
+}
+
+export async function brokerFinish(config, request) {
+  const capabilityPath = join(dirname(config.statusFile), "git-workflow-broker.json");
+  let capability;
+  try {
+    capability = JSON.parse(await readFile(capabilityPath, "utf8"));
+  } catch {
+    return null;
+  }
+  if (capability?.version !== 1 || capability.workspaceId !== config.workspaceId
+    || typeof capability.socketPath !== "string" || typeof capability.token !== "string") {
+    throw new Error("Invalid muxpilot Git broker capability");
+  }
+  try {
+    return await sendBroker(capability.socketPath, { action: "finish", workspaceId: config.workspaceId, token: capability.token, ...request });
+  } catch (error) {
+    throw new Error(`BROKER_UNAVAILABLE: ${error.message}`);
+  }
+}
+
+function sendBroker(path, payload) {
+  return new Promise((resolvePromise, reject) => {
+    const socket = createConnection(path);
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(30_000, () => socket.destroy(new Error("broker request timed out")));
+    socket.once("connect", () => socket.write(`${JSON.stringify(payload)}\n`));
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      socket.end();
+      try { resolvePromise(JSON.parse(input.trim())); } catch (error) { reject(error); }
+    });
+    socket.once("error", reject);
+  });
 }
 
 function parseDependencies(raw) {

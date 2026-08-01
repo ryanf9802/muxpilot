@@ -24,6 +24,7 @@ import { ResourceGovernor } from "./services/resourceGovernor.js";
 import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
 import { HeavyCommandService } from "./services/heavyCommands.js";
 import { join } from "node:path";
+import { GitWorkflowBroker } from "./services/gitWorkflowBroker.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -34,9 +35,12 @@ const codexProcessResolver = new CodexProcessResolver();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
+const gitWorkflowBroker = new GitWorkflowBroker(db, join(config.dataDir, "runtime", "git-workflow-broker.sock"), app.log);
+await gitWorkflowBroker.start();
 const gitWorkspaces = new GitWorkspaceManager(db, {
   worktreeRoot: config.gitWorktreeRoot,
-  sessionRoot: config.gitSessionRoot
+  sessionRoot: config.gitSessionRoot,
+  publishCapability: (workspace) => gitWorkflowBroker.publishCapability(workspace)
 });
 const notifications = new NotificationService(db, events, app.log);
 const summaryClient = config.openaiApiKey
@@ -80,7 +84,8 @@ if (config.resourceGovernor !== "off") {
     socketPath: join(config.dataDir, "runtime", "docker-guard.sock"),
     memorySoftPercent: config.dockerMemorySoftPercent,
     memoryHardPercent: config.dockerMemoryHardPercent,
-    cpuPercent: config.dockerCpuPercent
+    cpuPercent: config.dockerCpuPercent,
+    heavyValidationDir: config.heavyValidationDir
   }, app.log);
   try {
     await dockerProxy.start();
@@ -179,6 +184,7 @@ const close = async () => {
   codexUsage.stop();
   await pwaTrustServer.close();
   await dockerProxy?.close();
+  await gitWorkflowBroker.close();
   await db.close();
   await app.close();
 };

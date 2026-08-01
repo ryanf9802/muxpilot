@@ -14,6 +14,7 @@ const execFileAsync = promisify(execFile);
 export interface LightweightGitWorkspaceOptions {
   worktreeRoot: string;
   sessionRoot: string;
+  publishCapability?: (workspace: StoredGitWorkspace) => Promise<StoredGitWorkspace>;
 }
 
 interface ProvisionRequest {
@@ -123,7 +124,7 @@ export class GitWorkspaceManager {
       updatedAt: createdAt
     };
     await this.db.upsertGitWorkspace(stored, createdAt);
-    return stored;
+    return this.options.publishCapability ? this.options.publishCapability(stored) : stored;
   }
 
   async bind(workspaceId: string, sessionId: string): Promise<StoredGitWorkspace> {
@@ -143,6 +144,7 @@ export class GitWorkspaceManager {
     const path = workspace.controlPath ?? join(this.options.sessionRoot, workspace.id);
     await mkdir(path, { recursive: true });
     await exposeWorkspaceSkillsInControl(path, workspace.summary.entryPath, workspace.summary.repoRoot);
+    if (this.options.publishCapability) await this.options.publishCapability(workspace);
     return path;
   }
 
