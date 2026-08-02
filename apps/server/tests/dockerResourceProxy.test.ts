@@ -149,6 +149,26 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
+  it("times out a stuck pre-start attach streaming request", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const daemon = createServer(() => undefined);
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      lifecycleStartTimeoutMs: 30
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    const response = await request(proxySocket, "POST", "/v1.47/containers/stuck/attach?stream=1");
+    expect(response.status).toBe(504);
+    expect(response.body).toContain("attach handshake");
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
   it("reaps containers whose heavyweight owner disappeared", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);

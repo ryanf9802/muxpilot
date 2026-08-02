@@ -110,7 +110,16 @@ export class DockerResourceProxy {
         response.end(forwarded.body);
         if (forwarded.statusCode < 300) this.observeLifecycle(request);
       } else {
-        await forwardStreaming(this.daemonSocketPath, request, response, () => this.observeLifecycle(request));
+        const attachTimeoutMs = ATTACH_PATH.test(request.url ?? "")
+          ? this.config.lifecycleStartTimeoutMs ?? 60_000
+          : undefined;
+        await forwardStreaming(
+          this.daemonSocketPath,
+          request,
+          response,
+          () => this.observeLifecycle(request),
+          attachTimeoutMs
+        );
       }
     } catch (error) {
       this.logger.warn({ err: error }, "Docker proxy request failed");
@@ -380,15 +389,18 @@ async function forwardStreaming(
   socketPath: string,
   incoming: IncomingMessage,
   outgoing: ServerResponse,
-  onSuccess: () => void
+  onSuccess: () => void,
+  timeoutMs?: number
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
+    let timer: NodeJS.Timeout | null = null;
     const upstream = httpRequest({
       socketPath,
       method: incoming.method,
       path: incoming.url,
       headers: incoming.headers
     }, (response) => {
+      if (timer) clearTimeout(timer);
       outgoing.writeHead(response.statusCode ?? 502, response.headers);
       response.pipe(outgoing);
       response.on("end", () => {
@@ -396,13 +408,21 @@ async function forwardStreaming(
         resolve();
       });
     });
-    upstream.on("error", reject);
+    upstream.on("error", (error) => {
+      if (timer) clearTimeout(timer);
+      reject(error);
+    });
+    if (timeoutMs) timer = setTimeout(() => upstream.destroy(
+      new DockerLifecycleTimeout(timeoutMs, "container attach handshake")
+    ), timeoutMs);
     incoming.pipe(upstream);
   });
 }
 
 class DockerLifecycleTimeout extends Error {
-  constructor(timeoutMs: number) { super(`muxpilot Docker guard timed out waiting ${Math.ceil(timeoutMs / 1_000)}s for the container start operation`); }
+  constructor(timeoutMs: number, operation = "container start operation") {
+    super(`muxpilot Docker guard timed out waiting ${Math.ceil(timeoutMs / 1_000)}s for the ${operation}`);
+  }
 }
 
 async function rawDockerRequest(
