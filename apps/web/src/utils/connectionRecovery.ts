@@ -21,8 +21,33 @@ export function requestWithTimeout<T>(
   timeoutMs: number,
   controller: AbortController
 ): Promise<T> {
-  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
-  return request(controller.signal).finally(() => window.clearTimeout(timeout));
+  let timeout: number | null = null;
+  let removeAbortListener = () => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const rejectAborted = () => reject(controller.signal.reason ?? new DOMException("The request was aborted.", "AbortError"));
+    if (controller.signal.aborted) {
+      rejectAborted();
+      return;
+    }
+
+    controller.signal.addEventListener("abort", rejectAborted, { once: true });
+    removeAbortListener = () => controller.signal.removeEventListener("abort", rejectAborted);
+    timeout = window.setTimeout(() => {
+      controller.abort(new DOMException(`The request timed out after ${timeoutMs}ms.`, "TimeoutError"));
+    }, timeoutMs);
+  });
+
+  let pending: Promise<T>;
+  try {
+    pending = Promise.resolve(request(controller.signal));
+  } catch (error) {
+    pending = Promise.reject(error);
+  }
+
+  return Promise.race([pending, aborted]).finally(() => {
+    if (timeout !== null) window.clearTimeout(timeout);
+    removeAbortListener();
+  });
 }
 
 export function attemptConnectionAutoReload(

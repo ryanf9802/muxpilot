@@ -24,19 +24,37 @@ afterEach(() => {
 });
 
 describe("requestWithTimeout", () => {
-  it("aborts a connectivity request that does not settle", async () => {
+  it("rejects at the deadline even when the request ignores abort", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
-    const request = vi.fn((signal: AbortSignal) => new Promise<never>((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
-    }));
+    const request = vi.fn(() => new Promise<never>(() => undefined));
 
     const result = requestWithTimeout(request, 5000, controller);
-    const rejection = expect(result).rejects.toMatchObject({ name: "AbortError" });
+    const rejection = expect(result).rejects.toMatchObject({ name: "TimeoutError" });
     await vi.advanceTimersByTimeAsync(5000);
 
     await rejection;
     expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("settles when an uncooperative request is externally aborted", async () => {
+    const controller = new AbortController();
+    const result = requestWithTimeout(() => new Promise<never>(() => undefined), 5000, controller);
+
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("allows a fresh request to succeed after a prior request times out", async () => {
+    vi.useFakeTimers();
+    const firstController = new AbortController();
+    const first = requestWithTimeout(() => new Promise<never>(() => undefined), 5000, firstController);
+    const firstRejection = expect(first).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(5000);
+    await firstRejection;
+
+    await expect(requestWithTimeout(async () => "connected", 5000, new AbortController())).resolves.toBe("connected");
   });
 
   it("clears the timeout after a request settles", async () => {
