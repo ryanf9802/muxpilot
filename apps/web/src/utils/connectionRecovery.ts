@@ -22,7 +22,7 @@ export function requestWithTimeout<T>(
   controller: AbortController
 ): Promise<T> {
   let timeout: number | null = null;
-  let removeAbortListener = () => undefined;
+  let removeAbortListener: () => void = () => undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
     const rejectAborted = () => reject(controller.signal.reason ?? new DOMException("The request was aborted.", "AbortError"));
     if (controller.signal.aborted) {
