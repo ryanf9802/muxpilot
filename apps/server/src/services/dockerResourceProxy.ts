@@ -1,8 +1,8 @@
 import { request as httpRequest, createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection } from "node:net";
-import { chmod, mkdir, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { Duplex } from "node:stream";
 
 const CREATE_PATH = /\/containers\/create(?:\?|$)/;
@@ -39,6 +39,19 @@ interface DockerLimits {
   MemorySwap?: number;
   NanoCpus?: number;
   PidsLimit?: number;
+}
+
+interface DockerBindMount {
+  Type?: string;
+  Source?: string;
+  Target?: string;
+  ReadOnly?: boolean;
+}
+
+interface DockerCreatePayload {
+  Labels?: Record<string, string>;
+  HostConfig?: DockerLimits & Record<string, unknown> & { Binds?: string[] };
+  Mounts?: DockerBindMount[];
 }
 
 interface Logger {
@@ -133,22 +146,23 @@ export class DockerResourceProxy {
 
   private async handleCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = await readBody(request);
-    const payload = JSON.parse(body.toString("utf8")) as {
-      Labels?: Record<string, string>;
-      HostConfig?: DockerLimits & Record<string, unknown>;
-    };
+    const payload = JSON.parse(body.toString("utf8")) as DockerCreatePayload;
     const heavyRun = headerValue(request, "x-muxpilot-heavy-run");
     const workspace = headerValue(request, "x-muxpilot-workspace");
+    const validHeavyRun = Boolean(heavyRun && HEAVY_RUN_ID.test(heavyRun));
     payload.Labels = {
       ...payload.Labels,
       "com.muxpilot.managed": "true",
       "com.muxpilot.resource-pool": "shared",
-      ...(heavyRun && HEAVY_RUN_ID.test(heavyRun) ? { "com.muxpilot.heavy-run": heavyRun } : {}),
+      ...(validHeavyRun ? { "com.muxpilot.heavy-run": heavyRun! } : {}),
       ...(workspace && WORKSPACE_ID.test(workspace) ? { "com.muxpilot.workspace": workspace } : {})
     };
-    const requested = pickLimits(payload.HostConfig ?? {});
+    const hostConfig = payload.HostConfig ?? {};
+    const gitBinds = validHeavyRun ? await linkedWorktreeGitBinds(hostConfig.Binds, payload.Mounts) : [];
+    const requested = pickLimits(hostConfig);
     payload.HostConfig = {
-      ...(payload.HostConfig ?? {}),
+      ...hostConfig,
+      ...(gitBinds.length > 0 ? { Binds: [...(hostConfig.Binds ?? []), ...gitBinds] } : {}),
       ...effectiveLimits(requested, this.poolLimits(this.runningCount() + 1))
     };
     const encoded = Buffer.from(JSON.stringify(payload));
@@ -376,6 +390,58 @@ function pickLimits(hostConfig: DockerLimits): DockerLimits {
       .filter((key) => typeof hostConfig[key as keyof DockerLimits] === "number")
       .map((key) => [key, hostConfig[key as keyof DockerLimits]])
   );
+}
+
+async function linkedWorktreeGitBinds(binds: string[] | undefined, mounts: DockerBindMount[] | undefined): Promise<string[]> {
+  const sources = new Set<string>();
+  const targets = new Set<string>();
+  for (const bind of Array.isArray(binds) ? binds : []) {
+    const parsed = parseBind(bind);
+    if (!parsed) continue;
+    sources.add(parsed.source);
+    targets.add(parsed.target);
+  }
+  for (const mount of Array.isArray(mounts) ? mounts : []) {
+    if (mount.Type !== "bind" || !mount.Source || !mount.Target) continue;
+    sources.add(mount.Source);
+    targets.add(mount.Target);
+  }
+
+  const additions: string[] = [];
+  for (const source of sources) {
+    const commonDir = await linkedWorktreeCommonDir(source);
+    if (!commonDir || targets.has(commonDir)) continue;
+    targets.add(commonDir);
+    additions.push(`${commonDir}:${commonDir}:ro`);
+  }
+  return additions;
+}
+
+function parseBind(bind: string): { source: string; target: string } | null {
+  const separator = bind.indexOf(":");
+  if (separator < 1) return null;
+  const nextSeparator = bind.indexOf(":", separator + 1);
+  const source = bind.slice(0, separator);
+  const target = bind.slice(separator + 1, nextSeparator < 0 ? undefined : nextSeparator);
+  return source.startsWith("/") && target.startsWith("/") ? { source, target } : null;
+}
+
+async function linkedWorktreeCommonDir(source: string): Promise<string | null> {
+  try {
+    const pointer = (await readFile(join(source, ".git"), "utf8")).trim();
+    if (!pointer.startsWith("gitdir:")) return null;
+    const pointerPath = pointer.slice("gitdir:".length).trim();
+    if (!pointerPath) return null;
+    const gitDir = resolve(source, pointerPath);
+    const commonPointer = (await readFile(join(gitDir, "commondir"), "utf8")).trim();
+    if (!commonPointer) return null;
+    const commonDir = resolve(gitDir, commonPointer);
+    const worktreeRoot = `${join(commonDir, "worktrees")}${sep}`;
+    if (!gitDir.startsWith(worktreeRoot) || !(await stat(commonDir)).isDirectory()) return null;
+    return commonDir;
+  } catch {
+    return null;
+  }
 }
 
 async function forwardRequest(socketPath: string, incoming: IncomingMessage, replacementBody?: Buffer, timeoutMs?: number) {

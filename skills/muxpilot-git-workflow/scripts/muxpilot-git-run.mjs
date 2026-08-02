@@ -28,6 +28,7 @@ let state = "waiting";
 let slot = null;
 let leasePath = null;
 let child = null;
+let childOutcome = null;
 let childStartedAt = null;
 let lastOutputAt = null;
 let lastActivityAt = null;
@@ -85,13 +86,17 @@ try {
   lastOutputAt = childStartedAt;
   lastActivityAt = childStartedAt;
 
+  const jsiiCache = await prepareJsiiCache();
+  if (jsiiCache.fallback) lifecycle("CACHE_FALLBACK", `name=JSII_RUNTIME_PACKAGE_CACHE_ROOT path=${jsiiCache.path} reason=${jsiiCache.reason}`);
+
   const childEnvironment = {
     ...process.env,
     DOCKER_CUSTOM_HEADERS: appendDockerHeader(
       appendDockerHeader(process.env.DOCKER_CUSTOM_HEADERS, "X-Muxpilot-Heavy-Run", runId),
       "X-Muxpilot-Workspace", workspaceId
     ),
-    MUXPILOT_HEAVY_RUN_ID: runId
+    MUXPILOT_HEAVY_RUN_ID: runId,
+    JSII_RUNTIME_PACKAGE_CACHE_ROOT: jsiiCache.path
   };
   child = spawn(resolveExecutable(command[0]) ?? command[0], command.slice(1), {
     cwd: process.cwd(),
@@ -111,8 +116,10 @@ try {
   watchdogTimer = setInterval(runWatchdog, Math.min(1_000, Math.max(25, Math.floor(inactivityWarnMs / 4))));
 
   const result = await childResult;
+  childOutcome = result;
   clearRuntimeTimers();
   lifecycle("COMMAND_EXITED", `run=${runId} code=${result.code ?? "null"} signal=${result.signal ?? "none"}`);
+  if ((result.code === 137 || result.signal === "SIGKILL") && !forced) diagnoseResourceExit();
   process.exitCode = desiredExitCode ?? result.code ?? (result.signal ? 1 : 0);
 } catch (error) {
   lifecycle("RUNNER_ERROR", error instanceof Error ? error.message : String(error));
@@ -475,12 +482,89 @@ function hasDockerContainers(candidateRunId) {
 
 async function cleanupDockerContainers() {
   if (!resolveExecutable("docker")) return;
-  const list = spawnSync("docker", ["ps", "-aq", "--filter", `label=com.muxpilot.heavy-run=${runId}`], { encoding: "utf8", timeout: 10_000, env: process.env });
-  const ids = list.status === 0 ? list.stdout.trim().split(/\s+/).filter(Boolean) : [];
-  if (!ids.length) return;
-  lifecycle("DOCKER_CLEANUP", `run=${runId} containers=${ids.length}`);
-  const removed = spawnSync("docker", ["rm", "--force", ...ids], { encoding: "utf8", timeout: 15_000, env: process.env });
-  lifecycle(removed.status === 0 ? "DOCKER_CLEANUP_COMPLETE" : "DOCKER_CLEANUP_FAILED", `run=${runId} containers=${ids.length}${removed.stderr ? ` detail=${removed.stderr.trim()}` : ""}`);
+  const deadline = Date.now() + 30_000;
+  let emptySamples = 0;
+  let emptySince = null;
+  let observedContainers = false;
+  let lastDetail = "";
+  while (Date.now() < deadline) {
+    const list = listRunContainers(5_000);
+    if (list.status !== 0) {
+      emptySamples = 0;
+      emptySince = null;
+      lastDetail = commandDetail(list.stderr, "docker ps failed");
+      lifecycle("DOCKER_CLEANUP_RETRY", `run=${runId} reason=list detail=${lastDetail}`);
+    } else if (list.ids.length === 0) {
+      emptySince ??= Date.now();
+      emptySamples += 1;
+      if (emptySamples >= 3 && Date.now() - emptySince >= 1_000) {
+        if (observedContainers) lifecycle("DOCKER_CLEANUP_COMPLETE", `run=${runId} containers=0`);
+        return;
+      }
+    } else {
+      emptySamples = 0;
+      emptySince = null;
+      observedContainers = true;
+      lifecycle("DOCKER_CLEANUP", `run=${runId} containers=${list.ids.length}`);
+      const removed = spawnSync("docker", ["rm", "--force", ...list.ids], { encoding: "utf8", timeout: 10_000, env: process.env });
+      if (removed.status !== 0) {
+        lastDetail = commandDetail(removed.stderr, "docker rm failed");
+        lifecycle("DOCKER_CLEANUP_RETRY", `run=${runId} reason=remove containers=${list.ids.length} detail=${lastDetail}`);
+      }
+    }
+    await delay(250);
+  }
+  const remaining = listRunContainers(5_000);
+  lifecycle("DOCKER_CLEANUP_FAILED", `run=${runId} containers=${remaining.ids.length} detail=${remaining.status === 0 ? lastDetail || "cleanup deadline exceeded" : commandDetail(remaining.stderr, "docker ps failed")}`);
+}
+
+function listRunContainers(timeout) {
+  const result = spawnSync("docker", ["ps", "-aq", "--filter", `label=com.muxpilot.heavy-run=${runId}`], { encoding: "utf8", timeout, env: process.env });
+  return {
+    status: result.status,
+    stderr: result.stderr,
+    ids: result.status === 0 ? result.stdout.trim().split(/\s+/).filter(Boolean) : []
+  };
+}
+
+function diagnoseResourceExit() {
+  const list = listRunContainers(5_000);
+  let cause = "probable-oom-or-external-sigkill";
+  if (list.status === 0 && list.ids.length > 0) {
+    const inspected = spawnSync("docker", ["inspect", "--format", "{{json .State}}", ...list.ids], { encoding: "utf8", timeout: 5_000, env: process.env });
+    if (inspected.status === 0 && inspected.stdout.split(/\r?\n/).some((line) => {
+      try { return JSON.parse(line).OOMKilled === true; } catch { return false; }
+    })) cause = "docker-oom";
+  }
+  lifecycle("RESOURCE_LIMIT_WARNING", `run=${runId} cause=${cause} code=${childOutcome?.code ?? "null"} signal=${childOutcome?.signal ?? "none"} guidance=${JSON.stringify("split the command targets or review configured resource limits; muxpilot will not retry automatically")}`);
+}
+
+async function prepareJsiiCache() {
+  const configured = process.env.JSII_RUNTIME_PACKAGE_CACHE_ROOT;
+  if (configured && await ensureWritableDirectory(configured)) return { path: configured, fallback: false, reason: "configured" };
+  const workspace = String(workspaceId ?? "shared").replace(/[^A-Za-z0-9_.-]/g, "_");
+  const fallback = join(leaseRoot, "caches", "jsii", workspace);
+  await mkdir(fallback, { recursive: true, mode: 0o700 });
+  await chmod(fallback, 0o700);
+  return { path: fallback, fallback: true, reason: configured ? "configured-path-unwritable" : "unset" };
+}
+
+async function ensureWritableDirectory(path) {
+  const probe = join(path, `.muxpilot-write-probe-${runId}`);
+  try {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    accessSync(path, constants.W_OK);
+    await writeFile(probe, "", { flag: "wx", mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(probe, { force: true }).catch(() => {});
+  }
+}
+
+function commandDetail(value, fallback) {
+  return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, 500) || fallback;
 }
 
 function sampleActivity() {

@@ -85,11 +85,15 @@ describe("heavyweight validation helper", () => {
   it("preserves the child exit status", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
-    await expect(execFileAsync(process.execPath, [
+    const outcome = execFileAsync(process.execPath, [
       helper, "--heavy", "--", process.execPath, "-e", "process.exit(7)"
     ], {
       env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
-    })).rejects.toMatchObject({ code: 7 });
+    });
+    await expect(outcome).rejects.toMatchObject({ code: 7 });
+    await outcome.catch((error: { stderr: string }) => {
+      expect(error.stderr).not.toContain("RESOURCE_LIMIT_WARNING");
+    });
   });
 
   it("force-removes labeled containers after a failed Docker command", async () => {
@@ -97,14 +101,118 @@ describe("heavyweight validation helper", () => {
     roots.push(root);
     const bin = join(root, "bin");
     const cleanup = join(root, "cleanup.txt");
+    const removed = join(root, "removed");
     await mkdir(bin);
     const docker = join(bin, "docker");
-    await writeFile(docker, `#!/bin/sh\nif [ "$1" = ps ]; then echo fake-container; exit 0; fi\nif [ "$1" = rm ]; then echo "$@" > "${cleanup}"; exit 0; fi\nexit 7\n`);
+    await writeFile(docker, `#!/bin/sh\nif [ "$1" = ps ]; then [ -f "${removed}" ] || echo fake-container; exit 0; fi\nif [ "$1" = rm ]; then echo "$@" > "${cleanup}"; touch "${removed}"; exit 0; fi\nexit 7\n`);
     await chmod(docker, 0o755);
     await expect(execFileAsync(process.execPath, [helper, "--heavy", "--", "docker", "run", "example"], {
       env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
     })).rejects.toMatchObject({ code: 7 });
     expect(await readFile(cleanup, "utf8")).toContain("rm --force fake-container");
+  });
+
+  it("retries cleanup for a late container and a transient remove failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    const calls = join(root, "calls");
+    const removed = join(root, "removed");
+    await mkdir(bin);
+    await writeFile(calls, "");
+    const docker = join(bin, "docker");
+    await writeFile(docker, `#!/bin/sh\nif [ "$1" = ps ]; then count=$(wc -l < "${calls}" 2>/dev/null || echo 0); echo ps >> "${calls}"; if [ "$count" -ge 1 ] && [ ! -f "${removed}" ]; then echo late-container; fi; exit 0; fi\nif [ "$1" = rm ]; then echo rm >> "${calls}"; if ! grep -q rm-failed "${calls}"; then echo rm-failed >> "${calls}"; echo busy >&2; exit 1; fi; touch "${removed}"; exit 0; fi\nexit 9\n`);
+    await chmod(docker, 0o755);
+    const outcome = execFileAsync(process.execPath, [helper, "--heavy", "--", "docker", "run", "example"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases") }
+    });
+    await expect(outcome).rejects.toMatchObject({ code: 9 });
+    await outcome.catch((error: { stderr: string }) => {
+      expect(error.stderr).toContain("DOCKER_CLEANUP_RETRY");
+      expect(error.stderr).toContain("DOCKER_CLEANUP_COMPLETE");
+    });
+    expect(await stat(removed)).toBeTruthy();
+  });
+
+  it("provides a writable workspace JSII cache and preserves a usable override", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const output = join(root, "cache.txt");
+    const script = "require('node:fs').writeFileSync(process.argv[1], process.env.JSII_RUNTIME_PACKAGE_CACHE_ROOT)";
+    const fallbackEnvironment = {
+      ...process.env,
+      MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+      MUXPILOT_HEAVY_VALIDATION_DIR: leases
+    };
+    delete fallbackEnvironment.JSII_RUNTIME_PACKAGE_CACHE_ROOT;
+    const fallback = await execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", script, output], {
+      env: fallbackEnvironment
+    });
+    const fallbackPath = await readFile(output, "utf8");
+    expect(fallbackPath).toBe(join(leases, "caches", "jsii", "workspace-a"));
+    expect((await stat(fallbackPath)).isDirectory()).toBe(true);
+    expect(fallback.stderr).toContain("CACHE_FALLBACK");
+
+    const configured = join(root, "configured-jsii");
+    await mkdir(configured);
+    const configuredResult = await execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", script, output], {
+      env: { ...fallbackEnvironment, JSII_RUNTIME_PACKAGE_CACHE_ROOT: configured }
+    });
+    expect(await readFile(output, "utf8")).toBe(configured);
+    expect(configuredResult.stderr).not.toContain("CACHE_FALLBACK");
+  });
+
+  it("replaces an unusable JSII cache and explains exit 137", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    const unusableCache = join(root, "not-a-directory");
+    await mkdir(bin);
+    await writeFile(unusableCache, "file");
+    const docker = join(bin, "docker");
+    await writeFile(docker, "#!/bin/sh\nif [ \"$1\" = ps ]; then exit 0; fi\nexit 1\n");
+    await chmod(docker, 0o755);
+    const outcome = execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", "process.exit(137)"], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-b",
+        MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases"),
+        JSII_RUNTIME_PACKAGE_CACHE_ROOT: unusableCache
+      }
+    });
+    await expect(outcome).rejects.toMatchObject({ code: 137 });
+    await outcome.catch((error: { stderr: string }) => {
+      expect(error.stderr).toContain("CACHE_FALLBACK");
+      expect(error.stderr).toContain("reason=configured-path-unwritable");
+      expect(error.stderr).toContain("RESOURCE_LIMIT_WARNING");
+      expect(error.stderr).toContain("cause=probable-oom-or-external-sigkill");
+    });
+  });
+
+  it("reports confirmed Docker OOM kills for labeled run containers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    const removed = join(root, "removed");
+    await mkdir(bin);
+    const docker = join(bin, "docker");
+    await writeFile(docker, `#!/bin/sh\nif [ "$1" = ps ]; then [ -f "${removed}" ] || echo oom-container; exit 0; fi\nif [ "$1" = inspect ]; then echo '{"OOMKilled":true}'; exit 0; fi\nif [ "$1" = rm ]; then touch "${removed}"; exit 0; fi\nexit 1\n`);
+    await chmod(docker, 0o755);
+    const outcome = execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", "process.exit(137)"], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases")
+      }
+    });
+    await expect(outcome).rejects.toMatchObject({ code: 137 });
+    await outcome.catch((error: { stderr: string }) => {
+      expect(error.stderr).toContain("RESOURCE_LIMIT_WARNING");
+      expect(error.stderr).toContain("cause=docker-oom");
+      expect(error.stderr).toContain("DOCKER_CLEANUP_COMPLETE");
+    });
   });
 
   it("warns and exits 124 after the configured child-output inactivity timeout", async () => {

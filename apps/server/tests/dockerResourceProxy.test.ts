@@ -97,6 +97,105 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
+  it("mounts linked-worktree Git metadata read-only for heavyweight containers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const commonA = join(root, "repo-a", ".git");
+    const commonB = join(root, "repo-b", ".git");
+    const worktreeA = join(root, "worktree-a");
+    const worktreeB = join(root, "worktree-b");
+    const malformed = join(root, "malformed");
+    for (const [commonDir, worktree, name] of [
+      [commonA, worktreeA, "task-a"],
+      [commonB, worktreeB, "task-b"]
+    ]) {
+      const gitDir = join(commonDir, "worktrees", name);
+      await mkdir(gitDir, { recursive: true });
+      await mkdir(worktree, { recursive: true });
+      await writeFile(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+      await writeFile(join(gitDir, "commondir"), "../..\n");
+    }
+    await mkdir(malformed);
+    await writeFile(join(malformed, ".git"), "gitdir: /etc\n");
+
+    const received: Array<Record<string, any>> = [];
+    const daemon = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        received.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(JSON.stringify({ Id: `container-${received.length}` }));
+      });
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+
+    const payload = {
+      Image: "example",
+      HostConfig: { Binds: [`${worktreeA}:/src-a:ro`, `${malformed}:/broken:ro`] },
+      Mounts: [{ Type: "bind", Source: worktreeB, Target: "/src-b", ReadOnly: true }]
+    };
+    await request(proxySocket, "POST", "/v1.47/containers/create", payload, {
+      "x-muxpilot-heavy-run": "mabc123-012345abcdef"
+    });
+    expect(received[0]?.HostConfig.Binds).toEqual([
+      `${worktreeA}:/src-a:ro`,
+      `${malformed}:/broken:ro`,
+      `${commonA}:${commonA}:ro`,
+      `${commonB}:${commonB}:ro`
+    ]);
+
+    await request(proxySocket, "POST", "/v1.47/containers/create", payload);
+    expect(received[1]?.HostConfig.Binds).toEqual(payload.HostConfig.Binds);
+
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
+  it("does not override an existing bind at the linked-worktree metadata target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const commonDir = join(root, "repo", ".git");
+    const gitDir = join(commonDir, "worktrees", "task");
+    const worktree = join(root, "worktree");
+    await mkdir(gitDir, { recursive: true });
+    await mkdir(worktree);
+    await writeFile(join(worktree, ".git"), `gitdir: ${gitDir}\n`);
+    await writeFile(join(gitDir, "commondir"), "../..\n");
+    let received: Record<string, any> = {};
+    const daemon = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      request.on("end", () => {
+        received = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        response.writeHead(201, { "content-type": "application/json" });
+        response.end(JSON.stringify({ Id: "container" }));
+      });
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    const conflicting = `${join(root, "other")}:${commonDir}:ro`;
+    await request(proxySocket, "POST", "/v1.47/containers/create", {
+      Image: "example", HostConfig: { Binds: [`${worktree}:/src:ro`, conflicting] }
+    }, { "x-muxpilot-heavy-run": "mabc123-012345abcdef" });
+    expect(received.HostConfig.Binds).toEqual([`${worktree}:/src:ro`, conflicting]);
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
   it("times out a start acknowledged by Docker that remains created", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);
