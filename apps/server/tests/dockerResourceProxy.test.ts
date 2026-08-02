@@ -169,6 +169,30 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
+  it("flushes streaming attach headers before Docker sends body data", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    let finishDaemonResponse = () => undefined;
+    const daemon = createServer((_request, response) => {
+      finishDaemonResponse = () => response.end();
+      response.writeHead(200, { "content-type": "application/vnd.docker.raw-stream" });
+      response.flushHeaders();
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      lifecycleStartTimeoutMs: 1_000
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+    expect(await responseHeaders(proxySocket, "/v1.47/containers/stuck/attach?stream=1")).toBe(200);
+    finishDaemonResponse();
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
   it("reaps containers whose heavyweight owner disappeared", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);
@@ -235,5 +259,18 @@ function upgrade(socketPath: string, path: string): Promise<string> {
     socket.on("data", (chunk) => { response += chunk; });
     socket.once("end", () => resolve(response));
     socket.once("error", reject);
+  });
+}
+
+function responseHeaders(socketPath: string, path: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const next = httpRequest({ socketPath, method: "POST", path }, (response) => {
+      clearTimeout(timer);
+      response.resume();
+      resolve(response.statusCode ?? 0);
+    });
+    const timer = setTimeout(() => next.destroy(new Error("streaming response headers were not flushed")), 250);
+    next.once("error", reject);
+    next.end();
   });
 }

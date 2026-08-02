@@ -402,6 +402,7 @@ async function forwardStreaming(
     }, (response) => {
       if (timer) clearTimeout(timer);
       outgoing.writeHead(response.statusCode ?? 502, response.headers);
+      outgoing.flushHeaders();
       response.pipe(outgoing);
       response.on("end", () => {
         if ((response.statusCode ?? 500) < 300) onSuccess();
