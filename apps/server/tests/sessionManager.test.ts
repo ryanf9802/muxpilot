@@ -2520,6 +2520,27 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("prefers the Codex working title over its always-visible composer", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: repo, paneId: "%1", windowName: "828-working-days", title: "⠙ workspace-id" })
+    ];
+    harness.tmux.capturePane = async () => [
+      "• Working (4m 08s • esc to interrupt)",
+      "› Implement {feature}",
+      "  gpt-5.6-sol medium · Context 81% left",
+      ...Array.from({ length: 45 }, () => "")
+    ].join("\n");
+
+    await harness.manager.discover();
+
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.status).toBe("working");
+    harness.db.close();
+  });
+
   it("prefers active working cues over approval wording in transcript text", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

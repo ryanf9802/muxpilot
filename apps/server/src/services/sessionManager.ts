@@ -2262,6 +2262,8 @@ async function inferStatus(
   try {
     const capture = await capturePane(pane.paneId, 100);
     const screenStatus = inferStatusFromScreen(capture);
+    if (screenStatus === "approval") return screenStatus;
+    if (titleStatus === "working") return titleStatus;
     if (screenStatus) return screenStatus;
     if (titleStatus) return titleStatus;
     if (looksLikeCodexScreen(capture)) return "waiting";
