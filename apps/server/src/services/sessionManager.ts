@@ -2152,7 +2152,7 @@ async function inferStatus(
 }
 
 function inferStatusFromTitle(pane: TmuxPane): SessionStatus | null {
-  const title = `${pane.title} ${pane.windowName}`.toLowerCase();
+  const title = pane.title.toLowerCase();
   if (title.includes("working") || title.includes("running") || /[\u2800-\u28ff]/u.test(pane.title)) return "working";
   if (looksLikeBlockedStatus(title)) return "blocked";
   if (title.includes("waiting")) return "waiting";
@@ -2168,18 +2168,22 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
 
 function inferStatusFromScreen(capture: string): SessionStatus | null {
   const visible = visibleTail(capture);
-  const haystack = visible.toLowerCase();
   if (parseInteractiveApprovalPrompt(capture)) return "approval";
-  if (haystack.includes("working (") || haystack.includes("esc to interrupt")) return "working";
-  const footer = visible.split("\n").slice(-6).join("\n");
-  if (/(^|\n)\s*›(?!\s*\d+\.)/m.test(footer)) return "waiting";
+  const lines = visible.split("\n");
+  const latestWorkingLine = lines.findLastIndex((line) => {
+    const normalized = line.toLowerCase();
+    return normalized.includes("working (") || normalized.includes("esc to interrupt");
+  });
+  const latestComposerLine = lines.findLastIndex((line) => /^\s*›(?!\s*\d+\.)/.test(line));
+  if (latestComposerLine > latestWorkingLine) return "waiting";
+  if (latestWorkingLine >= 0) return "working";
   if (looksLikeApprovalScreen(visible)) return "approval";
   if (looksLikeBlockedStatus(visible)) return "blocked";
   return null;
 }
 
 function visibleTail(text: string): string {
-  return text.split("\n").slice(-30).join("\n");
+  return text.trimEnd().split("\n").slice(-30).join("\n");
 }
 
 function looksLikeBlockedStatus(text: string): boolean {

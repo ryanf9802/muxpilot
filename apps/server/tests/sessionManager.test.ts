@@ -2406,6 +2406,35 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it.each(["828-working-days", "still-running", "waiting-room", "blocked-copy"])(
+    "does not infer status from the user-controlled window name %s",
+    async (windowName) => {
+      const harness = await createHarness();
+      const repo = join(harness.dir, "repo");
+      await mkdir(repo);
+      harness.tmux.listPanes = async () => [
+        testPane({ cwd: repo, paneId: "%1", windowName, title: "workspace-id" })
+      ];
+      harness.tmux.capturePane = async () => [
+        "• Booting MCP server: codex_apps (0s • esc to interrupt)",
+        "",
+        "⚠ MCP startup interrupted. The following servers were not initialized:",
+        "  codex_apps, playwright",
+        "",
+        "› Implement {feature}",
+        "",
+        "  gpt-5.6-sol medium · Context 100% left",
+        ...Array.from({ length: 45 }, () => "")
+      ].join("\n");
+
+      await harness.manager.discover();
+
+      const session = harness.manager.listSessions(true)[0];
+      expect(session?.status).toBe("waiting");
+      harness.db.close();
+    }
+  );
+
   it("prefers working cues over incidental blocked text in the pane and window name", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2416,7 +2445,10 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.capturePane = async () => [
       "The DB row is also persisted as blocked.",
       "",
-      "Working (20s • esc to interrupt)"
+      "› Implement {feature}",
+      "",
+      "Working (20s • esc to interrupt)",
+      ...Array.from({ length: 45 }, () => "")
     ].join("\n");
 
     await harness.manager.discover();
