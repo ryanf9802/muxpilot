@@ -27,7 +27,7 @@ import type {
   TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -1271,8 +1271,8 @@ export class SessionManager {
   }
 
   private async setFastMode(session: ManagedSession, enabled: boolean): Promise<void> {
-    if (!isInputReadyStatus(session.status)) {
-      throw new FastModeSwitchError("Fast mode can only be changed when the session is ready for input");
+    if (!canToggleFastMode(session.status)) {
+      throw new FastModeSwitchError("Fast mode cannot be changed in the session's current state");
     }
     if (session.fastModeAvailable === false) {
       throw new FastModeSwitchError("Fast mode is not available for the active Codex model");

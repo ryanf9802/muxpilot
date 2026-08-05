@@ -74,7 +74,7 @@ import type {
   TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
-import { hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
 import { api, eventSocket } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
@@ -1795,7 +1795,7 @@ export function SessionView() {
           enabled={readySession.fastMode === true}
           available={readySession.fastModeAvailable ?? null}
           busy={actionBusy === "setFastMode"}
-          ready={readySession.status === "waiting" || readySession.status === "idle"}
+          status={readySession.status}
           onChange={setFastMode}
         />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
@@ -2869,21 +2869,22 @@ export function FastModeToggle({
   enabled,
   available,
   busy,
-  ready,
+  status,
   onChange
 }: {
   enabled: boolean;
   available: boolean | null;
   busy: boolean;
-  ready: boolean;
+  status: ManagedSession["status"];
   onChange: (enabled: boolean) => void;
 }) {
   const unavailable = available === false;
-  const disabled = busy || unavailable || !ready;
+  const allowed = canToggleFastMode(status);
+  const disabled = busy || unavailable || !allowed;
   const title = unavailable
     ? "Fast mode is unavailable for this model"
-    : !ready
-      ? "Fast mode can be changed when Codex is ready for input"
+    : !allowed
+      ? "Fast mode cannot be changed in the session's current state"
       : enabled
         ? "Disable Fast mode (also updates the default for future Codex sessions)"
         : "Enable Fast mode (uses more credits and updates the default for future Codex sessions)";

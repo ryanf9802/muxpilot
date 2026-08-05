@@ -1852,7 +1852,7 @@ describe("SessionManager transcript isolation", () => {
       })}\n`
     );
     await utimes(sessionPath, mtime, mtime);
-    const pane = testPane({ cwd: repo, paneId: "%1" });
+    const pane = testPane({ cwd: repo, paneId: "%1", title: "⠙ repo" });
     harness.tmux.listPanes = async () => [pane];
     const sentInputs: string[] = [];
     harness.tmux.sendInput = async (_paneId, text) => {
@@ -1870,6 +1870,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0];
     expect(session?.fastMode).toBe(false);
+    expect(session?.status).toBe("working");
 
     const updated = await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
 

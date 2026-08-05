@@ -12,6 +12,15 @@ export type SessionStatus =
   | "missing"
   | "unknown";
 
+export function canToggleFastMode(status: SessionStatus): boolean {
+  return status === "idle"
+    || status === "waiting"
+    || status === "generating"
+    || status === "executing"
+    || status === "working"
+    || status === "planning";
+}
+
 export type CollaborationMode = "default" | "plan";
 
 export interface SessionModelSettings {

@@ -950,14 +950,28 @@ describe("Fast mode controls", () => {
       enabled: true,
       available: true,
       busy: false,
-      ready: true,
+      status: "waiting",
       onChange: () => undefined
     }));
     const unavailable = renderToStaticMarkup(createElement(FastModeToggle, {
       enabled: false,
       available: false,
       busy: false,
-      ready: true,
+      status: "waiting",
+      onChange: () => undefined
+    }));
+    const working = renderToStaticMarkup(createElement(FastModeToggle, {
+      enabled: false,
+      available: true,
+      busy: false,
+      status: "working",
+      onChange: () => undefined
+    }));
+    const approval = renderToStaticMarkup(createElement(FastModeToggle, {
+      enabled: false,
+      available: true,
+      busy: false,
+      status: "approval",
       onChange: () => undefined
     }));
 
@@ -966,6 +980,9 @@ describe("Fast mode controls", () => {
     expect(enabled).toContain("fast-mode-toggle selected");
     expect(unavailable).toContain("disabled");
     expect(unavailable).toContain("unavailable for this model");
+    expect(working).not.toContain("disabled");
+    expect(approval).toContain("disabled");
+    expect(approval).toContain("current state");
   });
 });
 
