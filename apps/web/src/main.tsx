@@ -5,16 +5,19 @@ import { AppRecoveryPage, AppShell } from "./pages/AppShell.js";
 import { Dashboard } from "./pages/Dashboard.js";
 import { AccessPage } from "./pages/Login.js";
 import { SessionView } from "./pages/SessionView.js";
+import { AppUpdatePrompt } from "./components/AppUpdatePrompt.js";
 import { urlWithoutConnectionRecoveryToken } from "./utils/connectionRecovery.js";
+import { browserServiceWorkerUpdateCoordinator } from "./utils/serviceWorkerUpdates.js";
 import "react-toastify/dist/ReactToastify.css";
 import "./styles/app.css";
 
 const cleanRecoveryUrl = urlWithoutConnectionRecoveryToken(window.location.href);
 if (cleanRecoveryUrl) window.history.replaceState(window.history.state, "", cleanRecoveryUrl);
 
-if (import.meta.env.PROD && typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+const serviceWorkerUpdates = import.meta.env.PROD ? browserServiceWorkerUpdateCoordinator() : null;
+if (serviceWorkerUpdates) {
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    void serviceWorkerUpdates.start();
   });
 }
 
@@ -49,6 +52,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { error: Error
 createRoot(document.getElementById("root")!).render(
   <AppErrorBoundary>
     <BrowserRouter>
+      <AppUpdatePrompt coordinator={serviceWorkerUpdates} />
       <Routes>
         <Route path="/access" element={<AccessPage />} />
         <Route path="/" element={<AppShell />}>

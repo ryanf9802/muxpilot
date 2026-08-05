@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type ProxyOptions } from "vite";
+import { pwaServiceWorkerPlugin } from "./pwaPlugin.js";
 
 const apiTarget = process.env.MUXPILOT_API_TARGET ?? "http://127.0.0.1:4177";
 const https = viteHttpsConfig();
@@ -60,7 +61,7 @@ const proxy: Record<string, ProxyOptions> = {
 };
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), pwaServiceWorkerPlugin()],
   server: {
     https,
     proxy

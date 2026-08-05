@@ -48,6 +48,33 @@ body {
   background: var(--color-bg);
 }
 
+.app-update-prompt {
+  position: fixed;
+  z-index: 100;
+  top: calc(env(safe-area-inset-top) + 12px);
+  left: 50%;
+  display: flex;
+  width: min(calc(100% - 24px), 440px);
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  transform: translateX(-50%);
+  border: 1px solid var(--color-warning);
+  border-radius: 10px;
+  background: var(--color-warning-soft);
+  box-shadow: var(--shadow-elevated);
+}
+
+.app-update-prompt button {
+  flex: 0 0 auto;
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--color-warning);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+}
+
 button,
 input,
 textarea,
