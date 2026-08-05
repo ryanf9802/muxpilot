@@ -1830,7 +1830,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("switches Fast mode with an explicit command after Codex confirms the tier", async () => {
+  it("switches Fast mode with Codex's toggle command after the tier is confirmed", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -1873,7 +1873,7 @@ describe("SessionManager transcript isolation", () => {
 
     const updated = await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
 
-    expect(sentInputs).toEqual(["/fast on"]);
+    expect(sentInputs).toEqual(["/fast"]);
     expect(updated?.fastMode).toBe(true);
     harness.db.close();
   });

@@ -1288,7 +1288,7 @@ export class SessionManager {
     }
 
     const pane = await this.livePane(session);
-    await this.tmux.sendInput(pane.paneId, enabled ? "/fast on" : "/fast off");
+    await this.tmux.sendInput(pane.paneId, "/fast");
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await delay(100);
       if (await readLatestCodexFastMode(session.codexJsonlPath) !== enabled) continue;
@@ -1298,7 +1298,7 @@ export class SessionManager {
         "local",
         "set_fast_mode",
         session.id,
-        JSON.stringify({ enabled, command: enabled ? "/fast on" : "/fast off" }),
+        JSON.stringify({ enabled, command: "/fast" }),
         updatedAt
       );
       return;
