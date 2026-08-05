@@ -1878,6 +1878,48 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("detects an explicit Standard tier beyond the previous JSONL tail window", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sessionPath = join(harness.codexHome, "sessions", "session.jsonl");
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    await appendFile(
+      sessionPath,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } }
+      })}\n`
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+
+    await harness.manager.discover();
+    expect(harness.manager.listSessions(true)[0]?.fastMode).toBe(true);
+
+    await appendFile(
+      sessionPath,
+      [
+        JSON.stringify({
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_settings: { service_tier: "default" } }
+        }),
+        JSON.stringify({ type: "response_item", payload: { type: "function_call_output", output: "x".repeat(300 * 1024) } }),
+        ""
+      ].join("\n")
+    );
+
+    await harness.manager.discover();
+
+    expect(harness.manager.listSessions(true)[0]?.fastMode).toBe(false);
+    harness.db.close();
+  });
+
   it("hydrates model selections from the Codex screen before the first turn", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

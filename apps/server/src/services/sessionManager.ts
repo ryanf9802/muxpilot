@@ -1916,12 +1916,84 @@ async function readLatestCodexModelSettings(path: string): Promise<SessionModelS
   }
 }
 
+const CODEX_FAST_MODE_SCAN_CHUNK_BYTES = 256 * 1024;
+const CODEX_FAST_MODE_CACHE_LIMIT = 256;
+const CODEX_FAST_MODE_EVENT_MARKER = Buffer.from('"thread_settings_applied"');
+const codexFastModeFileCache = new Map<string, { size: number; mtimeMs: number; value: boolean | null }>();
+
 async function readLatestCodexFastMode(path: string): Promise<boolean | null> {
+  let file: Awaited<ReturnType<typeof open>>;
   try {
-    return latestCodexFastModeFromText(await readFileTail(path, 256 * 1024));
+    file = await open(path, "r");
   } catch {
     return null;
   }
+  try {
+    const fileStat = await file.stat();
+    const cached = codexFastModeFileCache.get(path);
+    if (cached && cached.size === fileStat.size && cached.mtimeMs === fileStat.mtimeMs) return cached.value;
+
+    const start = cached && fileStat.size > cached.size ? cached.size : 0;
+    const appendedValue = await readLatestCodexFastModeBetween(file, start, fileStat.size);
+    const value = appendedValue ?? (start > 0 ? cached?.value ?? null : null);
+
+    if (fileStat.size === 0 || await fileEndsWithNewline(file, fileStat.size)) {
+      cacheCodexFastMode(path, { size: fileStat.size, mtimeMs: fileStat.mtimeMs, value });
+    }
+    return value;
+  } catch {
+    return null;
+  } finally {
+    await file.close();
+  }
+}
+
+function cacheCodexFastMode(path: string, entry: { size: number; mtimeMs: number; value: boolean | null }): void {
+  if (!codexFastModeFileCache.has(path) && codexFastModeFileCache.size >= CODEX_FAST_MODE_CACHE_LIMIT) {
+    const oldestPath = codexFastModeFileCache.keys().next().value;
+    if (oldestPath) codexFastModeFileCache.delete(oldestPath);
+  }
+  codexFastModeFileCache.set(path, entry);
+}
+
+async function readLatestCodexFastModeBetween(
+  file: Awaited<ReturnType<typeof open>>,
+  start: number,
+  end: number
+): Promise<boolean | null> {
+  let position = end;
+  let lineParts: Buffer[] = [];
+  while (position > start) {
+    const length = Math.min(CODEX_FAST_MODE_SCAN_CHUNK_BYTES, position - start);
+    position -= length;
+    const buffer = Buffer.allocUnsafe(length);
+    const { bytesRead } = await file.read(buffer, 0, length, position);
+    const chunk = buffer.subarray(0, bytesRead);
+    let lineEnd = chunk.length;
+    for (let index = chunk.length - 1; index >= 0; index -= 1) {
+      if (chunk[index] !== 0x0a) continue;
+      const segment = chunk.subarray(index + 1, lineEnd);
+      const line = lineParts.length > 0 ? Buffer.concat([segment, ...lineParts]) : segment;
+      const fastMode = codexFastModeFromBuffer(line);
+      if (fastMode !== null) return fastMode;
+      lineParts = [];
+      lineEnd = index;
+    }
+    lineParts.unshift(chunk.subarray(0, lineEnd));
+  }
+  return codexFastModeFromBuffer(Buffer.concat(lineParts));
+}
+
+function codexFastModeFromBuffer(line: Buffer): boolean | null {
+  if (line.indexOf(CODEX_FAST_MODE_EVENT_MARKER) < 0) return null;
+  return codexFastModeFromLine(line.toString("utf8"));
+}
+
+async function fileEndsWithNewline(file: Awaited<ReturnType<typeof open>>, size: number): Promise<boolean> {
+  if (size === 0) return true;
+  const byte = Buffer.allocUnsafe(1);
+  const { bytesRead } = await file.read(byte, 0, 1, size - 1);
+  return bytesRead === 1 && byte[0] === 0x0a;
 }
 
 export function latestCodexFastModeFromText(text: string): boolean | null {
@@ -1934,7 +2006,7 @@ export function latestCodexFastModeFromText(text: string): boolean | null {
 }
 
 function codexFastModeFromLine(line: string): boolean | null {
-  if (!line.trim()) return null;
+  if (!line.includes('"thread_settings_applied"')) return null;
   try {
     const event = JSON.parse(line) as {
       payload?: { type?: unknown; thread_settings?: { service_tier?: unknown } };
