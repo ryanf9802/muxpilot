@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -641,6 +641,11 @@ export function SessionCard({
             ) : null}
           </div>
           <span className="session-card-head-actions">
+            {session.fastMode === true ? (
+              <span className="session-fast-mode-indicator" title="Fast mode enabled" aria-label="Fast mode enabled">
+                <Zap size={14} />
+              </span>
+            ) : null}
             {session.pinned ? (
               <span className="session-pin-indicator" title="Pinned" aria-label="Pinned session">
                 <Pin size={14} />

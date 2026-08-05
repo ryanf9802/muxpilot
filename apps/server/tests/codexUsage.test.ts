@@ -84,7 +84,8 @@ describe("normalizeCodexModels", () => {
               { reasoningEffort: "medium", description: "Balanced" },
               { reasoningEffort: "high", description: "Deeper" }
             ],
-            defaultReasoningEffort: "medium"
+            defaultReasoningEffort: "medium",
+            serviceTiers: [{ id: "fast", name: "Fast", description: "Priority processing" }]
           },
           {
             id: "hidden",
@@ -107,7 +108,8 @@ describe("normalizeCodexModels", () => {
           { reasoningEffort: "medium", description: "Balanced" },
           { reasoningEffort: "high", description: "Deeper" }
         ],
-        defaultReasoningEffort: "medium"
+        defaultReasoningEffort: "medium",
+        serviceTiers: [{ id: "fast", name: "Fast", description: "Priority processing" }]
       }
     ]);
   });

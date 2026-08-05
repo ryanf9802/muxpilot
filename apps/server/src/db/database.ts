@@ -290,6 +290,10 @@ export class AppDatabase {
     return this.call("setSessionInputMode", sessionId, inputMode, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  setSessionFastMode(sessionId: string, fastMode: boolean, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionFastMode", sessionId, fastMode, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   setSessionModelSettings(
     sessionId: string,
     mode: CollaborationMode,
@@ -772,6 +776,16 @@ export class SyncAppDatabase {
     const existing = this.getSession(sessionId);
     if (!existing) return null;
     const next = { ...existing, inputMode };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  setSessionFastMode(sessionId: string, fastMode: boolean, updatedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, fastMode };
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
@@ -2103,6 +2117,8 @@ export class SyncAppDatabase {
       activitySummarySourceSequence: activitySummary?.source_sequence ?? null,
       inputMode: collaborationMode(session.inputMode) ?? "default",
       models: sessionModels(session.models),
+      fastMode: typeof session.fastMode === "boolean" ? session.fastMode : null,
+      fastModeAvailable: typeof session.fastModeAvailable === "boolean" ? session.fastModeAvailable : null,
       transcriptSize: this.messageCount(row.id),
       transcriptSyncing: session.transcriptSyncing === true,
       unreadCount: row.unread_count,

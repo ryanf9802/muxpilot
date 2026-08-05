@@ -19,6 +19,7 @@ import {
   ShieldCheck,
   Skull,
   Trash2,
+  Zap,
   X
 } from "lucide-react";
 import { cursorLineDown, insertNewlineAndIndent } from "@codemirror/commands";
@@ -233,6 +234,14 @@ export function inputModeAction(mode: CollaborationMode): SessionAction {
 
 export function sessionWithPendingInputMode(session: ManagedSession, pendingMode: CollaborationMode | null): ManagedSession {
   return pendingMode ? { ...session, inputMode: pendingMode } : session;
+}
+
+export function fastModeAction(enabled: boolean): SessionAction {
+  return { type: "setFastMode", enabled };
+}
+
+export function sessionWithPendingFastMode(session: ManagedSession, pendingFastMode: boolean | null): ManagedSession {
+  return pendingFastMode === null ? session : { ...session, fastMode: pendingFastMode };
 }
 
 export function shouldQueueComposerInput(
@@ -706,6 +715,7 @@ export function SessionView() {
   const [heavyCommandError, setHeavyCommandError] = useState("");
   const [terminatingHeavyRun, setTerminatingHeavyRun] = useState<string | null>(null);
   const [inputModeError, setInputModeError] = useState("");
+  const [fastModeError, setFastModeError] = useState("");
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
@@ -737,6 +747,7 @@ export function SessionView() {
   const loadingSearchPageRef = useRef(false);
   const liveTailRefreshGateRef = useRef(new LatestGenerationRefreshGate());
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
+  const pendingFastModeRef = useRef<boolean | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
   const initialTranscriptSessionIdRef = useRef<string | null>(null);
   const hasMoreAfterRef = useRef(false);
@@ -1068,7 +1079,9 @@ export function SessionView() {
       setPlanActionError("");
       setSubmitBusy(false);
       setActionBusy(null);
+      pendingFastModeRef.current = null;
       setInputModeError("");
+      setFastModeError("");
       setCopiedTmuxCommand(false);
       setHeavyCommands([]);
       setHeavyCommandsOpen(false);
@@ -1228,7 +1241,10 @@ export function SessionView() {
   async function loadSession(targetId = id, token = requestTokenRef.current) {
     const response = await trackRefreshRequest(() => api.session(targetId));
     if (!isCurrentRequest(targetId, token)) return;
-    const nextSession = sessionWithPendingInputMode(response.session, pendingInputModeRef.current);
+    const nextSession = sessionWithPendingFastMode(
+      sessionWithPendingInputMode(response.session, pendingInputModeRef.current),
+      pendingFastModeRef.current
+    );
     clearTranscriptOnSessionSourceChange(nextSession);
     setSession(nextSession);
     syncSessionStoplight(nextSession);
@@ -1627,6 +1643,31 @@ export function SessionView() {
     }
   }
 
+  async function setFastMode(enabled: boolean) {
+    if (!session || session.fastMode === enabled || actionBusy) return;
+    const targetId = id;
+    const token = requestTokenRef.current;
+    pendingFastModeRef.current = enabled;
+    setActionBusy("setFastMode");
+    setFastModeError("");
+    setSession((current) => (current ? { ...current, fastMode: enabled } : current));
+    try {
+      const response = await api.action(targetId, fastModeAction(enabled));
+      if (!isCurrentRequest(targetId, token)) return;
+      if (response.session) setSession(response.session);
+    } catch (error) {
+      if (!isCurrentRequest(targetId, token)) return;
+      setFastModeError(error instanceof Error ? error.message : String(error));
+      pendingFastModeRef.current = null;
+      await loadSession(targetId, token);
+    } finally {
+      if (isCurrentRequest(targetId, token)) {
+        pendingFastModeRef.current = null;
+        setActionBusy(null);
+      }
+    }
+  }
+
   async function copyTmuxCommand() {
     if (!session) return;
     const command = tmuxAttachCommand(session);
@@ -1750,8 +1791,16 @@ export function SessionView() {
           <StatusPill status={readySession.status} />
         </div>
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
+        <FastModeToggle
+          enabled={readySession.fastMode === true}
+          available={readySession.fastModeAvailable ?? null}
+          busy={actionBusy === "setFastMode"}
+          ready={readySession.status === "waiting" || readySession.status === "idle"}
+          onChange={setFastMode}
+        />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
+        {fastModeError ? <p className="mode-toggle-error">{fastModeError}</p> : null}
       </div>
 
       <HeavyCommandsModal
@@ -2813,6 +2862,45 @@ export function ModeToggle({
         <span className="mode-toggle-text">Plan</span>
       </button>
     </div>
+  );
+}
+
+export function FastModeToggle({
+  enabled,
+  available,
+  busy,
+  ready,
+  onChange
+}: {
+  enabled: boolean;
+  available: boolean | null;
+  busy: boolean;
+  ready: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  const unavailable = available === false;
+  const disabled = busy || unavailable || !ready;
+  const title = unavailable
+    ? "Fast mode is unavailable for this model"
+    : !ready
+      ? "Fast mode can be changed when Codex is ready for input"
+      : enabled
+        ? "Disable Fast mode (also updates the default for future Codex sessions)"
+        : "Enable Fast mode (uses more credits and updates the default for future Codex sessions)";
+  return (
+    <button
+      type="button"
+      className={`fast-mode-toggle${enabled ? " selected" : ""}`}
+      disabled={disabled}
+      aria-label={enabled ? "Disable Fast mode" : "Enable Fast mode"}
+      aria-pressed={enabled}
+      aria-busy={busy}
+      title={title}
+      onClick={() => onChange(!enabled)}
+    >
+      <Zap size={15} aria-hidden="true" />
+      <span>Fast</span>
+    </button>
   );
 }
 

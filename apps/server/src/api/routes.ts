@@ -22,6 +22,7 @@ import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
   CreateSessionError,
+  FastModeSwitchError,
   InputModeSwitchError,
   QuestionResolutionError,
   QueuedInputError,
@@ -122,6 +123,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
+  z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
   z.object({ type: z.literal("rename"), name: sessionNameSchema }),
   z.object({ type: z.literal("pin") }),
@@ -481,6 +483,9 @@ export function registerRoutes(
       return reply.code(202).send({ ok: true });
     } catch (error) {
       if (error instanceof InputModeSwitchError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      if (error instanceof FastModeSwitchError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       throw error;

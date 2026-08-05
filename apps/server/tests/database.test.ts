@@ -251,6 +251,29 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("persists Fast mode in session data", async () => {
+    const db = await tempDb();
+    const session = testSession("session-fast-mode");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+
+    const updated = db.setSessionFastMode(session.id, true, "2026-07-07T00:00:01.000Z");
+
+    expect(updated?.fastMode).toBe(true);
+    expect(db.getSession(session.id)?.fastMode).toBe(true);
+    db.close();
+  });
+
+  it("hydrates missing legacy Fast mode state as unknown", async () => {
+    const db = await tempDb();
+    const legacySession = { ...testSession("session-legacy-fast-mode") };
+    delete (legacySession as Partial<ManagedSession>).fastMode;
+    delete (legacySession as Partial<ManagedSession>).fastModeAvailable;
+    db.upsertSession(legacySession as ManagedSession, "2026-07-07T00:00:00.000Z");
+
+    expect(db.getSession(legacySession.id)).toMatchObject({ fastMode: null, fastModeAvailable: null });
+    db.close();
+  });
+
   it("hydrates missing legacy session model selections", async () => {
     const db = await tempDb();
     const legacySession = { ...testSession("session-legacy-models") };

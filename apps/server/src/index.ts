@@ -13,7 +13,7 @@ import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
 import { ActivitySummarizer, OpenAIActivitySummaryClient } from "./services/activitySummarizer.js";
 import { buildOpenAIModelPricingTable } from "./services/openaiPricing.js";
-import { CodexUsageService } from "./services/codexUsage.js";
+import { CodexModelsService, CodexUsageService } from "./services/codexUsage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
@@ -33,6 +33,7 @@ const tmux = new TmuxAdapter(config.inputSubmitKeys);
 const codex = new CodexSessionStore(config.codexHome);
 const codexProcessResolver = new CodexProcessResolver();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
+const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const events = new EventBus();
 const gitWorkflowBroker = new GitWorkflowBroker(db, join(config.dataDir, "runtime", "git-workflow-broker.sock"), app.log);
@@ -109,7 +110,8 @@ const manager = new SessionManager(
   gitWorkspaces,
   config.codexHome,
   config.gitWorktreeRoot,
-  managedEnvironment
+  managedEnvironment,
+  codexModels
 );
 const heavyCommands = new HeavyCommandService(config.heavyValidationDir, config.gitSessionRoot);
 const resourceGovernor = new ResourceGovernor({
@@ -182,6 +184,7 @@ const close = async () => {
   await resourceGovernor.stop();
   notifications.stop();
   codexUsage.stop();
+  codexModels.stop();
   await pwaTrustServer.close();
   await dockerProxy?.close();
   await gitWorkflowBroker.close();

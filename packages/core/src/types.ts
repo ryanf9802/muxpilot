@@ -51,6 +51,13 @@ export interface CodexModel {
   isDefault: boolean;
   supportedReasoningEfforts: CodexReasoningEffortOption[];
   defaultReasoningEffort: string | null;
+  serviceTiers: CodexServiceTier[];
+}
+
+export interface CodexServiceTier {
+  id: string;
+  name: string;
+  description: string;
 }
 
 export interface CodexReasoningEffortOption {
@@ -231,6 +238,8 @@ export interface ManagedSession {
   activitySummarySourceSequence: number | null;
   inputMode: CollaborationMode;
   models: SessionModelSelections;
+  fastMode?: boolean | null;
+  fastModeAvailable?: boolean | null;
   transcriptSize: number;
   transcriptSyncing?: boolean;
   unreadCount: number;
@@ -633,6 +642,7 @@ export type SessionAction =
   | { type: "interrupt" }
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
+  | { type: "setFastMode"; enabled: boolean }
   | { type: "choosePlanAction"; action: PlanActionChoice }
   | { type: "rename"; name: string }
   | { type: "pin" }

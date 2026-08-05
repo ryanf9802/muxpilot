@@ -10,6 +10,7 @@ import { EventBus } from "../src/services/eventBus.js";
 import {
   codexModelSettingsFromPaneText,
   legacyTmuxPaneSessionId,
+  latestCodexFastModeFromText,
   managedCodexLaunchOptions,
   normalizeRepositoryApprovalPrefix,
   sessionChanged,
@@ -28,6 +29,19 @@ describe("Codex pane model settings", () => {
 
   it("ignores model and effort text without Codex screen framing", () => {
     expect(codexModelSettingsFromPaneText("Try gpt-5.6-sol medium for this task.")).toBeNull();
+  });
+});
+
+describe("Codex Fast mode settings", () => {
+  it("uses the latest applied thread service tier", () => {
+    const settings = [
+      JSON.stringify({ type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { service_tier: "default" } } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } } })
+    ].join("\n");
+
+    expect(latestCodexFastModeFromText(settings)).toBe(true);
+    expect(latestCodexFastModeFromText('{"payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"default"}}}')).toBe(false);
+    expect(latestCodexFastModeFromText('{"payload":{"type":"other","service_tier":"priority"}}')).toBeNull();
   });
 });
 
@@ -1813,6 +1827,54 @@ describe("SessionManager transcript isolation", () => {
       default: { model: "gpt-5.5", reasoningEffort: "high" },
       plan: { model: null, reasoningEffort: null }
     });
+    harness.db.close();
+  });
+
+  it("switches Fast mode with an explicit command after Codex confirms the tier", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const mtime = new Date("2026-07-07T00:00:00.000Z");
+    const sessionPath = join(harness.codexHome, "sessions", "session.jsonl");
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime
+    });
+    await appendFile(
+      sessionPath,
+      `${JSON.stringify({
+        timestamp: "2026-07-07T00:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", thread_settings: { service_tier: "default" } }
+      })}\n`
+    );
+    await utimes(sessionPath, mtime, mtime);
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+    harness.tmux.listPanes = async () => [pane];
+    const sentInputs: string[] = [];
+    harness.tmux.sendInput = async (_paneId, text) => {
+      sentInputs.push(text);
+      await appendFile(
+        sessionPath,
+        `${JSON.stringify({
+          timestamp: "2026-07-07T00:00:04.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } }
+        })}\n`
+      );
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session?.fastMode).toBe(false);
+
+    const updated = await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
+
+    expect(sentInputs).toEqual(["/fast on"]);
+    expect(updated?.fastMode).toBe(true);
     harness.db.close();
   });
 

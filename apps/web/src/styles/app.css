@@ -1386,6 +1386,18 @@ select:focus-visible {
   border-radius: 999px;
 }
 
+.session-fast-mode-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 34%, transparent);
+  border-radius: 999px;
+}
+
 .session-card-menu-button {
   position: absolute;
   top: 8px;
@@ -2860,6 +2872,34 @@ select:focus-visible {
 
 .mode-toggle-plan.selected {
   background: var(--color-tertiary);
+}
+
+.fast-mode-toggle {
+  flex: 0 0 auto;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  color: var(--color-text-muted);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.fast-mode-toggle:hover:not(:disabled),
+.fast-mode-toggle:focus-visible {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 52%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
+  box-shadow: none;
+}
+
+.fast-mode-toggle.selected {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 62%, var(--color-border));
+  background: color-mix(in srgb, var(--color-warning) 14%, var(--color-surface));
 }
 
 .tmux-command-button {
@@ -4412,6 +4452,17 @@ select:focus-visible {
 
   .mode-toggle {
     flex: 0 0 auto;
+  }
+
+  .fast-mode-toggle {
+    width: 32px;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0;
+  }
+
+  .fast-mode-toggle span {
+    display: none;
   }
 
   .mode-toggle button {

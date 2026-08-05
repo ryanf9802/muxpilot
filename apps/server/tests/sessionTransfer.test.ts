@@ -31,7 +31,11 @@ describe.sequential("SessionTransferService", () => {
     expect(file[8]).toBe(0);
     const entries = await tarEntries(gunzipSync(file.subarray(9)));
     expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "sessions/0002.jsonl"]);
-    expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({ formatVersion: 3, gitBranches: [] });
+    expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({
+      formatVersion: 3,
+      gitBranches: [],
+      sessions: [expect.objectContaining({ fastMode: true }), expect.objectContaining({ fastMode: false })]
+    });
     expect([...entries.keys()].join(" ")).not.toContain(fixture.sessions[0]!.codexSessionId);
 
     const preview = await service.inspect(file);
@@ -161,6 +165,7 @@ async function createFixture(count = 2): Promise<{ root: string; sessions: Manag
       activitySummarySourceSequence: null,
       inputMode: "default",
       models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
+      fastMode: index === 0,
       transcriptSize: 0,
       unreadCount: 0,
       pinned: index === 0,

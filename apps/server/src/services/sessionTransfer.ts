@@ -44,6 +44,7 @@ export interface PortableSession {
   targetBranch: string | null;
   inputMode: CollaborationMode;
   models: SessionModelSelections;
+  fastMode?: boolean | null;
   pinned: boolean;
   lastActivityAt: string | null;
   transcriptEntry: string;
@@ -287,6 +288,7 @@ function portableSession(
     targetBranch: session.gitWorkspace?.targetBranch ?? null,
     inputMode: session.inputMode,
     models: session.models,
+    fastMode: session.fastMode ?? null,
     pinned: session.pinned,
     lastActivityAt: session.lastActivityAt,
     transcriptEntry,

@@ -17,6 +17,8 @@ import {
   DESKTOP_VIM_MEDIA_QUERY,
   elapsedSince,
   formatElapsedSeconds,
+  FastModeToggle,
+  fastModeAction,
   groupEventStacks,
   groupStackableMessages,
   GitWorkspacePanel,
@@ -48,6 +50,7 @@ import {
   loadComposerDraft,
   loadVimModePreference,
   sessionWithPendingInputMode,
+  sessionWithPendingFastMode,
   saveComposerDraft,
   saveVimModePreference,
   sentQueuedInputToPendingUserMessage,
@@ -930,6 +933,39 @@ describe("input mode helpers", () => {
 
     expect(sessionWithPendingInputMode(staleSession, "plan")).toMatchObject({ id: "session-a", inputMode: "plan" });
     expect(sessionWithPendingInputMode(staleSession, null)).toBe(staleSession);
+  });
+});
+
+describe("Fast mode controls", () => {
+  it("builds explicit actions and preserves optimistic state over refreshes", () => {
+    const staleSession = managedSession({ fastMode: false });
+
+    expect(fastModeAction(true)).toEqual({ type: "setFastMode", enabled: true });
+    expect(sessionWithPendingFastMode(staleSession, true)).toMatchObject({ id: "session-a", fastMode: true });
+    expect(sessionWithPendingFastMode(staleSession, null)).toBe(staleSession);
+  });
+
+  it("renders an accessible pressed toggle and disables unsupported models", () => {
+    const enabled = renderToStaticMarkup(createElement(FastModeToggle, {
+      enabled: true,
+      available: true,
+      busy: false,
+      ready: true,
+      onChange: () => undefined
+    }));
+    const unavailable = renderToStaticMarkup(createElement(FastModeToggle, {
+      enabled: false,
+      available: false,
+      busy: false,
+      ready: true,
+      onChange: () => undefined
+    }));
+
+    expect(enabled).toContain('aria-pressed="true"');
+    expect(enabled).toContain('aria-label="Disable Fast mode"');
+    expect(enabled).toContain("fast-mode-toggle selected");
+    expect(unavailable).toContain("disabled");
+    expect(unavailable).toContain("unavailable for this model");
   });
 });
 

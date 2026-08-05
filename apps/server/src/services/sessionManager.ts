@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
+  CodexModel,
   CollaborationMode,
   CreateSessionRequest,
   GitWorkspaceSummary,
@@ -52,6 +53,11 @@ interface CodexProcessLookup {
   resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
 }
 
+interface CodexMetadataLookup {
+  listModels(): Promise<CodexModel[]>;
+  effectiveServiceTier(cwd: string): Promise<string | null>;
+}
+
 interface ApprovalKeyMap {
   approveOnce: string[];
   approveForPrefix: string[];
@@ -98,7 +104,8 @@ export class SessionManager {
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
     private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
     private readonly gitWorktreeRoot: string | null = null,
-    private readonly managedEnvironment: Record<string, string> = {}
+    private readonly managedEnvironment: Record<string, string> = {},
+    private readonly codexMetadata: CodexMetadataLookup | null = null
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -168,6 +175,7 @@ export class SessionManager {
     const now = nowIso();
     const seen = new Set<string>();
     const paneIds = panes.map(tmuxPaneSessionId);
+    const codexModels = await this.codexMetadata?.listModels().catch(() => []) ?? [];
 
     for (const [index, pane] of panes.entries()) {
       const sessionId = paneIds[index] ?? tmuxPaneSessionId(pane);
@@ -245,6 +253,16 @@ export class SessionManager {
         (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
       );
       const liveModelSettings = mergeModelSettings(jsonlModelSettings, paneModelSettings);
+      const models = mergeSessionModels(existing?.models, inputMode, liveModelSettings);
+      const activeModel = activeSessionModel(models, inputMode);
+      const discoveredFastModeAvailable = codexFastModeAvailable(codexModels, activeModel);
+      const fastModeAvailable = discoveredFastModeAvailable ?? (sourceChanged ? null : existing?.fastModeAvailable ?? null);
+      const observedFastMode = nextCodexJsonlPath ? await readLatestCodexFastMode(nextCodexJsonlPath) : null;
+      const storedFastMode = sourceChanged ? null : existing?.fastMode ?? null;
+      const configuredFastMode = observedFastMode === null && storedFastMode === null
+        ? serviceTierFastMode(await this.codexMetadata?.effectiveServiceTier(pane.cwd).catch(() => null) ?? null)
+        : null;
+      const fastMode = observedFastMode ?? storedFastMode ?? configuredFastMode;
       const storedGitWorkspace = await this.gitWorkspaces?.getBySession(lookupId) ?? null;
       if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
@@ -264,7 +282,9 @@ export class SessionManager {
         activitySummaryGeneratedAt: sourceChanged ? null : existing?.activitySummaryGeneratedAt ?? null,
         activitySummarySourceSequence: sourceChanged ? null : existing?.activitySummarySourceSequence ?? null,
         inputMode,
-        models: mergeSessionModels(existing?.models, inputMode, liveModelSettings),
+        models,
+        fastMode,
+        fastModeAvailable,
         transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
         transcriptSyncing,
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
@@ -586,6 +606,8 @@ export class SessionManager {
       activitySummarySourceSequence: null,
       inputMode: portable.inputMode,
       models: portable.models,
+      fastMode: portable.fastMode ?? null,
+      fastModeAvailable: null,
       transcriptSize: 0,
       unreadCount: 0,
       pinned: portable.pinned,
@@ -1002,6 +1024,8 @@ export class SessionManager {
       activitySummarySourceSequence: null,
       inputMode: "default",
       models: emptySessionModels(),
+      fastMode: null,
+      fastModeAvailable: null,
       transcriptSize: 0,
       transcriptSyncing: false,
       unreadCount: 0,
@@ -1069,6 +1093,9 @@ export class SessionManager {
         }),
         updatedAt
       );
+    }
+    if (action.type === "setFastMode") {
+      await this.setFastMode(session, action.enabled);
     }
     if (action.type === "detach") {
       this.publish("notification.created", sessionId, { title: "Detach requested", body: "Detach is managed by tmux clients." });
@@ -1243,6 +1270,42 @@ export class SessionManager {
     return liveSession;
   }
 
+  private async setFastMode(session: ManagedSession, enabled: boolean): Promise<void> {
+    if (!isInputReadyStatus(session.status)) {
+      throw new FastModeSwitchError("Fast mode can only be changed when the session is ready for input");
+    }
+    if (session.fastModeAvailable === false) {
+      throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
+    }
+    if (!session.codexJsonlPath) {
+      throw new FastModeSwitchError("Fast mode is unavailable until the Codex session is detected");
+    }
+
+    const observed = await readLatestCodexFastMode(session.codexJsonlPath);
+    if (observed === enabled || (observed === null && session.fastMode === enabled)) {
+      await this.db.setSessionFastMode(session.id, enabled, nowIso());
+      return;
+    }
+
+    const pane = await this.livePane(session);
+    await this.tmux.sendInput(pane.paneId, enabled ? "/fast on" : "/fast off");
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await delay(100);
+      if (await readLatestCodexFastMode(session.codexJsonlPath) !== enabled) continue;
+      const updatedAt = nowIso();
+      await this.db.setSessionFastMode(session.id, enabled, updatedAt);
+      await this.db.addAudit(
+        "local",
+        "set_fast_mode",
+        session.id,
+        JSON.stringify({ enabled, command: enabled ? "/fast on" : "/fast off" }),
+        updatedAt
+      );
+      return;
+    }
+    throw new FastModeSwitchError("Codex did not confirm the Fast mode change");
+  }
+
   private async liveSession(session: ManagedSession): Promise<ManagedSession> {
     const pane = await this.livePane(session);
     return { ...session, tmux: pane };
@@ -1294,6 +1357,8 @@ export class SessionManager {
       activitySummarySourceSequence: source.activitySummarySourceSequence,
       inputMode: source.inputMode,
       models: source.models,
+      fastMode: source.fastMode ?? null,
+      fastModeAvailable: source.fastModeAvailable ?? null,
       transcriptSize: source.transcriptSize,
       transcriptSyncing: source.transcriptSyncing === true,
       unreadCount: source.unreadCount,
@@ -1399,6 +1464,10 @@ export class QuestionResolutionError extends Error {
 }
 
 export class InputModeSwitchError extends Error {
+  readonly statusCode = 409;
+}
+
+export class FastModeSwitchError extends Error {
   readonly statusCode = 409;
 }
 
@@ -1847,6 +1916,36 @@ async function readLatestCodexModelSettings(path: string): Promise<SessionModelS
   }
 }
 
+async function readLatestCodexFastMode(path: string): Promise<boolean | null> {
+  try {
+    return latestCodexFastModeFromText(await readFileTail(path, 256 * 1024));
+  } catch {
+    return null;
+  }
+}
+
+export function latestCodexFastModeFromText(text: string): boolean | null {
+  let latest: boolean | null = null;
+  for (const line of text.split("\n")) {
+    const fastMode = codexFastModeFromLine(line);
+    if (fastMode !== null) latest = fastMode;
+  }
+  return latest;
+}
+
+function codexFastModeFromLine(line: string): boolean | null {
+  if (!line.trim()) return null;
+  try {
+    const event = JSON.parse(line) as {
+      payload?: { type?: unknown; thread_settings?: { service_tier?: unknown } };
+    };
+    if (event.payload?.type !== "thread_settings_applied") return null;
+    return serviceTierFastMode(stringValue(event.payload.thread_settings?.service_tier));
+  } catch {
+    return null;
+  }
+}
+
 async function readLiveCodexModelSettings(
   pane: TmuxPane,
   capturePane: (paneId: string, lines: number) => Promise<string>
@@ -1992,6 +2091,8 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     transcriptSyncing: session.transcriptSyncing === true,
     inputMode: session.inputMode,
     models: session.models,
+    fastMode: session.fastMode ?? null,
+    fastModeAvailable: session.fastModeAvailable ?? null,
     pinned: session.pinned,
     archived: session.archived,
     gitWorkspace: session.gitWorkspace
@@ -2030,6 +2131,28 @@ function emptySessionModels(): SessionModelSelections {
 
 function emptySessionModelSettings(): SessionModelSettings {
   return { model: null, reasoningEffort: null };
+}
+
+function activeSessionModel(models: SessionModelSelections, mode: CollaborationMode): string | null {
+  return models[mode].model ?? models.default.model ?? models.plan.model;
+}
+
+function codexFastModeAvailable(models: CodexModel[], activeModel: string | null): boolean | null {
+  if (!activeModel || models.length === 0) return null;
+  const model = models.find((candidate) => candidate.model === activeModel || candidate.id === activeModel);
+  if (!model) return null;
+  return model.serviceTiers.some((tier) => {
+    const id = tier.id.toLowerCase();
+    return id === "fast" || id === "priority";
+  });
+}
+
+function serviceTierFastMode(serviceTier: string | null): boolean | null {
+  if (!serviceTier) return null;
+  const normalized = serviceTier.toLowerCase();
+  if (normalized === "fast" || normalized === "priority") return true;
+  if (normalized === "default" || normalized === "standard") return false;
+  return null;
 }
 
 function mergeSessionModels(

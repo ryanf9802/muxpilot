@@ -296,6 +296,13 @@ describe("SessionCard", () => {
     expect(renderSessionCard(session)).toContain("Pinned session");
   });
 
+  it("shows a lightning indicator only for Fast mode sessions", () => {
+    const base = { id: "a", paneId: "%111", windowName: "fast-mode" };
+    expect(renderSessionCard(testSession({ ...base, fastMode: true }))).toContain("Fast mode enabled");
+    expect(renderSessionCard(testSession({ ...base, fastMode: false }))).not.toContain("Fast mode enabled");
+    expect(cssRule(".session-fast-mode-indicator")).toContain("var(--color-warning)");
+  });
+
   it("marks session cards as shared context-menu triggers", () => {
     expect(renderSessionCard(testSession({ id: "a", paneId: "%111", windowName: "context-menu" }))).toContain(
       'data-context-menu-trigger=""'
@@ -648,7 +655,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace" | "resourceUsage">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -682,6 +689,7 @@ function testSession(
     activitySummarySourceSequence: null,
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
+    fastMode: input.fastMode ?? null,
     transcriptSize: 0,
     unreadCount: 0,
     pinned: input.pinned ?? false,

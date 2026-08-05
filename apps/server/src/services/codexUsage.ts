@@ -125,6 +125,18 @@ export class CodexModelsService {
     }
   }
 
+  async effectiveServiceTier(cwd: string): Promise<string | null> {
+    try {
+      const response = await this.client.request<{ config?: { service_tier?: unknown } }>("config/read", {
+        cwd,
+        includeLayers: false
+      });
+      return stringValue(response.config?.service_tier);
+    } catch {
+      return null;
+    }
+  }
+
   stop(): void {
     this.client.stop();
   }
@@ -287,7 +299,8 @@ export function normalizeCodexModels(response: RawModelListResponse): CodexModel
         hidden: Boolean(model?.hidden),
         isDefault: Boolean(model?.isDefault),
         supportedReasoningEfforts: reasoningEffortOptions(model?.supportedReasoningEfforts),
-        defaultReasoningEffort: stringValue(model?.defaultReasoningEffort)
+        defaultReasoningEffort: stringValue(model?.defaultReasoningEffort),
+        serviceTiers: serviceTierOptions(model?.serviceTiers)
       } satisfies CodexModel;
     })
     .filter((model): model is CodexModel => Boolean(model))
@@ -395,4 +408,20 @@ function reasoningEffortOptions(value: unknown): CodexModel["supportedReasoningE
       };
     })
     .filter((option): option is CodexModel["supportedReasoningEfforts"][number] => Boolean(option));
+}
+
+function serviceTierOptions(value: unknown): CodexModel["serviceTiers"] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((candidate) => {
+      const option = recordValue(candidate);
+      const id = stringValue(option?.id);
+      if (!id) return null;
+      return {
+        id,
+        name: stringValue(option?.name) ?? id,
+        description: stringValue(option?.description) ?? ""
+      };
+    })
+    .filter((option): option is CodexModel["serviceTiers"][number] => Boolean(option));
 }
