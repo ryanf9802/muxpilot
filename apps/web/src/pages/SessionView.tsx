@@ -1791,13 +1791,6 @@ export function SessionView() {
           <StatusPill status={readySession.status} />
         </div>
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
-        <FastModeToggle
-          enabled={readySession.fastMode === true}
-          available={readySession.fastModeAvailable ?? null}
-          busy={actionBusy === "setFastMode"}
-          status={readySession.status}
-          onChange={setFastMode}
-        />
         <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
         {fastModeError ? <p className="mode-toggle-error">{fastModeError}</p> : null}
@@ -1840,6 +1833,13 @@ export function SessionView() {
               <span>{readyWorkspace.targetBranch}</span>
             </button>
           ) : null}
+          <FastModeToggle
+            enabled={readySession.fastMode === true}
+            available={readySession.fastModeAvailable ?? null}
+            busy={actionBusy === "setFastMode"}
+            status={readySession.status}
+            onChange={setFastMode}
+          />
           <button
             disabled={Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}

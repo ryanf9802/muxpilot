@@ -2923,7 +2923,7 @@ select:focus-visible {
   box-shadow: none;
 }
 
-.fast-mode-toggle.selected {
+.actions .fast-mode-toggle.selected {
   color: var(--color-warning);
   border-color: color-mix(in srgb, var(--color-warning) 62%, var(--color-border));
   background: color-mix(in srgb, var(--color-warning) 14%, var(--color-surface));
@@ -4481,14 +4481,7 @@ select:focus-visible {
     flex: 0 0 auto;
   }
 
-  .fast-mode-toggle {
-    width: 32px;
-    min-width: 32px;
-    min-height: 32px;
-    padding: 0;
-  }
-
-  .fast-mode-toggle span {
+  .actions .fast-mode-toggle span {
     display: none;
   }
 
