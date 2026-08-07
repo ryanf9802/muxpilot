@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   codexCommandArgs,
+  codexStartupActionFromCapture,
   codexStartupErrorFromCapture,
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
@@ -75,6 +76,38 @@ describe("isCodexDirectoryTrustPrompt", () => {
 
   it("does not mistake the normal Codex screen for a trust gate", () => {
     expect(isCodexDirectoryTrustPrompt(">_ OpenAI Codex\nWhat can I help you build?")).toBe(false);
+  });
+});
+
+describe("codexStartupActionFromCapture", () => {
+  const trustPrompt = [
+    "> You are in /home/dev/.muxpilot/sessions/example",
+    "Do you trust the contents of this directory?",
+    "› 1. Yes, continue",
+    "  2. No, quit",
+    "Press enter to continue"
+  ].join("\n");
+
+  it("accepts the active Codex project trust gate", () => {
+    expect(codexStartupActionFromCapture(trustPrompt)).toBe("accept_trust");
+  });
+
+  it("does not keep pressing Enter for a stale trust gate above the ready screen", () => {
+    const capture = [
+      trustPrompt,
+      "╭─────────────────────╮",
+      "│ >_ OpenAI Codex (v0.147.0) │",
+      "│ model: gpt-5.6-sol medium   │",
+      "╯─────────────────────╯",
+      "› Explain this codebase",
+      "  gpt-5.6-sol medium · Context 100% left"
+    ].join("\n");
+
+    expect(codexStartupActionFromCapture(capture)).toBe("ready");
+  });
+
+  it("accepts a current trust gate below stale ready-screen history", () => {
+    expect(codexStartupActionFromCapture([">_ OpenAI Codex", trustPrompt].join("\n"))).toBe("accept_trust");
   });
 });
 

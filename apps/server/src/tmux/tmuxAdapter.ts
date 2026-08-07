@@ -181,12 +181,13 @@ export class TmuxAdapter {
       }
       const startupError = codexStartupErrorFromCapture(capture);
       if (startupError) throw startupError;
-      if (isCodexDirectoryTrustPrompt(capture)) {
+      const startupAction = codexStartupActionFromCapture(capture);
+      if (startupAction === "accept_trust") {
         await this.sendKeys(pane.paneId, ["Enter"]);
         await delay(250);
         continue;
       }
-      if (isCodexReadyScreen(capture)) return;
+      if (startupAction === "ready") return;
       await delay(CODEX_STARTUP_POLL_INTERVAL_MS);
     }
     throw new CodexStartupError("Codex did not become ready within 60 seconds.", "timeout");
@@ -347,13 +348,21 @@ export function isCodexDirectoryTrustPrompt(text: string): boolean {
   return text.includes("Do you trust the contents of this directory?") && text.includes("Yes, continue") && text.includes("No, quit");
 }
 
-function isCodexReadyScreen(text: string): boolean {
+export function codexStartupActionFromCapture(text: string): "accept_trust" | "ready" | "wait" {
+  const trustPromptIndex = text.lastIndexOf("Do you trust the contents of this directory?");
+  const readyScreenIndex = codexReadyScreenIndex(text);
+  if (readyScreenIndex > trustPromptIndex) return "ready";
+  if (trustPromptIndex >= 0 && isCodexDirectoryTrustPrompt(text.slice(trustPromptIndex))) return "accept_trust";
+  return readyScreenIndex >= 0 ? "ready" : "wait";
+}
+
+function codexReadyScreenIndex(text: string): number {
   const normalized = text.toLowerCase();
-  return (
-    normalized.includes("openai codex") ||
-    normalized.includes("use /skills to list available skills") ||
-    normalized.includes("context left") ||
-    normalized.includes("gpt-")
+  return Math.max(
+    normalized.lastIndexOf("openai codex"),
+    normalized.lastIndexOf("use /skills to list available skills"),
+    normalized.lastIndexOf("context left"),
+    normalized.lastIndexOf("gpt-")
   );
 }
 
