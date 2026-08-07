@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { TmuxPane } from "@muxpilot/core";
 
@@ -7,7 +8,10 @@ const SEP = "\t";
 const MIN_INPUT_SUBMIT_DELAY_MS = 80;
 const MAX_INPUT_SUBMIT_DELAY_MS = 2500;
 const CODEX_STARTUP_POLL_INTERVAL_MS = 50;
-const CODEX_STARTUP_TIMEOUT_MS = 5000;
+const CODEX_STARTUP_TIMEOUT_MS = 60_000;
+const CODEX_STARTUP_CAPTURE_FAILURE_LIMIT = 20;
+const CODEX_STARTUP_FAILED_MARKER = "MUXPILOT_CODEX_STARTUP_FAILED";
+const CODEX_LAUNCHER_PATH = fileURLToPath(new URL("../../../../scripts/codex-launcher.sh", import.meta.url));
 const PANE_FORMAT = [
   "#{session_id}",
   "#{session_name}",
@@ -39,6 +43,13 @@ export interface CodexPaneLaunch {
 }
 
 export type CodexContinuation = { mode: "resume" | "fork"; sessionId: string };
+
+export class CodexStartupError extends Error {
+  constructor(message: string, readonly reason: "database_locked" | "exited" | "pane_closed" | "timeout") {
+    super(message);
+    this.name = "CodexStartupError";
+  }
+}
 
 export class TmuxAdapter {
   constructor(private readonly inputSubmitKeys: string[] = ["Enter"]) {}
@@ -154,16 +165,31 @@ export class TmuxAdapter {
 
   private async prepareCodexPane(pane: TmuxPane): Promise<void> {
     const deadline = Date.now() + CODEX_STARTUP_TIMEOUT_MS;
+    let captureFailures = 0;
     while (Date.now() < deadline) {
-      const capture = await this.capturePane(pane.paneId, 40).catch(() => "");
+      let capture: string;
+      try {
+        capture = await this.capturePane(pane.paneId, 80);
+        captureFailures = 0;
+      } catch {
+        captureFailures += 1;
+        if (captureFailures >= CODEX_STARTUP_CAPTURE_FAILURE_LIMIT) {
+          throw new CodexStartupError("Codex exited before startup completed.", "pane_closed");
+        }
+        await delay(CODEX_STARTUP_POLL_INTERVAL_MS);
+        continue;
+      }
+      const startupError = codexStartupErrorFromCapture(capture);
+      if (startupError) throw startupError;
       if (isCodexDirectoryTrustPrompt(capture)) {
         await this.sendKeys(pane.paneId, ["Enter"]);
         await delay(250);
-        return;
+        continue;
       }
       if (isCodexReadyScreen(capture)) return;
       await delay(CODEX_STARTUP_POLL_INTERVAL_MS);
     }
+    throw new CodexStartupError("Codex did not become ready within 60 seconds.", "timeout");
   }
 
   private async hasSession(sessionName: string): Promise<boolean> {
@@ -285,17 +311,36 @@ export function tmuxNewCodexForkWindowArgs(targetSessionId: string, cwd: string,
 }
 
 export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, continuation?: CodexContinuation): string[] {
-  const args = Object.keys(options.environment ?? {}).length
+  const codexArgs = Object.keys(options.environment ?? {}).length
     ? ["env", ...Object.entries(options.environment ?? {}).map(([key, value]) => `${key}=${value}`), "codex"]
     : ["codex"];
-  args.push("-c", "check_for_update_on_startup=false");
+  codexArgs.push("-c", "check_for_update_on_startup=false");
   if (options.isolatedWorkspace) {
-    args.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
-    for (const root of options.writableRoots ?? []) args.push("--add-dir", root);
+    codexArgs.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
+    for (const root of options.writableRoots ?? []) codexArgs.push("--add-dir", root);
   }
-  if (options.developerInstructions) args.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
-  if (continuation) args.push(continuation.mode, continuation.sessionId);
-  return args;
+  if (options.developerInstructions) codexArgs.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
+  if (continuation) codexArgs.push(continuation.mode, continuation.sessionId);
+  return ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];
+}
+
+export function codexStartupErrorFromCapture(text: string): CodexStartupError | null {
+  if (!isCodexStartupFailureCapture(text)) return null;
+  const normalized = text.toLowerCase();
+  if (normalized.includes("database is locked") || normalized.includes("another codex process is using its local data")) {
+    return new CodexStartupError(
+      "Codex couldn't start because its local data is locked. Restart WSL or close other Codex processes, then create the session again.",
+      "database_locked"
+    );
+  }
+  return new CodexStartupError(
+    "Codex exited before startup completed. Review the tmux pane output, then create the session again.",
+    "exited"
+  );
+}
+
+export function isCodexStartupFailureCapture(text: string): boolean {
+  return text.includes(CODEX_STARTUP_FAILED_MARKER);
 }
 
 export function isCodexDirectoryTrustPrompt(text: string): boolean {

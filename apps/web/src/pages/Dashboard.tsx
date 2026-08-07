@@ -50,7 +50,7 @@ const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repo
 export const DASHBOARD_SESSION_RECONCILE_INTERVAL_MS = SESSION_STATUS_RECONCILE_INTERVAL_MS;
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
 export const DASHBOARD_EVENT_DEBOUNCE_MS = SESSION_STATUS_EVENT_DEBOUNCE_MS;
-export const DASHBOARD_STATUSES = ["", "working", "planning", "waiting", "question", "plan_ready", "approval", "unknown", "missing"];
+export const DASHBOARD_STATUSES = ["", "working", "planning", "waiting", "question", "plan_ready", "approval", "startup_failed", "unknown", "missing"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
 export type DashboardStatusFilter =
@@ -671,7 +671,9 @@ export function SessionCard({
           </span>
         </div>
         <div className="preview">
-          {previewLines.length > 0 ? (
+          {session.startupError ? (
+            <p className="preview-line session-startup-error" role="alert">{session.startupError}</p>
+          ) : previewLines.length > 0 ? (
             previewLines.map((line, index) => (
               <p className={`preview-line${session.activitySummary ? " preview-summary" : ""}`} key={`${session.id}-preview-${index}`}>
                 {line}

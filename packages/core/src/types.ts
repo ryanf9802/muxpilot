@@ -9,6 +9,7 @@ export type SessionStatus =
   | "question"
   | "plan_ready"
   | "blocked"
+  | "startup_failed"
   | "missing"
   | "unknown";
 
@@ -245,6 +246,7 @@ export interface ManagedSession {
   discoveryConfidence: "high" | "medium" | "low";
   status: SessionStatus;
   initializing?: boolean;
+  startupError?: string | null;
   lastActivityAt: string | null;
   preview: string;
   recentUserPrompts: string[];

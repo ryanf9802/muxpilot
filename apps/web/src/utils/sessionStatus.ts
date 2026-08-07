@@ -13,7 +13,7 @@ export const SESSION_STATUS_EVENT_DEBOUNCE_MS = 2000;
 export const SESSION_STATUS_SEVERITIES: readonly SessionStatusSeverity[] = ["red", "yellow", "green"];
 
 export function sessionStatusSeverity(status: SessionStatus): SessionStatusSeverity {
-  if (status === "approval" || status === "question" || status === "plan_ready" || status === "blocked" || status === "missing") {
+  if (status === "approval" || status === "question" || status === "plan_ready" || status === "blocked" || status === "startup_failed" || status === "missing") {
     return "red";
   }
   if (status === "waiting" || status === "idle") return "green";
@@ -21,7 +21,7 @@ export function sessionStatusSeverity(status: SessionStatus): SessionStatusSever
 }
 
 export function sessionStatusesForSeverity(severity: SessionStatusSeverity): readonly SessionStatus[] {
-  if (severity === "red") return ["approval", "question", "plan_ready", "blocked", "missing"];
+  if (severity === "red") return ["approval", "question", "plan_ready", "blocked", "startup_failed", "missing"];
   if (severity === "green") return ["waiting", "idle"];
   return ["working", "generating", "executing", "planning", "unknown"];
 }

@@ -8,6 +8,7 @@ describe("StatusPill", () => {
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "planning" }))).toContain(">planning<");
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "question" }))).toContain(">question<");
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "plan_ready" }))).toContain(">plan ready<");
+    expect(renderToStaticMarkup(createElement(StatusPill, { status: "startup_failed" }))).toContain(">startup failed<");
   });
 
   it("keeps status text accessible when CSS renders it as a mobile dot", () => {

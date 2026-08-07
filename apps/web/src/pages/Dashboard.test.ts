@@ -122,6 +122,20 @@ describe("SessionCard", () => {
     expect(html).not.toContain("status-yellow");
   });
 
+  it("renders the actionable startup failure instead of an empty prompt preview", () => {
+    const html = renderSessionCard(testSession({
+      id: "failed",
+      paneId: "%119",
+      windowName: "failed",
+      status: "startup_failed",
+      startupError: "Codex local data is locked"
+    }));
+
+    expect(html).toContain("Codex local data is locked");
+    expect(html).toContain('class="status status-red"');
+    expect(html).not.toContain("No user prompts yet.");
+  });
+
   it("renders memory usage before status with CPU and memory tooltip details", () => {
     const session = testSession({
       id: "resources",
@@ -668,7 +682,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -694,6 +708,7 @@ function testSession(
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
     initializing: input.initializing ?? false,
+    startupError: input.startupError ?? null,
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: input.recentUserPrompts ?? [],

@@ -311,6 +311,10 @@ describe("composerLockReason", () => {
     expect(composerLockReason(false, true)).toBe("Choose a proposed plan action below to continue");
     expect(composerLockReason(false, false)).toBeNull();
   });
+
+  it("locks with the persisted startup failure", () => {
+    expect(composerLockReason(true, true, "Codex local data is locked")).toBe("Codex local data is locked");
+  });
 });
 
 describe("composer draft storage", () => {

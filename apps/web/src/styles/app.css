@@ -1288,6 +1288,20 @@ select:focus-visible {
   font-size: 13px;
 }
 
+.session-startup-error {
+  color: var(--color-error);
+}
+
+.session-startup-error-banner {
+  margin: 0 16px;
+  padding: 10px 12px;
+  color: var(--color-error);
+  background: var(--color-error-soft);
+  border: 1px solid var(--color-error);
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+
 .session-card-shell {
   position: relative;
   min-width: 0;

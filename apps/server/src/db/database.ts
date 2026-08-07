@@ -286,6 +286,15 @@ export class AppDatabase {
     return this.call("setSessionInitializing", sessionId, initializing, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  setSessionInitializationResult(
+    sessionId: string,
+    status: SessionStatus,
+    startupError: string | null,
+    updatedAt: string
+  ): Promise<ManagedSession | null> {
+    return this.call("setSessionInitializationResult", sessionId, status, startupError, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   setSessionInputMode(sessionId: string, inputMode: CollaborationMode, updatedAt: string): Promise<ManagedSession | null> {
     return this.call("setSessionInputMode", sessionId, inputMode, updatedAt) as Promise<ManagedSession | null>;
   }
@@ -769,6 +778,21 @@ export class SyncAppDatabase {
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  setSessionInitializationResult(
+    sessionId: string,
+    status: SessionStatus,
+    startupError: string | null,
+    updatedAt: string
+  ): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, status, initializing: false, startupError };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, status = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), status, updatedAt, sessionId);
     return this.getSession(sessionId);
   }
 
@@ -2109,6 +2133,7 @@ export class SyncAppDatabase {
       ...session,
       status: row.status,
       initializing: session.initializing === true,
+      startupError: typeof session.startupError === "string" ? session.startupError : null,
       lastActivityAt: row.last_activity_at ?? this.latestMessageAt(row.id),
       preview: recentUserPrompts[0] ?? "",
       recentUserPrompts,

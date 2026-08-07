@@ -37,7 +37,7 @@ import {
   parseInteractiveApprovalPrompt,
   type InteractiveApprovalPrompt
 } from "../codex/approvalPrompt.js";
-import { TmuxAdapter } from "../tmux/tmuxAdapter.js";
+import { isCodexStartupFailureCapture, TmuxAdapter } from "../tmux/tmuxAdapter.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -247,6 +247,9 @@ export class SessionManager {
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
       );
+      const recoveredFromStartupError = Boolean(existing?.startupError) && status !== "startup_failed" && status !== "unknown";
+      const startupError = sourceChanged || recoveredFromStartupError ? null : existing?.startupError ?? null;
+      const effectiveStatus = startupError ? "startup_failed" : status;
       const jsonlModelSettings =
         nextCodexJsonlPath ? await readLatestCodexModelSettings(nextCodexJsonlPath) : null;
       const paneModelSettings = await readLiveCodexModelSettings(
@@ -274,8 +277,9 @@ export class SessionManager {
         codexSessionId: nextCodexSessionId,
         codexJsonlPath: nextCodexJsonlPath,
         discoveryConfidence: match ? "high" : looksLikeCodexPane(pane) ? "medium" : "low",
-        status,
+        status: effectiveStatus,
         initializing: existing?.initializing === true,
+        startupError,
         lastActivityAt: sourceChanged ? null : existing?.lastActivityAt ?? null,
         preview: sourceChanged ? "" : existing?.preview ?? "",
         recentUserPrompts: sourceChanged ? [] : existing?.recentUserPrompts ?? [],
@@ -295,7 +299,7 @@ export class SessionManager {
         forkedFrom: existing?.forkedFrom ?? null
       };
 
-      if (status === "approval" && liveApprovalPrompt) {
+      if (effectiveStatus === "approval" && liveApprovalPrompt) {
         this.liveApprovals.set(sessionId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
       } else {
         this.liveApprovals.delete(sessionId);
@@ -1095,6 +1099,7 @@ export class SessionManager {
       discoveryConfidence: "medium",
       status: "unknown",
       initializing: true,
+      startupError: null,
       lastActivityAt: null,
       preview: "",
       recentUserPrompts: [],
@@ -1121,14 +1126,28 @@ export class SessionManager {
 
   private finishSessionInitialization(sessionId: string, ready: Promise<void>): void {
     void ready
-      .catch((error) => {
-        console.error(`Muxpilot session ${sessionId} readiness check failed`, error);
-      })
-      .then(async () => {
-        await this.runDiscoverTick();
-        const session = await this.db.setSessionInitializing(sessionId, false, nowIso());
-        if (session) this.publish("session.updated", sessionId, session);
-      })
+      .then(
+        async () => {
+          await this.runDiscoverTick();
+          const discovered = await this.db.getSession(sessionId);
+          const session = await this.db.setSessionInitializationResult(
+            sessionId,
+            discovered?.status === "startup_failed" ? "unknown" : discovered?.status ?? "unknown",
+            null,
+            nowIso()
+          );
+          if (session) this.publish("session.updated", sessionId, session);
+        },
+        async (error) => {
+          console.error(`Muxpilot session ${sessionId} readiness check failed`, error);
+          const startupError = error instanceof Error ? error.message : "Codex exited before startup completed.";
+          const session = await this.db.setSessionInitializationResult(sessionId, "startup_failed", startupError, nowIso());
+          if (session) {
+            this.publish("status.changed", sessionId, { status: "startup_failed" });
+            this.publish("session.updated", sessionId, session);
+          }
+        }
+      )
       .catch((error) => {
         console.error(`Muxpilot session ${sessionId} initialization finalization failed`, error);
       });
@@ -1429,6 +1448,7 @@ export class SessionManager {
       discoveryConfidence: "medium",
       status: "unknown",
       initializing: true,
+      startupError: null,
       lastActivityAt: source.lastActivityAt,
       preview: source.preview,
       recentUserPrompts: source.recentUserPrompts,
@@ -1588,6 +1608,7 @@ function resolveSessionStatus(
   answeredPlanMessageIds: Set<string>,
   answeredQuestionMessageIds: Set<string>
 ): SessionStatus {
+  if (inferredStatus === "startup_failed") return inferredStatus;
   const pendingStatus = preservePendingStatus(
     inferredStatus,
     latestQuestionMessage,
@@ -2255,6 +2276,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
     initializing: session.initializing === true,
+    startupError: session.startupError ?? null,
     lastActivityAt: session.lastActivityAt,
     transcriptSyncing: session.transcriptSyncing === true,
     inputMode: session.inputMode,
@@ -2461,6 +2483,7 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
 }
 
 function inferStatusFromScreen(capture: string): SessionStatus | null {
+  if (isCodexStartupFailureCapture(capture)) return "startup_failed";
   const visible = visibleTail(capture);
   if (parseInteractiveApprovalPrompt(capture)) return "approval";
   const lines = visible.split("\n");

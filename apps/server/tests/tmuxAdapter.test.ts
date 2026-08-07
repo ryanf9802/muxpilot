@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   codexCommandArgs,
+  codexStartupErrorFromCapture,
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
   parsePaneLine,
@@ -35,6 +36,9 @@ describe("codexCommandArgs", () => {
       developerInstructions: "Use $muxpilot-git-workflow.",
       environment: { MUXPILOT_GIT_WORKSPACE_ID: "workspace-1" }
     })).toEqual([
+      "bash",
+      expect.stringMatching(/scripts\/codex-launcher\.sh$/),
+      "--",
       "env",
       "MUXPILOT_GIT_WORKSPACE_ID=workspace-1",
       "codex",
@@ -71,6 +75,26 @@ describe("isCodexDirectoryTrustPrompt", () => {
 
   it("does not mistake the normal Codex screen for a trust gate", () => {
     expect(isCodexDirectoryTrustPrompt(">_ OpenAI Codex\nWhat can I help you build?")).toBe(false);
+  });
+});
+
+describe("codexStartupErrorFromCapture", () => {
+  it("classifies an exhausted local database lock without persisting raw terminal output", () => {
+    const error = codexStartupErrorFromCapture([
+      "Codex couldn't start because another Codex process is using its local data.",
+      "database is locked: private terminal detail",
+      "MUXPILOT_CODEX_STARTUP_FAILED code=1 attempts=3"
+    ].join("\n"));
+
+    expect(error).toMatchObject({ reason: "database_locked" });
+    expect(error?.message).toContain("local data is locked");
+    expect(error?.message).not.toContain("private terminal detail");
+  });
+
+  it("classifies other terminal startup failures and ignores retries", () => {
+    expect(codexStartupErrorFromCapture("MUXPILOT_CODEX_STARTUP_RETRY attempt=1 code=1")).toBeNull();
+    expect(codexStartupErrorFromCapture("failed\nMUXPILOT_CODEX_STARTUP_FAILED code=1 attempts=3"))
+      .toMatchObject({ reason: "exited" });
   });
 });
 
@@ -115,6 +139,9 @@ describe("tmuxNewCodexWindowArgs", () => {
       "make-warnings",
       "-c",
       "/home/dev/workspace/example",
+      "bash",
+      expect.stringMatching(/scripts\/codex-launcher\.sh$/),
+      "--",
       "codex",
       "-c",
       "check_for_update_on_startup=false"
@@ -135,6 +162,9 @@ describe("tmuxNewCodexWindowArgs", () => {
       "old-work",
       "-c",
       "/home/dev/workspace/example",
+      "bash",
+      expect.stringMatching(/scripts\/codex-launcher\.sh$/),
+      "--",
       "codex",
       "-c",
       "check_for_update_on_startup=false",
@@ -157,6 +187,9 @@ describe("tmuxNewCodexWindowArgs", () => {
       "old-work-fork",
       "-c",
       "/home/dev/workspace/example",
+      "bash",
+      expect.stringMatching(/scripts\/codex-launcher\.sh$/),
+      "--",
       "codex",
       "-c",
       "check_for_update_on_startup=false",

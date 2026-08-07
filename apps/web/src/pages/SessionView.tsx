@@ -796,7 +796,7 @@ export function SessionView() {
     () => latestUserPromptTimestamp(pendingUserChatMessage ? [...loadedMessages, pendingUserChatMessage] : loadedMessages),
     [loadedMessages, pendingUserChatMessage]
   );
-  const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan));
+  const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan), session?.startupError);
   const composerLocked = Boolean(composerLock);
   const effectiveVimEnabled = vimAvailable && vimEnabled;
   const currentTranscriptFindMatch = transcriptFindMatches[transcriptFindMatchIndex] ?? null;
@@ -1788,7 +1788,7 @@ export function SessionView() {
           <SessionTitleHeading
             name={sessionDisplayName(readySession)}
             onFork={() => openForkSession(readySession)}
-            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || !readySession.codexSessionId}
+            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !readySession.codexSessionId}
           />
           <SessionHeaderMeta session={readySession} />
         </div>
@@ -1797,10 +1797,14 @@ export function SessionView() {
           <StatusPill status={readySession.status} />
         </div>
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
-        <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode"} onChange={setInputMode} />
+        <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode" || Boolean(readySession.startupError)} onChange={setInputMode} />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
         {fastModeError ? <p className="mode-toggle-error">{fastModeError}</p> : null}
       </div>
+
+      {readySession.startupError ? (
+        <p className="session-startup-error-banner" role="alert">{readySession.startupError}</p>
+      ) : null}
 
       <HeavyCommandsModal
         open={heavyCommandsOpen}
@@ -2217,7 +2221,8 @@ export function blurActiveElementForVimSubmit(vimEnabled: boolean, activeElement
   activeElement.blur();
 }
 
-export function composerLockReason(hasPendingQuestion: boolean, hasPendingPlan: boolean): string | null {
+export function composerLockReason(hasPendingQuestion: boolean, hasPendingPlan: boolean, startupError?: string | null): string | null {
+  if (startupError) return startupError;
   if (hasPendingQuestion) return "Answer the pending question below to continue";
   if (hasPendingPlan) return "Choose a proposed plan action below to continue";
   return null;

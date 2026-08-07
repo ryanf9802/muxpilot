@@ -3732,6 +3732,49 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("persists a startup failure instead of allowing the session to become missing", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let rejectReady: ((error: Error) => void) | null = null;
+    const ready = new Promise<void>((_resolve, reject) => {
+      rejectReady = reject;
+    });
+    const pane = testPane({
+      cwd: repo,
+      paneId: "%2",
+      windowId: "@2",
+      windowName: "failed-work",
+      title: "Codex startup failed",
+      pid: 456,
+      sessionName: "muxpilot",
+      currentCommand: "sleep"
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => [
+      "Codex couldn't start because its local data is locked.",
+      "MUXPILOT_CODEX_STARTUP_FAILED code=1 attempts=3"
+    ].join("\n");
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready });
+
+    const created = await harness.manager.createSessionInDirectory(repo, "failed-work");
+    rejectReady?.(new Error("Codex couldn't start because its local data is locked."));
+
+    await expect.poll(async () => (await harness.manager.getSession(created.id))?.status).toBe("startup_failed");
+    const failed = await harness.manager.getSession(created.id);
+    expect(failed).toMatchObject({
+      initializing: false,
+      startupError: "Codex couldn't start because its local data is locked."
+    });
+
+    await harness.manager.discoverNow();
+    expect(await harness.manager.getSession(created.id)).toMatchObject({
+      status: "startup_failed",
+      startupError: "Codex couldn't start because its local data is locked."
+    });
+    harness.db.close();
+  });
+
   it("rejects created session names that cannot normalize to a valid slug", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

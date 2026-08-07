@@ -83,6 +83,7 @@ describe("matchingNotificationRules", () => {
     };
 
     expect(matchingNotificationRules(settings, "a", "waiting", "missing")).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "waiting", "startup_failed")).toEqual([]);
   });
 
   it("fires done task from discovered session updates", async () => {
