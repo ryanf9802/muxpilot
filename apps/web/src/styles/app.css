@@ -2892,6 +2892,46 @@ select:focus-visible {
   flex: 1;
 }
 
+.session-title-heading {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+}
+
+.session-title-heading h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-title-fork-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 25px;
+  min-width: 25px;
+  min-height: 25px;
+  padding: 0;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  opacity: 0.62;
+  box-shadow: none;
+}
+
+.session-title-fork-button:hover:not(:disabled),
+.session-title-fork-button:focus-visible {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+  opacity: 1;
+  box-shadow: none;
+}
+
 .mode-toggle {
   display: inline-grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

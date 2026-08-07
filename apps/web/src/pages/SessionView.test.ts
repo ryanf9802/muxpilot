@@ -59,6 +59,7 @@ import {
   secondsUntil,
   sessionCreateSessionCwd,
   SessionHeaderMeta,
+  SessionTitleHeading,
   SessionLoadingView,
   isNearMessageListBottom,
   isCodexPastedContentPlaceholder,
@@ -98,6 +99,19 @@ import {
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
+
+describe("SessionTitleHeading", () => {
+  it("places a subtle icon-only fork button immediately after the session name", () => {
+    const html = renderToStaticMarkup(createElement(SessionTitleHeading, {
+      name: "branch-the-chat",
+      onFork: () => undefined
+    }));
+
+    expect(html).toContain('<div class="session-title-heading"><h1>branch-the-chat</h1><button class="session-title-fork-button"');
+    expect(html).toContain('aria-label="Fork session"');
+    expect(html).not.toContain(">Fork</button>");
+  });
+});
 
 describe("SessionHeaderMeta", () => {
   it("links to a locally resolved fork origin", () => {

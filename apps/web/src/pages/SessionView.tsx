@@ -1785,7 +1785,11 @@ export function SessionView() {
           <ArrowLeft size={19} />
         </button>
         <div className="session-title">
-          <h1>{sessionDisplayName(readySession)}</h1>
+          <SessionTitleHeading
+            name={sessionDisplayName(readySession)}
+            onFork={() => openForkSession(readySession)}
+            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || !readySession.codexSessionId}
+          />
           <SessionHeaderMeta session={readySession} />
         </div>
         <div className="session-header-state">
@@ -1819,16 +1823,6 @@ export function SessionView() {
           >
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => openForkSession(readySession)}
-            disabled={Boolean(actionBusy) || readySession.initializing === true || !readySession.codexSessionId}
-            aria-label="Fork session"
-            title="Fork session"
-          >
-            <GitFork size={16} />
-            <span className="session-action-label">Fork</span>
           </button>
           {readyWorkspace ? (
             <button
@@ -2767,6 +2761,32 @@ export function SkillTextArea({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+export function SessionTitleHeading({
+  name,
+  onFork,
+  forkDisabled = false
+}: {
+  name: string;
+  onFork: () => void;
+  forkDisabled?: boolean;
+}) {
+  return (
+    <div className="session-title-heading">
+      <h1>{name}</h1>
+      <button
+        className="session-title-fork-button"
+        type="button"
+        onClick={onFork}
+        disabled={forkDisabled}
+        aria-label="Fork session"
+        title="Fork session"
+      >
+        <GitFork size={14} aria-hidden="true" />
+      </button>
     </div>
   );
 }
