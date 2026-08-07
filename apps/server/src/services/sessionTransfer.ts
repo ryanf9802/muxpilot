@@ -10,6 +10,7 @@ import type {
   CollaborationMode,
   ManagedSession,
   SessionModelSelections,
+  SessionForkOrigin,
   SessionTransferImportBranchResult,
   SessionTransferImportMapping,
   SessionTransferImportResponse,
@@ -46,6 +47,7 @@ export interface PortableSession {
   models: SessionModelSelections;
   fastMode?: boolean | null;
   pinned: boolean;
+  forkedFrom?: SessionForkOrigin | null;
   lastActivityAt: string | null;
   transcriptEntry: string;
   transcriptBytes: number;
@@ -290,6 +292,9 @@ function portableSession(
     models: session.models,
     fastMode: session.fastMode ?? null,
     pinned: session.pinned,
+    forkedFrom: session.forkedFrom
+      ? { ...session.forkedFrom, sessionId: null }
+      : null,
     lastActivityAt: session.lastActivityAt,
     transcriptEntry,
     transcriptBytes: transcript.length,
@@ -529,6 +534,12 @@ function validPortablePreferences(session: PortableSession): boolean {
   if (typeof session.pinned !== "boolean") return false;
   if (session.targetBranch !== null && typeof session.targetBranch !== "string") return false;
   if (session.lastActivityAt !== null && typeof session.lastActivityAt !== "string") return false;
+  if (session.forkedFrom !== undefined && session.forkedFrom !== null
+    && (typeof session.forkedFrom.codexSessionId !== "string"
+      || !/^[a-zA-Z0-9-]{8,80}$/.test(session.forkedFrom.codexSessionId)
+      || session.forkedFrom.sessionId !== null
+      || typeof session.forkedFrom.sessionName !== "string"
+      || session.forkedFrom.sessionName.length > 200)) return false;
   return validModelSettings(session.models?.default) && validModelSettings(session.models?.plan);
 }
 

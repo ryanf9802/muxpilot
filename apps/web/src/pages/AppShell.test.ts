@@ -6,12 +6,14 @@ import {
   AppBrand,
   AppRecoveryPage,
   ConnectDeviceContent,
+  defaultForkSessionName,
   DisconnectedNotice,
   GitWorkflowSkillStatusCallout,
   SHELL_RECONNECT_INTERVAL_MS,
   SHELL_CONNECTION_PROBE_TIMEOUT_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
+  forkSessionWarnings,
   hasShortcutBlockingOverlay,
   isMuxpilotManagedSessionBranch,
   isEditableShortcutTarget,
@@ -44,6 +46,37 @@ import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
+  it("builds a valid editable name for a fork", () => {
+    const session = testSession({ id: "fork-name" });
+    session.tmux.windowName = "a-very-long-session-name-that-needs-truncation";
+
+    expect(defaultForkSessionName(session)).toBe("a-very-long-session-name-th-fork");
+    expect(defaultForkSessionName(session)).toHaveLength(32);
+  });
+
+  it("warns when live work or an isolated Git worktree will not carry into the fork", () => {
+    const session = testSession({ id: "fork-warning", status: "working" });
+    session.gitWorkspace = {
+      workflowVersion: 1,
+      id: "workspace-source",
+      state: "worktree",
+      entryPath: "/repo",
+      repoRoot: "/repo",
+      targetBranch: "main",
+      targetSha: "abc123",
+      sessionBranch: "muxpilot/source/task",
+      worktreePath: "/tmp/source-task",
+      lastError: null,
+      updatedAt: "2026-08-07T12:00:00.000Z",
+      dependencyLinks: []
+    };
+
+    expect(forkSessionWarnings(session)).toEqual([
+      "This session is still working. The fork may mark its in-progress turn as interrupted.",
+      "Unintegrated files are not copied. The fork starts from the current main target branch in a separate workspace."
+    ]);
+  });
+
   it("offers only existing local branches as targets", () => {
     const probe = {
       isGit: true,

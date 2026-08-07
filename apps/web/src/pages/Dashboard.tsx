@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
+import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -42,7 +42,7 @@ import {
 } from "../utils/sessionStatus.js";
 
 const ACTION_MENU_WIDTH = 220;
-const ACTION_MENU_HEIGHT = 224;
+const ACTION_MENU_HEIGHT = 268;
 const NOTIFICATION_MENU_WIDTH = 220;
 const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
@@ -61,7 +61,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch, openCreateSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
+  const { connectionEpoch, openCreateSession, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
@@ -414,6 +414,16 @@ export function Dashboard() {
             Rename
           </ContextMenuItem>
           <ContextMenuItem
+            icon={<GitFork size={16} />}
+            onClick={() => {
+              setMenu(null);
+              openForkSession(menu.session);
+            }}
+            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.codexSessionId}
+          >
+            Fork session
+          </ContextMenuItem>
+          <ContextMenuItem
             icon={<Bell size={16} />}
             aria-haspopup="menu"
             aria-expanded={notifySubmenuOpen}
@@ -637,6 +647,11 @@ export function SessionCard({
             {workspace ? (
               <p className="session-card-branch" title={workspace.targetBranch}>
                 {workspace.targetBranch}
+              </p>
+            ) : null}
+            {session.forkedFrom ? (
+              <p className="session-card-origin" title={`Forked from ${session.forkedFrom.sessionName}`}>
+                Forked from {session.forkedFrom.sessionName}
               </p>
             ) : null}
           </div>

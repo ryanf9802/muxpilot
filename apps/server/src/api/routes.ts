@@ -3,6 +3,8 @@ import { z } from "zod";
 import type {
   CodexSkillsResponse,
   CreateSessionRequest,
+  ForkSessionRequest,
+  ForkSessionResponse,
   PushSubscriptionInput,
   QuestionAnswerRequest,
   ResolveApprovalRequest,
@@ -66,6 +68,7 @@ const createSessionSchema = z.object({
     })
   ]).optional()
 });
+const forkSessionSchema = z.object({ name: sessionNameSchema });
 const queuedInputSchema = inputBodySchema;
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
@@ -345,6 +348,31 @@ export function registerRoutes(
       if (error instanceof SessionNameError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof CreateSessionError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
+      throw error;
+    }
+  });
+
+  app.post("/api/sessions/:id/fork", { preHandler: access.requireAccess }, async (request, reply): Promise<ForkSessionResponse | void> => {
+    const { id } = request.params as { id: string };
+    const body = forkSessionSchema.parse(request.body) as ForkSessionRequest;
+    try {
+      const source = await manager.getSession(id);
+      if (!source) throw new SessionNotFoundError("Session not found");
+      if (source.gitWorkspace && (await muxpilotGitWorkflowSkillStatus(config.codexHome)).status !== "current") {
+        await reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before forking a Git session", code: "git_skill_required" });
+        return;
+      }
+      const session = await manager.forkSession(id, body.name);
+      return reply.code(201).send({ session });
+    } catch (error) {
+      if (error instanceof SessionNameError || error instanceof CreateSessionError || error instanceof SessionNotFoundError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      if (error instanceof GitWorkspaceError) {
+        await reply.code(409).send({ error: error.message, code: error.code });
+        return;
+      }
       throw error;
     }
   });

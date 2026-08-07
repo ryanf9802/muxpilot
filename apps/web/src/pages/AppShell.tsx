@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, GitFork, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -22,10 +22,11 @@ import type {
   SessionTransferImportResponse,
   SessionTransferInspectResponse
 } from "@muxpilot/core";
-import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
+import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput, sessionHistoryIdentity } from "@muxpilot/core";
 import { installCtrlWGuard } from "../utils/ctrlW.js";
 import { credentialSuppressedField, noAutofillTextField, searchField } from "../utils/formFields.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
+import { sessionBaseName } from "../utils/sessionLabels.js";
 import {
   SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
@@ -82,6 +83,10 @@ export function AppShell() {
   const [showLogoutButton, setShowLogoutButton] = useState(true);
   const [accessMode, setAccessMode] = useState<AccessMode | null>(null);
   const [createSessionOpen, setCreateSessionOpen] = useState(false);
+  const [forkSessionSource, setForkSessionSource] = useState<ManagedSession | null>(null);
+  const [forkSessionName, setForkSessionName] = useState("");
+  const [forkSessionBusy, setForkSessionBusy] = useState(false);
+  const [forkSessionError, setForkSessionError] = useState<string | null>(null);
   const [createSessionCwd, setCreateSessionCwd] = useState("");
   const [createSessionName, setCreateSessionName] = useState("");
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
@@ -482,12 +487,18 @@ export function AppShell() {
     setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
+  const openForkSession = useCallback((session: ManagedSession) => {
+    setForkSessionSource(session);
+    setForkSessionName(defaultForkSessionName(session));
+    setForkSessionError(null);
+  }, []);
+
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
     const handleNewSessionShortcut = (event: globalThis.KeyboardEvent) => {
       if (!isNewSessionShortcut(event)) return;
       event.preventDefault();
-      if (createSessionOpen || connectOpen || promptHistoryOpen) return;
+      if (createSessionOpen || forkSessionSource || connectOpen || promptHistoryOpen) return;
       let cwd = "";
       try {
         cwd = createSessionCwdPrefillRef.current();
@@ -498,7 +509,7 @@ export function AppShell() {
     };
     document.addEventListener("keydown", handleNewSessionShortcut);
     return () => document.removeEventListener("keydown", handleNewSessionShortcut);
-  }, [connectionState, connectOpen, createSessionOpen, openCreateSession, promptHistoryOpen]);
+  }, [connectionState, connectOpen, createSessionOpen, forkSessionSource, openCreateSession, promptHistoryOpen]);
 
   const registerCreateSessionCwdPrefill = useCallback((provider: () => string) => {
     createSessionCwdPrefillRef.current = provider;
@@ -551,12 +562,12 @@ export function AppShell() {
     const handlePromptHistoryShortcut = (event: globalThis.KeyboardEvent) => {
       if (!isPromptHistoryShortcut(event)) return;
       event.preventDefault();
-      if (createSessionOpen || connectOpen) return;
+      if (createSessionOpen || forkSessionSource || connectOpen) return;
       openPromptHistory();
     };
     document.addEventListener("keydown", handlePromptHistoryShortcut);
     return () => document.removeEventListener("keydown", handlePromptHistoryShortcut);
-  }, [connectionState, connectOpen, createSessionOpen, openPromptHistory]);
+  }, [connectionState, connectOpen, createSessionOpen, forkSessionSource, openPromptHistory]);
 
   if (connectionState === "checking") {
     return <AppLoadingSkeleton variant={loadingSkeletonVariantForPath(location.pathname)} />;
@@ -603,6 +614,32 @@ export function AppShell() {
     setCreateSessionDirectoryFocused(false);
     setCreateSessionDirectorySelectedIndex(0);
     setCreateSessionNameAutofocus(false);
+  }
+
+  function closeForkSession() {
+    if (forkSessionBusy) return;
+    setForkSessionSource(null);
+    setForkSessionError(null);
+  }
+
+  async function submitForkSession(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!forkSessionSource || forkSessionBusy) return;
+    const name = normalizeSessionName(forkSessionName);
+    if (!isValidSessionName(name)) return;
+    setForkSessionBusy(true);
+    setForkSessionError(null);
+    try {
+      const response = await api.forkSession(forkSessionSource.id, { name });
+      syncSessionStoplight(response.session);
+      setForkSessionSource(null);
+      navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
+      void loadSessions().catch(handleConnectedRequestFailure);
+    } catch (error) {
+      setForkSessionError(error instanceof Error ? error.message : "Could not fork session.");
+    } finally {
+      setForkSessionBusy(false);
+    }
   }
 
   function updateCreateSessionCwd(value: string) {
@@ -892,6 +929,7 @@ export function AppShell() {
               syncSessionStoplight,
               sessionStoplightSeverity,
               openCreateSession,
+              openForkSession,
               registerCreateSessionCwdPrefill,
               registerPromptHistoryPrefill,
               registerPrimaryInputFocus,
@@ -904,6 +942,20 @@ export function AppShell() {
         />
       </main>
       <ToastContainer theme="dark" newestOnTop closeButton closeOnClick pauseOnFocusLoss={false} />
+      {forkSessionSource ? (
+        <ForkSessionDialog
+          source={forkSessionSource}
+          name={forkSessionName}
+          busy={forkSessionBusy}
+          error={forkSessionError}
+          onNameChange={(value) => {
+            setForkSessionName(normalizeSessionNameInput(value));
+            setForkSessionError(null);
+          }}
+          onClose={closeForkSession}
+          onSubmit={submitForkSession}
+        />
+      ) : null}
       <Modal
         open={createSessionOpen}
         onClose={closeCreateSession}
@@ -1119,6 +1171,7 @@ export interface AppShellOutletContext {
   syncSessionStoplight: (session: ManagedSession) => void;
   sessionStoplightSeverity: SessionStatusSeverity | null;
   openCreateSession: (cwd?: string) => void;
+  openForkSession: (session: ManagedSession) => void;
   registerCreateSessionCwdPrefill: (provider: () => string) => () => void;
   registerPromptHistoryPrefill: (provider: () => string) => () => void;
   registerPrimaryInputFocus: (provider: PrimaryInputFocusHandler) => () => void;
@@ -1126,6 +1179,87 @@ export interface AppShellOutletContext {
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
   setNotificationSettings: (settings: NotificationSettings) => void;
+}
+
+export function defaultForkSessionName(session: ManagedSession): string {
+  const suffix = "-fork";
+  const normalized = normalizeSessionName(sessionBaseName(session)) || "session";
+  return `${normalized.slice(0, SESSION_NAME_MAX_LENGTH - suffix.length).replace(/[._-]+$/g, "")}${suffix}`;
+}
+
+export function forkSessionWarnings(session: ManagedSession): string[] {
+  const warnings: string[] = [];
+  if (["generating", "executing", "working", "planning"].includes(session.status)) {
+    warnings.push("This session is still working. The fork may mark its in-progress turn as interrupted.");
+  }
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+  if (workspace && (workspace.state === "worktree" || workspace.state === "integrating")) {
+    warnings.push(`Unintegrated files are not copied. The fork starts from the current ${workspace.targetBranch} target branch in a separate workspace.`);
+  }
+  return warnings;
+}
+
+function ForkSessionDialog({
+  source,
+  name,
+  busy,
+  error,
+  onNameChange,
+  onClose,
+  onSubmit
+}: {
+  source: ManagedSession;
+  name: string;
+  busy: boolean;
+  error: string | null;
+  onNameChange: (value: string) => void;
+  onClose: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const invalid = !isValidSessionName(normalizeSessionName(name));
+  const warning = sessionNameValidationMessage(name);
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title="Fork session"
+      panelClassName="session-name-dialog"
+      as="form"
+      onSubmit={onSubmit}
+      dismissible={!busy}
+    >
+      <p className="session-fork-summary">
+        Create a new conversation from the current persisted history of <strong>{sessionBaseName(source)}</strong>.
+      </p>
+      {forkSessionWarnings(source).map((message) => (
+        <div className="session-fork-warning" role="note" key={message}>
+          <AlertTriangle size={17} aria-hidden="true" />
+          <span>{message}</span>
+        </div>
+      ))}
+      <label className="rename-field">
+        <span>Name</span>
+        <input
+          {...noAutofillTextField}
+          autoFocus
+          value={name}
+          onChange={(event) => onNameChange(event.target.value)}
+          maxLength={SESSION_NAME_MAX_LENGTH}
+          aria-invalid={invalid}
+          disabled={busy}
+        />
+      </label>
+      {warning ? <p className="dialog-error" role="alert">{warning}</p> : null}
+      {error ? <p className="dialog-error" role="alert">{error}</p> : null}
+      <div className="dialog-actions">
+        <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="primary" type="submit" disabled={busy || invalid} aria-busy={busy} data-busy={busy || undefined}>
+          <GitFork size={16} aria-hidden="true" />
+          {busy ? "Forking" : "Fork and open"}
+        </button>
+      </div>
+    </Modal>
+  );
 }
 
 export function shouldProbeShellConnection(error: unknown): boolean {

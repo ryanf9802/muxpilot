@@ -47,6 +47,24 @@ describe.sequential("SessionTransferService", () => {
     await expect(service.inspect(Buffer.concat([Buffer.from("MPSESSN1", "ascii"), Buffer.from([0])]))).rejects.toMatchObject({ statusCode: 400 });
   });
 
+  it("exports fork origins without machine-local session ids", async () => {
+    const fixture = await createFixture(1);
+    fixture.sessions[0]!.forkedFrom = {
+      codexSessionId: "019f-parent-session-abcdef",
+      sessionId: "local-parent-session",
+      sessionName: "parent-session"
+    };
+
+    const archive = await transferService(fixture.sessions).export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    expect(manifest.sessions[0].forkedFrom).toEqual({
+      codexSessionId: "019f-parent-session-abcdef",
+      sessionId: null,
+      sessionName: "parent-session"
+    });
+  });
+
   it("encrypts exports and rejects missing, wrong, and tampered keys", async () => {
     const fixture = await createFixture(1);
     const encrypted = transferService(fixture.sessions, "correct horse battery staple");

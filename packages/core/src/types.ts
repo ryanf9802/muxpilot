@@ -230,6 +230,12 @@ export interface HeavyCommandOutputResponse {
   truncated: boolean;
 }
 
+export interface SessionForkOrigin {
+  codexSessionId: string;
+  sessionId: string | null;
+  sessionName: string;
+}
+
 export interface ManagedSession {
   id: string;
   tmux: TmuxPane;
@@ -254,6 +260,7 @@ export interface ManagedSession {
   unreadCount: number;
   pinned: boolean;
   archived: boolean;
+  forkedFrom?: SessionForkOrigin | null;
   gitWorkspace?: GitWorkspaceSummary | null;
   resourceUsage?: SessionResourceUsage | null;
 }
@@ -509,6 +516,14 @@ export type CreateSessionRequest =
       };
     }
   | { cwd: string; name: string; workspace?: { mode: "directory" } };
+
+export interface ForkSessionRequest {
+  name: string;
+}
+
+export interface ForkSessionResponse {
+  session: ManagedSession;
+}
 
 export interface GitRepositoryProbe {
   isGit: boolean;

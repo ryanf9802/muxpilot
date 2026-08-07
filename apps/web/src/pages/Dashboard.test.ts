@@ -308,6 +308,19 @@ describe("SessionCard", () => {
       'data-context-menu-trigger=""'
     );
   });
+
+  it("labels forked conversations with their origin", () => {
+    const session = testSession({ id: "fork", paneId: "%120", windowName: "alternate-route" });
+    session.forkedFrom = {
+      codexSessionId: "codex-parent",
+      sessionId: "parent",
+      sessionName: "original-route"
+    };
+
+    const html = renderSessionCard(session);
+    expect(html).toContain('class="session-card-origin"');
+    expect(html).toContain("Forked from original-route");
+  });
 });
 
 function cssRule(selector: string): string {

@@ -7,6 +7,8 @@ import type {
   AccessResponse,
   ConnectivityResponse,
   CreateSessionRequest,
+  ForkSessionRequest,
+  ForkSessionResponse,
   GitRepositoryProbe,
   HeavyCommandOutputResponse,
   HeavyCommandsResponse,
@@ -145,6 +147,8 @@ export const api = {
   gitRepositoryProbe: (cwd: string) => json<GitRepositoryProbe>(`/api/git/repository-probe?cwd=${encodeURIComponent(cwd)}`),
   createSession: (request: CreateSessionRequest) =>
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
+  forkSession: (id: string, request: ForkSessionRequest) =>
+    json<ForkSessionResponse>(`/api/sessions/${encodeURIComponent(id)}/fork`, { method: "POST", body: JSON.stringify(request) }),
   openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),
   updateActivitySummarySettings: (request: UpdateActivitySummarySettingsRequest) =>
     json<ActivitySummarySettingsResponse>("/api/activity-summaries/settings", {

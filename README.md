@@ -98,6 +98,14 @@ Externally discovered Codex panes remain unmanaged because a running process can
 
 The History tab searches restorable sessions that muxpilot has managed before. Search matches only submitted user prompts, not assistant replies, tool output, or command output. Selecting a live result opens the existing pane; selecting a missing or archived result starts a new tmux window with `codex resume <session-id>` and opens the resumed session.
 
+### Forking A Session
+
+Use **Fork session** from a session header or dashboard action menu to branch the conversation at its current persisted tip. Confirm or edit the proposed session name, then muxpilot starts a new tmux window with Codex's native `fork` command and opens the child session. The child keeps a persistent **Forked from** link to its origin when that session is still available locally.
+
+Forking is allowed while the source is working. In that case, Codex may record the source's partial turn as interrupted, and muxpilot warns before continuing. Queued inputs, composer drafts, pins, notifications, and other transient UI state are not copied.
+
+For a managed Git source, the fork inherits the same target branch but receives its own managed workspace and neutral control directory. If the source has an active task worktree, muxpilot warns that unintegrated files are not copied; the fork starts from the current target branch instead. Directory sessions continue directly in the source working directory.
+
 ### Moving Sessions Between Hosts
 
 The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the complete Codex rollout transcripts and portable session preferences, then resumes all imported sessions in tmux. A resumed agent retains the history saved in that rollout, including tool activity and compaction summaries, but not live processes or other transient machine state.

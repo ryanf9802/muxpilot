@@ -7,6 +7,7 @@ import {
   Copy,
   HelpCircle,
   GitBranch,
+  GitFork,
   Gauge,
   ListChecks,
   LoaderCircle,
@@ -51,7 +52,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
-import { useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useOutletContext, useParams } from "react-router-dom";
 import remarkGfm from "remark-gfm";
 import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
@@ -685,6 +686,7 @@ export function SessionView() {
     refreshSessionStoplight,
     syncSessionStoplight,
     openCreateSession,
+    openForkSession,
     registerCreateSessionCwdPrefill,
     registerPromptHistoryPrefill,
     registerPrimaryInputFocus,
@@ -1818,6 +1820,16 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
+          <button
+            type="button"
+            onClick={() => openForkSession(readySession)}
+            disabled={Boolean(actionBusy) || readySession.initializing === true || !readySession.codexSessionId}
+            aria-label="Fork session"
+            title="Fork session"
+          >
+            <GitFork size={16} />
+            <span className="session-action-label">Fork</span>
+          </button>
           {readyWorkspace ? (
             <button
               className="git-workspace-chip"
@@ -2759,7 +2771,7 @@ export function SkillTextArea({
   );
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace"> }) {
+export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom"> }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
   const title = `${session.repo.name}${dirty ? " · dirty" : ""}`;
@@ -2773,6 +2785,16 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
             ·
           </span>
           <span className="session-header-dirty dirty">dirty</span>
+        </>
+      ) : null}
+      {session.forkedFrom ? (
+        <>
+          <span className="session-header-meta-separator" aria-hidden="true">·</span>
+          {session.forkedFrom.sessionId ? (
+            <Link to={`/sessions/${session.forkedFrom.sessionId}`}>Forked from {session.forkedFrom.sessionName}</Link>
+          ) : (
+            <span>Forked from {session.forkedFrom.sessionName}</span>
+          )}
         </>
       ) : null}
     </p>

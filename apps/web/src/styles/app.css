@@ -1364,10 +1364,16 @@ select:focus-visible {
 
 .session-card .card-head h2,
 .session-card .session-card-branch,
+.session-card .session-card-origin,
 .session-card .card-foot > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.session-card .session-card-origin {
+  color: var(--color-text-subtle);
+  font-size: 11px;
 }
 
 .session-card-head-actions {
@@ -1698,6 +1704,29 @@ select:focus-visible {
 .session-git-probe-note {
   color: var(--color-text-muted);
   font-size: 12px;
+}
+
+.session-fork-summary {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.session-fork-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px;
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 36%, var(--color-border));
+  border-radius: 7px;
+  font-size: 12px;
+}
+
+.session-fork-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
 }
 
 .session-git-skill-callout {
@@ -2517,6 +2546,14 @@ select:focus-visible {
 
 .session-header-meta span {
   flex: 0 0 auto;
+}
+
+.session-header-meta a {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-header-state {

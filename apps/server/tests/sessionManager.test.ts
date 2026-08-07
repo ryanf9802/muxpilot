@@ -7,6 +7,7 @@ import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
+import type { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
 import {
   codexModelSettingsFromPaneText,
   legacyTmuxPaneSessionId,
@@ -3468,6 +3469,181 @@ describe("SessionManager transcript isolation", () => {
 
     expect(updatedPins).toEqual([true, false]);
     expect((await harness.manager.getSession(session.id))?.pinned).toBe(false);
+    harness.db.close();
+  });
+
+  it("forks a live busy session into a separate Codex pane and preserves its origin", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "fork-source.jsonl", {
+      sessionId: "codex-fork-source",
+      cwd: repo,
+      user: "explore the first route",
+      assistant: "working on it",
+      mtime: new Date("2026-08-07T12:00:00.000Z")
+    });
+    const sourcePane = testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "route-one", pid: 101 });
+    let panes = [sourcePane];
+    harness.tmux.listPanes = async () => panes;
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const source = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...source,
+      pinned: true,
+      inputMode: "plan",
+      models: {
+        default: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+        plan: { model: "gpt-5.6-sol", reasoningEffort: "medium" }
+      },
+      fastMode: true
+    }, "2026-08-07T12:00:00.500Z");
+    await harness.db.setSessionStatus(source.id, "working", "2026-08-07T12:00:01.000Z");
+
+    const forkCalls: Array<{ cwd: string; name: string; codexSessionId: string }> = [];
+    harness.tmux.createCodexForkWindowInMuxpilotSession = async (cwd, name, codexSessionId) => {
+      forkCalls.push({ cwd, name, codexSessionId });
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 202 });
+      panes = [...panes, pane];
+      return { pane, ready: pendingReadiness() };
+    };
+
+    const fork = await harness.manager.forkSession(source.id, "route-two");
+
+    expect(forkCalls).toEqual([{ cwd: repo, name: "route-two", codexSessionId: "codex-fork-source" }]);
+    expect(fork.id).not.toBe(source.id);
+    expect(fork.initializing).toBe(true);
+    expect(fork.forkedFrom).toEqual({
+      codexSessionId: "codex-fork-source",
+      sessionId: source.id,
+      sessionName: "route-one"
+    });
+    expect(fork).toMatchObject({
+      pinned: false,
+      inputMode: "plan",
+      models: {
+        default: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+        plan: { model: "gpt-5.6-sol", reasoningEffort: "medium" }
+      },
+      fastMode: true
+    });
+    expect(harness.manager.listMessages(fork.id, 0)).toEqual([]);
+    expect(harness.manager.getSession(source.id)?.status).toBe("working");
+    await harness.manager.discover();
+    expect(harness.manager.getSession(fork.id)?.forkedFrom).toMatchObject({
+      codexSessionId: "codex-fork-source",
+      sessionId: source.id
+    });
+    expect(harness.manager.listMessages(source.id, 0).map((message) => message.text)).toEqual([
+      "explore the first route",
+      "working on it"
+    ]);
+    harness.db.close();
+  });
+
+  it("rejects forking a session before Codex assigns its conversation id", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "starting" });
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready: pendingReadiness() });
+    const source = await harness.manager.createSessionInDirectory(repo, "starting");
+
+    await expect(harness.manager.forkSession(source.id, "starting-fork")).rejects.toThrow(
+      "Session does not have a Codex session id to fork"
+    );
+    harness.db.close();
+  });
+
+  it("forks a managed Git session into a distinct workspace on the same target branch", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "git-fork-source.jsonl", {
+      sessionId: "codex-git-fork-source",
+      cwd: repo,
+      user: "change the implementation",
+      assistant: "first route",
+      mtime: new Date("2026-08-07T13:00:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "git-route" })];
+    await harness.manager.discover();
+    const source = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...source,
+      gitWorkspace: {
+        workflowVersion: 1,
+        id: "workspace-source",
+        state: "worktree",
+        entryPath: repo,
+        repoRoot: repo,
+        targetBranch: "main",
+        targetSha: "abc123",
+        sessionBranch: "muxpilot/source/task",
+        worktreePath: join(repo, "source-worktree"),
+        lastError: null,
+        updatedAt: "2026-08-07T13:00:00.000Z",
+        dependencyLinks: []
+      }
+    }, "2026-08-07T13:00:00.000Z");
+
+    const provisionCalls: Array<{ sessionName: string; entryPath: string; targetBranch: string }> = [];
+    const workspace = {
+      id: "workspace-fork",
+      sessionId: null,
+      sessionName: "git-route-fork",
+      commonGitDir: join(repo, ".git"),
+      controlPath: join(harness.dir, "control", "workspace-fork"),
+      implementationRoot: join(harness.dir, "worktrees", "workspace-fork"),
+      helperToken: "token",
+      summary: {
+        workflowVersion: 1 as const,
+        id: "workspace-fork",
+        state: "idle" as const,
+        entryPath: repo,
+        repoRoot: repo,
+        targetBranch: "main",
+        targetSha: "abc123",
+        sessionBranch: null,
+        worktreePath: null,
+        lastError: null,
+        updatedAt: "2026-08-07T13:00:01.000Z",
+        dependencyLinks: []
+      },
+      createdAt: "2026-08-07T13:00:01.000Z",
+      updatedAt: "2026-08-07T13:00:01.000Z"
+    };
+    const binds: Array<{ workspaceId: string; sessionId: string }> = [];
+    const fakeGitWorkspaces = {
+      provision: async (request: { sessionName: string; entryPath: string; targetBranch: string }) => {
+        provisionCalls.push(request);
+        return workspace;
+      },
+      ensureControlPath: async () => workspace.controlPath,
+      bind: async (workspaceId: string, sessionId: string) => {
+        binds.push({ workspaceId, sessionId });
+        return { ...workspace, sessionId };
+      }
+    } as unknown as GitWorkspaceManager;
+    (harness.manager as unknown as { gitWorkspaces: GitWorkspaceManager }).gitWorkspaces = fakeGitWorkspaces;
+    harness.tmux.createCodexForkWindowInMuxpilotSession = async (cwd, name, codexSessionId, options) => {
+      expect(cwd).toBe(workspace.controlPath);
+      expect(name).toBe("git-route-fork");
+      expect(codexSessionId).toBe("codex-git-fork-source");
+      expect(options.environment).toMatchObject({ MUXPILOT_GIT_WORKSPACE_ID: "workspace-fork", MUXPILOT_GIT_TARGET_BRANCH: "main" });
+      return {
+        pane: testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name }),
+        ready: pendingReadiness()
+      };
+    };
+
+    const fork = await harness.manager.forkSession(source.id, "git-route-fork");
+
+    expect(provisionCalls).toEqual([{ sessionName: "git-route-fork", entryPath: repo, targetBranch: "main" }]);
+    expect(binds).toEqual([{ workspaceId: "workspace-fork", sessionId: fork.id }]);
+    expect(fork.gitWorkspace).toMatchObject({ id: "workspace-fork", targetBranch: "main", state: "idle" });
+    expect(fork.gitWorkspace?.id).not.toBe("workspace-source");
     harness.db.close();
   });
 

@@ -4,6 +4,7 @@ import {
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
   parsePaneLine,
+  tmuxNewCodexForkWindowArgs,
   tmuxNewCodexResumeWindowArgs,
   tmuxNewCodexWindowArgs,
   tmuxPasteBufferArgs
@@ -138,6 +139,28 @@ describe("tmuxNewCodexWindowArgs", () => {
       "-c",
       "check_for_update_on_startup=false",
       "resume",
+      "codex-session-id"
+    ]);
+  });
+
+  it("builds a native Codex fork command for branched sessions", () => {
+    const args = tmuxNewCodexForkWindowArgs("muxpilot", "/home/dev/workspace/example", "old-work-fork", "codex-session-id");
+
+    expect(args).toEqual([
+      "new-window",
+      "-P",
+      "-F",
+      expect.any(String),
+      "-t",
+      "muxpilot:",
+      "-n",
+      "old-work-fork",
+      "-c",
+      "/home/dev/workspace/example",
+      "codex",
+      "-c",
+      "check_for_update_on_startup=false",
+      "fork",
       "codex-session-id"
     ]);
   });

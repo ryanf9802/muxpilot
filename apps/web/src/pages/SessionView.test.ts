@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { MemoryRouter } from "react-router-dom";
 import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
   activeSkillToken,
@@ -97,6 +98,29 @@ import {
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
+
+describe("SessionHeaderMeta", () => {
+  it("links to a locally resolved fork origin", () => {
+    const html = renderToStaticMarkup(createElement(
+      MemoryRouter,
+      null,
+      createElement(SessionHeaderMeta, {
+        session: {
+          repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
+          gitWorkspace: null,
+          forkedFrom: {
+            codexSessionId: "019f-parent-session-abcdef",
+            sessionId: "parent-session",
+            sessionName: "original-chat"
+          }
+        }
+      })
+    ));
+
+    expect(html).toContain('href="/sessions/parent-session"');
+    expect(html).toContain("Forked from original-chat");
+  });
+});
 
 describe("heavyweight command UI", () => {
   const command: HeavyCommand = {

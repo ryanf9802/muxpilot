@@ -15,6 +15,7 @@ import type {
   QueuedInput,
   ResolveApprovalRequest,
   SessionResourceUsage,
+  SessionForkOrigin,
   SessionHistoryResult,
   SessionAction,
   SessionDirectorySuggestion,
@@ -290,7 +291,8 @@ export class SessionManager {
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         pinned: existing?.pinned ?? false,
         archived: existing?.archived ?? false,
-        gitWorkspace: refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null
+        gitWorkspace: refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null,
+        forkedFrom: existing?.forkedFrom ?? null
       };
 
       if (status === "approval" && liveApprovalPrompt) {
@@ -483,14 +485,24 @@ export class SessionManager {
   }
 
   listSessions(includeArchived = false): Promise<ManagedSession[]> {
-    const sessions = this.db.listSessions(includeArchived) as Promise<ManagedSession[]> | ManagedSession[];
-    const decorate = (values: ManagedSession[]) => values.map((session) => this.withResourceUsage(session));
-    return (Array.isArray(sessions) ? decorate(sessions) : sessions.then(decorate)) as Promise<ManagedSession[]>;
+    const result = this.db.listSessions(true) as Promise<ManagedSession[]> | ManagedSession[];
+    const decorate = (allSessions: ManagedSession[]) => {
+      const sessions = includeArchived ? allSessions : allSessions.filter((session) => !session.archived);
+      return sessions.map((session) => this.decorateSession(session, allSessions));
+    };
+    return (Array.isArray(result) ? decorate(result) : result.then(decorate)) as Promise<ManagedSession[]>;
   }
 
   getSession(sessionId: string): Promise<ManagedSession | null> {
     const result = this.db.getSession(sessionId) as Promise<ManagedSession | null> | ManagedSession | null;
-    const decorate = (session: ManagedSession | null) => session ? this.withResourceUsage(session) : null;
+    const decorate = (session: ManagedSession | null): Promise<ManagedSession | null> | ManagedSession | null => {
+      if (!session) return null;
+      if (!session.forkedFrom) return this.decorateSession(session, [session]);
+      const allSessions = this.db.listSessions(true) as Promise<ManagedSession[]> | ManagedSession[];
+      return Array.isArray(allSessions)
+        ? this.decorateSession(session, allSessions)
+        : allSessions.then((sessions) => this.decorateSession(session, sessions));
+    };
     return (isPromiseLike(result) ? result.then(decorate) : decorate(result)) as Promise<ManagedSession | null>;
   }
 
@@ -501,6 +513,24 @@ export class SessionManager {
   private withResourceUsage(session: ManagedSession): ManagedSession {
     if (!this.resourceUsageLookup) return session;
     return { ...session, resourceUsage: this.resourceUsageLookup.usageForSession(session.id) };
+  }
+
+  private decorateSession(session: ManagedSession, allSessions: ManagedSession[]): ManagedSession {
+    const origin = session.forkedFrom;
+    const source = origin
+      ? preferredForkSource(allSessions.filter((candidate) => candidate.codexSessionId === origin.codexSessionId))
+      : null;
+    const withOrigin = origin
+      ? {
+          ...session,
+          forkedFrom: {
+            ...origin,
+            sessionId: source?.id ?? null,
+            sessionName: source ? sessionName(source) : origin.sessionName
+          }
+        }
+      : session;
+    return this.withResourceUsage(withOrigin);
   }
 
   async listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
@@ -612,6 +642,7 @@ export class SessionManager {
       unreadCount: 0,
       pinned: portable.pinned,
       archived: false,
+      forkedFrom: portable.forkedFrom ?? null,
       gitWorkspace: null
     };
     await this.db.upsertSession(session, nowIso());
@@ -1001,10 +1032,58 @@ export class SessionManager {
     return session;
   }
 
+  async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
+    const source = await this.db.getSession(sessionId);
+    if (!source) throw new SessionNotFoundError("Session not found");
+    if (!source.codexSessionId) throw new CreateSessionError("Session does not have a Codex session id to fork");
+    const sessionNameValue = requireSessionName(name);
+    const forkedFrom: SessionForkOrigin = {
+      codexSessionId: source.codexSessionId,
+      sessionId: source.id,
+      sessionName: sessionName(source)
+    };
+
+    let launch;
+    let gitWorkspace: GitWorkspaceSummary | null = null;
+    let repoPath: string;
+    if (source.gitWorkspace) {
+      if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+      const workspace = await this.gitWorkspaces.provision({
+        sessionName: sessionNameValue,
+        entryPath: source.gitWorkspace.entryPath,
+        targetBranch: source.gitWorkspace.targetBranch
+      });
+      const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
+      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(
+        controlPath,
+        sessionNameValue,
+        source.codexSessionId,
+        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+      );
+      const forkSessionId = tmuxPaneSessionId(launch.pane);
+      await this.gitWorkspaces.bind(workspace.id, forkSessionId);
+      gitWorkspace = workspace.summary;
+      repoPath = workspace.summary.entryPath;
+    } else {
+      repoPath = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
+      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, source.codexSessionId, {
+        environment: this.managedEnvironment
+      });
+    }
+
+    const session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source);
+    this.finishSessionInitialization(session.id, launch.ready);
+    await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
+    this.publish("session.updated", session.id, session);
+    return session;
+  }
+
   private async persistInitializingSession(
     pane: TmuxPane,
     repoPath: string,
-    gitWorkspace: GitWorkspaceSummary | null = null
+    gitWorkspace: GitWorkspaceSummary | null = null,
+    forkedFrom: SessionForkOrigin | null = null,
+    preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">
   ): Promise<ManagedSession> {
     const now = nowIso();
     const session: ManagedSession = {
@@ -1022,15 +1101,16 @@ export class SessionManager {
       activitySummary: null,
       activitySummaryGeneratedAt: null,
       activitySummarySourceSequence: null,
-      inputMode: "default",
-      models: emptySessionModels(),
-      fastMode: null,
-      fastModeAvailable: null,
+      inputMode: preferences?.inputMode ?? "default",
+      models: preferences?.models ?? emptySessionModels(),
+      fastMode: preferences?.fastMode ?? null,
+      fastModeAvailable: preferences?.fastModeAvailable ?? null,
       transcriptSize: 0,
       transcriptSyncing: false,
       unreadCount: 0,
       pinned: false,
       archived: false,
+      forkedFrom,
       gitWorkspace
     };
     await this.db.upsertSession(session, now);
@@ -1364,6 +1444,7 @@ export class SessionManager {
       unreadCount: source.unreadCount,
       pinned: source.pinned,
       archived: false,
+      forkedFrom: source.forkedFrom ?? null,
       gitWorkspace: source.gitWorkspace ?? null
     };
     const rebound = await this.db.rekeySession(source.id, session, parserOffsetMove, now);
@@ -1599,8 +1680,23 @@ function collapseHistoryByIdentity(results: SessionHistoryResult[], limit: numbe
   return [...byIdentity.values()].slice(0, limit);
 }
 
+function preferredForkSource(sessions: ManagedSession[]): ManagedSession | null {
+  return [...sessions].sort((first, second) => {
+    const firstLive = first.status !== "missing" && !first.archived;
+    const secondLive = second.status !== "missing" && !second.archived;
+    if (firstLive !== secondLive) return firstLive ? -1 : 1;
+    const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+    const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+    return secondTime - firstTime;
+  })[0] ?? null;
+}
+
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return Boolean(value && typeof (value as Promise<T>).then === "function");
+}
+
+function sessionName(session: ManagedSession): string {
+  return session.tmux.windowName.trim() || session.tmux.sessionName.trim() || session.repo.name || "session";
 }
 
 function historyResultPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {
@@ -2167,6 +2263,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     fastModeAvailable: session.fastModeAvailable ?? null,
     pinned: session.pinned,
     archived: session.archived,
+    forkedFrom: session.forkedFrom ?? null,
     gitWorkspace: session.gitWorkspace
   };
 }
