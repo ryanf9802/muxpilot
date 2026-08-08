@@ -75,6 +75,7 @@ import {
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
   shouldReconcileSessionForEvent,
+  isLatestSessionRefresh,
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
   sessionModelDisplay,
@@ -886,6 +887,13 @@ describe("shouldReconcileSessionForEvent", () => {
   it("leaves message append events on the direct append path", () => {
     expect(shouldReconcileSessionForEvent({ type: "message.appended" })).toBe(false);
     expect(shouldReconcileSessionForEvent({ type: "connected" })).toBe(false);
+  });
+});
+
+describe("isLatestSessionRefresh", () => {
+  it("rejects an older session response after a newer refresh starts", () => {
+    expect(isLatestSessionRefresh(4, 5)).toBe(false);
+    expect(isLatestSessionRefresh(5, 5)).toBe(true);
   });
 });
 

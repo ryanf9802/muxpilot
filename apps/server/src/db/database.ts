@@ -575,6 +575,10 @@ export class AppDatabase {
     return this.call("getParserOffset", source) as Promise<number>;
   }
 
+  listParserOffsets(): Promise<Record<string, number>> {
+    return this.call("listParserOffsets") as Promise<Record<string, number>>;
+  }
+
   hasParserOffset(source: string): Promise<boolean> {
     return this.call("hasParserOffset", source) as Promise<boolean>;
   }
@@ -2065,6 +2069,14 @@ export class SyncAppDatabase {
   getParserOffset(source: string): number {
     const row = this.db.prepare("SELECT byte_offset FROM parser_offsets WHERE source = ?").get(source) as { byte_offset: number } | undefined;
     return row?.byte_offset ?? 0;
+  }
+
+  listParserOffsets(): Record<string, number> {
+    const rows = this.db.prepare("SELECT source, byte_offset FROM parser_offsets").all() as unknown as Array<{
+      source: string;
+      byte_offset: number;
+    }>;
+    return Object.fromEntries(rows.map((row) => [row.source, row.byte_offset]));
   }
 
   hasParserOffset(source: string): boolean {

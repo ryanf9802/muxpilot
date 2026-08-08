@@ -4,6 +4,13 @@ import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUse
 import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
 
 export const PARSER_VERSION = "codex-jsonl-v1";
+const DEFAULT_BATCH_BYTES = 1024 * 1024;
+const DEFAULT_MAX_RECORD_BYTES = 64 * 1024 * 1024;
+
+export interface ParseCodexJsonlOptions {
+  batchBytes?: number;
+  maxRecordBytes?: number;
+}
 
 interface RawEvent {
   timestamp?: string;
@@ -29,27 +36,77 @@ export interface ParseResult {
   messages: Omit<ChatMessage, "sessionId" | "sequence">[];
   nextOffset: number;
   pendingSkillNames: string[];
+  notices: string[];
   complete: boolean;
 }
 
-export async function parseCodexJsonl(path: string, offset: number): Promise<ParseResult> {
+export async function parseCodexJsonl(path: string, offset: number, options: ParseCodexJsonlOptions = {}): Promise<ParseResult> {
   const file = await open(path, "r");
   try {
     const stat = await file.stat();
     if (offset > stat.size) offset = 0;
     const length = Math.max(0, stat.size - offset);
-    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [], complete: true };
-    const buffer = Buffer.allocUnsafe(Math.min(length, 1024 * 1024));
-    const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
-    const chunk = buffer.subarray(0, bytesRead).toString("utf8");
-    const parsed = parseCodexJsonlChunk(chunk, offset);
-    return { ...parsed, complete: parsed.nextOffset >= stat.size };
+    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: true };
+    const batch = await readCompleteJsonlBatch(file, offset, stat.size, options);
+    if (batch.skippedBytes > 0) {
+      const nextOffset = offset + batch.skippedBytes;
+      return {
+        messages: [],
+        nextOffset,
+        pendingSkillNames: [],
+        notices: [`Skipped an oversized Codex transcript record (${batch.skippedBytes} bytes).`],
+        complete: nextOffset >= stat.size
+      };
+    }
+    if (batch.bytes.length === 0) {
+      return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: false };
+    }
+    const parsed = parseCodexJsonlChunk(batch.bytes.toString("utf8"), offset);
+    return { ...parsed, notices: [], complete: parsed.nextOffset >= stat.size };
   } finally {
     await file.close();
   }
 }
 
-function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, "complete"> {
+async function readCompleteJsonlBatch(
+  file: Awaited<ReturnType<typeof open>>,
+  offset: number,
+  fileSize: number,
+  options: ParseCodexJsonlOptions
+): Promise<{ bytes: Buffer; skippedBytes: number }> {
+  const batchBytes = Math.max(1, options.batchBytes ?? DEFAULT_BATCH_BYTES);
+  const maxRecordBytes = Math.max(batchBytes, options.maxRecordBytes ?? DEFAULT_MAX_RECORD_BYTES);
+  const firstLength = Math.min(batchBytes, fileSize - offset);
+  const first = Buffer.allocUnsafe(firstLength);
+  const { bytesRead } = await file.read(first, 0, first.length, offset);
+  const initial = first.subarray(0, bytesRead);
+  const lastNewline = initial.lastIndexOf(10);
+  if (lastNewline >= 0) return { bytes: initial.subarray(0, lastNewline + 1), skippedBytes: 0 };
+
+  const retained: Buffer[] = [initial];
+  let scanned = initial.length;
+  let retaining = scanned <= maxRecordBytes;
+  while (offset + scanned < fileSize) {
+    const nextLength = Math.min(batchBytes, fileSize - offset - scanned);
+    const next = Buffer.allocUnsafe(nextLength);
+    const read = await file.read(next, 0, next.length, offset + scanned);
+    if (read.bytesRead === 0) break;
+    const bytes = next.subarray(0, read.bytesRead);
+    const newline = bytes.indexOf(10);
+    const consumed = newline >= 0 ? newline + 1 : bytes.length;
+    if (retaining && scanned + consumed <= maxRecordBytes) retained.push(bytes.subarray(0, consumed));
+    else retaining = false;
+    scanned += consumed;
+    if (newline >= 0) {
+      return retaining
+        ? { bytes: Buffer.concat(retained, scanned), skippedBytes: 0 }
+        : { bytes: Buffer.alloc(0), skippedBytes: scanned };
+    }
+  }
+  return { bytes: Buffer.alloc(0), skippedBytes: 0 };
+}
+
+function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, "complete" | "notices"> {
   const lines = chunk.split("\n");
   const completeLines = chunk.endsWith("\n") ? lines.slice(0, -1) : lines.slice(0, -1);
   let consumed = offset;

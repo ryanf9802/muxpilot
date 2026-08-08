@@ -229,6 +229,10 @@ export function shouldReconcileSessionForEvent(event: Pick<SessionEvent, "type">
   return event.type === "session.updated" || event.type === "status.changed";
 }
 
+export function isLatestSessionRefresh(requestId: number, latestRequestId: number): boolean {
+  return requestId === latestRequestId;
+}
+
 export function inputModeAction(mode: CollaborationMode): SessionAction {
   return { type: "setInputMode", mode };
 }
@@ -744,6 +748,7 @@ export function SessionView() {
   const messageListRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<ManagedSession | null>(null);
   const requestTokenRef = useRef(0);
+  const sessionRefreshRequestRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
   const loadingSearchPageRef = useRef(false);
@@ -1241,8 +1246,10 @@ export function SessionView() {
   }
 
   async function loadSession(targetId = id, token = requestTokenRef.current) {
+    const refreshRequestId = sessionRefreshRequestRef.current + 1;
+    sessionRefreshRequestRef.current = refreshRequestId;
     const response = await trackRefreshRequest(() => api.session(targetId));
-    if (!isCurrentRequest(targetId, token)) return;
+    if (!isCurrentRequest(targetId, token) || !isLatestSessionRefresh(refreshRequestId, sessionRefreshRequestRef.current)) return;
     const nextSession = sessionWithPendingFastMode(
       sessionWithPendingInputMode(response.session, pendingInputModeRef.current),
       pendingFastModeRef.current

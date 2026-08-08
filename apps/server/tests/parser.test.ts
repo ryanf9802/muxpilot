@@ -5,6 +5,57 @@ import { describe, expect, it } from "vitest";
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
+  it("advances across a JSONL record larger than the normal read batch", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const oversizedOutput = "x".repeat(1024 * 1024 + 256);
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00Z",
+          type: "response_item",
+          payload: { type: "function_call_output", output: oversizedOutput }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "final answer" }] }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    const first = await parseCodexJsonl(path, 0);
+    const second = await parseCodexJsonl(path, first.nextOffset);
+
+    expect(first.nextOffset).toBeGreaterThan(1024 * 1024);
+    expect(first.complete).toBe(false);
+    expect(second.messages.map((message) => message.text)).toEqual(["final answer"]);
+    expect(second.complete).toBe(true);
+  });
+
+  it("skips a record over the safety limit without pinning the parser offset", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({ type: "response_item", payload: { type: "function_call_output", output: "x".repeat(512) } }),
+        JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "after oversized record" } }),
+        ""
+      ].join("\n")
+    );
+
+    const first = await parseCodexJsonl(path, 0, { batchBytes: 64, maxRecordBytes: 128 });
+    const second = await parseCodexJsonl(path, first.nextOffset, { batchBytes: 64, maxRecordBytes: 128 });
+
+    expect(first.notices).toEqual([expect.stringContaining("Skipped an oversized Codex transcript record")]);
+    expect(first.nextOffset).toBeGreaterThan(0);
+    expect(second.messages.map((message) => message.text)).toEqual(["after oversized record"]);
+    expect(second.complete).toBe(true);
+  });
+
   it("maps Codex JSONL events into chat messages", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");

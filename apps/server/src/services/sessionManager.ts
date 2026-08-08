@@ -78,6 +78,8 @@ interface IngestSessionResult {
   progressed: boolean;
 }
 
+const MAX_LIVE_INGEST_PASSES_PER_TICK = 8;
+
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
   private parserTimer: NodeJS.Timeout | null = null;
@@ -89,6 +91,7 @@ export class SessionManager {
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
   private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
+  private missingIngestCursor = 0;
   private resourceUsageLookup: SessionResourceUsageLookup | null = null;
 
   constructor(
@@ -141,18 +144,9 @@ export class SessionManager {
     if (this.ingestRunning) return;
     this.ingestRunning = true;
     try {
-      const sessions = await this.listIngestSessions({ recentFirst: true });
+      const sessions = await this.listIngestSessions();
       for (const initialSession of sessions) {
-        let session: ManagedSession | null = initialSession;
-        while (session) {
-          const result = await this.ingestSession(session);
-          if (!result.incomplete || !result.progressed) break;
-          const refreshed = await this.db.getSession(session.id);
-          session =
-            refreshed && refreshed.codexJsonlPath === initialSession.codexJsonlPath && !refreshed.archived
-              ? refreshed
-              : null;
-        }
+        await this.drainIngestSession(initialSession);
       }
     } finally {
       this.ingestRunning = false;
@@ -351,9 +345,13 @@ export class SessionManager {
 
   async ingest(): Promise<void> {
     const sessions = await this.listIngestSessions();
-    for (const session of sessions) {
-      await this.ingestSession(session);
-    }
+    const live = sessions.filter((session) => session.status !== "missing");
+    const missing = sessions.filter((session) => session.status === "missing");
+    for (const session of live) await this.drainIngestSession(session, MAX_LIVE_INGEST_PASSES_PER_TICK);
+    const missingIndex = missing.length > 0 ? this.missingIngestCursor % missing.length : -1;
+    const missingSession = missingIndex >= 0 ? missing[missingIndex] : null;
+    if (missing.length > 0) this.missingIngestCursor = (missingIndex + 1) % missing.length;
+    if (missingSession) await this.ingestSession(missingSession);
   }
 
   private async runIngestTick(): Promise<void> {
@@ -372,16 +370,42 @@ export class SessionManager {
     });
   }
 
-  private async listIngestSessions(options: { recentFirst?: boolean } = {}): Promise<ManagedSession[]> {
+  private async listIngestSessions(): Promise<ManagedSession[]> {
     const sessions = (await this.db.listSessions(true)).filter((session) => session.codexJsonlPath && !session.archived);
-    if (!options.recentFirst) return sessions;
+    const offsets = await this.db.listParserOffsets();
     const targets = await Promise.all(
-      sessions.map(async (session) => ({
-        session,
-        sourceUpdatedAtMs: await sessionSourceUpdatedAtMs(session)
-      }))
+      sessions.map(async (session): Promise<IngestTarget | null> => {
+        const source = session.codexJsonlPath!;
+        const metadata = await sessionSourceMetadata(session);
+        const offset = offsets[parserOffsetKey(session.id, source)];
+        const needsIngest =
+          session.transcriptSyncing ||
+          offset === undefined ||
+          metadata.sizeBytes === null ||
+          metadata.sizeBytes !== offset;
+        if (!needsIngest || (metadata.sizeBytes === null && session.status === "missing" && !session.transcriptSyncing)) return null;
+        return { session, sourceUpdatedAtMs: metadata.updatedAtMs };
+      })
     );
-    return targets.sort(compareIngestTargets).map((target) => target.session);
+    return targets
+      .filter((target): target is IngestTarget => Boolean(target))
+      .sort(compareIngestTargets)
+      .map((target) => target.session);
+  }
+
+  private async drainIngestSession(initialSession: ManagedSession, maxPasses = Number.POSITIVE_INFINITY): Promise<void> {
+    let session: ManagedSession | null = initialSession;
+    let passes = 0;
+    while (session && passes < maxPasses) {
+      passes += 1;
+      const result = await this.ingestSession(session);
+      if (!result.incomplete || !result.progressed) break;
+      const refreshed = await this.db.getSession(session.id);
+      session =
+        refreshed && refreshed.codexJsonlPath === initialSession.codexJsonlPath && !refreshed.archived
+          ? refreshed
+          : null;
+    }
   }
 
   private async ingestSession(session: ManagedSession): Promise<IngestSessionResult> {
@@ -396,6 +420,19 @@ export class SessionManager {
       }
       const offset = await this.db.getParserOffset(offsetKey);
       const result = await parseCodexJsonl(source, offset);
+      for (const notice of result.notices) {
+        const message: ChatMessage = {
+          id: stableId(`${session.id}:parser-notice:${source}:${offset}:${notice}`),
+          sessionId: session.id,
+          sequence: await this.db.nextSequence(session.id),
+          type: "parser_notice",
+          role: "system",
+          timestamp: nowIso(),
+          text: notice,
+          payload: { source, offset }
+        };
+        if (await this.db.appendMessage(message)) this.publish("message.appended", session.id, message);
+      }
       if (result.pendingSkillNames.length > 0) {
         const previousUserMessage = await this.db.latestUserMessage(session.id);
         if (previousUserMessage) {
@@ -448,7 +485,9 @@ export class SessionManager {
       if (!currentSession || currentSession.codexJsonlPath !== source) {
         return { incomplete: false, progressed: false };
       }
-      await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
+      if (!hasOffset || result.nextOffset !== offset) {
+        await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
+      }
       if (result.complete && currentSession.transcriptSyncing) {
         const latestQuestionMessage = await this.db.latestQuestionMessage(session.id);
         const latestUserMessage = await this.db.latestUserMessage(session.id);
@@ -2307,12 +2346,13 @@ function compareIngestTargets(first: IngestTarget, second: IngestTarget): number
   return first.session.id.localeCompare(second.session.id);
 }
 
-async function sessionSourceUpdatedAtMs(session: ManagedSession): Promise<number | null> {
-  if (!session.codexJsonlPath) return null;
+async function sessionSourceMetadata(session: ManagedSession): Promise<{ sizeBytes: number | null; updatedAtMs: number | null }> {
+  if (!session.codexJsonlPath) return { sizeBytes: null, updatedAtMs: null };
   try {
-    return (await stat(session.codexJsonlPath)).mtimeMs;
+    const details = await stat(session.codexJsonlPath);
+    return { sizeBytes: details.size, updatedAtMs: details.mtimeMs };
   } catch {
-    return null;
+    return { sizeBytes: null, updatedAtMs: null };
   }
 }
 

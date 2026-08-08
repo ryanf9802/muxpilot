@@ -3413,6 +3413,69 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("drains a multi-batch live transcript without revisiting caught-up missing sessions", async () => {
+    const harness = await createHarness();
+    const liveRepo = join(harness.dir, "live-repo");
+    const missingRepo = join(harness.dir, "missing-repo");
+    await mkdir(liveRepo);
+    await mkdir(missingRepo);
+    const livePath = join(harness.codexHome, "sessions", "live.jsonl");
+    await writeCodexSession(harness.codexHome, "live.jsonl", {
+      sessionId: "codex-live",
+      cwd: liveRepo,
+      user: "live prompt",
+      assistant: "starting",
+      mtime: new Date("2026-07-07T00:01:00.000Z")
+    });
+    await writeCodexSession(harness.codexHome, "missing.jsonl", {
+      sessionId: "codex-missing",
+      cwd: missingRepo,
+      user: "old prompt",
+      assistant: "old answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: liveRepo, paneId: "%1" }),
+      testPane({ cwd: missingRepo, paneId: "%2" })
+    ];
+    await harness.manager.discover();
+    await harness.manager.catchUpIngest();
+    const sessions = await harness.manager.listSessions(true);
+    const liveSession = sessions.find((session) => session.tmux.cwd === liveRepo)!;
+    const missingSession = sessions.find((session) => session.tmux.cwd === missingRepo)!;
+    await harness.db.setSessionStatus(missingSession.id, "missing", "2026-07-07T00:02:00.000Z");
+    const parserOffsetWrites: string[] = [];
+    const setParserOffset = harness.db.setParserOffset.bind(harness.db);
+    harness.db.setParserOffset = async (source, offset, parserVersion, updatedAt) => {
+      parserOffsetWrites.push(source);
+      await setParserOffset(source, offset, parserVersion, updatedAt);
+    };
+
+    await appendFile(
+      livePath,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:03:00.000Z",
+          type: "response_item",
+          payload: { type: "function_call_output", output: "x".repeat(1024 * 1024 + 256) }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:03:01.000Z",
+          type: "response_item",
+          payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "live final answer" }] }
+        }),
+        ""
+      ].join("\n")
+    );
+
+    await harness.manager.ingest();
+
+    expect((await harness.manager.listMessages(liveSession.id, 0)).map((message) => message.text)).toContain("live final answer");
+    expect(parserOffsetWrites).toContain(`${liveSession.id}:${liveSession.codexJsonlPath}`);
+    expect(parserOffsetWrites).not.toContain(`${missingSession.id}:${missingSession.codexJsonlPath}`);
+    harness.db.close();
+  });
+
   it("normalizes renamed session names before applying tmux window names", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
