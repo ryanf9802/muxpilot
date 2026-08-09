@@ -800,6 +800,94 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces destructive custom command approvals without explicit escalation metadata", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "destructive-command-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-08-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-destructive-command-approval",
+            input: 'const r = await tools.exec_command({cmd:"rm -rf /tmp/disposable-results",workdir:"/repo"}); text(r.output);'
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    const capture = commandApprovalCapture(1)
+      .replaceAll("pnpm app restart prod", "rm -rf /tmp/disposable-results")
+      .replace(
+        "Do you want to allow restarting the muxpilot production server so the simplified hold feedback is live?",
+        "Do you want to allow this destructive command?"
+      );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", title: "[ . ] Action Required" })];
+    harness.tmux.capturePane = async () => capture;
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    expect(session.status).toBe("waiting");
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-destructive-command-approval",
+      kind: "command",
+      command: "rm -rf /tmp/disposable-results"
+    });
+    harness.db.close();
+  });
+
+  it("rejects a visible command approval that does not match the latest custom command", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "mismatched-command-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-08-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-unrelated-command",
+            input: 'const r = await tools.exec_command({cmd:"git status --short"}); text(r.output);'
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1).replaceAll("pnpm app restart prod", "rm -rf /tmp/results");
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
   it("surfaces and resolves patch approvals that have no JSONL approval event", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

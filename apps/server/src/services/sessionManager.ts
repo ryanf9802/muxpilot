@@ -2695,11 +2695,36 @@ function interactiveApprovalHasTranscriptContext(
   if (prompt.kind === "permissions") return toolCallName(payload)?.startsWith("codex_apps.") ?? false;
   if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));
   if (prompt.kind !== "command") return false;
-  return Boolean(
-    input &&
-      /tools\.exec_command\s*\(/.test(input) &&
-      /["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)
-  );
+  if (!input || !/tools\.exec_command\s*\(/.test(input)) return false;
+  if (/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return true;
+  return nestedExecCommandMatchesPrompt(input, prompt);
+}
+
+function nestedExecCommandMatchesPrompt(input: string, prompt: InteractiveApprovalPrompt): boolean {
+  const command = nestedExecCommand(input);
+  const visibleCommand = prompt.prefixRule?.join(" ") ?? prompt.command;
+  if (!command || !visibleCommand) return false;
+  const normalizedCommand = normalizeCommandText(command);
+  const normalizedVisibleCommand = normalizeCommandText(visibleCommand);
+  return normalizedCommand === normalizedVisibleCommand || normalizedCommand.startsWith(`${normalizedVisibleCommand} `);
+}
+
+function nestedExecCommand(input: string): string | null {
+  const callIndex = input.lastIndexOf("tools.exec_command");
+  if (callIndex < 0) return null;
+  const call = input.slice(callIndex);
+  const match = call.match(/(?:["']cmd["']|\bcmd)\s*:\s*(["'])((?:\\[\s\S]|(?!\1)[\s\S])*)\1/);
+  if (!match?.[1] || match[2] === undefined) return null;
+  try {
+    if (match[1] === '"') return JSON.parse(`"${match[2]}"`) as string;
+    return match[2].replace(/\\([\\'])/g, "$1").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCommandText(value: string): string {
+  return value.trim().replace(/\s+/g, " ");
 }
 
 function stringArraysEqual(first: string[] | null, second: string[] | null): boolean {
