@@ -1,0 +1,4 @@
+interface:
+  display_name: "Muxpilot Production Restart"
+  short_description: "Restart production outside session limits"
+  default_prompt: "Use $muxpilot-restart-prod to activate the integrated muxpilot commit in production."
