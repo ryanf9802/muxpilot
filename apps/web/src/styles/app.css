@@ -720,6 +720,12 @@ select:focus-visible {
   border-radius: 8px;
 }
 
+.recovery-page-connecting .recovery-mark {
+  color: var(--color-action);
+  background: color-mix(in srgb, var(--color-surface) 82%, var(--color-action));
+  border-color: color-mix(in srgb, var(--color-action) 52%, var(--color-border));
+}
+
 .recovery-copy {
   display: grid;
   gap: 8px;

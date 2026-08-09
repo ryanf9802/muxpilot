@@ -9,6 +9,7 @@ import {
   defaultForkSessionName,
   DisconnectedNotice,
   GitWorkflowSkillStatusCallout,
+  SHELL_CONNECTION_FAILURE_GRACE_MS,
   SHELL_RECONNECT_INTERVAL_MS,
   SHELL_CONNECTION_PROBE_TIMEOUT_MS,
   SessionStoplight,
@@ -121,6 +122,7 @@ describe("shell connection state", () => {
   it("uses a short reconnect interval for transient disconnects", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);
     expect(SHELL_CONNECTION_PROBE_TIMEOUT_MS).toBe(5000);
+    expect(SHELL_CONNECTION_FAILURE_GRACE_MS).toBe(5000);
   });
 
   it("only probes connectivity for failures that did not receive an HTTP response", () => {
@@ -148,11 +150,29 @@ describe("shell connection state", () => {
       })
     );
 
-    expect(html).toContain('class="recovery-page"');
+    expect(html).toContain('class="recovery-page recovery-page-warning"');
     expect(html).toContain('role="alert"');
     expect(html).toContain("Cannot reach muxpilot");
     expect(html).toContain("The app is open, but the backend is not responding.");
     expect(html).toContain("Restart connection");
+  });
+
+  it("renders a calm accessible state while connecting", () => {
+    const html = renderToStaticMarkup(
+      createElement(AppRecoveryPage, {
+        role: "status",
+        variant: "connecting",
+        busy: true,
+        title: "Connecting to muxpilot",
+        message: "Checking the local muxpilot server and restoring your session."
+      })
+    );
+
+    expect(html).toContain('class="recovery-page recovery-page-connecting"');
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Connecting to muxpilot");
+    expect(html).toContain("spin");
+    expect(html).not.toContain("<button");
   });
 });
 

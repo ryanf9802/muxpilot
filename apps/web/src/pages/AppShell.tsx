@@ -37,12 +37,10 @@ import {
 } from "../utils/sessionStatus.js";
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { AppBrand } from "../components/AppBrand.js";
-import { AppLoadingSkeleton, loadingSkeletonVariantForPath } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
 import {
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
-  CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
   forceConnectionAutoReload,
   installForegroundRecoveryListeners,
@@ -60,9 +58,10 @@ import {
   playNotificationBell
 } from "../utils/notifications.js";
 
-export type ShellConnectionState = "checking" | "connected" | "disconnected" | "unauthorized";
+export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SHELL_CONNECTION_PROBE_TIMEOUT_MS = 5000;
+export const SHELL_CONNECTION_FAILURE_GRACE_MS = 5000;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
@@ -75,7 +74,7 @@ type PrimaryInputFocusHandler = (command: PrimaryInputFocusCommand) => boolean |
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
-  const [connectionState, setConnectionState] = useState<ShellConnectionState>("checking");
+  const [connectionState, setConnectionState] = useState<ShellConnectionState>("connecting");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
@@ -118,7 +117,9 @@ export function AppShell() {
   const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
   const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
   const sessionRequestIdRef = useRef(0);
-  const connectionStateRef = useRef<ShellConnectionState>("checking");
+  const connectionStateRef = useRef<ShellConnectionState>("connecting");
+  const connectionGraceStartedAtRef = useRef(Date.now());
+  const connectionGraceTimerRef = useRef<number | null>(null);
   const locationPathRef = useRef(location.pathname);
   const notificationSettingsRef = useRef<NotificationSettings | null>(null);
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
@@ -135,9 +136,27 @@ export function AppShell() {
 
   useEffect(() => installCtrlWGuard(), []);
 
-  useEffect(() => {
-    connectionStateRef.current = connectionState;
-  }, [connectionState]);
+  const updateConnectionState = useCallback((state: ShellConnectionState) => {
+    connectionStateRef.current = state;
+    setConnectionState(state);
+  }, []);
+
+  const clearConnectionGrace = useCallback(() => {
+    if (connectionGraceTimerRef.current !== null) window.clearTimeout(connectionGraceTimerRef.current);
+    connectionGraceTimerRef.current = null;
+  }, []);
+
+  const beginConnectionGrace = useCallback((state: "connecting" | "reconnecting") => {
+    clearConnectionGrace();
+    connectionGraceStartedAtRef.current = Date.now();
+    updateConnectionState(state);
+    connectionGraceTimerRef.current = window.setTimeout(() => {
+      connectionGraceTimerRef.current = null;
+      if (connectionStateRef.current === "connecting" || connectionStateRef.current === "reconnecting") {
+        updateConnectionState("disconnected");
+      }
+    }, SHELL_CONNECTION_FAILURE_GRACE_MS);
+  }, [clearConnectionGrace, updateConnectionState]);
 
   useEffect(() => {
     locationPathRef.current = location.pathname;
@@ -148,17 +167,25 @@ export function AppShell() {
   }, [notificationSettings]);
 
   const markUnauthorized = useCallback(() => {
-    setConnectionState("unauthorized");
+    clearConnectionGrace();
+    updateConnectionState("unauthorized");
     navigate("/access", { replace: true });
-  }, [navigate]);
+  }, [clearConnectionGrace, navigate, updateConnectionState]);
 
   const markDisconnected = useCallback((error?: unknown) => {
     if (isUnauthorizedError(error)) {
       markUnauthorized();
       return;
     }
-    setConnectionState("disconnected");
-  }, [markUnauthorized]);
+    if (connectionStateRef.current === "connected") beginConnectionGrace("reconnecting");
+    if (
+      (connectionStateRef.current === "connecting" || connectionStateRef.current === "reconnecting")
+      && Date.now() - connectionGraceStartedAtRef.current >= SHELL_CONNECTION_FAILURE_GRACE_MS
+    ) {
+      clearConnectionGrace();
+      updateConnectionState("disconnected");
+    }
+  }, [beginConnectionGrace, clearConnectionGrace, markUnauthorized, updateConnectionState]);
 
   const applyMe = useCallback((me: MeResponse) => {
     connectionProbeFailureCountRef.current = 0;
@@ -167,17 +194,18 @@ export function AppShell() {
       markUnauthorized();
       return;
     }
-    const wasDisconnected = connectionStateRef.current === "disconnected";
-    setConnectionState("connected");
+    const wasDisconnected = connectionStateRef.current !== "connected";
+    clearConnectionGrace();
+    updateConnectionState("connected");
     setAccessMode(me.accessMode);
     setShowConnectButton(shouldShowConnectDeviceButton(me));
     setShowLogoutButton(shouldShowLogoutButton(me));
     if (wasDisconnected) setConnectionEpoch((epoch) => epoch + 1);
-  }, [markUnauthorized]);
+  }, [clearConnectionGrace, markUnauthorized, updateConnectionState]);
 
   const probeShellConnection = useCallback((
     supersede = false,
-    autoReloadFailureThreshold = CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD
+    autoReloadFailureThreshold: number | null = null
   ): Promise<boolean> => {
     const activeProbe = connectionProbeRef.current;
     if (activeProbe && !supersede) return activeProbe.promise;
@@ -202,14 +230,16 @@ export function AppShell() {
         markDisconnected(error);
         if (isUnauthorizedError(error)) return false;
         connectionProbeFailureCountRef.current += 1;
-        attemptConnectionAutoReload(connectionProbeFailureCountRef.current, {
-          visibilityState: document.visibilityState,
-          failureThreshold: autoReloadFailureThreshold,
-          storage: () => window.sessionStorage,
-          currentUrl: () => window.location.href,
-          now: () => Date.now(),
-          reload: (url) => window.location.replace(url)
-        });
+        if (autoReloadFailureThreshold !== null) {
+          attemptConnectionAutoReload(connectionProbeFailureCountRef.current, {
+            visibilityState: document.visibilityState,
+            failureThreshold: autoReloadFailureThreshold,
+            storage: () => window.sessionStorage,
+            currentUrl: () => window.location.href,
+            now: () => Date.now(),
+            reload: (url) => window.location.replace(url)
+          });
+        }
         return false;
       })
       .finally(() => {
@@ -235,8 +265,9 @@ export function AppShell() {
       return;
     }
     if (!shouldProbeShellConnection(error)) return;
+    if (connectionStateRef.current === "connected") beginConnectionGrace("reconnecting");
     void probeShellConnection();
-  }, [markUnauthorized, probeShellConnection]);
+  }, [beginConnectionGrace, markUnauthorized, probeShellConnection]);
 
   useEffect(() => {
     const handleAuthExpired = () => markUnauthorized();
@@ -259,25 +290,29 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
+    beginConnectionGrace("connecting");
     void probeShellConnection(true);
     return () => {
+      clearConnectionGrace();
       const activeProbe = connectionProbeRef.current;
       connectionProbeRef.current = null;
       activeProbe?.controller.abort();
     };
-  }, [probeShellConnection]);
+  }, [beginConnectionGrace, clearConnectionGrace, probeShellConnection]);
 
   useEffect(() => installForegroundRecoveryListeners(({ startsNewCycle }) => {
     if (startsNewCycle) {
       connectionProbeFailureCountRef.current = 0;
       clearConnectionAutoReload(() => window.sessionStorage);
     }
-    if (connectionStateRef.current === "connected") {
+    const wasConnected = connectionStateRef.current === "connected";
+    beginConnectionGrace(connectionStateRef.current === "connecting" ? "connecting" : "reconnecting");
+    if (wasConnected) {
       setConnectionEpoch((epoch) => epoch + 1);
       setShellSocketEpoch((epoch) => epoch + 1);
     }
     void probeShellConnection(true, FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD);
-  }), [probeShellConnection]);
+  }), [beginConnectionGrace, probeShellConnection]);
 
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
@@ -296,15 +331,6 @@ export function AppShell() {
     const interval = setInterval(() => void loadSessions().catch(handleConnectedRequestFailure), SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
-    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    const reconnectSockets = () => {
-      reconnectTimer = setTimeout(() => {
-        reconnectTimer = null;
-        if (closing) return;
-        setConnectionEpoch((epoch) => epoch + 1);
-        setShellSocketEpoch((epoch) => epoch + 1);
-      }, SHELL_RECONNECT_INTERVAL_MS);
-    };
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
       if (isNotificationTriggeredEvent(event)) {
@@ -322,20 +348,19 @@ export function AppShell() {
     };
     socket.onclose = () => {
       if (closing) return;
-      reconnectSockets();
+      beginConnectionGrace("reconnecting");
       void probeShellConnection();
     };
     return () => {
       closing = true;
       if (refreshTimer) clearTimeout(refreshTimer);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(interval);
       socket.close();
     };
-  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
+  }, [beginConnectionGrace, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
 
   useEffect(() => {
-    if (connectionState !== "disconnected") return undefined;
+    if (connectionState !== "connecting" && connectionState !== "reconnecting" && connectionState !== "disconnected") return undefined;
 
     const poll = () => void probeShellConnection();
     poll();
@@ -569,8 +594,29 @@ export function AppShell() {
     return () => document.removeEventListener("keydown", handlePromptHistoryShortcut);
   }, [connectionState, connectOpen, createSessionOpen, forkSessionSource, openPromptHistory]);
 
-  if (connectionState === "checking") {
-    return <AppLoadingSkeleton variant={loadingSkeletonVariantForPath(location.pathname)} />;
+  if (connectionState === "connecting" || connectionState === "reconnecting") {
+    const reconnecting = connectionState === "reconnecting";
+    return (
+      <div className="app">
+        <header className="topbar">
+          <AppBrand />
+          <div />
+          <div className="topbar-actions" />
+        </header>
+        <main className="content recovery-content">
+          <AppRecoveryPage
+            role="status"
+            variant="connecting"
+            busy
+            title={reconnecting ? "Reconnecting to muxpilot" : "Connecting to muxpilot"}
+            message={reconnecting
+              ? "Restoring the app connection after it was in the background."
+              : "Checking the local muxpilot server and restoring your session."}
+            detail="This usually takes only a few seconds."
+          />
+        </main>
+      </div>
+    );
   }
   if (connectionState === "unauthorized") return null;
   if (connectionState === "disconnected") {
@@ -1302,6 +1348,7 @@ export function AppRecoveryPage({
   detail,
   actionLabel,
   busy = false,
+  variant = "warning",
   onAction
 }: {
   role?: "alert" | "status";
@@ -1310,10 +1357,11 @@ export function AppRecoveryPage({
   detail?: string;
   actionLabel?: string;
   busy?: boolean;
+  variant?: "warning" | "connecting";
   onAction?: () => void;
 }) {
   return (
-    <section className="recovery-page" role={role} aria-live={role === "status" ? "polite" : "assertive"}>
+    <section className={`recovery-page recovery-page-${variant}`} role={role} aria-live={role === "status" ? "polite" : "assertive"}>
       <div className="recovery-mark" aria-hidden="true">
         {busy ? <LoaderCircle className="spin" size={28} /> : <AlertTriangle size={28} />}
       </div>

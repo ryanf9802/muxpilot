@@ -4,6 +4,8 @@ export const CONNECTION_AUTO_RELOAD_STORAGE_KEY = "muxpilot.connection-auto-relo
 export const CONNECTION_AUTO_RELOAD_DELAYS_MS = [0, 10_000, 30_000] as const;
 export const CONNECTION_RECOVERY_QUERY_PARAM = "muxpilot-recovery";
 export const FOREGROUND_RECOVERY_COALESCE_MS = 50;
+export const FOREGROUND_HEARTBEAT_INTERVAL_MS = 2_000;
+export const FOREGROUND_HEARTBEAT_STALE_MS = 5_000;
 
 export interface ForegroundRecoveryEvent {
   startsNewCycle: boolean;
@@ -127,6 +129,7 @@ export function installForegroundRecoveryListeners(onRecover: (event: Foreground
   let sawHidden = document.visibilityState === "hidden";
   let startsNewCycle = false;
   let recoveryTimer: number | null = null;
+  let lastHeartbeatAt = Date.now();
 
   const scheduleRecovery = (nextCycle: boolean) => {
     startsNewCycle ||= nextCycle;
@@ -142,37 +145,66 @@ export function installForegroundRecoveryListeners(onRecover: (event: Foreground
   const handleVisibilityChange = () => {
     if (document.visibilityState === "hidden") {
       sawHidden = true;
+      lastHeartbeatAt = Date.now();
       return;
     }
     scheduleRecovery(sawHidden);
     sawHidden = false;
+    lastHeartbeatAt = Date.now();
   };
   const handlePageShow = (event: PageTransitionEvent) => {
     scheduleRecovery(sawHidden || event.persisted);
     sawHidden = false;
+    lastHeartbeatAt = Date.now();
+  };
+  const handlePageHide = () => {
+    sawHidden = true;
+    lastHeartbeatAt = Date.now();
   };
   const handleOnline = () => scheduleRecovery(true);
+  const handleFocus = () => {
+    const now = Date.now();
+    const resumed = sawHidden || now - lastHeartbeatAt >= FOREGROUND_HEARTBEAT_STALE_MS;
+    sawHidden = false;
+    lastHeartbeatAt = now;
+    if (resumed) scheduleRecovery(true);
+  };
   const handleFreeze = () => {
     sawHidden = true;
+    lastHeartbeatAt = Date.now();
   };
   const handleResume = () => {
     scheduleRecovery(true);
     sawHidden = false;
+    lastHeartbeatAt = Date.now();
   };
+  const heartbeatTimer = window.setInterval(() => {
+    const now = Date.now();
+    const elapsed = now - lastHeartbeatAt;
+    lastHeartbeatAt = now;
+    if (document.visibilityState === "visible" && elapsed >= FOREGROUND_HEARTBEAT_STALE_MS) {
+      scheduleRecovery(true);
+    }
+  }, FOREGROUND_HEARTBEAT_INTERVAL_MS);
 
   document.addEventListener("visibilitychange", handleVisibilityChange);
   document.addEventListener("freeze", handleFreeze);
   document.addEventListener("resume", handleResume);
   window.addEventListener("pageshow", handlePageShow);
+  window.addEventListener("pagehide", handlePageHide);
   window.addEventListener("online", handleOnline);
+  window.addEventListener("focus", handleFocus);
 
   return () => {
     if (recoveryTimer !== null) window.clearTimeout(recoveryTimer);
+    window.clearInterval(heartbeatTimer);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     document.removeEventListener("freeze", handleFreeze);
     document.removeEventListener("resume", handleResume);
     window.removeEventListener("pageshow", handlePageShow);
+    window.removeEventListener("pagehide", handlePageHide);
     window.removeEventListener("online", handleOnline);
+    window.removeEventListener("focus", handleFocus);
   };
 }
 

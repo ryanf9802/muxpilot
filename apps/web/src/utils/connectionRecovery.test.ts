@@ -7,6 +7,8 @@ import {
   CONNECTION_AUTO_RELOAD_STORAGE_KEY,
   CONNECTION_RECOVERY_QUERY_PARAM,
   FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD,
+  FOREGROUND_HEARTBEAT_INTERVAL_MS,
+  FOREGROUND_HEARTBEAT_STALE_MS,
   FOREGROUND_RECOVERY_COALESCE_MS,
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
@@ -200,6 +202,49 @@ describe("installForegroundRecoveryListeners", () => {
     removeListeners();
   });
 
+  it("starts a new recovery cycle when the foreground heartbeat resumes after a timer gap", async () => {
+    vi.useFakeTimers();
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    const recover = vi.fn();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const removeListeners = installForegroundRecoveryListeners(recover);
+
+    now.mockReturnValue(FOREGROUND_HEARTBEAT_STALE_MS);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_HEARTBEAT_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
+
+    expect(recover).toHaveBeenCalledWith({ startsNewCycle: true });
+    removeListeners();
+  });
+
+  it("treats page hide and focus as a new foreground recovery cycle", async () => {
+    vi.useFakeTimers();
+    const recover = vi.fn();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const removeListeners = installForegroundRecoveryListeners(recover);
+
+    window.dispatchEvent(new Event("pagehide"));
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
+
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(recover).toHaveBeenCalledWith({ startsNewCycle: true });
+    removeListeners();
+  });
+
+  it("ignores ordinary focus changes without a hidden or suspended interval", async () => {
+    vi.useFakeTimers();
+    const recover = vi.fn();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const removeListeners = installForegroundRecoveryListeners(recover);
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
+
+    expect(recover).not.toHaveBeenCalled();
+    removeListeners();
+  });
+
   it("starts a new recovery cycle when Chrome freezes and resumes the page", async () => {
     vi.useFakeTimers();
     const recover = vi.fn();
@@ -227,7 +272,9 @@ describe("installForegroundRecoveryListeners", () => {
     visibilityState.mockReturnValue("visible");
     document.dispatchEvent(new Event("visibilitychange"));
     window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("pagehide"));
     window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("focus"));
     await vi.advanceTimersByTimeAsync(FOREGROUND_RECOVERY_COALESCE_MS);
     expect(recover).not.toHaveBeenCalled();
   });
