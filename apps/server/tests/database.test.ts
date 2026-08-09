@@ -53,6 +53,18 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("invalidates cached recent prompts when a user message is appended", async () => {
+    const db = await tempDb();
+    const session = testSession("session-prompt-cache");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    await db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    expect((await db.getSession(session.id))?.recentUserPrompts).toEqual(["First prompt"]);
+
+    await db.appendMessage(testMessage(session.id, 2, "user", "Second prompt"));
+    expect((await db.getSession(session.id))?.recentUserPrompts).toEqual(["Second prompt", "First prompt"]);
+    await db.close();
+  });
+
   it("excludes initial instruction context from recent prompt metadata", async () => {
     const db = await tempDb();
     const session = testSession("session-context-preview");

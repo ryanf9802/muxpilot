@@ -612,6 +612,7 @@ export class AppDatabase {
 
 export class SyncAppDatabase {
   private readonly db: DatabaseSync;
+  private readonly recentUserPromptsCache = new Map<string, string[]>();
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -736,6 +737,8 @@ export class SyncAppDatabase {
   }
 
   private rekeySessionReferences(oldSessionId: string, newSessionId: string): void {
+    this.recentUserPromptsCache.delete(oldSessionId);
+    this.recentUserPromptsCache.delete(newSessionId);
     this.db.prepare("UPDATE messages SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE session_prompt_index SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
@@ -1004,6 +1007,7 @@ export class SyncAppDatabase {
 
     if (Number(result.changes) > 0) {
       this.upsertPromptIndexMessage(message);
+      if (message.role === "user") this.recentUserPromptsCache.delete(message.sessionId);
       this.db
         .prepare(
           `UPDATE managed_sessions
@@ -1101,6 +1105,7 @@ export class SyncAppDatabase {
     this.deletePromptIndexMessage(message.id);
     this.upsertPromptIndexMessage({ ...message, text });
     if (message.role === "user") {
+      this.recentUserPromptsCache.delete(message.sessionId);
       this.db
         .prepare(
           `UPDATE managed_sessions
@@ -1597,6 +1602,7 @@ export class SyncAppDatabase {
   }
 
   clearSessionTranscript(sessionId: string): void {
+    this.recentUserPromptsCache.delete(sessionId);
     this.db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM session_prompt_index WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM session_summaries WHERE session_id = ?").run(sessionId);
@@ -2167,6 +2173,8 @@ export class SyncAppDatabase {
   }
 
   private recentUserPrompts(sessionId: string): string[] {
+    const cached = this.recentUserPromptsCache.get(sessionId);
+    if (cached) return cached;
     // session_id is intentionally UNINDEXED in the FTS table; use the message index and stop after two prompts.
     const rows = this.db
       .prepare(
@@ -2182,6 +2190,7 @@ export class SyncAppDatabase {
       if (text) prompts.push(text);
       if (prompts.length === 2) break;
     }
+    this.recentUserPromptsCache.set(sessionId, prompts);
     return prompts;
   }
 
