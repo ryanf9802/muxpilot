@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SessionStatus } from "@muxpilot/core";
-import { countSessionStatuses, sessionStatusesForSeverity, sessionStatusSeverity, shouldRefreshSessionsForEvent } from "./sessionStatus.js";
+import { countSessionStatuses, SESSION_STATUS_RECONCILE_INTERVAL_MS, sessionStatusesForSeverity, sessionStatusSeverity } from "./sessionStatus.js";
+
+it("uses a 30-second visible-session fallback cadence", () => {
+  expect(SESSION_STATUS_RECONCILE_INTERVAL_MS).toBe(30_000);
+});
 
 describe("sessionStatusSeverity", () => {
   it("maps every session status to the shared stoplight severity", () => {
@@ -46,18 +50,5 @@ describe("countSessionStatuses", () => {
         { status: "waiting" }
       ])
     ).toEqual({ red: 2, yellow: 2, green: 1 });
-  });
-});
-
-describe("shouldRefreshSessionsForEvent", () => {
-  it("refreshes for session data events", () => {
-    expect(shouldRefreshSessionsForEvent({ type: "session.updated" })).toBe(true);
-    expect(shouldRefreshSessionsForEvent({ type: "status.changed" })).toBe(true);
-    expect(shouldRefreshSessionsForEvent({ type: "message.appended" })).toBe(true);
-  });
-
-  it("ignores unrelated events", () => {
-    expect(shouldRefreshSessionsForEvent({ type: "connected" })).toBe(false);
-    expect(shouldRefreshSessionsForEvent({ type: "notification.created" })).toBe(false);
   });
 });

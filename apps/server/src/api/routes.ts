@@ -12,6 +12,7 @@ import type {
   SendInputRequest,
   SessionDirectoriesResponse,
   SessionHistoryResponse,
+  SessionSnapshotResponse,
   SessionTransferExportRequest,
   SessionTransferImportRequest,
   SessionAction,
@@ -267,8 +268,7 @@ export function registerRoutes(
 
   app.get("/api/sessions", { preHandler: access.requireAccess }, async (request) => {
     const query = request.query as { includeArchived?: string; includeAll?: string; status?: string; q?: string };
-    let sessions = await manager.listSessions(query.includeArchived === "true");
-    if (query.includeAll !== "true") sessions = sessions.filter((session) => session.status !== "missing");
+    let sessions = await manager.listSessions(query.includeArchived === "true", query.includeAll === "true");
     if (query.status) sessions = sessions.filter((session) => !session.initializing && session.status === query.status);
     if (query.q) {
       const q = query.q.toLowerCase();
@@ -382,6 +382,24 @@ export function registerRoutes(
     const session = await manager.getSession(id);
     if (!session) return reply.code(404).send({ error: "Session not found" });
     return { session };
+  });
+
+  app.get("/api/sessions/:id/snapshot", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionSnapshotResponse | void> => {
+    const { id } = request.params as { id: string };
+    const query = request.query as { limit?: string };
+    const session = await manager.getSession(id);
+    if (!session) {
+      await reply.code(404).send({ error: "Session not found" });
+      return;
+    }
+    const limit = parseMessagePageLimit(query.limit);
+    const [messages, approval, question, queuedInputs] = await Promise.all([
+      manager.listActiveTailMessages(id, limit),
+      manager.getPendingApproval(id),
+      manager.getPendingQuestion(id),
+      manager.listQueuedInputs(id)
+    ]);
+    return { session, messages, approval, question, queuedInputs, sampledAt: new Date().toISOString() };
   });
 
   app.get("/api/sessions/:id/heavy-commands", { preHandler: access.requireAccess }, async (request, reply) => {

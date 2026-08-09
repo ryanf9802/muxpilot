@@ -5,6 +5,7 @@ import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion }
 import {
   AppBrand,
   AppRecoveryPage,
+  applySessionEventToSessions,
   ConnectDeviceContent,
   defaultForkSessionName,
   DisconnectedNotice,
@@ -706,6 +707,20 @@ describe("syncSessionIntoStoplightSessions", () => {
 
     expect(syncSessionIntoStoplightSessions([first, second], testSession({ id: "a", status: "missing" }))).toEqual([second]);
     expect(syncSessionIntoStoplightSessions([first, second], testSession({ id: "b", archived: true }))).toEqual([first]);
+  });
+});
+
+describe("applySessionEventToSessions", () => {
+  it("patches shell-owned sessions without another list request", () => {
+    const session = testSession({ id: "a", status: "working" });
+    const event = { id: "event", type: "status.changed" as const, sessionId: "a", payload: { status: "waiting" }, timestamp: "2026-08-09T00:00:00.000Z" };
+    expect(applySessionEventToSessions([session], event)[0]?.status).toBe("waiting");
+  });
+
+  it("removes a session when an event reports it missing", () => {
+    const session = testSession({ id: "a", status: "working" });
+    const event = { id: "event", type: "status.changed" as const, sessionId: "a", payload: { status: "missing" }, timestamp: "2026-08-09T00:00:00.000Z" };
+    expect(applySessionEventToSessions([session], event)).toEqual([]);
   });
 });
 

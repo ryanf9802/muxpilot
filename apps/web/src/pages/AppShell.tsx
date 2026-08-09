@@ -28,10 +28,8 @@ import { credentialSuppressedField, noAutofillTextField, searchField } from "../
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { sessionBaseName } from "../utils/sessionLabels.js";
 import {
-  SESSION_STATUS_EVENT_DEBOUNCE_MS,
   SESSION_STATUS_RECONCILE_INTERVAL_MS,
   countSessionStatuses,
-  shouldRefreshSessionsForEvent,
   type SessionStoplightCounts,
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
@@ -113,6 +111,7 @@ export function AppShell() {
   const [sessionHistoryRestoreId, setSessionHistoryRestoreId] = useState<string | null>(null);
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [sessionStoplightSeverity, setSessionStoplightSeverity] = useState<SessionStatusSeverity | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
@@ -124,6 +123,7 @@ export function AppShell() {
   const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
   const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
   const sessionRequestIdRef = useRef(0);
+  const sessionEventListenersRef = useRef(new Set<(event: SessionEvent) => void>());
   const connectionStateRef = useRef<ShellConnectionState>("connecting");
   const connectionGraceStartedAtRef = useRef(Date.now());
   const connectionGraceTimerRef = useRef<number | null>(null);
@@ -284,7 +284,10 @@ export function AppShell() {
   const loadSessions = useCallback(async () => {
     const requestId = ++sessionRequestIdRef.current;
     const sessionResponse = await api.sessions();
-    if (requestId === sessionRequestIdRef.current) setSessions(sessionResponse.sessions);
+    if (requestId === sessionRequestIdRef.current) {
+      setSessions(sessionResponse.sessions);
+      setSessionsLoaded(true);
+    }
   }, []);
 
   const loadNotificationSettings = useCallback(async () => {
@@ -293,6 +296,13 @@ export function AppShell() {
 
   const syncSessionStoplight = useCallback((session: ManagedSession) => {
     setSessions((currentSessions) => syncSessionIntoStoplightSessions(currentSessions, session));
+  }, []);
+
+  const subscribeSessionEvents = useCallback((listener: (event: SessionEvent) => void) => {
+    sessionEventListenersRef.current.add(listener);
+    return () => {
+      sessionEventListenersRef.current.delete(listener);
+    };
   }, []);
 
   useEffect(() => {
@@ -324,23 +334,21 @@ export function AppShell() {
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
 
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleLoad = () => {
-      if (refreshTimer) return;
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        void loadSessions().catch(handleConnectedRequestFailure);
-      }, SESSION_STATUS_EVENT_DEBOUNCE_MS);
-    };
-
     void loadSessions().catch(handleConnectedRequestFailure);
     void loadNotificationSettings().catch(() => undefined);
-    const interval = setInterval(() => void loadSessions().catch(handleConnectedRequestFailure), SESSION_STATUS_RECONCILE_INTERVAL_MS);
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") void loadSessions().catch(handleConnectedRequestFailure);
+    }, SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
+      if ("sessionId" in event) {
+        const sessionEvent = event as SessionEvent;
+        setSessions((current) => applySessionEventToSessions(current, sessionEvent));
+        for (const listener of sessionEventListenersRef.current) listener(sessionEvent);
+      }
       if (isNotificationTriggeredEvent(event)) {
         if (notificationSoundEnabled(notificationSettingsRef.current)) playNotificationBell();
         const message = notificationToastMessage(event.payload);
@@ -352,7 +360,6 @@ export function AppShell() {
           onClick: () => navigate(event.payload.url)
         });
       }
-      if (shouldRefreshSessionsForEvent(event)) scheduleLoad();
     };
     socket.onclose = () => {
       if (closing) return;
@@ -364,7 +371,6 @@ export function AppShell() {
     };
     return () => {
       closing = true;
-      if (refreshTimer) clearTimeout(refreshTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(interval);
       socket.close();
@@ -985,6 +991,9 @@ export function AppShell() {
             {
               refreshSessionStoplight: loadSessions,
               syncSessionStoplight,
+              sessions,
+              sessionsLoaded,
+              subscribeSessionEvents,
               sessionStoplightSeverity,
               openCreateSession,
               openForkSession,
@@ -1227,6 +1236,9 @@ export { AppBrand };
 export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;
   syncSessionStoplight: (session: ManagedSession) => void;
+  sessions: ManagedSession[];
+  sessionsLoaded: boolean;
+  subscribeSessionEvents: (listener: (event: SessionEvent) => void) => () => void;
   sessionStoplightSeverity: SessionStatusSeverity | null;
   openCreateSession: (cwd?: string) => void;
   openForkSession: (session: ManagedSession) => void;
@@ -1545,6 +1557,18 @@ export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession
   const nextSessions = [...currentSessions];
   nextSessions[index] = session;
   return nextSessions;
+}
+
+export function applySessionEventToSessions(currentSessions: ManagedSession[], event: SessionEvent): ManagedSession[] {
+  if (event.type === "session.updated") {
+    return syncSessionIntoStoplightSessions(currentSessions, event.payload as ManagedSession);
+  }
+  if (event.type !== "status.changed") return currentSessions;
+  const status = (event.payload as { status?: ManagedSession["status"] }).status;
+  if (!status) return currentSessions;
+  const current = currentSessions.find((session) => session.id === event.sessionId);
+  if (!current) return currentSessions;
+  return syncSessionIntoStoplightSessions(currentSessions, { ...current, status });
 }
 
 export function sessionStoplightSearch(currentSearch: string): string {

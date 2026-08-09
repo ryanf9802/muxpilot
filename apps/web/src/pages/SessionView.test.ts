@@ -25,7 +25,9 @@ import {
   GitWorkspacePanel,
   HeavyCommandIndicator,
   HeavyCommandsModal,
+  hasActiveHeavyCommand,
   isDesktopVimAvailable,
+  isLiveManagedSession,
   isPlanModeMessage,
   inputModeAction,
   latestUserPromptTimestamp,
@@ -74,7 +76,6 @@ import {
   shouldResetInitialTranscriptForLiveTail,
   shouldShowSessionLoading,
   shouldShowWorkingIndicator,
-  shouldReconcileSessionForEvent,
   isLatestSessionRefresh,
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
@@ -878,15 +879,18 @@ describe("replaceTranscriptTail", () => {
   });
 });
 
-describe("shouldReconcileSessionForEvent", () => {
-  it("refreshes session metadata for session status events", () => {
-    expect(shouldReconcileSessionForEvent({ type: "session.updated" })).toBe(true);
-    expect(shouldReconcileSessionForEvent({ type: "status.changed" })).toBe(true);
+describe("session fallback polling", () => {
+  it("stops fallback polling for missing and archived sessions", () => {
+    expect(isLiveManagedSession({ status: "waiting", archived: false })).toBe(true);
+    expect(isLiveManagedSession({ status: "missing", archived: false })).toBe(false);
+    expect(isLiveManagedSession({ status: "waiting", archived: true })).toBe(false);
   });
 
-  it("leaves message append events on the direct append path", () => {
-    expect(shouldReconcileSessionForEvent({ type: "message.appended" })).toBe(false);
-    expect(shouldReconcileSessionForEvent({ type: "connected" })).toBe(false);
+  it("keeps heavyweight polling fast only while the panel or a command is active", () => {
+    expect(hasActiveHeavyCommand([{ state: "waiting" }])).toBe(true);
+    expect(hasActiveHeavyCommand([{ state: "running" }])).toBe(true);
+    expect(hasActiveHeavyCommand([{ state: "stalled" }])).toBe(true);
+    expect(hasActiveHeavyCommand([])).toBe(false);
   });
 });
 

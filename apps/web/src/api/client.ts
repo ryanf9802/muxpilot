@@ -29,6 +29,7 @@ import type {
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
   SessionHistoryResponse,
+  SessionSnapshotResponse,
   SessionActionResponse,
   SessionAction,
   SessionTransferImportRequest,
@@ -157,6 +158,8 @@ export const api = {
     }),
   codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
+  sessionSnapshot: (id: string, limit = 80) =>
+    json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`),
   heavyCommands: (id: string) => json<HeavyCommandsResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands`),
   heavyCommandOutput: (id: string, runId: string) => json<HeavyCommandOutputResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/output`),
   terminateHeavyCommand: (id: string, runId: string) => json<{ accepted: true }>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/terminate`, { method: "POST" }),

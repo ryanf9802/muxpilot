@@ -313,8 +313,8 @@ export class AppDatabase {
     return this.call("setSessionModelSettings", sessionId, mode, model, reasoningEffort, updatedAt) as Promise<ManagedSession | null>;
   }
 
-  listSessions(includeArchived = false): Promise<ManagedSession[]> {
-    return this.call("listSessions", includeArchived) as Promise<ManagedSession[]>;
+  listSessions(includeArchived = false, includeMissing = true): Promise<ManagedSession[]> {
+    return this.call("listSessions", includeArchived, includeMissing) as Promise<ManagedSession[]>;
   }
 
   getSession(sessionId: string): Promise<ManagedSession | null> {
@@ -836,15 +836,16 @@ export class SyncAppDatabase {
     return this.getSession(sessionId);
   }
 
-  listSessions(includeArchived = false): ManagedSession[] {
+  listSessions(includeArchived = false, includeMissing = true): ManagedSession[] {
     const rows = this.db
       .prepare(
         `SELECT managed_sessions.*
          FROM managed_sessions
          WHERE (? = 1 OR archived = 0)
+           AND (? = 1 OR status <> 'missing')
          ORDER BY managed_sessions.id ASC`
       )
-      .all(includeArchived ? 1 : 0) as unknown as SessionRow[];
+      .all(includeArchived ? 1 : 0, includeMissing ? 1 : 0) as unknown as SessionRow[];
 
     return rows
       .map((row) => this.hydrateSession(row))

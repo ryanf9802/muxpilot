@@ -23,7 +23,7 @@ import type {
   SessionStatus
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
-import { api, eventSocket, notificationDeviceId } from "../api/client.js";
+import { api, notificationDeviceId } from "../api/client.js";
 import type { AppShellOutletContext } from "./AppShell.js";
 import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
@@ -34,10 +34,7 @@ import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
-  SESSION_STATUS_EVENT_DEBOUNCE_MS,
-  SESSION_STATUS_RECONCILE_INTERVAL_MS,
   sessionStatusSeverity,
-  shouldRefreshSessionsForEvent,
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
 
@@ -47,9 +44,7 @@ const NOTIFICATION_MENU_WIDTH = 220;
 const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
-export const DASHBOARD_SESSION_RECONCILE_INTERVAL_MS = SESSION_STATUS_RECONCILE_INTERVAL_MS;
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
-export const DASHBOARD_EVENT_DEBOUNCE_MS = SESSION_STATUS_EVENT_DEBOUNCE_MS;
 export const DASHBOARD_STATUSES = ["", "working", "planning", "waiting", "question", "plan_ready", "approval", "startup_failed", "unknown", "missing"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
@@ -61,13 +56,11 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { connectionEpoch, openCreateSession, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
+  const { sessions: shellSessions, sessionsLoaded, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
-  const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
   const [codexUsageSummary, setCodexUsageSummary] = useState<CodexUsageSummaryResponse | null>(null);
-  const [sessionsInitialLoading, setSessionsInitialLoading] = useState(true);
   const [usageSummaryInitialLoading, setUsageSummaryInitialLoading] = useState(true);
   const [codexUsageSummaryInitialLoading, setCodexUsageSummaryInitialLoading] = useState(true);
   const [q, setQ] = useState("");
@@ -84,10 +77,9 @@ export function Dashboard() {
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const sessionRequestIdRef = useRef(0);
   const usageRequestIdRef = useRef(0);
   const codexUsageRequestIdRef = useRef(0);
-  const optimisticallyRemovedSessionIdsRef = useRef(new Set<string>());
+  const [optimisticallyRemovedSessionIds, setOptimisticallyRemovedSessionIds] = useState<Set<string>>(() => new Set());
   const queryStatusFilter = useMemo(() => dashboardStatusFilterFromSearchParams(searchParams), [searchParams]);
   const statusFilter = useMemo<DashboardStatusFilter>(
     () =>
@@ -97,18 +89,10 @@ export function Dashboard() {
     [queryStatusFilter, sessionStoplightSeverity]
   );
 
-  const loadSessions = useCallback(async () => {
-    const requestId = ++sessionRequestIdRef.current;
-    try {
-      const sessionResponse = await api.sessions(q, statusFilter.kind === "status" ? statusFilter.status : "");
-      if (requestId === sessionRequestIdRef.current) {
-        const visibleSessions = filterSessionsByDashboardStatus(sessionResponse.sessions, statusFilter);
-        setSessions(removeSessionsFromDashboard(visibleSessions, optimisticallyRemovedSessionIdsRef.current));
-      }
-    } finally {
-      if (requestId === sessionRequestIdRef.current) setSessionsInitialLoading(false);
-    }
-  }, [q, statusFilter]);
+  const sessions = useMemo(
+    () => removeSessionsFromDashboard(filterSessionsByDashboardQuery(filterSessionsByDashboardStatus(shellSessions, statusFilter), q), optimisticallyRemovedSessionIds),
+    [optimisticallyRemovedSessionIds, q, shellSessions, statusFilter]
+  );
 
   const loadUsageSummary = useCallback(async () => {
     const requestId = ++usageRequestIdRef.current;
@@ -133,43 +117,29 @@ export function Dashboard() {
   useEffect(() => {
     const optimisticallyRemovedSessionId = dashboardLocationState(location.state).optimisticallyRemovedSessionId;
     if (!optimisticallyRemovedSessionId) return;
-    optimisticallyRemovedSessionIdsRef.current.add(optimisticallyRemovedSessionId);
-    setSessions((currentSessions) => removeSessionFromDashboard(currentSessions, optimisticallyRemovedSessionId));
+    setOptimisticallyRemovedSessionIds((current) => new Set(current).add(optimisticallyRemovedSessionId));
   }, [location.state]);
 
   useEffect(() => {
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-    const scheduleLoad = () => {
-      if (refreshTimer) return;
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        void loadSessions().catch(() => undefined);
-      }, DASHBOARD_EVENT_DEBOUNCE_MS);
-    };
-
-    void loadSessions().catch(() => undefined);
-    const interval = setInterval(() => void loadSessions().catch(() => undefined), DASHBOARD_SESSION_RECONCILE_INTERVAL_MS);
-    const socket = eventSocket();
-    socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as SessionEvent | { type: string };
-      if (isNotificationTriggeredEvent(event)) {
-        setNotificationRings((current) => ({ ...current, [event.sessionId]: event.payload.severity }));
-        window.setTimeout(() => {
-          setNotificationRings((current) => {
-            const next = { ...current };
-            delete next[event.sessionId];
-            return next;
-          });
-        }, NOTIFICATION_RING_MS);
-      }
-      if (shouldRefreshDashboardForEvent(event)) scheduleLoad();
-    };
+    const timers = new Set<number>();
+    const unsubscribe = subscribeSessionEvents((event) => {
+      if (!isNotificationTriggeredEvent(event)) return;
+      setNotificationRings((current) => ({ ...current, [event.sessionId]: event.payload.severity }));
+      const timer = window.setTimeout(() => {
+        timers.delete(timer);
+        setNotificationRings((current) => {
+          const next = { ...current };
+          delete next[event.sessionId];
+          return next;
+        });
+      }, NOTIFICATION_RING_MS);
+      timers.add(timer);
+    });
     return () => {
-      if (refreshTimer) clearTimeout(refreshTimer);
-      clearInterval(interval);
-      socket.close();
+      unsubscribe();
+      for (const timer of timers) window.clearTimeout(timer);
     };
-  }, [connectionEpoch, loadSessions]);
+  }, [subscribeSessionEvents]);
 
   useEffect(() => {
     void loadUsageSummary().catch(() => undefined);
@@ -243,7 +213,7 @@ export function Dashboard() {
     try {
       await api.action(renameSession.id, { type: "rename", name });
       setRenameSession(null);
-      await loadSessions();
+      await refreshSessionStoplight();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "Could not rename session.");
     } finally {
@@ -255,15 +225,18 @@ export function Dashboard() {
     setMenu(null);
     setActionError(null);
 
-    optimisticallyRemovedSessionIdsRef.current.add(session.id);
-    setSessions((currentSessions) => removeSessionFromDashboard(currentSessions, session.id));
+    setOptimisticallyRemovedSessionIds((current) => new Set(current).add(session.id));
     setBusyAction({ sessionId: session.id, type: "kill" });
     try {
       await api.action(session.id, { type: "kill" });
-      await loadSessions();
+      await refreshSessionStoplight();
     } catch (error) {
-      optimisticallyRemovedSessionIdsRef.current.delete(session.id);
-      await loadSessions();
+      setOptimisticallyRemovedSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(session.id);
+        return next;
+      });
+      await refreshSessionStoplight();
       setActionError(error instanceof Error ? error.message : "Could not kill pane.");
     } finally {
       setBusyAction(null);
@@ -274,14 +247,12 @@ export function Dashboard() {
     setMenu(null);
     setActionError(null);
     setBusyAction({ sessionId: session.id, type: "pin" });
-    setSessions((currentSessions) =>
-      currentSessions.map((candidate) => (candidate.id === session.id ? { ...candidate, pinned } : candidate))
-    );
+    syncSessionStoplight({ ...session, pinned });
     try {
       await api.action(session.id, { type: pinned ? "pin" : "unpin" });
-      await loadSessions();
+      await refreshSessionStoplight();
     } catch (error) {
-      await loadSessions();
+      await refreshSessionStoplight();
       setActionError(error instanceof Error ? error.message : pinned ? "Could not pin session." : "Could not unpin session.");
     } finally {
       setBusyAction(null);
@@ -296,7 +267,7 @@ export function Dashboard() {
     setUsageSummary((summary) => (summary ? { ...summary, activitySummariesEnabled: enabled } : summary));
     try {
       await api.updateActivitySummarySettings({ enabled });
-      await Promise.all([loadUsageSummary(), loadSessions()]);
+      await Promise.all([loadUsageSummary(), refreshSessionStoplight()]);
     } catch (error) {
       setUsageSummary(previousSummary);
       setActivitySummaryToggleError(error instanceof Error ? error.message : "Could not update activity summary setting.");
@@ -355,7 +326,7 @@ export function Dashboard() {
       ) : null}
 
       <div className="repo-session-groups">
-        {sessionsInitialLoading ? <DashboardSessionsSkeleton /> : sessionGroups.map((group) => {
+        {!sessionsLoaded ? <DashboardSessionsSkeleton /> : sessionGroups.map((group) => {
           const isCollapsed = collapsedRepoKeys.has(group.key);
           const sessionGridId = repoSessionGridId(group.key);
 
@@ -562,12 +533,28 @@ export function dashboardStatusFilterFromSearchParams(params: Pick<URLSearchPara
 }
 
 export function filterSessionsByDashboardStatus(sessions: ManagedSession[], filter: DashboardStatusFilter): ManagedSession[] {
+  if (filter.kind === "status") return sessions.filter((session) => session.status === filter.status);
   if (filter.kind !== "severity") return sessions;
   return sessions.filter((session) => !session.initializing && sessionStatusSeverity(session.status) === filter.severity);
 }
 
-export function shouldRefreshDashboardForEvent(event: Pick<SessionEvent, "type"> | { type: string }): boolean {
-  return shouldRefreshSessionsForEvent(event);
+export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query: string): ManagedSession[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return sessions;
+  return sessions.filter((session) => [
+    session.repo.name,
+    session.repo.branch,
+    session.tmux.cwd,
+    session.tmux.sessionName,
+    session.tmux.windowId,
+    String(session.tmux.windowIndex),
+    session.tmux.windowName,
+    session.tmux.paneId,
+    String(session.tmux.paneIndex),
+    session.preview,
+    session.activitySummary,
+    ...session.recentUserPrompts
+  ].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle)));
 }
 
 export function removeSessionFromDashboard(sessions: ManagedSession[], sessionId: string): ManagedSession[] {

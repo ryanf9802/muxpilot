@@ -156,6 +156,7 @@ export class SessionManager {
   stop(): void {
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     if (this.parserTimer) clearInterval(this.parserTimer);
+    this.codexStore.stop();
     this.activitySummarizer?.stop();
   }
 
@@ -527,8 +528,8 @@ export class SessionManager {
     }
   }
 
-  listSessions(includeArchived = false): Promise<ManagedSession[]> {
-    const result = this.db.listSessions(true) as Promise<ManagedSession[]> | ManagedSession[];
+  listSessions(includeArchived = false, includeMissing = true): Promise<ManagedSession[]> {
+    const result = this.db.listSessions(true, includeMissing) as Promise<ManagedSession[]> | ManagedSession[];
     const decorate = (allSessions: ManagedSession[]) => {
       const sessions = includeArchived ? allSessions : allSessions.filter((session) => !session.archived);
       return sessions.map((session) => this.decorateSession(session, allSessions));

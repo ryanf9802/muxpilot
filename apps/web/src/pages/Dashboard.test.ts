@@ -5,13 +5,12 @@ import { readFileSync } from "node:fs";
 import type { GitWorkspaceState, ManagedSession } from "@muxpilot/core";
 import {
   CodexUsagePanel,
-  DASHBOARD_EVENT_DEBOUNCE_MS,
-  DASHBOARD_SESSION_RECONCILE_INTERVAL_MS,
   DASHBOARD_STATUSES,
   DASHBOARD_USAGE_RECONCILE_INTERVAL_MS,
   dashboardLocationState,
   dashboardPreviewLines,
   dashboardStatusFilterFromSearchParams,
+  filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
   groupSessionsByRepo,
   OpenAIUsagePanel,
@@ -22,7 +21,6 @@ import {
   removeSessionsFromDashboard,
   SessionCard,
   sessionNameValidationMessage,
-  shouldRefreshDashboardForEvent
 } from "./Dashboard.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
@@ -35,11 +33,15 @@ describe("DASHBOARD_STATUSES", () => {
   });
 });
 
-describe("dashboard refresh cadence", () => {
-  it("keeps idle polling slower than event-driven session refreshes", () => {
-    expect(DASHBOARD_EVENT_DEBOUNCE_MS).toBe(2000);
-    expect(DASHBOARD_SESSION_RECONCILE_INTERVAL_MS).toBe(10_000);
+describe("dashboard data ownership", () => {
+  it("keeps only the independent usage fallback poll", () => {
     expect(DASHBOARD_USAGE_RECONCILE_INTERVAL_MS).toBe(60_000);
+  });
+
+  it("filters the shell-owned session list without another API request", () => {
+    const matching = testSession({ id: "matching", paneId: "%111", windowName: "codex-cache" });
+    const other = testSession({ id: "other", paneId: "%112", windowName: "ui" });
+    expect(filterSessionsByDashboardQuery([matching, other], "CACHE")).toEqual([matching]);
   });
 });
 
@@ -579,24 +581,12 @@ describe("dashboard status filters", () => {
     ).toEqual(["d"]);
   });
 
-  it("preserves non-severity filter results unchanged", () => {
+  it("applies status filters to the shell-owned session list", () => {
     const sessions = [testSession({ id: "a", paneId: "%111", windowName: "waiting", status: "waiting" })];
 
-    expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "waiting", selectValue: "waiting" })).toBe(sessions);
+    expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "waiting", selectValue: "waiting" })).toEqual(sessions);
+    expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "working", selectValue: "working" })).toEqual([]);
     expect(filterSessionsByDashboardStatus(sessions, { kind: "all", selectValue: "" })).toBe(sessions);
-  });
-});
-
-describe("shouldRefreshDashboardForEvent", () => {
-  it("refreshes for session and message events", () => {
-    expect(shouldRefreshDashboardForEvent({ type: "session.updated" })).toBe(true);
-    expect(shouldRefreshDashboardForEvent({ type: "status.changed" })).toBe(true);
-    expect(shouldRefreshDashboardForEvent({ type: "message.appended" })).toBe(true);
-  });
-
-  it("ignores events that do not affect dashboard session data", () => {
-    expect(shouldRefreshDashboardForEvent({ type: "connected" })).toBe(false);
-    expect(shouldRefreshDashboardForEvent({ type: "notification.created" })).toBe(false);
   });
 });
 

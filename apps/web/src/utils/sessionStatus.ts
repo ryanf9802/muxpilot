@@ -1,4 +1,4 @@
-import type { ManagedSession, SessionEvent, SessionStatus } from "@muxpilot/core";
+import type { ManagedSession, SessionStatus } from "@muxpilot/core";
 
 export type SessionStatusSeverity = "red" | "yellow" | "green";
 
@@ -8,8 +8,7 @@ export interface SessionStoplightCounts {
   green: number;
 }
 
-export const SESSION_STATUS_RECONCILE_INTERVAL_MS = 10_000;
-export const SESSION_STATUS_EVENT_DEBOUNCE_MS = 2000;
+export const SESSION_STATUS_RECONCILE_INTERVAL_MS = 30_000;
 export const SESSION_STATUS_SEVERITIES: readonly SessionStatusSeverity[] = ["red", "yellow", "green"];
 
 export function sessionStatusSeverity(status: SessionStatus): SessionStatusSeverity {
@@ -37,8 +36,4 @@ export function countSessionStatuses(sessions: readonly Pick<ManagedSession, "st
     counts[sessionStatusSeverity(session.status)] += 1;
   }
   return counts;
-}
-
-export function shouldRefreshSessionsForEvent(event: Pick<SessionEvent, "type"> | { type: string }): boolean {
-  return event.type === "session.updated" || event.type === "status.changed" || event.type === "message.appended";
 }

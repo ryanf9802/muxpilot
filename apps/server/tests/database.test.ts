@@ -5,6 +5,20 @@ import { describe, expect, it } from "vitest";
 import type { ChatMessage, ManagedSession, QueuedInput, TranscriptPageResponse } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
+describe("AppDatabase session visibility", () => {
+  it("filters missing rows in SQL before session hydration", async () => {
+    const db = await tempDb();
+    const active = testSession("session-active");
+    const missing = { ...testSession("session-missing"), status: "missing" as const };
+    await db.upsertSession(active, "2026-07-07T00:00:00.000Z");
+    await db.upsertSession(missing, "2026-07-07T00:00:00.000Z");
+
+    expect((await db.listSessions(false, false)).map((session) => session.id)).toEqual([active.id]);
+    expect((await db.listSessions(false, true)).map((session) => session.id).sort()).toEqual([active.id, missing.id].sort());
+    await db.close();
+  });
+});
+
 describe("AppDatabase activity summaries", () => {
   it("hydrates persisted activity summary metadata onto sessions", async () => {
     const db = await tempDb();

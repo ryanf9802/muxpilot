@@ -352,6 +352,15 @@ export interface QuestionResponse {
   question: QuestionRequest | null;
 }
 
+export interface SessionSnapshotResponse {
+  session: ManagedSession;
+  messages: TranscriptPageResponse;
+  approval: ApprovalRequest | null;
+  question: QuestionRequest | null;
+  queuedInputs: QueuedInput[];
+  sampledAt: string;
+}
+
 export type QueuedInputStatus = "queued" | "sending" | "sent" | "failed";
 
 export interface QueuedInput {

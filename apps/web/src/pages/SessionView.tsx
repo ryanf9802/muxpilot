@@ -70,14 +70,13 @@ import type {
   QueuedInput,
   SessionModelSettings,
   SessionAction,
-  SessionEvent,
   TranscriptPageResponse,
   TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
 import { canToggleFastMode, hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
-import { api, eventSocket } from "../api/client.js";
+import { api } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
@@ -90,7 +89,8 @@ import { sessionDisplayName } from "../utils/sessionLabels.js";
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
 const MESSAGE_BOTTOM_LOAD_THRESHOLD_PX = 120;
-const SESSION_RECONCILE_INTERVAL_MS = 2000;
+export const SESSION_RECONCILE_INTERVAL_MS = 30_000;
+export const ACTIVE_HEAVY_COMMAND_RECONCILE_INTERVAL_MS = 2_000;
 const SKILL_REFRESH_INTERVAL_MS = 60_000;
 const SKILL_REFRESH_STALE_MS = 10_000;
 // "none" explicitly preserves the viewport; "idle" means there is no pending transcript scroll request.
@@ -225,8 +225,12 @@ function useDesktopVimAvailable(): boolean {
   return available;
 }
 
-export function shouldReconcileSessionForEvent(event: Pick<SessionEvent, "type"> | { type: string }): boolean {
-  return event.type === "session.updated" || event.type === "status.changed";
+export function isLiveManagedSession(session: Pick<ManagedSession, "archived" | "status"> | null): boolean {
+  return Boolean(session && !session.archived && session.status !== "missing");
+}
+
+export function hasActiveHeavyCommand(commands: readonly Pick<HeavyCommand, "state">[]): boolean {
+  return commands.some((command) => command.state === "waiting" || command.state === "running" || command.state === "stalled" || command.state === "terminating");
 }
 
 export function isLatestSessionRefresh(requestId: number, latestRequestId: number): boolean {
@@ -695,7 +699,8 @@ export function SessionView() {
     registerPromptHistoryPrefill,
     registerPrimaryInputFocus,
     connectionEpoch,
-    accessMode
+    accessMode,
+    subscribeSessionEvents
   } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
@@ -753,6 +758,7 @@ export function SessionView() {
   const loadingNewerRef = useRef(false);
   const loadingSearchPageRef = useRef(false);
   const liveTailRefreshGateRef = useRef(new LatestGenerationRefreshGate());
+  const snapshotRefreshGateRef = useRef(new LatestGenerationRefreshGate());
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
   const pendingFastModeRef = useRef<boolean | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
@@ -1120,31 +1126,45 @@ export function SessionView() {
       scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
       setExpandedStacks(new Set());
     }
-    void loadAll(id, token);
-    const interval = setInterval(() => void reconcileLiveSession(id, token), SESSION_RECONCILE_INTERVAL_MS);
-    const socket = eventSocket();
-    socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as SessionEvent | { type: string };
-      if ("sessionId" in event && event.sessionId === id) {
-        if (event.type === "message.appended") {
-          const nextMessage = event.payload as ChatMessage;
-          if (!hasMoreAfterRef.current) void refreshLiveTailMessages(id, token);
-          if (nextMessage.type === "approval_request") void loadApproval(id, token);
-          if (nextMessage.type === "question_request") void loadQuestion(id, token);
-          void loadQueuedInputs(id, token);
-        }
-        if (event.type === "queue.updated") void loadQueuedInputs(id, token);
-        if (shouldReconcileSessionForEvent(event)) {
-          scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
-          void reconcileLiveSession(id, token);
-        }
-      }
-    };
+    void loadSnapshot(id, token, true);
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "visible" || !isLiveManagedSession(sessionRef.current)) return;
+      void loadSnapshot(id, token, false);
+    }, SESSION_RECONCILE_INTERVAL_MS);
     return () => {
       clearInterval(interval);
-      socket.close();
     };
   }, [connectionEpoch, id]);
+
+  useEffect(() => {
+    return subscribeSessionEvents((event) => {
+      if (event.sessionId !== id) return;
+      sessionRefreshRequestRef.current += 1;
+      const token = requestTokenRef.current;
+      if (event.type === "message.appended") {
+        const nextMessage = event.payload as ChatMessage;
+        if (!hasMoreAfterRef.current) void refreshLiveTailMessages(id, token);
+        if (nextMessage.type === "approval_request") void loadApproval(id, token);
+        if (nextMessage.type === "question_request") void loadQuestion(id, token);
+        return;
+      }
+      if (event.type === "queue.updated") {
+        void loadQueuedInputs(id, token);
+        return;
+      }
+      if (event.type === "session.updated") {
+        const nextSession = sessionWithPendingFastMode(
+          sessionWithPendingInputMode(event.payload as ManagedSession, pendingInputModeRef.current),
+          pendingFastModeRef.current
+        );
+        clearTranscriptOnSessionSourceChange(nextSession);
+        setSession(nextSession);
+        syncSessionStoplight(nextSession);
+        return;
+      }
+      if (event.type === "status.changed") void loadSession(id, token);
+    });
+  }, [id, subscribeSessionEvents]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1171,9 +1191,14 @@ export function SessionView() {
       }
     };
     void refresh();
-    const interval = window.setInterval(() => void refresh(), 2_000);
+    const intervalMs = heavyCommandsOpen || hasActiveHeavyCommand(heavyCommands)
+      ? ACTIVE_HEAVY_COMMAND_RECONCILE_INTERVAL_MS
+      : SESSION_RECONCILE_INTERVAL_MS;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible" && isLiveManagedSession(sessionRef.current)) void refresh();
+    }, intervalMs);
     return () => { cancelled = true; window.clearInterval(interval); };
-  }, [heavyCommandsOpen, id, terminatingHeavyRun]);
+  }, [heavyCommandsOpen, id, terminatingHeavyRun, hasActiveHeavyCommand(heavyCommands)]);
 
   async function terminateHeavyCommand(runId: string) {
     setTerminatingHeavyRun(runId);
@@ -1235,14 +1260,37 @@ export function SessionView() {
     return request();
   }
 
-  async function loadAll(targetId = id, token = requestTokenRef.current) {
-    await Promise.all([
-      loadSession(targetId, token),
-      loadRecentMessages(targetId, token),
-      loadApproval(targetId, token),
-      loadQuestion(targetId, token),
-      loadQueuedInputs(targetId, token)
-    ]);
+  async function loadSnapshot(targetId = id, token = requestTokenRef.current, initial = false) {
+    await snapshotRefreshGateRef.current.run(token, async () => {
+      const refreshRequestId = sessionRefreshRequestRef.current + 1;
+      sessionRefreshRequestRef.current = refreshRequestId;
+      const response = await trackRefreshRequest(() => api.sessionSnapshot(targetId, MESSAGE_PAGE_SIZE));
+      if (!isCurrentRequest(targetId, token) || !isLatestSessionRefresh(refreshRequestId, sessionRefreshRequestRef.current) || response.messages.sessionId !== targetId) return false;
+      const nextSession = sessionWithPendingFastMode(
+        sessionWithPendingInputMode(response.session, pendingInputModeRef.current),
+        pendingFastModeRef.current
+      );
+      clearTranscriptOnSessionSourceChange(nextSession);
+      setSession(nextSession);
+      syncSessionStoplight(nextSession);
+      setApproval(response.approval);
+      if (!response.approval) setApprovalError("");
+      setQuestion(response.question);
+      if (!response.question) setQuestionError("");
+      setQueuedInputs(response.queuedInputs);
+      setSentQueuedUserMessage((current) => retainLatestSentQueuedUserMessage(current, response.queuedInputs));
+
+      scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate(initial ? "initial" : "live", initial || isNearBottomRef.current);
+      const sourceChanged = acceptTranscriptSource(response.messages);
+      const replaceAll = initial || sourceChanged || initialTranscriptSessionIdRef.current !== targetId;
+      setTranscriptItems((current) => replaceAll
+        ? appendUniqueTranscriptItems([], response.messages.items)
+        : replaceTranscriptTail(current, response.messages.items));
+      reconcilePendingUserMessage(response.messages.items);
+      setPagination(response.messages.hasMoreBefore, response.messages.hasMoreAfter);
+      if (replaceAll) markInitialTranscriptSessionId(targetId);
+      return isLiveManagedSession(nextSession);
+    });
   }
 
   async function loadSession(targetId = id, token = requestTokenRef.current) {
@@ -1268,17 +1316,6 @@ export function SessionView() {
     reconcilePendingUserMessage(response.items);
     setPagination(response.hasMoreBefore, response.hasMoreAfter);
     markInitialTranscriptSessionId(targetId);
-  }
-
-  async function reconcileLiveSession(targetId = id, token = requestTokenRef.current) {
-    scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
-    await Promise.all([
-      loadSession(targetId, token),
-      loadApproval(targetId, token),
-      loadQuestion(targetId, token),
-      loadQueuedInputs(targetId, token),
-      refreshLiveTailMessages(targetId, token)
-    ]);
   }
 
   async function refreshLiveTailMessages(targetId = id, token = requestTokenRef.current) {
