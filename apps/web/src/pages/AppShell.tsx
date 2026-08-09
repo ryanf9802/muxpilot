@@ -71,6 +71,13 @@ const MENU_EDGE = 8;
 export type PrimaryInputFocusCommand = "focus" | "insert" | "insertStart" | "append" | "appendEnd";
 type PrimaryInputFocusHandler = (command: PrimaryInputFocusCommand) => boolean | void;
 
+export function foregroundConnectionDisplayState(
+  state: ShellConnectionState
+): "connecting" | "reconnecting" | null {
+  if (state === "connected" || state === "unauthorized") return null;
+  return state === "connecting" ? "connecting" : "reconnecting";
+}
+
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -265,9 +272,8 @@ export function AppShell() {
       return;
     }
     if (!shouldProbeShellConnection(error)) return;
-    if (connectionStateRef.current === "connected") beginConnectionGrace("reconnecting");
     void probeShellConnection();
-  }, [beginConnectionGrace, markUnauthorized, probeShellConnection]);
+  }, [markUnauthorized, probeShellConnection]);
 
   useEffect(() => {
     const handleAuthExpired = () => markUnauthorized();
@@ -306,7 +312,8 @@ export function AppShell() {
       clearConnectionAutoReload(() => window.sessionStorage);
     }
     const wasConnected = connectionStateRef.current === "connected";
-    beginConnectionGrace(connectionStateRef.current === "connecting" ? "connecting" : "reconnecting");
+    const foregroundState = foregroundConnectionDisplayState(connectionStateRef.current);
+    if (foregroundState) beginConnectionGrace(foregroundState);
     if (wasConnected) {
       setConnectionEpoch((epoch) => epoch + 1);
       setShellSocketEpoch((epoch) => epoch + 1);
@@ -331,6 +338,7 @@ export function AppShell() {
     const interval = setInterval(() => void loadSessions().catch(handleConnectedRequestFailure), SESSION_STATUS_RECONCILE_INTERVAL_MS);
     const socket = eventSocket();
     let closing = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
       if (isNotificationTriggeredEvent(event)) {
@@ -348,16 +356,20 @@ export function AppShell() {
     };
     socket.onclose = () => {
       if (closing) return;
-      beginConnectionGrace("reconnecting");
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (!closing) setShellSocketEpoch((epoch) => epoch + 1);
+      }, SHELL_RECONNECT_INTERVAL_MS);
       void probeShellConnection();
     };
     return () => {
       closing = true;
       if (refreshTimer) clearTimeout(refreshTimer);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       clearInterval(interval);
       socket.close();
     };
-  }, [beginConnectionGrace, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
+  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "connecting" && connectionState !== "reconnecting" && connectionState !== "disconnected") return undefined;

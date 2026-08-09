@@ -14,6 +14,7 @@ import {
   SHELL_CONNECTION_PROBE_TIMEOUT_MS,
   SessionStoplight,
   filterSessionDirectorySuggestions,
+  foregroundConnectionDisplayState,
   forkSessionWarnings,
   hasShortcutBlockingOverlay,
   isMuxpilotManagedSessionBranch,
@@ -123,6 +124,13 @@ describe("shell connection state", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);
     expect(SHELL_CONNECTION_PROBE_TIMEOUT_MS).toBe(5000);
     expect(SHELL_CONNECTION_FAILURE_GRACE_MS).toBe(5000);
+  });
+
+  it("keeps connected content visible while a foreground probe verifies the connection", () => {
+    expect(foregroundConnectionDisplayState("connected")).toBeNull();
+    expect(foregroundConnectionDisplayState("unauthorized")).toBeNull();
+    expect(foregroundConnectionDisplayState("connecting")).toBe("connecting");
+    expect(foregroundConnectionDisplayState("disconnected")).toBe("reconnecting");
   });
 
   it("only probes connectivity for failures that did not receive an HTTP response", () => {
