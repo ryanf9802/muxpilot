@@ -4,11 +4,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ManagedSession, TmuxPane } from "@muxpilot/core";
 import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
-import { CodexSessionStore } from "../src/codex/codexSessionStore.js";
+import { CodexSessionStore, type CodexSessionFile } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import type { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
 import {
+  clearCodexTailAnalysisCache,
   codexModelSettingsFromPaneText,
   legacyTmuxPaneSessionId,
   latestCodexFastModeFromText,
@@ -16,6 +17,7 @@ import {
   normalizeRepositoryApprovalPrefix,
   sessionChanged,
   SessionManager,
+  transcriptOverlapScore,
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
 import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
@@ -30,6 +32,30 @@ describe("Codex pane model settings", () => {
 
   it("ignores model and effort text without Codex screen framing", () => {
     expect(codexModelSettingsFromPaneText("Try gpt-5.6-sol medium for this task.")).toBeNull();
+  });
+});
+
+describe("Codex transcript overlap discovery", () => {
+  it("reuses parsed tails until the watched file metadata changes", async () => {
+    clearCodexTailAnalysisCache();
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-overlap-cache-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(path, `${JSON.stringify({ payload: { message: "first visible response" } })}\n`);
+    const file: CodexSessionFile = {
+      sessionId: "codex-cache",
+      path,
+      cwd: dir,
+      startedAtMs: 1,
+      updatedAtMs: 1,
+      sizeBytes: 1,
+      cliVersion: null
+    };
+
+    expect(await transcriptOverlapScore(file, "first visible response")).toBeGreaterThan(0);
+    await writeFile(path, `${JSON.stringify({ payload: { message: "second visible response" } })}\n`);
+    expect(await transcriptOverlapScore(file, "second visible response")).toBe(0);
+    expect(await transcriptOverlapScore({ ...file, updatedAtMs: 2, sizeBytes: 2 }, "second visible response")).toBeGreaterThan(0);
+    clearCodexTailAnalysisCache();
   });
 });
 

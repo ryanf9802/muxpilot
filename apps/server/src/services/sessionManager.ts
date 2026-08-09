@@ -245,8 +245,7 @@ export class SessionManager {
       const recoveredFromStartupError = Boolean(existing?.startupError) && status !== "startup_failed" && status !== "unknown";
       const startupError = sourceChanged || recoveredFromStartupError ? null : existing?.startupError ?? null;
       const effectiveStatus = startupError ? "startup_failed" : status;
-      const jsonlModelSettings =
-        nextCodexJsonlPath ? await readLatestCodexModelSettings(nextCodexJsonlPath) : null;
+      const jsonlModelSettings = match ? await readLatestCodexModelSettings(match) : null;
       const paneModelSettings = await readLiveCodexModelSettings(
         pane,
         (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
@@ -1990,7 +1989,7 @@ async function visibleCodexFileForPane(
     const scored = await Promise.all(
       candidates.map(async (file) => ({
         file,
-        score: await transcriptOverlapScore(file.path, capture)
+        score: await transcriptOverlapScore(file, capture)
       }))
     );
     scored.sort(
@@ -2034,21 +2033,53 @@ function matchByProcessStart(processInfo: CodexProcessInfo | null, candidates: C
   return best.file;
 }
 
-async function transcriptOverlapScore(path: string, capture: string): Promise<number> {
+interface CodexTailAnalysis {
+  sizeBytes: number;
+  updatedAtMs: number;
+  overlapChunks: string[];
+  modelSettings: SessionModelSettings | null;
+}
+
+const CODEX_TAIL_ANALYSIS_CACHE_LIMIT = 512;
+const codexTailAnalysisCache = new Map<string, CodexTailAnalysis>();
+
+export async function transcriptOverlapScore(file: CodexSessionFile, capture: string): Promise<number> {
   const visible = normalizeOverlapText(capture);
   if (!visible) return 0;
-  const tail = await readFileTail(path, 128 * 1024);
-  const chunks = tail
-    .split("\n")
-    .flatMap((line) => extractJsonlStrings(line))
-    .map(normalizeOverlapText)
-    .filter((text) => text.length >= 8);
+  const chunks = (await readCodexTailAnalysis(file)).overlapChunks;
 
   let score = 0;
   for (const text of chunks) {
     if (visible.includes(text)) score += Math.min(text.length, 400);
   }
   return score;
+}
+
+export function clearCodexTailAnalysisCache(): void {
+  codexTailAnalysisCache.clear();
+}
+
+async function readCodexTailAnalysis(file: CodexSessionFile): Promise<CodexTailAnalysis> {
+  const cached = codexTailAnalysisCache.get(file.path);
+  if (cached && cached.sizeBytes === file.sizeBytes && cached.updatedAtMs === file.updatedAtMs) return cached;
+
+  const tail = await readFileTail(file.path, 256 * 1024);
+  const analysis: CodexTailAnalysis = {
+    sizeBytes: file.sizeBytes,
+    updatedAtMs: file.updatedAtMs,
+    overlapChunks: tail
+      .split("\n")
+      .flatMap((line) => extractJsonlStrings(line))
+      .map(normalizeOverlapText)
+      .filter((text) => text.length >= 8),
+    modelSettings: latestCodexModelSettingsFromText(tail)
+  };
+  if (!codexTailAnalysisCache.has(file.path) && codexTailAnalysisCache.size >= CODEX_TAIL_ANALYSIS_CACHE_LIMIT) {
+    const oldestPath = codexTailAnalysisCache.keys().next().value;
+    if (oldestPath) codexTailAnalysisCache.delete(oldestPath);
+  }
+  codexTailAnalysisCache.set(file.path, analysis);
+  return analysis;
 }
 
 async function readFileTail(path: string, maxBytes: number): Promise<string> {
@@ -2065,9 +2096,9 @@ async function readFileTail(path: string, maxBytes: number): Promise<string> {
   }
 }
 
-async function readLatestCodexModelSettings(path: string): Promise<SessionModelSettings | null> {
+async function readLatestCodexModelSettings(file: CodexSessionFile): Promise<SessionModelSettings | null> {
   try {
-    return latestCodexModelSettingsFromText(await readFileTail(path, 256 * 1024));
+    return (await readCodexTailAnalysis(file)).modelSettings;
   } catch {
     return null;
   }
