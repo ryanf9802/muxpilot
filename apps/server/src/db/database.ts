@@ -2167,18 +2167,22 @@ export class SyncAppDatabase {
   }
 
   private recentUserPrompts(sessionId: string): string[] {
+    // session_id is intentionally UNINDEXED in the FTS table; use the message index and stop after two prompts.
     const rows = this.db
       .prepare(
-        `SELECT text FROM session_prompt_index
-         WHERE session_id = ?
+        `SELECT text FROM messages
+         WHERE session_id = ? AND role = 'user'
          ORDER BY sequence DESC`
       )
-      .all(sessionId) as unknown as Pick<PromptIndexRow, "text">[];
-
-    return rows
-      .slice(0, 2)
-      .map((row) => normalizePreviewText(row.text))
-      .filter(Boolean);
+      .iterate(sessionId) as unknown as Iterable<Pick<MessageRow, "text">>;
+    const prompts: string[] = [];
+    for (const row of rows) {
+      if (!isDisplayableUserPromptText(row.text)) continue;
+      const text = normalizePreviewText(row.text);
+      if (text) prompts.push(text);
+      if (prompts.length === 2) break;
+    }
+    return prompts;
   }
 
   private latestMessageAt(sessionId: string): string | null {
