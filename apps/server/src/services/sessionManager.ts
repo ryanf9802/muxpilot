@@ -164,6 +164,7 @@ export class SessionManager {
     const panes = await this.tmux.listPanes();
     const codexFiles = await this.codexStore.listRecent();
     const growingCodexFilePaths = growingCodexFiles(codexFiles, this.codexFileObservations);
+    const reconsideredCodexFilePaths = reconsideredCodexFiles(codexFiles, this.codexFileObservations);
     this.codexFileObservations = new Map(
       codexFiles.map((file) => [file.path, { sizeBytes: file.sizeBytes, updatedAtMs: file.updatedAtMs }])
     );
@@ -196,7 +197,8 @@ export class SessionManager {
         codexClaims,
         processInfo,
         (lines) => this.tmux.capturePane(pane.paneId, lines, false),
-        growingCodexFilePaths
+        growingCodexFilePaths,
+        reconsideredCodexFilePaths
       );
 
       seen.add(sessionId);
@@ -1880,7 +1882,8 @@ async function claimCodexFile(
   claims: Set<string>,
   processInfo: CodexProcessInfo | null,
   capturePane: (lines: number) => Promise<string>,
-  growingPaths: ReadonlySet<string>
+  growingPaths: ReadonlySet<string>,
+  reconsideredPaths: ReadonlySet<string>
 ): Promise<CodexSessionFile | null> {
   const exact = files.filter((file) => file.cwd === pane.cwd);
   const existingMatch = exact.find((file) => file.path === existing?.codexJsonlPath);
@@ -1890,6 +1893,14 @@ async function claimCodexFile(
   if (resumedMatch && !claims.has(resumedMatch.path)) {
     claims.add(resumedMatch.path);
     return resumedMatch;
+  }
+
+  const alternativeChanged = compatibleExact.some(
+    (file) => file.path !== existingMatch?.path && reconsideredPaths.has(file.path)
+  );
+  if (existingMatch && !claims.has(existingMatch.path) && (growingPaths.has(existingMatch.path) || !alternativeChanged)) {
+    claims.add(existingMatch.path);
+    return existingMatch;
   }
 
   const visibleMatch = await visibleCodexFileForPane(compatibleExact, capturePane, existingMatch?.path);
@@ -1939,6 +1950,21 @@ function growingCodexFiles(
       .filter((file) => {
         const observed = previous.get(file.path);
         return Boolean(observed && (file.sizeBytes > observed.sizeBytes || file.updatedAtMs > observed.updatedAtMs));
+      })
+      .map((file) => file.path)
+  );
+}
+
+function reconsideredCodexFiles(
+  files: CodexSessionFile[],
+  previous: ReadonlyMap<string, { sizeBytes: number; updatedAtMs: number }>
+): Set<string> {
+  if (previous.size === 0) return new Set();
+  return new Set(
+    files
+      .filter((file) => {
+        const observed = previous.get(file.path);
+        return !observed || file.sizeBytes !== observed.sizeBytes || file.updatedAtMs !== observed.updatedAtMs;
       })
       .map((file) => file.path)
   );
