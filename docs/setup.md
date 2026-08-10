@@ -6,12 +6,12 @@ Prerequisites:
 - tmux.
 - Codex CLI.
 - Node.js 24 or newer.
-- pnpm 10.28.0 or compatible.
+- pnpm 11.12.0, matching the repository's `packageManager` pin.
 
 Fresh install:
 
 ```bash
-git clone <muxpilot-repo-url>
+git clone https://github.com/ryanf9802/muxpilot.git
 cd muxpilot
 pnpm install
 cp .env.example .env

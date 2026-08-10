@@ -1,587 +1,168 @@
-# muxpilot
-
-muxpilot is a local web console for supervising Codex CLI sessions running in tmux.
-
-It exists for a specific workflow: I run several Codex agents at once, usually inside tmux on a WSL2 development machine, and I want one place to see what they are doing, answer the things that need me, and send follow-up prompts without hunting through terminal windows. The browser UI is useful on the host machine; the phone UI is useful when I am away from the keyboard but still on the same network.
-
-muxpilot is not a hosted agent platform, a replacement for tmux, or a general remote shell. The backend is a trusted local process. It talks to tmux, reads Codex JSONL transcripts from `~/.codex/sessions`, stores local state in SQLite, and exposes a React UI over HTTP/WebSocket.
-
-The intended deployment is one operator, one trusted machine, optional same-LAN phone access. Do not expose muxpilot directly to the internet, no cross-network security measures are (or will be) put in place.
-
-## The Basic Idea
-
-Codex already has the important runtime pieces: the CLI, tmux, structured session logs, and interactive approval/question flows. muxpilot sits on top of those pieces and makes them easier to operate when there is more than one session in flight.
-
-With muxpilot you can:
-
-- See Codex/tmux sessions grouped by repository.
-- Open the structured transcript for a session.
-- Send normal or plan-mode input to Codex.
-- Queue input while Codex is busy.
-- Answer approvals, questions, and proposed-plan prompts from the browser.
-- Start new Codex sessions in repo directories.
-- Search old prompts.
-- Get local browser/push notifications when a session needs attention or finishes work.
-- Connect a phone on the same LAN using an access key or QR code.
-- Install the UI as a local PWA when HTTPS certificates are configured.
-
-New sessions created from muxpilot are placed inside a shared tmux session named `muxpilot`. Existing Codex panes can also be discovered from tmux when they can be matched to Codex session logs.
-
-## What The App Shows
-
-### Dashboard
-
-The dashboard is the operator view for all active sessions.
-
-It includes:
-
-- Repo-grouped session cards.
-- Collapsible repo groups.
-- Search across repo names, branches, cwd, tmux metadata, previews, summaries, and recent prompts.
-- A red/yellow/green stoplight for sessions that need attention, are working, or are ready.
-- Status pills for states like `working`, `planning`, `waiting`, `approval`, `question`, `plan_ready`, `missing`, and `unknown`.
-- Repo metadata, branch, dirty-worktree signal, transcript size, recent user prompts, and optional activity summaries.
-- Per-session actions for rename, notification rules, and kill.
-- OpenAI usage/cost summary when `OPENAI_API_KEY` is configured.
-- Codex account/rate-limit summary through `codex app-server` when available.
-
-### Session View
-
-The session page is the main working surface for one Codex pane.
-
-It includes:
-
-- Live structured transcript from Codex JSONL.
-- Collapsed intermediate activity for tool calls, command output, parser notices, system events, and assistant progress updates.
-- Expandable transcript ranges when you need those details.
-- Inline proposed-plan actions.
-- Inline question forms.
-- Approval banner for command/tool/patch/permission prompts.
-- Normal/Plan input mode toggle.
-- Composer with queue-aware submit behavior.
-- Editable queued inputs.
-- Prompt skill suggestions.
-- Optional Vim composer mode.
-- Transcript search.
-- Jump-to-top and jump-to-bottom controls.
-- Long-transcript paging with scroll-position preservation.
-- Copy actions for transcript messages.
-- Local tmux attach command copy button.
-- Interrupt and kill controls.
-- New-session action prefilled from the current repo/cwd.
-
-The transcript UI is intentionally not a raw dump. It keeps user prompts, assistant replies, approvals, questions, plan actions, loaded-instructions notices, aborts, and other useful events visible while folding the noisy activity around them.
-
-## Working With Sessions
-
-### Creating A Session
-
-Use the new-session button or press `Ctrl+N`.
-
-The Create tab asks for:
-
-- Directory: the repo or working directory where Codex should start.
-- Name: the tmux window name for the new Codex session.
-- Target branch: selected from existing local branches and used as the local integration destination.
-
-Directory suggestions come from active sessions and recently touched repositories. Session names are normalized and must be 2-32 lowercase letters, numbers, or hyphens.
-
-For Git repositories, muxpilot runs `codex` from a neutral control directory. Applicable repository skills from `.agents/skills` and `.codex/skills` are linked into that directory before Codex starts, so they remain available without making the repository checkout writable. The bundled skill creates a short-lived local worktree only for a change task. The implementing agent runs focused checks and repeatedly self-reviews its complete diff until clean, then the skill rebases as needed. In managed sessions an authenticated local Unix-socket broker independently revalidates and performs only the final fast-forward, target-checkout update, and cleanup. A dirty target checkout blocks integration. Successful integration removes the task worktree and branch.
-
-Validation is heavyweight when it covers a whole repository, workspace, application, package, or multi-project configuration; runs a static-analysis, security, dependency, or image scanner; starts Docker/Compose; launches multiple workers or shards; creates a production bundle; or is likely to exceed one minute, about 1 GiB of memory, or sustained use of multiple CPU cores. Selected-file lint, syntax-only checks, and one explicitly selected test target without parallel workers are normally lightweight. Heavy commands run through the workflow's shared validation lease; uncertain commands are treated as heavy. Activity combines child output, process-group CPU/I/O, and running labeled Docker containers, so output silence alone is not called a stall. Stuck Docker start calls and pre-start attach handshakes time out, and the server reaps containers belonging to disappeared or abnormally ended heavy runs while preserving completed detached containers. The lease schedules work but does not authorize repository-wide validation, which still requires an explicit user request or an explicit PR-style branch/ref review.
-
-The target branch must already exist locally before the target helper runs. When a request creates or selects a branch for implementation, the agent treats that destination branch as the intended session target even if the prompt does not explicitly say to change it; a source such as `origin/dev` is only the branch's start point. Before creating a different target branch or beginning implementation, the agent names the `fixed-target` guard, explains that current and future task commits will integrate there, and receives separate explicit confirmation. An active task worktree is preserved, then rebased if necessary and revalidated before integration. Multiple tasks can target the same branch concurrently; only their brief final integration operations serialize, so completion order determines landing order. Muxpilot never automatically fetches, pulls, or pushes.
-
-Implementation worktrees use simple links to existing manifest-associated dependency directories (`node_modules`, Python virtual environments, Composer `vendor`, and Bundler `vendor/bundle`). Their real paths are writable in the Codex sandbox for test caches; dependencies the Muxpilot host user cannot write are skipped instead of being linked. Dependency-changing tasks localize the relevant link first. Node localization is transactional: muxpilot requires the repository's exact package-manager pin and lockfile, runs a frozen install through the heavy scheduler with isolated writable caches/store, and restores the original link if installation fails. Other dependency kinds are prepared locally for an explicit install. A tiny atomic status file lets the UI observe whether changes are isolated, integrating, blocked, or complete.
-
-Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into another working directory. Non-Git directories retain the direct-directory session flow.
-
-The History tab searches restorable sessions that muxpilot has managed before. Search matches only submitted user prompts, not assistant replies, tool output, or command output. Selecting a live result opens the existing pane; selecting a missing or archived result starts a new tmux window with `codex resume <session-id>` and opens the resumed session.
-
-### Forking A Session
-
-Use **Fork session** from a session header or dashboard action menu to branch the conversation at its current persisted tip. Confirm or edit the proposed session name, then muxpilot starts a new tmux window with Codex's native `fork` command and opens the child session. The child keeps a persistent **Forked from** link to its origin when that session is still available locally.
-
-Forking is allowed while the source is working. In that case, Codex may record the source's partial turn as interrupted, and muxpilot warns before continuing. Queued inputs, composer drafts, pins, notifications, and other transient UI state are not copied.
-
-For a managed Git source, the fork inherits the same target branch but receives its own managed workspace and neutral control directory. If the source has an active task worktree, muxpilot warns that unintegrated files are not copied; the fork starts from the current target branch instead. Directory sessions continue directly in the source working directory.
-
-### Moving Sessions Between Hosts
-
-The top-bar transfer button exports one or more active or historical sessions to a single `.mpsession` file. On another host, open the same dialog, select the file, map each source repository or directory to its destination path, and import. Muxpilot restores the complete Codex rollout transcripts and portable session preferences, then resumes all imported sessions in tmux. A resumed agent retains the history saved in that rollout, including tool activity and compaction summaries, but not live processes or other transient machine state.
-
-Single-session plaintext exports use the session name as the filename. Multi-session exports use a generic session-count filename, and encrypted exports use a non-identifying timestamped filename. Filenames are descriptive only: all identity and restoration metadata lives inside the archive, so a `.mpsession` file can be renamed without affecting import.
-
-For managed Git sessions, current exports also include the committed local target branch. Muxpilot packages the objects not reachable from its upstream, or the full reachable branch when no usable upstream exists. Import creates, reuses, or safely fast-forwards the same branch name and restores its tracking configuration when the destination has the same remote name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting existing upstream.
-
-Clone or copy the relevant repositories first. Dirty files, staged and untracked changes, stashes, active task worktrees, Git LFS payloads, submodule repositories, queued inputs, notification rules, dependencies, machine-wide Codex configuration, and live terminals are intentionally excluded. Older format-v2 files remain importable and continue to require an existing destination target branch.
-
-Set the same `MUXPILOT_SESSION_FILE_KEY` value (at least 16 characters) on both hosts to encrypt exports and decrypt imports. When the variable is unset, exports are plaintext. Plaintext files remain importable when a key is configured. Import/export controls and APIs are available only from the muxpilot host browser.
-
-### Sending Input
-
-The composer sends text through a tmux paste buffer and then sends the configured submit key sequence. By default that submit key is `Enter`.
-
-Behavior:
-
-- `Ctrl+Enter` submits the composer.
-- If Codex is ready (`waiting` or `idle`), the input is sent immediately.
-- If Codex is busy, planning, executing, or already has queued input, muxpilot queues the message.
-- Queued input can be edited or deleted until it starts sending.
-- Queued input is tied to the current Codex transcript source so it does not get sent into a different run after a pane/source change.
-- When the pane becomes ready, muxpilot sends the next queued item automatically.
-
-The Normal/Plan toggle changes Codex collaboration mode by sending the configured tmux key sequence. The default is `BTab`, which is tmux's name for Shift+Tab.
-
-If Codex is waiting on a question or proposed plan, the composer is locked until that prompt is answered.
-
-### Approvals, Questions, And Proposed Plans
-
-muxpilot handles the common interactive Codex gates:
-
-- Approval prompts can be approved once, approved for a prefix when Codex provides a prefix rule, or denied. App/connector permission prompts also expose Codex's session-wide and persistent allow choices.
-- Structured questions render as browser form controls.
-- Multiple-choice question answers are sent through Codex's menu selection path.
-- Free-form question answers are pasted into the pane.
-- Proposed plans can be implemented, implemented after clearing context, or left in plan mode.
-
-These actions still operate through tmux. muxpilot is not bypassing the Codex CLI; it is automating the same key/input path you would use manually.
-
-### Prompt History
-
-Press `Ctrl+R` to open prompt history.
-
-Prompt history searches submitted user prompts stored in SQLite and shows repo/session metadata for each result. Selecting a result copies it to the clipboard. Prompt History and the New Session History tab share a persistent SQLite full-text index of displayable user prompts so searches stay quick as transcripts grow.
-
-### Skill Suggestions
-
-Type `$` in the composer to search Codex skills.
-
-Suggestions can include:
-
-- User skills.
-- System skills.
-- Plugin skills.
-- Workspace skills discovered from the session repo/cwd.
-
-Use Arrow Up/Down to move through suggestions, `Enter` or `Tab` to accept, and `Escape` to dismiss. Known `$skill-name` references are highlighted in the composer.
-
-## Keyboard Reference
-
-### Global
-
-These work when focus is not already inside an input, editor, menu, or dialog.
-
-| Key      | Action                               |
-| -------- | ------------------------------------ |
-| `Ctrl+N` | Open new-session dialog              |
-| `Ctrl+R` | Open prompt history                  |
-| `Escape` | Close the active dialog              |
-| `i`      | Focus the primary input              |
-| `I`      | Focus the primary input at the start |
-| `a`      | Focus the primary input for append   |
-| `A`      | Focus the primary input at the end   |
-
-On the dashboard, the primary input is search. In a session, it is the composer.
-
-### Session
-
-| Key         | Action                   |
-| ----------- | ------------------------ |
-| `Backspace` | Return to the dashboard  |
-
-### Composer
-
-| Key              | Action                           |
-| ---------------- | -------------------------------- |
-| `Ctrl+Enter`     | Send or queue input              |
-| `$`              | Start skill suggestion search    |
-| Arrow Up/Down    | Move through skill suggestions   |
-| `Enter` or `Tab` | Accept selected skill suggestion |
-| `Escape`         | Dismiss skill suggestions        |
-
-### Vim Mode
-
-Vim mode is available on desktop-like devices with keyboard and pointer support. It uses CodeMirror with `@replit/codemirror-vim` and shows relative line numbers.
-
-Composer Vim behavior:
-
-| Key                    | Action                                             |
-| ---------------------- | -------------------------------------------------- |
-| `Ctrl+Enter`           | Send or queue input                                |
-| `Escape`               | Leave insert/visual mode, or blur from normal mode |
-| `Ctrl+W` then `k`      | Move focus from composer to transcript             |
-| `Ctrl+W` then `Ctrl+K` | Move focus from composer to transcript             |
-
-When Vim mode is enabled and focus is on the transcript, these navigation keys are active:
-
-| Key               | Action                     |
-| ----------------- | -------------------------- |
-| `gg`              | Jump to top/oldest page    |
-| `G`               | Jump to bottom/newest page |
-| `Ctrl+U`          | Scroll half page up        |
-| `Ctrl+D`          | Scroll half page down      |
-| `Ctrl+B`          | Scroll one page up         |
-| `Ctrl+F`          | Scroll one page down       |
-| `/`               | Open transcript find       |
-| `Ctrl+W` then `j` | Focus composer             |
-
-## Notifications
-
-Notifications are local to the muxpilot install. They are useful when you have several sessions running and only want to look over when something changes.
-
-Rules can be enabled globally from the top-bar bell or per session from a right-click context menu on the dashboard:
-
-- Done task: a running task returns to `waiting` or `idle`.
-- Approval gate: a session enters an attention state such as approval, question, plan-ready, or blocked.
-- Status change: any non-missing status transition.
-
-When a rule fires, muxpilot can:
-
-- Ring the session card on the dashboard.
-- Show a toast in the open browser.
-- Play a short bell sound.
-- Send a Web Push notification to registered browsers.
-
-When a notification rule is enabled, the browser may ask for notification permission. Push subscriptions and VAPID keys are stored locally in SQLite.
-
-## Phone And PWA Support
-
-Phone access is same-LAN access to the web UI running on the host machine.
-
-When LAN mode is enabled, the host UI shows a Connect device button. The dialog includes:
-
-- Best detected phone URL.
-- Other detected LAN URLs when available.
-- Generated access key when remote access requires one.
-- QR code for the access URL.
-- Revoke button to rotate remote access.
-- Optional unrestricted remote-access toggle.
-- Optional phone certificate install URL and QR code when PWA trust files are configured.
-
-The phone login page accepts the access key manually. If the phone browser has camera access, it can scan the Connect device QR code. Camera access for LAN IP URLs usually requires HTTPS and a trusted certificate, which is why the repo includes `pnpm pwa:setup`.
-
-PWA support includes a web manifest, service worker, app icons, local HTTPS certificate setup, and a small trust-file server for public root CA files.
-
-On iOS, after installing the muxpilot root CA profile, enable full trust for it in Settings. On Android, install the CA into user credentials.
-
-## Setup
-
-Prerequisites:
-
-- WSL2 Ubuntu or another local Linux-like development host.
-- tmux.
-- Node.js 24 or newer.
-- pnpm.
-- Codex CLI.
-
-Install dependencies and create local config:
-
-```bash
-pnpm install
-cp .env.example .env
+<p align="center">
+  <img src="apps/web/public/icons/muxpilot.svg" alt="muxpilot" width="96" height="96">
+</p>
+
+<h1 align="center">muxpilot</h1>
+
+<p align="center">
+  A local, phone-friendly control surface for Codex CLI sessions running in tmux.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1ff989" alt="MIT license"></a>
+</p>
+
+muxpilot gives one operator a single place to watch multiple Codex sessions, answer the ones that need attention, and send follow-up prompts without hunting through terminal windows. Use it from the development machine or check in from a phone on the same network.
+
+It is a local companion to Codex and tmux, not a hosted agent platform or a general remote shell. The backend runs as your user, reads local Codex transcripts, controls tmux through fixed operations, and stores its own state in SQLite.
+
+> [!WARNING]
+> muxpilot is designed for one trusted machine and optional same-LAN access. Do not expose it directly to the internet.
+
+## Why muxpilot?
+
+Running one coding agent in a terminal is easy. Running several across repositories creates an operator problem: which session is working, which one needs approval, and where did that useful conversation go?
+
+muxpilot adds an operator layer without replacing the tools already doing the work:
+
+- **One dashboard for every session.** Group Codex/tmux sessions by repository and see their branch, worktree, activity, and attention state.
+- **Structured conversations.** Read Codex JSONL as a focused transcript instead of a raw terminal dump.
+- **Interactive control.** Send or queue prompts, answer questions and approvals, act on proposed plans, interrupt work, and start or fork sessions.
+- **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
+- **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with optional encryption.
+- **Notifications that matter.** Get browser, sound, or Web Push alerts when work finishes or a session needs attention.
+- **A real phone workflow.** Connect over the LAN with an access key or QR code and install the interface as a PWA with local HTTPS.
+
+## How it works
+
+```text
+Desktop or phone browser
+          │
+          ▼
+  muxpilot web UI ── HTTP/WebSocket ──► local muxpilot server
+                                              │
+                         ┌────────────────────┼────────────────────┐
+                         ▼                    ▼                    ▼
+                       tmux          Codex JSONL files          SQLite
+                         │
+                         ▼
+                    Codex CLI panes
 ```
 
-Start production mode:
+tmux remains the source of truth for live panes and input delivery. Codex session files provide structured transcripts. SQLite holds muxpilot state such as queued input, prompt history, notification settings, and parsed messages.
+
+## Quick start
+
+### Requirements
+
+- WSL2 Ubuntu or another local Linux-like host
+- [tmux](https://github.com/tmux/tmux)
+- [Codex CLI](https://github.com/openai/codex)
+- Node.js 24 or newer
+- pnpm 11.12.0, matching the repository's `packageManager` pin
+
+### Install and run
 
 ```bash
+git clone https://github.com/ryanf9802/muxpilot.git
+cd muxpilot
+pnpm install
+cp .env.example .env
 pnpm app start
 ```
 
-Open:
+Open [http://127.0.0.1:12778](http://127.0.0.1:12778).
 
-```text
-http://127.0.0.1:12778
-```
-
-Check status and logs:
+The production command builds the workspace, starts a background supervisor, waits for both services to become healthy, and installs or refreshes the bundled `muxpilot-git-workflow` skill in your Codex home.
 
 ```bash
 pnpm app status
 pnpm app logs
-```
-
-For development mode:
-
-```bash
-pnpm app start dev
-```
-
-Development and production use separate ports, databases, and runtime logs.
-
-## Runtime Commands
-
-Use `pnpm app ...` for normal operation. The app runs on the host machine under the current user so it can control that user's tmux/Codex sessions. The command starts a small supervisor in the background; you do not need to leave the terminal open.
-
-| Command                                     | Purpose                                                    |
-| ------------------------------------------- | ---------------------------------------------------------- |
-| `pnpm app start`                            | Build, then start or reuse production                      |
-| `pnpm app start dev`                        | Start or reuse development                                 |
-| `pnpm app stop`                             | Stop production                                            |
-| `pnpm app stop dev`                         | Stop development                                           |
-| `pnpm app restart`                          | Restart production                                         |
-| `pnpm app restart dev`                      | Restart development                                        |
-| `pnpm app restart all` or `pnpm restart`    | Restart only modes that are already running                |
-| `pnpm app status` or `pnpm status`          | Show production and development process health             |
-| `pnpm app logs` or `pnpm logs`              | Show production backend logs                               |
-| `pnpm app logs prod --process all --follow` | Follow production supervisor, backend, and web logs        |
-| `pnpm db:reset:dev`                         | Reset dev SQLite state                                     |
-| `pnpm db:reset:prod`                        | Reset production SQLite state                              |
-| `pnpm db:compact:dev`                       | Compact a stopped development database                     |
-| `pnpm db:compact:prod`                      | Compact a stopped production database                      |
-| `pnpm pwa:setup`                            | Create/reuse HTTPS/PWA certificates and write `.env.local` |
-| `pnpm pwa:trust`                            | Run the phone trust-file helper                            |
-| `pnpm pwa:certs:status`                     | Print PWA certificate status                               |
-| `pnpm build`                                | Build all packages/apps                                    |
-| `pnpm typecheck`                            | Type-check all packages/apps                               |
-| `pnpm test`                                 | Run tests                                                  |
-
-`pnpm dev` intentionally exits and points you to `pnpm app start dev`.
-
-Production startup automatically installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`). This synchronization also runs when production is already active, so rerunning `pnpm app start` is enough to refresh the skill after updating muxpilot.
-
-Development defaults:
-
-- Web UI: `http://127.0.0.1:5177`
-- Backend: `http://127.0.0.1:4177`
-- Database: `./data/dev/muxpilot.db`
-- Runtime logs/PIDs: `./data/runtime/dev/`
-
-Production defaults:
-
-- Web UI: `http://127.0.0.1:12778`
-- Backend: `http://127.0.0.1:12777`
-- Database: `./data/prod/muxpilot.db`
-- Runtime logs/PIDs: `./data/runtime/prod/`
-
-Each runtime directory contains `supervisor.log`, `server.log`, `web.log`, and matching PID files. The supervisor restarts a crashed backend or web process while the host/WSL instance remains running. If Windows, WSL, or the machine itself restarts, run `pnpm app start` again.
-
-To update muxpilot:
-
-```bash
-git pull
-pnpm install
 pnpm app restart
+pnpm app stop
 ```
 
-Automated coding agents should use the development lane. Production commands are intended for the human operator.
+See the [setup guide](docs/setup.md) for runtime paths, updates, and troubleshooting.
 
-## Same-LAN Phone Setup
+## Phone access
 
-Enable LAN mode:
+Set LAN mode in `.env`:
 
 ```dotenv
 MUXPILOT_LAN_ENABLED=1
 ```
 
-Or run it for one command:
-
-```bash
-MUXPILOT_LAN_ENABLED=1 pnpm app start
-```
-
-Open muxpilot on the host and use Connect device. From the phone, use the URL shown there. Do not use `localhost`, `127.0.0.1`, or `0.0.0.0` from the phone.
-
-For native Linux, install and verify the Web UI firewall rule:
-
-```bash
-scripts/linux-lan.sh install --port 12778
-scripts/linux-lan.sh status --port 12778
-```
-
-For Windows 11 + WSL2, install firewall rules for the web port from an Administrator PowerShell at the muxpilot repo path:
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows-lan.ps1 install -Port 12778
-```
-
-Check reachability:
-
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows-lan.ps1 status -Port 12778
-```
-
-For development mode, use port `5177`.
-
-Full native Linux notes are in [docs/linux-lan.md](docs/linux-lan.md). Full WSL2 notes are in [docs/windows-wsl-lan.md](docs/windows-wsl-lan.md).
-
-## HTTPS And PWA Certificates
-
-For phone camera login, installable PWA behavior, and secure-context APIs over LAN, use the certificate helper:
+Restart muxpilot, open it on the host, and choose **Connect device** for the current phone URL and access key. For QR scanning, secure-context browser APIs, and installable PWA support, configure local certificates first:
 
 ```bash
 pnpm pwa:setup
-pnpm app start
+pnpm app restart
 ```
 
-`pnpm pwa:setup` creates or reuses a muxpilot local root CA, issues a host certificate for localhost and detected LAN addresses, writes HTTPS settings to `.env.local`, prepares public CA files for phone install, and tries to trust the CA on the host.
+LAN firewall setup differs between [native Linux](docs/linux-lan.md) and [Windows 11 with WSL2](docs/windows-wsl-lan.md). The setup guide covers the full [phone connection flow](docs/setup.md#phone-access-on-the-same-network).
 
-If the phone will install the certificate over LAN, allow the trust-server port too. On native Linux:
+## Security model
 
-```bash
-scripts/linux-lan.sh install --port 12880
-```
+muxpilot is intentionally local-first:
 
-On Windows 11 + WSL2:
+- Loopback access is trusted and does not require an access key.
+- LAN access is opt-in and requires a generated access key by default.
+- The browser talks to constrained HTTP and WebSocket endpoints; it cannot submit arbitrary shell commands.
+- The server runs as the current user because it needs that user's tmux socket and Codex session files.
+- HTTPS support uses a local certificate authority. Keep its private key private.
+- Internet-reachable deployment, multi-user isolation, and remote shell access are out of scope.
 
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\scripts\windows-lan.ps1 install -Port 12880
-```
+Read [Architecture](docs/architecture.md) and [Deployment](docs/deployment.md) before changing the trust boundary.
 
-Install the phone certificate from Connect device before opening the HTTPS app URL.
+## Using muxpilot
 
-Keep the root CA private key private. Devices that trust this CA will trust certificates issued from it.
+The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, inspect the raw terminal, and manage the session.
 
-## Access Model
+The [usage guide](docs/usage.md) covers:
 
-Loopback local use is trusted. A browser on `127.0.0.1` does not need an access key.
-
-LAN mode requires an access key by default. The host-only Connect device modal shows the current key, access URLs, QR codes, and revoke action. Access keys included in query strings are stripped from the phone login page after they are read.
-
-The Connect device modal also has an unrestricted remote-access toggle. Use it only on a trusted LAN. It lets remote devices connect without the access key.
-
-By default, muxpilot generates the access key and cookie signing secret at startup, so browser/phone access sessions may be invalidated after restart. Set `MUXPILOT_SESSION_SECRET` if you want access cookies to survive restarts.
-
-## Configuration
-
-Most local use only needs `.env` copied from `.env.example`:
-
-```dotenv
-MUXPILOT_LAN_ENABLED=0
-OPENAI_API_KEY=
-```
-
-Common settings:
-
-- `MUXPILOT_LAN_ENABLED`: set to `1`, `true`, `yes`, or `on` for phone access.
-- `OPENAI_API_KEY`: optional. Enables prompt-only activity summaries and OpenAI usage/cost tracking.
-- `MUXPILOT_CODEX_HOME`: optional Codex home override. Defaults to `$HOME/.codex`.
-- `MUXPILOT_SESSION_SECRET`: optional cookie signing secret for access sessions across restarts.
-- `MUXPILOT_DATA_DIR`: optional data directory override.
-- `MUXPILOT_DB_PATH`: optional SQLite path override.
-- `MUXPILOT_HOST`, `MUXPILOT_PORT`, `MUXPILOT_WEB_PORT`: bind/port overrides.
-- `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: key sequence for switching Codex normal/plan mode. Defaults to `BTab`.
-- `MUXPILOT_INPUT_SUBMIT_KEYS`: key sequence sent after pasted composer input. Defaults to `Enter`.
-- `MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS`, `MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS`, `MUXPILOT_APPROVAL_DENY_KEYS`: key sequences for approval gates.
-- `MUXPILOT_SUMMARY_MODEL`, `MUXPILOT_SUMMARY_INTERVAL_MS`, `MUXPILOT_SUMMARY_DEBOUNCE_MS`: activity summary behavior.
-- `MUXPILOT_OPENAI_PRICING_JSON`: optional pricing overrides for usage/cost estimates.
-- `MUXPILOT_SESSION_FILE_KEY`: optional passphrase used for authenticated `.mpsession` encryption; use the same value on importing hosts.
-
-The lifecycle scripts load `.env` first and `.env.local` second. Machine-specific output from `pnpm pwa:setup` belongs in `.env.local`.
-
-See [docs/configuration.md](docs/configuration.md) for the full reference.
-
-## How Discovery Works
-
-muxpilot periodically lists tmux panes and recent Codex session files.
-
-For each session it records:
-
-- tmux session/window/pane IDs.
-- cwd and current command.
-- repo root, repo name, branch, worktree, and dirty state.
-- matched Codex session ID and JSONL path.
-- transcript size and recent prompt activity.
-- inferred status from tmux/Codex state.
-
-If the Codex JSONL source for a pane changes, muxpilot treats it as a source change and resets the stored transcript for that app session. That keeps stale transcript data from appearing under a new Codex run.
-
-## Statuses
-
-Common session statuses:
-
-- `working`, `generating`, `executing`: Codex appears busy.
-- `planning`: Codex is working in plan mode.
-- `waiting`, `idle`: input is likely safe to send.
-- `approval`: Codex is waiting on an approval gate.
-- `question`: Codex asked a structured question.
-- `plan_ready`: Codex has proposed a plan and wants a choice.
-- `blocked`: Codex reported a blocked state.
-- `missing`: the tmux pane is gone or no longer discoverable.
-- `unknown`: muxpilot sees the pane but cannot confidently infer the state.
-
-Stoplight grouping:
-
-- Red: attention needed.
-- Yellow: working or unknown.
-- Green: ready/idle/waiting.
-
-## Troubleshooting
-
-No sessions show up:
-
-- Make sure Codex is running inside tmux under the same OS/WSL user that started muxpilot.
-- Check that `tmux list-panes -a` works from the same shell.
-- If Codex uses a non-default home, set `MUXPILOT_CODEX_HOME`.
-
-Input does not reach Codex:
-
-- Confirm the tmux pane still exists.
-- Confirm the backend user can access the tmux socket.
-- If mode switching is wrong, check `MUXPILOT_INPUT_MODE_CYCLE_KEYS`.
-
-Phone cannot connect:
-
-- Use the URL from Connect device.
-- Confirm `MUXPILOT_LAN_ENABLED=1`.
-- Confirm the phone is on the same LAN and not on guest WiFi.
-- On native Linux, run `scripts/linux-lan.sh status --port 12778` for the web port.
-- On Windows/WSL2, run `scripts/windows-lan.ps1 status` for the web port.
-- On managed Windows laptops that block direct mirrored-networking access, use the host-specific [port proxy fallback](docs/windows-wsl-lan.md#managed-laptop-port-proxy-fallback).
-
-QR scanner is missing or camera fails:
-
-- Open the app over HTTPS on the phone.
-- Install and trust the muxpilot local root CA from Connect device.
-- Make sure the trust-server port is reachable if installing the CA over LAN.
-
-Access key is rejected:
-
-- Open Connect device on the host and use the current key.
-- Revoke remote access and scan/copy the new URL if the key may be stale.
-
-Installed PWA opens before the backend is ready:
-
-- Leave it open. The UI shows a reconnect screen and polls until the backend returns.
-
-Skill suggestions are missing:
-
-- Check that `MUXPILOT_CODEX_HOME` points to the Codex home with your skills/plugins.
-- Workspace skills depend on the session repo/cwd being discoverable.
-
-OpenAI summaries or usage are missing:
-
-- Set `OPENAI_API_KEY` for activity summaries and OpenAI usage/cost tracking.
-- Codex account/rate-limit data depends on `codex app-server` being available and authenticated.
+- Creating, forking, resuming, and transferring sessions
+- Managed Git worktrees and target branches
+- Queued input, approvals, questions, and proposed plans
+- Prompt history, skill suggestions, and keyboard controls
+- Notifications, phone/PWA behavior, discovery, and statuses
 
 ## Development
 
-Repo layout:
-
-- `apps/web`: React/Vite UI.
-- `apps/server`: Fastify backend, tmux/Codex/session services, SQLite persistence.
-- `packages/core`: shared types and transcript/user-context helpers.
-- `scripts`: app lifecycle/supervisor, PWA certs, icons, DB reset, Linux and Windows LAN helpers.
-- `docs`: focused setup/config/development/deployment notes.
-
-Useful development commands:
+Start the isolated development lane:
 
 ```bash
 pnpm app start dev
-pnpm build
-pnpm typecheck
-pnpm test
-pnpm restart
 ```
 
-Keep shared transcript behavior in `packages/core`, backend side effects in `apps/server`, and browser-only behavior in `apps/web`.
+Development uses separate ports, logs, and SQLite data from production. Automated coding agents should use this lane; production is reserved for operator use.
 
-More detail:
+```bash
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm app logs dev --process all
+pnpm app stop dev
+```
 
-- [Setup](docs/setup.md)
-- [Configuration](docs/configuration.md)
-- [Development](docs/development.md)
-- [Architecture](docs/architecture.md)
-- [Deployment](docs/deployment.md)
-- [Native Linux LAN Access](docs/linux-lan.md)
-- [Windows 11 WSL2 LAN Access](docs/windows-wsl-lan.md)
+The workspace contains a React/Vite web app, a Fastify server, and a shared TypeScript core package. See the [development guide](docs/development.md) and [architecture overview](docs/architecture.md) before making structural changes. Never commit private Codex transcripts; test fixtures should be small and sanitized.
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Setup](docs/setup.md) | Installation, runtime commands, phone access, updates, and troubleshooting |
+| [Usage](docs/usage.md) | Session workflows, interactive controls, shortcuts, notifications, and statuses |
+| [Configuration](docs/configuration.md) | Environment variables and defaults |
+| [Development](docs/development.md) | Workspace layout, commands, and code boundaries |
+| [Architecture](docs/architecture.md) | Components, data flow, persistence, and trust model |
+| [Deployment](docs/deployment.md) | Production runtime and operational notes |
+| [Linux LAN access](docs/linux-lan.md) | Native Linux firewall and reachability setup |
+| [Windows/WSL LAN access](docs/windows-wsl-lan.md) | Windows 11 and WSL2 network setup |
+
+## Project status
+
+muxpilot is early-stage, maintainer-built software shaped around a specific Codex + tmux workflow. Interfaces and behavior may change as that workflow evolves.
+
+## License
+
+muxpilot is available under the [MIT License](LICENSE).
