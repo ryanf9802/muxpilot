@@ -54,13 +54,13 @@ function pixelColor(x, y, radius) {
   if (circle(x, y, 364, 382, 11)) color = [74, 222, 128, 255];
 
   if (chevron(x, y)) color = lerpColor([53, 215, 255, 255], [31, 249, 137, 255], (x - 188) / 69);
-  if (roundedRect(x, y, 269, 270, 77, 32, 16)) color = [243, 246, 244, 255];
+  if (roundedRect(x, y, 269, 250, 77, 32, 16)) color = [243, 246, 244, 255];
 
   return color;
 }
 
 function chevron(x, y) {
-  return lineDistance(x, y, 200, 211, 245, 256) <= 17 || lineDistance(x, y, 200, 301, 245, 256) <= 17;
+  return lineDistance(x, y, 200, 191, 245, 236) <= 17 || lineDistance(x, y, 200, 281, 245, 236) <= 17;
 }
 
 function ring(color, x, y, cx, cy, radius, width, ringColor) {
