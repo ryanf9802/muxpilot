@@ -100,6 +100,7 @@ export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
 export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
+export type PendingActionRefresh = "approval" | "question" | null;
 export interface PendingUserMessage {
   id: string;
   sessionId: string;
@@ -754,6 +755,8 @@ export function SessionView() {
   const sessionRef = useRef<ManagedSession | null>(null);
   const requestTokenRef = useRef(0);
   const sessionRefreshRequestRef = useRef(0);
+  const approvalRefreshRequestRef = useRef(0);
+  const questionRefreshRequestRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
   const loadingSearchPageRef = useRef(false);
@@ -1162,7 +1165,12 @@ export function SessionView() {
         syncSessionStoplight(nextSession);
         return;
       }
-      if (event.type === "status.changed") void loadSession(id, token);
+      if (event.type === "status.changed") {
+        void loadSession(id, token);
+        const pendingAction = pendingActionRefreshForStatus((event.payload as { status?: ManagedSession["status"] }).status);
+        if (pendingAction === "approval") void loadApproval(id, token);
+        if (pendingAction === "question") void loadQuestion(id, token);
+      }
     });
   }, [id, subscribeSessionEvents]);
 
@@ -1420,15 +1428,19 @@ export function SessionView() {
   }
 
   async function loadApproval(targetId = id, token = requestTokenRef.current) {
+    const refreshRequestId = approvalRefreshRequestRef.current + 1;
+    approvalRefreshRequestRef.current = refreshRequestId;
     const response = await trackRefreshRequest(() => api.approval(targetId));
-    if (!isCurrentRequest(targetId, token)) return;
+    if (!isCurrentRequest(targetId, token) || !isLatestSessionRefresh(refreshRequestId, approvalRefreshRequestRef.current)) return;
     setApproval(response.approval);
     if (!response.approval) setApprovalError("");
   }
 
   async function loadQuestion(targetId = id, token = requestTokenRef.current) {
+    const refreshRequestId = questionRefreshRequestRef.current + 1;
+    questionRefreshRequestRef.current = refreshRequestId;
     const response = await trackRefreshRequest(() => api.question(targetId));
-    if (!isCurrentRequest(targetId, token)) return;
+    if (!isCurrentRequest(targetId, token) || !isLatestSessionRefresh(refreshRequestId, questionRefreshRequestRef.current)) return;
     setQuestion(response.question);
     if (!response.question) setQuestionError("");
   }
@@ -2114,6 +2126,11 @@ export function SessionView() {
       ) : null}
     </section>
   );
+}
+
+export function pendingActionRefreshForStatus(status: ManagedSession["status"] | undefined): PendingActionRefresh {
+  if (status === "approval" || status === "question") return status;
+  return null;
 }
 
 export function SessionLoadingView({

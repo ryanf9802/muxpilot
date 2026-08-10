@@ -39,6 +39,7 @@ import {
   MessageBubble,
   ModeToggle,
   pendingProposedPlanMessage,
+  pendingActionRefreshForStatus,
   pendingUserMessageToChatMessage,
   planActionRequest,
   planActionText,
@@ -101,6 +102,18 @@ import {
   WorkingIndicator,
   UserText
 } from "./SessionView.js";
+
+describe("pendingActionRefreshForStatus", () => {
+  it("retries loading an approval when the authoritative status event arrives", () => {
+    expect(pendingActionRefreshForStatus("approval")).toBe("approval");
+  });
+
+  it("refreshes only statuses backed by pending action payloads", () => {
+    expect(pendingActionRefreshForStatus("question")).toBe("question");
+    expect(pendingActionRefreshForStatus("working")).toBeNull();
+    expect(pendingActionRefreshForStatus(undefined)).toBeNull();
+  });
+});
 
 describe("SessionTitleHeading", () => {
   it("places a subtle icon-only fork button immediately after the session name", () => {
