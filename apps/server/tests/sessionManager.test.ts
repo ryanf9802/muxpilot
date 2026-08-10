@@ -3178,7 +3178,7 @@ describe("SessionManager transcript isolation", () => {
     });
     harness.tmux.listPanes = async () => [pane];
     harness.tmux.capturePane = async () => "› ";
-    harness.processLookup.set(pane.pid, { pid: 201, sessionId: null, startedAtMs: oldStartedAt.getTime() });
+    harness.processLookup.set(pane.pid, { pid: 201, sessionId: "codex-old", startedAtMs: oldStartedAt.getTime() });
 
     await harness.manager.discover();
     await harness.manager.ingest();
@@ -3223,6 +3223,120 @@ describe("SessionManager transcript isolation", () => {
     ]);
     expect(replayedStatusEvents).toEqual([]);
     unsubscribe();
+    harness.db.close();
+  });
+
+  it("rebinds a resumed pane when visible output belongs to a fresh context", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1", pid: 101 });
+    const oldStartedAt = new Date("2026-07-07T00:00:00.000Z");
+
+    await writeCodexSession(harness.codexHome, "old.jsonl", {
+      sessionId: "codex-old",
+      cwd: repo,
+      user: "make a plan",
+      assistant: "old proposed plan",
+      startedAt: oldStartedAt,
+      mtime: oldStartedAt
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "old proposed plan\n› ";
+    harness.processLookup.set(pane.pid, { pid: 201, sessionId: "codex-old", startedAtMs: oldStartedAt.getTime() });
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session?.codexSessionId).toBe("codex-old");
+
+    await writeCodexSession(harness.codexHome, "fresh.jsonl", {
+      sessionId: "codex-fresh",
+      cwd: repo,
+      user: "implement in a fresh context",
+      assistant: "fresh implementation progress",
+      startedAt: new Date("2026-07-07T02:00:00.000Z"),
+      mtime: new Date("2026-07-07T02:00:00.000Z")
+    });
+    harness.tmux.capturePane = async () => "fresh implementation progress\nWorking (1s • esc to interrupt)";
+
+    await harness.manager.discover();
+    await harness.manager.catchUpIngest();
+
+    const rebound = await harness.manager.getSession(session!.id);
+    expect(rebound).toMatchObject({
+      codexSessionId: "codex-fresh",
+      status: "working",
+      inputMode: "default",
+      transcriptSyncing: false
+    });
+    expect(harness.manager.listMessages(session!.id, 0).map((message) => message.text)).toEqual([
+      "implement in a fresh context",
+      "fresh implementation progress"
+    ]);
+    harness.db.close();
+  });
+
+  it("reconciles a fresh context on the first discovery after restart", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1", pid: 101 });
+    const oldStartedAt = new Date("2026-07-07T00:00:00.000Z");
+
+    await writeCodexSession(harness.codexHome, "old.jsonl", {
+      sessionId: "codex-old",
+      cwd: repo,
+      user: "old prompt",
+      assistant: "old answer",
+      startedAt: oldStartedAt,
+      mtime: oldStartedAt
+    });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "old answer\n› ";
+    harness.processLookup.set(pane.pid, { pid: 201, sessionId: "codex-old", startedAtMs: oldStartedAt.getTime() });
+
+    await harness.manager.discover();
+    await harness.manager.ingest();
+    const session = (await harness.manager.listSessions(true))[0];
+    expect(session?.codexSessionId).toBe("codex-old");
+
+    await writeCodexSession(harness.codexHome, "fresh.jsonl", {
+      sessionId: "codex-fresh",
+      cwd: repo,
+      user: "fresh prompt",
+      assistant: "fresh completed answer",
+      startedAt: new Date("2026-07-07T02:00:00.000Z"),
+      mtime: new Date("2026-07-07T02:00:00.000Z")
+    });
+    harness.manager.stop();
+    const restartedStore = new CodexSessionStore(harness.codexHome);
+    const restartedManager = new SessionManager(
+      harness.db,
+      harness.tmux,
+      restartedStore,
+      harness.events,
+      60_000,
+      60_000,
+      { approveOnce: [], approveForPrefix: [], deny: [] },
+      ["BTab"],
+      null,
+      harness.processLookup
+    );
+    harness.tmux.capturePane = async () => "fresh completed answer\n› ";
+
+    await restartedManager.discover();
+    await restartedManager.catchUpIngest();
+
+    expect(await restartedManager.getSession(session!.id)).toMatchObject({
+      codexSessionId: "codex-fresh",
+      transcriptSyncing: false
+    });
+    expect(restartedManager.listMessages(session!.id, 0).map((message) => message.text)).toEqual([
+      "fresh prompt",
+      "fresh completed answer"
+    ]);
+    restartedManager.stop();
     harness.db.close();
   });
 

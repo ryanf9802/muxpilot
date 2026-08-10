@@ -172,6 +172,8 @@ export class SessionManager {
     const now = nowIso();
     const seen = new Set<string>();
     const paneIds = panes.map(tmuxPaneSessionId);
+    const paneCwdCounts = new Map<string, number>();
+    for (const pane of panes) paneCwdCounts.set(pane.cwd, (paneCwdCounts.get(pane.cwd) ?? 0) + 1);
     const codexModels = await this.codexMetadata?.listModels().catch(() => []) ?? [];
 
     for (const [index, pane] of panes.entries()) {
@@ -198,7 +200,8 @@ export class SessionManager {
         processInfo,
         (lines) => this.tmux.capturePane(pane.paneId, lines, false),
         growingCodexFilePaths,
-        reconsideredCodexFilePaths
+        reconsideredCodexFilePaths,
+        paneCwdCounts.get(pane.cwd) === 1
       );
 
       seen.add(sessionId);
@@ -1883,14 +1886,18 @@ async function claimCodexFile(
   processInfo: CodexProcessInfo | null,
   capturePane: (lines: number) => Promise<string>,
   growingPaths: ReadonlySet<string>,
-  reconsideredPaths: ReadonlySet<string>
+  reconsideredPaths: ReadonlySet<string>,
+  allowUncorroboratedSuccessor: boolean
 ): Promise<CodexSessionFile | null> {
   const exact = files.filter((file) => file.cwd === pane.cwd);
   const existingMatch = exact.find((file) => file.path === existing?.codexJsonlPath);
   const compatibleExact = exact.filter((file) => !claims.has(file.path) || file.path === existingMatch?.path);
 
   const resumedMatch = matchByResumedSessionId(processInfo, compatibleExact);
-  if (resumedMatch && !claims.has(resumedMatch.path)) {
+  // A fresh context can start a new rollout without changing the long-lived
+  // process argv, so a resume id that still names the existing file is only a
+  // fallback after live continuity checks.
+  if (resumedMatch && resumedMatch.path !== existingMatch?.path && !claims.has(resumedMatch.path)) {
     claims.add(resumedMatch.path);
     return resumedMatch;
   }
@@ -1910,9 +1917,18 @@ async function claimCodexFile(
   }
 
   const growingSuccessor = uniqueGrowingSuccessor(compatibleExact, existingMatch, growingPaths);
-  if (growingSuccessor && !claims.has(growingSuccessor.path)) {
+  if (
+    growingSuccessor &&
+    (!resumedMatch || allowUncorroboratedSuccessor) &&
+    !claims.has(growingSuccessor.path)
+  ) {
     claims.add(growingSuccessor.path);
     return growingSuccessor;
+  }
+
+  if (resumedMatch && !claims.has(resumedMatch.path)) {
+    claims.add(resumedMatch.path);
+    return resumedMatch;
   }
 
   const startTimeMatch = matchByProcessStart(processInfo, compatibleExact);
@@ -1959,7 +1975,9 @@ function reconsideredCodexFiles(
   files: CodexSessionFile[],
   previous: ReadonlyMap<string, { sizeBytes: number; updatedAtMs: number }>
 ): Set<string> {
-  if (previous.size === 0) return new Set();
+  // Reconsider persisted bindings once after startup, before file growth has
+  // established which rollout is live.
+  if (previous.size === 0) return new Set(files.map((file) => file.path));
   return new Set(
     files
       .filter((file) => {
