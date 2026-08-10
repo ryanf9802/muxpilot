@@ -3274,6 +3274,13 @@ describe("SessionManager transcript isolation", () => {
       "implement in a fresh context",
       "fresh implementation progress"
     ]);
+
+    await harness.manager.discover();
+    expect(await harness.manager.getSession(session!.id)).toMatchObject({
+      codexSessionId: "codex-fresh",
+      status: "working",
+      transcriptSyncing: false
+    });
     harness.db.close();
   });
 
@@ -3336,6 +3343,12 @@ describe("SessionManager transcript isolation", () => {
       "fresh prompt",
       "fresh completed answer"
     ]);
+
+    await restartedManager.discover();
+    expect(await restartedManager.getSession(session!.id)).toMatchObject({
+      codexSessionId: "codex-fresh",
+      transcriptSyncing: false
+    });
     restartedManager.stop();
     harness.db.close();
   });

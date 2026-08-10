@@ -1895,9 +1895,9 @@ async function claimCodexFile(
 
   const resumedMatch = matchByResumedSessionId(processInfo, compatibleExact);
   // A fresh context can start a new rollout without changing the long-lived
-  // process argv, so a resume id that still names the existing file is only a
-  // fallback after live continuity checks.
-  if (resumedMatch && resumedMatch.path !== existingMatch?.path && !claims.has(resumedMatch.path)) {
+  // process argv. Use that resume id immediately only for an unbound pane;
+  // established bindings must pass live continuity checks before falling back.
+  if (resumedMatch && !existingMatch && !claims.has(resumedMatch.path)) {
     claims.add(resumedMatch.path);
     return resumedMatch;
   }
