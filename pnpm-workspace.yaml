@@ -3,3 +3,8 @@ packages:
   - "packages/*"
 allowBuilds:
   esbuild: true
+overrides:
+  "fast-uri@>=3.0.0 <3.1.5": "3.1.5"
+  "find-my-way@<=9.6.0": "9.7.0"
+  "nanoid@>=3.0.0 <3.3.17": "3.3.17"
+  "postcss@<=8.5.22": "8.5.23"
