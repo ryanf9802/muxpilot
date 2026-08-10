@@ -38,6 +38,7 @@ import {
   messageListAutoPageAction,
   MessageBubble,
   ModeToggle,
+  pendingActionRefreshForEvent,
   pendingProposedPlanMessage,
   pendingActionRefreshForStatus,
   pendingUserMessageToChatMessage,
@@ -112,6 +113,26 @@ describe("pendingActionRefreshForStatus", () => {
     expect(pendingActionRefreshForStatus("question")).toBe("question");
     expect(pendingActionRefreshForStatus("working")).toBeNull();
     expect(pendingActionRefreshForStatus(undefined)).toBeNull();
+  });
+});
+
+describe("pendingActionRefreshForEvent", () => {
+  it("refreshes an approval discovered through a full session update", () => {
+    expect(pendingActionRefreshForEvent({
+      type: "session.updated",
+      payload: { status: "approval" }
+    })).toBe("approval");
+  });
+
+  it("refreshes pending actions from status changes without reacting to unrelated events", () => {
+    expect(pendingActionRefreshForEvent({
+      type: "status.changed",
+      payload: { status: "question" }
+    })).toBe("question");
+    expect(pendingActionRefreshForEvent({
+      type: "queue.updated",
+      payload: { status: "approval" }
+    })).toBeNull();
   });
 });
 

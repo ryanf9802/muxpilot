@@ -68,6 +68,7 @@ import type {
   QuestionAnswerRequest,
   QuestionRequest,
   QueuedInput,
+  SessionEvent,
   SessionModelSettings,
   SessionAction,
   TranscriptPageResponse,
@@ -1163,11 +1164,16 @@ export function SessionView() {
         clearTranscriptOnSessionSourceChange(nextSession);
         setSession(nextSession);
         syncSessionStoplight(nextSession);
+        refreshPendingActionForEvent(event);
         return;
       }
       if (event.type === "status.changed") {
         void loadSession(id, token);
-        const pendingAction = pendingActionRefreshForStatus((event.payload as { status?: ManagedSession["status"] }).status);
+        refreshPendingActionForEvent(event);
+      }
+
+      function refreshPendingActionForEvent(sessionEvent: Pick<SessionEvent, "type" | "payload">): void {
+        const pendingAction = pendingActionRefreshForEvent(sessionEvent);
         if (pendingAction === "approval") void loadApproval(id, token);
         if (pendingAction === "question") void loadQuestion(id, token);
       }
@@ -2130,6 +2136,16 @@ export function SessionView() {
 
 export function pendingActionRefreshForStatus(status: ManagedSession["status"] | undefined): PendingActionRefresh {
   if (status === "approval" || status === "question") return status;
+  return null;
+}
+
+export function pendingActionRefreshForEvent(event: Pick<SessionEvent, "type" | "payload">): PendingActionRefresh {
+  if (event.type === "session.updated") {
+    return pendingActionRefreshForStatus((event.payload as Partial<ManagedSession>).status);
+  }
+  if (event.type === "status.changed") {
+    return pendingActionRefreshForStatus((event.payload as { status?: ManagedSession["status"] }).status);
+  }
   return null;
 }
 
