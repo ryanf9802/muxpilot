@@ -192,6 +192,7 @@ function parseArguments(args) {
 async function createControlServer() {
   const control = createServer((socket) => {
     let input = "";
+    socket.on("error", () => { /* control clients may disconnect before a response is flushed */ });
     socket.setEncoding("utf8");
     socket.on("data", (chunk) => {
       input += chunk;

@@ -313,6 +313,21 @@ describe("heavyweight validation helper", () => {
     expect(await outcome).toMatchObject({ code: 143, stderr: expect.stringContaining("TERMINATING") });
   });
 
+  it("keeps running when a control client disconnects before reading the response", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 500)"
+    ], { env: { ...process.env, MUXPILOT_HEAVY_VALIDATION_DIR: leases } });
+    const runId = await waitForRun(leases);
+    const socketPath = join(leases, "runs", runId, "control.sock");
+
+    await Promise.all(Array.from({ length: 20 }, () => abandonControlRequest(socketPath, { action: "probe" })));
+
+    await expect(run).resolves.toMatchObject({ stderr: expect.stringContaining("COMMAND_EXITED") });
+  });
+
   it("tees lifecycle and child output into private retained session logs", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
@@ -378,5 +393,17 @@ function control(path: string, request: object): Promise<Record<string, unknown>
       }
     });
     socket.once("error", reject);
+  });
+}
+
+function abandonControlRequest(path: string, request: object): Promise<void> {
+  return new Promise((resolveRequest) => {
+    const socket = createConnection(path);
+    socket.once("connect", () => {
+      socket.write(`${JSON.stringify(request)}\n`);
+      socket.destroy();
+      resolveRequest();
+    });
+    socket.once("error", () => resolveRequest());
   });
 }
