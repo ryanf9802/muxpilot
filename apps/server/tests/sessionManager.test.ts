@@ -120,6 +120,8 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("longer than one minute");
     expect(options.developerInstructions).toContain("When uncertain, treat the command as heavyweight");
     expect(options.developerInstructions).toContain("does not authorize repository-wide validation");
+    expect(options.developerInstructions).toContain("$muxpilot-heavy-command-queue");
+    expect(options.developerInstructions).toContain("QUEUED_NOT_RUN");
     expect(options.developerInstructions).toContain("writable for test caches");
   });
 
@@ -1192,7 +1194,7 @@ describe("SessionManager transcript isolation", () => {
     });
 
     expect(sentKeys).toEqual([["Enter"]]);
-    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingQuestion(session.id)).toBeNull();
     harness.db.close();
   });
@@ -2234,6 +2236,52 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
 
     expect(await harness.manager.listQueuedInputs(session.id)).toEqual([]);
+    harness.db.close();
+  });
+
+  it("keeps user input queued while an otherwise-ready session owns a deferred heavyweight command", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...session,
+      gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
+    }, new Date().toISOString());
+    harness.manager.setHeavyCommandQueue({ hasDeferred: async () => true, cancelWorkspace: async () => undefined });
+
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("queued");
+
+    await harness.manager.sendInput(session.id, "wait behind heavy task");
+    expect(sentInputs).toEqual([]);
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ text: "wait behind heavy task", status: "queued" }]);
+    harness.db.close();
+  });
+
+  it("cancels a deferred heavyweight ticket before interrupting its session", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({ ...session, gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" } }, new Date().toISOString());
+    const operations: string[] = [];
+    harness.manager.setHeavyCommandQueue({
+      hasDeferred: async () => true,
+      cancelWorkspace: async () => { operations.push("cancel"); }
+    });
+    harness.tmux.interrupt = async () => { operations.push("interrupt"); };
+
+    await harness.manager.act(session.id, { type: "interrupt" });
+    expect(operations).toEqual(["cancel", "interrupt"]);
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
     harness.db.close();
   });
 

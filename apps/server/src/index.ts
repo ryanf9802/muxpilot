@@ -73,12 +73,14 @@ const activitySummarizer = new ActivitySummarizer({
 });
 let dockerProxy: DockerResourceProxy | null = null;
 const managedEnvironment: Record<string, string> = {
+  MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
   MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: String(config.heavyValidationInactivityWarnMs),
   MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS: String(config.heavyValidationInactivityTimeoutMs),
   MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS: String(config.heavyValidationRuntimeTimeoutMs),
-  MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS: String(config.heavyValidationTerminationGraceMs)
+  MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS: String(config.heavyValidationTerminationGraceMs),
+  MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS: String(config.heavyValidationResumeTimeoutMs)
 };
 if (config.resourceGovernor !== "off") {
   dockerProxy = new DockerResourceProxy({
@@ -113,7 +115,14 @@ const manager = new SessionManager(
   managedEnvironment,
   codexModels
 );
-const heavyCommands = new HeavyCommandService(config.heavyValidationDir, config.gitSessionRoot);
+const heavyCommands = new HeavyCommandService(
+  config.heavyValidationDir,
+  config.gitSessionRoot,
+  config.heavyValidationConcurrency,
+  config.heavyValidationResumeTimeoutMs
+);
+manager.setHeavyCommandQueue(heavyCommands);
+heavyCommands.start(manager);
 const resourceGovernor = new ResourceGovernor({
   enabled: config.resourceGovernor !== "off",
   agentMemorySoftPercent: config.agentMemorySoftPercent,
@@ -181,6 +190,7 @@ async function startNotificationsAfterStartupCatchup(): Promise<void> {
 const close = async () => {
   closing = true;
   manager.stop();
+  await heavyCommands.stop();
   await resourceGovernor.stop();
   notifications.stop();
   codexUsage.stop();

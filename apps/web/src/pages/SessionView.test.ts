@@ -201,6 +201,12 @@ describe("heavyweight command UI", () => {
     expect(html).toContain("Open heavyweight command details");
   });
 
+  it("labels a reserved slot as resuming the session", () => {
+    const html = renderToStaticMarkup(createElement(HeavyCommandIndicator, { commands: [{ ...command, state: "reserved", startedAt: null, resumeDeadlineAt: new Date(Date.now() + 60_000).toISOString() }], onOpen: vi.fn() }));
+    expect(html).toContain("Resuming session");
+    expect(html).toContain('data-state="reserved"');
+  });
+
   it("renders active command details, live output, and a terminate control", () => {
     const html = renderToStaticMarkup(createElement(HeavyCommandsModal, {
       open: true,
@@ -708,6 +714,7 @@ describe("skill composer helpers", () => {
 describe("shouldQueueComposerInput", () => {
   it("queues when the session is busy or a queue already exists", () => {
     expect(shouldQueueComposerInput({ status: "working" }, [])).toBe(true);
+    expect(shouldQueueComposerInput({ status: "queued" }, [])).toBe(true);
     expect(shouldQueueComposerInput({ status: "waiting" }, [{ status: "queued" }])).toBe(true);
   });
 
@@ -922,6 +929,7 @@ describe("session fallback polling", () => {
 
   it("keeps heavyweight polling fast only while the panel or a command is active", () => {
     expect(hasActiveHeavyCommand([{ state: "waiting" }])).toBe(true);
+    expect(hasActiveHeavyCommand([{ state: "reserved" }])).toBe(true);
     expect(hasActiveHeavyCommand([{ state: "running" }])).toBe(true);
     expect(hasActiveHeavyCommand([{ state: "stalled" }])).toBe(true);
     expect(hasActiveHeavyCommand([])).toBe(false);

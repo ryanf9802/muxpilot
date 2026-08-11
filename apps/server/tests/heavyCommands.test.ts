@@ -1,5 +1,5 @@
 import { createServer } from "node:net";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -60,7 +60,91 @@ describe("HeavyCommandService", () => {
     expect(await service.terminate("workspace-a", runId)).toBe("accepted");
     server.close();
   });
+
+  it("reserves deferred commands in FIFO order and dispatches an exact resume", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const first = "mabc123-111111111111";
+    const second = "mabc123-222222222222";
+    await writeQueueOwner(leases, first, "2026-01-01T00:00:00.000Z");
+    await writeQueueOwner(leases, second, "2026-01-01T00:00:01.000Z");
+    await mkdir(join(leases, "slot-0"));
+    await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({ version: 2, runId: "orphan", controlSocket: join(leases, "missing.sock"), heartbeatAt: Date.now() }));
+    const messages: string[] = [];
+    const service = new HeavyCommandService(leases, sessions, 1, 120_000);
+    service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+    });
+    try {
+      await waitFor(async () => messages.length === 1);
+      const firstOwner = JSON.parse(await readFile(join(leases, "runs", first, "owner.json"), "utf8"));
+      const secondOwner = JSON.parse(await readFile(join(leases, "runs", second, "owner.json"), "utf8"));
+      expect(firstOwner).toMatchObject({ state: "reserved", slot: 0 });
+      expect(secondOwner).toMatchObject({ state: "waiting", slot: null });
+      expect((await service.list("workspace-a")).commands.find((command) => command.runId === second)?.queuePosition).toBe(1);
+      expect(messages[0]).toContain(`--resume' '${first}`);
+      expect(messages[0]).toContain("$muxpilot-heavy-command-queue");
+      expect(await service.terminate("workspace-a", first)).toBe("accepted");
+      await expect(stat(join(leases, "slot-0"))).rejects.toThrow();
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("cancels a reservation when the delivered resume is not claimed in time", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-333333333333";
+    await writeQueueOwner(leases, runId, new Date().toISOString());
+    const service = new HeavyCommandService(leases, join(root, "sessions"), 1, 40);
+    service.start({ sessionIdForWorkspace: async () => "session-a", resumeHeavyCommand: async () => true });
+    try {
+      await waitFor(async () => {
+        const current = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
+        return current.state === "cancelled";
+      });
+      const current = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
+      expect(current.terminationReason).toContain("resume reservation expired");
+      await expect(stat(join(leases, "slot-0"))).rejects.toThrow();
+    } finally {
+      await service.stop();
+    }
+  });
 });
+
+async function writeQueueOwner(leases: string, runId: string, queuedAt: string): Promise<void> {
+  const runDir = join(leases, "runs", runId);
+  await mkdir(runDir, { recursive: true });
+  await writeFile(join(runDir, "owner.json"), JSON.stringify({
+    ...owner(runId, "workspace-a", null),
+    version: 4,
+    state: "waiting",
+    runnerPath: "/skills/muxpilot-git-run.mjs",
+    runnerOptions: [],
+    slot: null,
+    childPid: null,
+    queuedAt,
+    startedAt: null,
+    lastOutputAt: null,
+    lastActivityAt: null,
+    activity: { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 },
+    resumeSentAt: null,
+    resumeDeadlineAt: null
+  }));
+}
+
+async function waitFor(predicate: () => Promise<boolean> | boolean): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  throw new Error("condition was not met");
+}
 
 function owner(runId: string, workspaceId: string, logPath: string | null) {
   const now = new Date().toISOString();

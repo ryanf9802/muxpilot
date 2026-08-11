@@ -232,7 +232,7 @@ export function isLiveManagedSession(session: Pick<ManagedSession, "archived" | 
 }
 
 export function hasActiveHeavyCommand(commands: readonly Pick<HeavyCommand, "state">[]): boolean {
-  return commands.some((command) => command.state === "waiting" || command.state === "running" || command.state === "stalled" || command.state === "terminating");
+  return commands.some((command) => command.state === "waiting" || command.state === "reserved" || command.state === "running" || command.state === "stalled" || command.state === "terminating");
 }
 
 export function isLatestSessionRefresh(requestId: number, latestRequestId: number): boolean {
@@ -542,6 +542,7 @@ const HEAVY_STATE_PRIORITY: Record<HeavyCommand["state"], number> = {
   terminating: 4,
   stalled: 3,
   running: 2,
+  reserved: 2,
   waiting: 1
 };
 
@@ -609,6 +610,8 @@ export function HeavyCommandsModal({
                 <dl className="heavy-command-facts">
                   <div><dt>Working directory</dt><dd>{command.cwd}</dd></div>
                   <div><dt>Slot / PID</dt><dd>{command.slot ?? "queued"} / {command.childPid ?? "not started"}</dd></div>
+                  {command.state === "waiting" ? <div><dt>Queue position</dt><dd>{command.queuePosition ?? "calculating"}</dd></div> : null}
+                  {command.state === "reserved" ? <div><dt>Resume claim</dt><dd>{command.resumeDeadlineAt ? `${compactDuration(Math.max(0, Date.parse(command.resumeDeadlineAt) - now))} remaining` : "waiting for session"}</dd></div> : null}
                   <div><dt>Output silence</dt><dd>{silence ?? "not started"}</dd></div>
                   <div><dt>Observed activity</dt><dd>{activityAge ?? "not started"} ago · {command.activity?.processCount ?? "?"} processes · {command.activity?.runningContainers ?? "?"} running / {command.activity?.createdContainers ?? "?"} created containers</dd></div>
                   <div><dt>Limits</dt><dd>warn {compactDuration(command.deadlines.inactivityWarnMs)} idle · stop {compactDuration(command.deadlines.inactivityTimeoutMs)} idle · {compactDuration(command.deadlines.runtimeTimeoutMs)} total · {compactDuration(command.deadlines.terminationGraceMs)} grace</dd></div>
@@ -640,7 +643,7 @@ export function HeavyCommandsModal({
 }
 
 function heavyStateLabel(state: HeavyCommand["state"]): string {
-  return { waiting: "Waiting for slot", running: "Running", stalled: "No observed progress", terminating: "Terminating" }[state];
+  return { waiting: "Waiting for slot", reserved: "Resuming session", running: "Running", stalled: "No observed progress", terminating: "Terminating" }[state];
 }
 
 function compactDuration(milliseconds: number): string {

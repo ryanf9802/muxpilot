@@ -82,6 +82,40 @@ describe("heavyweight validation helper", () => {
     expect(events[3]).toBe(events[2]?.replace("-start", "-end"));
   });
 
+  it("defers a managed command without running it and resumes only its reserved ticket", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const commandCwd = join(root, "work");
+    const output = join(commandCwd, "deferred.txt");
+    await mkdir(commandCwd);
+    const environment = {
+      ...process.env,
+      MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+      MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+      MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+      MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+    };
+    const blocker = execFileAsync(process.execPath, [helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 500)"], { env: environment, cwd: commandCwd });
+    await waitForRun(leases);
+    const command = [process.execPath, "-e", "require('node:fs').writeFileSync('deferred.txt', 'ran')"];
+    const deferred = execFileAsync(process.execPath, [helper, "--heavy", "--", ...command], { env: environment, cwd: commandCwd });
+    await expect(deferred).rejects.toMatchObject({ code: 75, stderr: expect.stringContaining("QUEUED_NOT_RUN") });
+    await expect(stat(output)).rejects.toThrow();
+
+    const runId = await waitForState(leases, "waiting");
+    await blocker;
+    const ownerPath = join(leases, "runs", runId, "owner.json");
+    const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    await mkdir(join(leases, "slot-0"));
+    await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({ version: 4, runId, state: "reserved", heartbeatAt: new Date().toISOString() }));
+    await writeFile(ownerPath, JSON.stringify({ ...owner, state: "reserved", slot: 0, heartbeatAt: new Date().toISOString() }));
+
+    await execFileAsync(process.execPath, [helper, "--heavy", "--resume", runId, "--", ...command], { env: environment, cwd: root });
+    expect(await readFile(output, "utf8")).toBe("ran");
+  });
+
   it("preserves the child exit status", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
@@ -307,6 +341,18 @@ async function waitForRun(leases: string): Promise<string> {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   }
   throw new Error("heavyweight run did not become active");
+}
+
+async function waitForState(leases: string, state: string): Promise<string> {
+  const deadline = Date.now() + 3_000;
+  while (Date.now() < deadline) {
+    for (const entry of await readdir(join(leases, "runs")).catch(() => [])) {
+      const owner = await readFile(join(leases, "runs", entry, "owner.json"), "utf8").then(JSON.parse).catch(() => null);
+      if (owner?.state === state) return entry;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  throw new Error(`heavyweight run did not reach ${state}`);
 }
 
 function control(path: string, request: object): Promise<Record<string, unknown>> {

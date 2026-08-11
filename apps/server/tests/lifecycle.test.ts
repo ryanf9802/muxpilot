@@ -10,6 +10,7 @@ describe("production bundled skill startup", () => {
 
     expect(await syncBundledSkillForMode("dev", home)).toBeNull();
     await expect(access(join(home, "skills", "muxpilot-git-workflow", "SKILL.md"))).rejects.toThrow();
+    await expect(access(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"))).rejects.toThrow();
   });
 
   it("installs and updates the skill during production startup", async () => {
@@ -32,6 +33,10 @@ describe("production bundled skill startup", () => {
       expect(installedSkill).toContain("When uncertain, use the heavyweight wrapper");
       expect(installedSkill).toContain("does not authorize repository-wide validation");
       await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"))).resolves.toBeUndefined();
+      expect(await readFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "utf8")).toContain("QUEUED_NOT_RUN");
+
+      await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
+      expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
     } finally {
       log.mockRestore();
     }

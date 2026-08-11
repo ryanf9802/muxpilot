@@ -7,6 +7,8 @@ import { createServer, createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
+class DeferredError extends Error {}
+
 const parsed = parseArguments(process.argv.slice(2));
 const command = parsed.command;
 const concurrency = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY, 2);
@@ -19,11 +21,13 @@ const inactivityWarnMs = duration(parsed.inactivityWarn, process.env.MUXPILOT_HE
 const inactivityTimeoutMs = duration(parsed.inactivityTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS, 10 * 60_000);
 const runtimeTimeoutMs = duration(parsed.runtimeTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS, 30 * 60_000);
 const terminationGraceMs = duration(parsed.terminationGrace, process.env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS, 30_000);
-const runId = `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+const queueEnabled = process.env.MUXPILOT_HEAVY_QUEUE_ENABLED === "1";
+const runId = parsed.resumeRunId ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
 const workspaceId = process.env.MUXPILOT_GIT_WORKSPACE_ID ?? null;
 const runDir = join(leaseRoot, "runs", runId);
 const controlSocket = join(runDir, "control.sock");
-const startedWaitingAt = Date.now();
+let startedWaitingAt = Date.now();
+let executionCwd = process.cwd();
 let state = "waiting";
 let slot = null;
 let leasePath = null;
@@ -49,7 +53,16 @@ let consoleTimer = null;
 let watchdogTimer = null;
 let forceTimer = null;
 let ownerWrite = Promise.resolve();
+let deferred = false;
+let resumeOwner = null;
 
+if (parsed.resumeRunId) {
+  try { resumeOwner = await loadResumeOwner(); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
+  state = "reserved";
+  slot = resumeOwner.slot;
+  executionCwd = resumeOwner.cwd;
+  startedWaitingAt = Date.parse(resumeOwner.queuedAt);
+}
 await mkdir(runDir, { recursive: true, mode: 0o700 });
 await chmod(runDir, 0o700);
 log = await createRunLog();
@@ -74,7 +87,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 try {
-  const acquired = await acquireLease();
+  const acquired = resumeOwner ? await claimReservation(resumeOwner) : await acquireLease();
   leasePath = acquired.path;
   slot = acquired.slot;
   state = "running";
@@ -99,7 +112,7 @@ try {
     JSII_RUNTIME_PACKAGE_CACHE_ROOT: jsiiCache.path
   };
   child = spawn(resolveExecutable(command[0]) ?? command[0], command.slice(1), {
-    cwd: process.cwd(),
+    cwd: executionCwd,
     env: childEnvironment,
     detached: true,
     stdio: ["inherit", "pipe", "pipe"]
@@ -122,16 +135,25 @@ try {
   if ((result.code === 137 || result.signal === "SIGKILL") && !forced) diagnoseResourceExit();
   process.exitCode = desiredExitCode ?? result.code ?? (result.signal ? 1 : 0);
 } catch (error) {
-  lifecycle("RUNNER_ERROR", error instanceof Error ? error.message : String(error));
-  process.exitCode = desiredExitCode ?? 1;
+  if (error instanceof DeferredError) {
+    deferred = true;
+    lifecycle("QUEUED_NOT_RUN", `run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("use $muxpilot-heavy-command-queue; do not poll or retry")}`);
+    process.exitCode = 75;
+  } else {
+    lifecycle("RUNNER_ERROR", error instanceof Error ? error.message : String(error));
+    process.exitCode = desiredExitCode ?? 1;
+  }
 } finally {
   clearRuntimeTimers();
-  if (terminationReason || (process.exitCode ?? 0) !== 0) await cleanupDockerContainers();
+  if (!deferred && (terminationReason || (process.exitCode ?? 0) !== 0)) await cleanupDockerContainers();
   if (leasePath) {
     await rm(leasePath, { recursive: true, force: true });
     lifecycle("LEASE_RELEASED", `run=${runId} slot=${slot}`);
   }
-  await finalizeRun();
+  if (deferred) {
+    try { await updateOwner(); } catch { /* best effort queue metadata */ }
+    if (log) await new Promise((resolveEnd) => log.stream.end(resolveEnd));
+  } else await finalizeRun();
   await new Promise((resolveClose) => server?.close(resolveClose));
   await rm(controlSocket, { force: true });
   await pruneRunRecords();
@@ -142,7 +164,7 @@ try {
 }
 
 function parseArguments(args) {
-  if (args[0] !== "--heavy") fail("usage: muxpilot-git-run.mjs --heavy [timeout flags] -- <command> [args...]");
+  if (args[0] !== "--heavy") fail("usage: muxpilot-git-run.mjs --heavy [--resume <run-id>] [timeout flags] -- <command> [args...]");
   const result = {};
   let index = 1;
   const flags = new Map([
@@ -151,13 +173,17 @@ function parseArguments(args) {
     ["--runtime-timeout", "runtimeTimeout"],
     ["--termination-grace", "terminationGrace"]
   ]);
+  if (args[index] === "--resume" && args[index + 1]) {
+    result.resumeRunId = args[index + 1];
+    index += 2;
+  }
   while (index < args.length && args[index] !== "--") {
     const name = flags.get(args[index]);
     if (!name || !args[index + 1]) fail(`unknown or incomplete option: ${args[index]}`);
     result[name] = args[index + 1];
     index += 2;
   }
-  if (args[index] !== "--" || index + 1 >= args.length) fail("usage: muxpilot-git-run.mjs --heavy [timeout flags] -- <command> [args...]");
+  if (args[index] !== "--" || index + 1 >= args.length) fail("usage: muxpilot-git-run.mjs --heavy [--resume <run-id>] [timeout flags] -- <command> [args...]");
   result.command = args.slice(index + 1);
   return result;
 }
@@ -199,20 +225,94 @@ async function createControlServer() {
 
 async function acquireLease() {
   while (!stoppingSignal) {
-    await reapStaleLeases();
-    for (let candidateSlot = 0; candidateSlot < concurrency; candidateSlot += 1) {
-      const candidate = join(leaseRoot, `slot-${candidateSlot}`);
-      try {
-        await mkdir(candidate);
-        await writeFile(join(candidate, "owner.json"), JSON.stringify({ version: 2, runId, controlSocket, heartbeatAt: Date.now() }), { mode: 0o600 });
-        return { path: candidate, slot: candidateSlot };
-      } catch (error) {
-        if (error?.code !== "EEXIST") throw error;
+    const acquired = await withSchedulerLock(async () => {
+      await reapStaleLeases();
+      if (queueEnabled) {
+        const existingRunId = await deferredRunForWorkspace();
+        if (existingRunId) throw new Error(`workspace already has deferred heavyweight run ${existingRunId}; resume or cancel it before starting another`);
       }
-    }
+      const available = [];
+      for (let candidateSlot = 0; candidateSlot < concurrency; candidateSlot += 1) {
+        if (!existsSync(join(leaseRoot, `slot-${candidateSlot}`))) available.push(candidateSlot);
+      }
+      if (available.length === 0) return null;
+      if (queueEnabled) {
+        const queued = await queuedRunIds();
+        if (!queued.slice(0, available.length).includes(runId)) return null;
+      }
+      const candidateSlot = available[0];
+      const candidate = join(leaseRoot, `slot-${candidateSlot}`);
+      await mkdir(candidate);
+      await writeFile(join(candidate, "owner.json"), JSON.stringify({ version: 2, runId, controlSocket, heartbeatAt: Date.now() }), { mode: 0o600 });
+      return { path: candidate, slot: candidateSlot };
+    });
+    if (acquired) return acquired;
+    if (queueEnabled) throw new DeferredError();
     await delay(pollMs);
   }
   throw new Error(`stopped while waiting for a heavyweight slot (${stoppingSignal})`);
+}
+
+async function deferredRunForWorkspace() {
+  for (const candidateRunId of await readdir(join(leaseRoot, "runs")).catch(() => [])) {
+    if (candidateRunId === runId) continue;
+    try {
+      const owner = JSON.parse(await readFile(join(leaseRoot, "runs", candidateRunId, "owner.json"), "utf8"));
+      if (owner.version === 4 && owner.workspaceId === workspaceId && (owner.state === "waiting" || owner.state === "reserved")) return candidateRunId;
+    } catch { /* ignore incomplete records */ }
+  }
+  return null;
+}
+
+async function queuedRunIds() {
+  const queued = [];
+  for (const candidateRunId of await readdir(join(leaseRoot, "runs")).catch(() => [])) {
+    try {
+      const owner = JSON.parse(await readFile(join(leaseRoot, "runs", candidateRunId, "owner.json"), "utf8"));
+      if (owner.version === 4 && owner.state === "waiting") queued.push({ runId: candidateRunId, queuedAt: owner.queuedAt });
+    } catch { /* ignore incomplete records */ }
+  }
+  return queued.sort((left, right) => String(left.queuedAt).localeCompare(String(right.queuedAt)) || left.runId.localeCompare(right.runId)).map((entry) => entry.runId);
+}
+
+async function withSchedulerLock(operation) {
+  const path = join(leaseRoot, "scheduler-lock");
+  while (true) {
+    try {
+      await mkdir(path);
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const details = await stat(path).catch(() => null);
+      if (details && Date.now() - details.mtimeMs > 60_000) await rm(path, { recursive: true, force: true });
+      else await delay(Math.min(pollMs, 50));
+    }
+  }
+  try { return await operation(); } finally { await rm(path, { recursive: true, force: true }); }
+}
+
+async function loadResumeOwner() {
+  let owner;
+  try { owner = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8")); } catch { throw new Error(`heavyweight reservation ${runId} was not found`); }
+  if (owner.version !== 4 || owner.runId !== runId || owner.workspaceId !== workspaceId) throw new Error(`heavyweight reservation ${runId} does not belong to this workspace`);
+  if (owner.state !== "reserved") throw new Error(`heavyweight reservation ${runId} is ${owner.state ?? "unavailable"}`);
+  if (JSON.stringify(owner.command) !== JSON.stringify(command)) throw new Error(`heavyweight reservation ${runId} command does not match`);
+  if (typeof owner.cwd !== "string" || !owner.cwd) throw new Error(`heavyweight reservation ${runId} has no working directory`);
+  if (!Number.isFinite(Date.parse(owner.queuedAt))) throw new Error(`heavyweight reservation ${runId} has an invalid queue time`);
+  return owner;
+}
+
+async function claimReservation(owner) {
+  return withSchedulerLock(async () => {
+    const current = await loadResumeOwner();
+    const reservedSlot = Number(current.slot);
+    if (!Number.isInteger(reservedSlot) || reservedSlot < 0) throw new Error(`heavyweight reservation ${runId} has no slot`);
+    const path = join(leaseRoot, `slot-${reservedSlot}`);
+    const lease = JSON.parse(await readFile(join(path, "owner.json"), "utf8").catch(() => "null"));
+    if (lease?.runId !== runId) throw new Error(`heavyweight reservation ${runId} lost its slot`);
+    await writeFile(join(path, "owner.json"), JSON.stringify({ version: 2, runId, controlSocket, heartbeatAt: Date.now() }), { mode: 0o600 });
+    return { path, slot: reservedSlot };
+  });
 }
 
 async function reapStaleLeases() {
@@ -221,6 +321,11 @@ async function reapStaleLeases() {
     const path = join(leaseRoot, entry);
     try {
       const owner = JSON.parse(await readFile(join(path, "owner.json"), "utf8"));
+      if (owner.version === 4 && owner.state === "reserved") {
+        const timestamp = Date.parse(owner.heartbeatAt);
+        if (!Number.isFinite(timestamp) || Date.now() - timestamp > staleMs) await rm(path, { recursive: true, force: true });
+        continue;
+      }
       if (owner.version === 2 && validSocketPath(owner.controlSocket)) {
         if (!await probeSocket(owner.controlSocket)) await rm(path, { recursive: true, force: true });
         continue;
@@ -315,17 +420,24 @@ function updateOwner() {
 
 async function writeOwner() {
   const owner = {
-    version: 3,
+    version: 4,
     runId,
     workspaceId,
     state,
     command,
     commandDisplay: formatCommand(command),
-    cwd: process.cwd(),
+    cwd: executionCwd,
     wrapperPid: process.pid,
     childPid: child?.pid ?? null,
     slot,
     controlSocket,
+    runnerPath: resolve(process.argv[1]),
+    runnerOptions: [
+      parsed.inactivityWarn ? ["--inactivity-warn", parsed.inactivityWarn] : [],
+      parsed.inactivityTimeout ? ["--inactivity-timeout", parsed.inactivityTimeout] : [],
+      parsed.runtimeTimeout ? ["--runtime-timeout", parsed.runtimeTimeout] : [],
+      parsed.terminationGrace ? ["--termination-grace", parsed.terminationGrace] : []
+    ].flat(),
     logPath: log?.path ?? null,
     queuedAt: new Date(startedWaitingAt).toISOString(),
     startedAt: childStartedAt ? new Date(childStartedAt).toISOString() : null,
@@ -341,6 +453,8 @@ async function writeOwner() {
     },
     packageDiagnostics,
     terminationReason,
+    resumeSentAt: resumeOwner?.resumeSentAt ?? null,
+    resumeDeadlineAt: resumeOwner?.resumeDeadlineAt ?? null,
     exitCode: state === "completed" ? process.exitCode ?? null : null
   };
   const temporary = join(runDir, `owner-${process.pid}-${randomBytes(3).toString("hex")}.tmp`);
@@ -413,7 +527,7 @@ async function pruneLogs(root) {
 
 function inspectPackageManager() {
   const result = { declared: null, resolvedPath: null, resolvedVersion: null, storePath: null, cachePaths: {}, warnings: [], messages: [] };
-  let cursor = resolve(process.cwd());
+  let cursor = resolve(executionCwd);
   while (true) {
     const packagePath = join(cursor, "package.json");
     if (existsSync(packagePath)) {
@@ -444,7 +558,7 @@ function inspectPackageManager() {
 }
 
 function resolveExecutable(name) {
-  if (name.includes("/")) return existsSync(resolve(name)) ? resolve(name) : null;
+  if (name.includes("/")) return existsSync(resolve(executionCwd, name)) ? resolve(executionCwd, name) : null;
   for (const directory of (process.env.PATH ?? "").split(":")) {
     const candidate = join(directory, name);
     try { accessSync(candidate, constants.X_OK); return candidate; } catch { /* try next */ }

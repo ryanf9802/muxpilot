@@ -1,0 +1,4 @@
+interface:
+  display_name: "Muxpilot Heavy Command Queue"
+  short_description: "Release turns while heavyweight commands wait"
+  default_prompt: "Use $muxpilot-heavy-command-queue when a heavyweight command is deferred by muxpilot."

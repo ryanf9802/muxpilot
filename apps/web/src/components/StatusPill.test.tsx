@@ -22,6 +22,7 @@ describe("StatusPill", () => {
   it("uses the shared red yellow green severity classes", () => {
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "approval" }))).toContain('class="status status-red"');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "working" }))).toContain('class="status status-yellow"');
+    expect(renderToStaticMarkup(createElement(StatusPill, { status: "queued" }))).toContain('class="status status-yellow"');
     expect(renderToStaticMarkup(createElement(StatusPill, { status: "waiting" }))).toContain('class="status status-green"');
   });
 

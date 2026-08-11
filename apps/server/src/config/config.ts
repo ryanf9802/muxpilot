@@ -73,6 +73,7 @@ const schema = z.object({
   heavyValidationInactivityTimeoutMs: z.coerce.number().int().positive().default(600_000),
   heavyValidationRuntimeTimeoutMs: z.coerce.number().int().positive().default(1_800_000),
   heavyValidationTerminationGraceMs: z.coerce.number().int().positive().default(30_000),
+  heavyValidationResumeTimeoutMs: z.coerce.number().int().positive().default(120_000),
   openaiApiKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
     z.string().optional()
@@ -156,6 +157,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     heavyValidationInactivityTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS,
     heavyValidationRuntimeTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS,
     heavyValidationTerminationGraceMs: env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS,
+    heavyValidationResumeTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS,
     openaiApiKey: env.OPENAI_API_KEY,
     summaryModel: env.MUXPILOT_SUMMARY_MODEL,
     summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,

@@ -109,6 +109,7 @@ describe("config LAN access validation", () => {
       dockerCpuPercent: 25,
       sessionTasksMax: 768,
       heavyValidationConcurrency: 2,
+      heavyValidationResumeTimeoutMs: 120_000,
       heavyValidationInactivityWarnMs: 60_000,
       heavyValidationInactivityTimeoutMs: 600_000,
       heavyValidationRuntimeTimeoutMs: 1_800_000,
@@ -123,6 +124,7 @@ describe("config LAN access validation", () => {
     expect(overridden.resourceGovernor).toBe("off");
     expect(overridden.agentMemorySoftPercent).toBe(40);
     expect(overridden.heavyValidationConcurrency).toBe(3);
+    expect(parseConfig({ MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS: "45000" }).heavyValidationResumeTimeoutMs).toBe(45_000);
     expect(() => parseConfig({
       MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "70",
       MUXPILOT_AGENT_MEMORY_HARD_PERCENT: "60"

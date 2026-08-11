@@ -254,6 +254,7 @@ function isSessionStatus(value: unknown): value is SessionStatus {
     value === "executing" ||
     value === "working" ||
     value === "planning" ||
+    value === "queued" ||
     value === "waiting" ||
     value === "approval" ||
     value === "question" ||

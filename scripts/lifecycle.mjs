@@ -51,7 +51,8 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS",
   "MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS",
   "MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS",
-  "MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS"
+  "MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS",
+  "MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS"
 ];
 
 const MODE_CONFIG = {
@@ -140,11 +141,11 @@ export async function syncBundledSkillForMode(mode, codexHome = process.env.MUXP
   try {
     const result = await syncMuxpilotGitWorkflowSkill(codexHome);
     const verb = result.action === "unchanged" ? "is current" : `${result.action}`;
-    console.log(`Muxpilot Git workflow skill ${verb} at ${result.path}.`);
+    console.log(`Muxpilot bundled skills ${verb}; workflow path ${result.path}.`);
     return result;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Could not synchronize the muxpilot Git workflow skill: ${message}`, { cause: error });
+    throw new Error(`Could not synchronize muxpilot bundled skills: ${message}`, { cause: error });
   }
 }
 
@@ -414,6 +415,7 @@ function printStatus(mode, details, status) {
     console.log(`    docker: memory ${process.env.MUXPILOT_DOCKER_MEMORY_SOFT_PERCENT ?? "15"}% soft / ${process.env.MUXPILOT_DOCKER_MEMORY_HARD_PERCENT ?? "20"}% hard, cpu ${process.env.MUXPILOT_DOCKER_CPU_PERCENT ?? "25"}%, proxy ${dockerGuardActive ? "active" : "inactive"}`);
     console.log(`    heavyweight validation concurrency: ${process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY ?? "2"}`);
     console.log(`    heavyweight timeouts: warn ${process.env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS ?? "60000"}ms, silent ${process.env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS ?? "600000"}ms, runtime ${process.env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS ?? "1800000"}ms, termination grace ${process.env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS ?? "30000"}ms`);
+    console.log(`    heavyweight resume timeout: ${process.env.MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS ?? "120000"}ms`);
     const live = status.backendHealth?.resourceGovernor;
     if (live) {
       console.log(`    managed sessions: ${live.busySessions} busy, ${live.idleSessions} idle`);

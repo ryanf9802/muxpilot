@@ -73,6 +73,11 @@ interface SessionResourceUsageLookup {
   usageForSession(sessionId: string): SessionResourceUsage | null;
 }
 
+interface HeavyCommandQueueLookup {
+  hasDeferred(workspaceId: string): Promise<boolean>;
+  cancelWorkspace(workspaceId: string, reason: string): Promise<void>;
+}
+
 interface IngestSessionResult {
   incomplete: boolean;
   progressed: boolean;
@@ -93,6 +98,7 @@ export class SessionManager {
   private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
   private missingIngestCursor = 0;
   private resourceUsageLookup: SessionResourceUsageLookup | null = null;
+  private heavyCommandQueue: HeavyCommandQueueLookup | null = null;
 
   constructor(
     private readonly db: AppDatabase,
@@ -134,6 +140,27 @@ export class SessionManager {
 
   setResourceUsageLookup(lookup: SessionResourceUsageLookup | null): void {
     this.resourceUsageLookup = lookup;
+  }
+
+  setHeavyCommandQueue(lookup: HeavyCommandQueueLookup | null): void {
+    this.heavyCommandQueue = lookup;
+  }
+
+  async sessionIdForWorkspace(workspaceId: string): Promise<string | null> {
+    return (await this.gitWorkspaces?.get(workspaceId))?.sessionId ?? null;
+  }
+
+  async resumeHeavyCommand(sessionId: string, message: string): Promise<boolean> {
+    const session = await this.db.getSession(sessionId);
+    if (!session || session.status === "missing") return false;
+    const ready = await this.readyLiveSession(session);
+    if (!ready) return false;
+    await this.sendRawInput(ready, message);
+    const now = nowIso();
+    await this.db.setSessionStatus(sessionId, "waiting", now);
+    await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
+    this.publish("status.changed", sessionId, { status: "waiting" });
+    return true;
   }
 
   async discoverNow(): Promise<void> {
@@ -269,6 +296,11 @@ export class SessionManager {
       const storedGitWorkspace = await this.gitWorkspaces?.getBySession(lookupId) ?? null;
       if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
+      const activeGitWorkspace = refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null;
+      const projectedStatus =
+        !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace && await this.heavyCommandQueue?.hasDeferred(activeGitWorkspace.id)
+          ? "queued"
+          : effectiveStatus;
       const session: ManagedSession = {
         id: sessionId,
         tmux: pane,
@@ -276,7 +308,7 @@ export class SessionManager {
         codexSessionId: nextCodexSessionId,
         codexJsonlPath: nextCodexJsonlPath,
         discoveryConfidence: match ? "high" : looksLikeCodexPane(pane) ? "medium" : "low",
-        status: effectiveStatus,
+        status: projectedStatus,
         initializing: existing?.initializing === true,
         startupError,
         lastActivityAt: sourceChanged ? null : existing?.lastActivityAt ?? null,
@@ -294,7 +326,7 @@ export class SessionManager {
         unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
         pinned: existing?.pinned ?? false,
         archived: existing?.archived ?? false,
-        gitWorkspace: refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null,
+        gitWorkspace: activeGitWorkspace,
         forkedFrom: existing?.forkedFrom ?? null
       };
 
@@ -328,9 +360,8 @@ export class SessionManager {
     }
 
     for (const session of await this.db.listSessions(true)) {
-      if (!seen.has(session.id)) {
-      }
       if (!seen.has(session.id) && !session.initializing && session.status !== "missing") {
+        if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session is missing");
         this.liveApprovals.delete(session.id);
         await this.db.setSessionStatus(session.id, "missing", now);
         this.publish("status.changed", session.id, { status: "missing" });
@@ -892,6 +923,7 @@ export class SessionManager {
   }
 
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return true;
     if (isPlanActionInput(text)) return false;
     const queuedInputs = await this.db.listQueuedInputs(session.id);
     if (queuedInputs.length > 0) return true;
@@ -1199,7 +1231,13 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const session = requireSession(await this.db.getSession(sessionId));
-    if (action.type === "interrupt") await this.tmux.interrupt(session.tmux.paneId);
+    if (action.type === "interrupt") {
+      if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
+      await this.tmux.interrupt(session.tmux.paneId);
+      const now = nowIso();
+      await this.db.setSessionStatus(sessionId, "waiting", now);
+      this.publish("status.changed", sessionId, { status: "waiting" });
+    }
     if (action.type === "choosePlanAction") {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
@@ -1217,7 +1255,10 @@ export class SessionManager {
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
-    if (action.type === "kill") await this.tmux.killPane(session.tmux.paneId);
+    if (action.type === "kill") {
+      if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session was killed");
+      await this.tmux.killPane(session.tmux.paneId);
+    }
     if (action.type === "archiveTranscript") await this.db.markSessionArchived(sessionId, true, nowIso());
     if (action.type === "setInputMode") {
       await this.ensureInputMode(session, action.mode);
@@ -1296,6 +1337,7 @@ export class SessionManager {
       if (!input) return;
 
       const session = requireSession(await this.db.getSession(sessionId));
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return;
       if (!queuedInputMatchesSession(input, session)) {
         await this.markQueuedInputFailed(input, "Session source changed before this input was sent");
         return;
@@ -1712,6 +1754,7 @@ export function managedCodexLaunchOptions(
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
       "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Do not treat this same-agent self-review as a PR-style review. Run repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref.",
       "Treat a command as heavyweight if it covers an entire repository, workspace, application, package, or multi-project configuration; performs static-analysis, security, dependency, or container-image scanning such as Semgrep, CodeQL, or Trivy; starts Docker or Docker Compose; launches multiple workers, shards, or projects; produces a production bundle; or is reasonably expected to run longer than one minute, use more than about 1 GiB of memory, or sustain multiple CPU cores. Selected-file lint, syntax-only checks, and one explicitly selected test file or test case without parallel workers are normally not heavyweight. When uncertain, treat the command as heavyweight. Run every heavyweight command through muxpilot-git-run.mjs --heavy -- <command>. The wrapper schedules an already-authorized command; it does not authorize repository-wide validation, and its availability is not a reason to broaden a focused check.",
+      "If the heavyweight wrapper reports QUEUED_NOT_RUN, use $muxpilot-heavy-command-queue. The command did not run; do not poll or retry it.",
       "User instructions take priority over muxpilot guardrails. If an instruction conflicts with a muxpilot guard, name each exact guard and consequence and obtain explicit confirmation for those guards before bypassing them. Confirmation is operation-scoped; platform safety rules are not muxpilot guards.",
       "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard, explain that current and future task commits will integrate there, and obtain separate explicit confirmation for the fixed-target bypass. An active worktree must repeat focused checks and self-review after retargeting before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",

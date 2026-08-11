@@ -4,6 +4,7 @@ export type SessionStatus =
   | "executing"
   | "working"
   | "planning"
+  | "queued"
   | "waiting"
   | "approval"
   | "question"
@@ -177,7 +178,7 @@ export interface SessionResourceUsage {
   sampledAt: string;
 }
 
-export type HeavyCommandState = "waiting" | "running" | "stalled" | "terminating";
+export type HeavyCommandState = "waiting" | "reserved" | "running" | "stalled" | "terminating";
 
 export interface HeavyCommandPackageDiagnostics {
   declared: string | null;
@@ -218,6 +219,9 @@ export interface HeavyCommand {
   };
   packageDiagnostics: HeavyCommandPackageDiagnostics | null;
   terminationReason: string | null;
+  resumeSentAt?: string | null;
+  resumeDeadlineAt?: string | null;
+  queuePosition?: number | null;
 }
 
 export interface HeavyCommandsResponse {
