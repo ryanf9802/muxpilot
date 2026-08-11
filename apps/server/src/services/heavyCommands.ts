@@ -304,7 +304,7 @@ export class HeavyCommandService {
 
 interface QueueOwner extends Omit<HeavyCommand, "state"> {
   version: 4;
-  state: HeavyCommand["state"] | "cancelled" | "completed";
+  state: HeavyCommand["state"] | "acquiring" | "cancelled" | "completed";
   runnerPath: string;
   runnerOptions: string[];
 }

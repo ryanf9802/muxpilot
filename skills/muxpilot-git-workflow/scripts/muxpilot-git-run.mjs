@@ -28,7 +28,7 @@ const runDir = join(leaseRoot, "runs", runId);
 const controlSocket = join(runDir, "control.sock");
 let startedWaitingAt = Date.now();
 let executionCwd = process.cwd();
-let state = "waiting";
+let state = queueEnabled ? "acquiring" : "waiting";
 let slot = null;
 let leasePath = null;
 let child = null;
@@ -201,8 +201,8 @@ async function createControlServer() {
         const request = JSON.parse(input.trim());
         if (request.action === "probe") socket.end(`${JSON.stringify({ ok: true, runId, state })}\n`);
         else if (request.action === "terminate") {
-          const accepted = (state === "waiting" || Boolean(child)) && state !== "terminating";
-          if (accepted && state === "waiting") {
+          const accepted = (state === "acquiring" || state === "waiting" || Boolean(child)) && state !== "terminating";
+          if (accepted && !child) {
             state = "terminating";
             terminationReason = "operator requested termination while waiting for a slot";
             desiredExitCode = 143;
@@ -228,6 +228,7 @@ async function createControlServer() {
 async function acquireLease() {
   while (!stoppingSignal) {
     const acquired = await withSchedulerLock(async () => {
+      if (stoppingSignal) return null;
       await reapStaleLeases();
       if (queueEnabled) {
         const existingRunId = await deferredRunForWorkspace();
@@ -237,10 +238,16 @@ async function acquireLease() {
       for (let candidateSlot = 0; candidateSlot < concurrency; candidateSlot += 1) {
         if (!existsSync(join(leaseRoot, `slot-${candidateSlot}`))) available.push(candidateSlot);
       }
-      if (available.length === 0) return null;
+      if (available.length === 0) {
+        if (queueEnabled) await markDeferred();
+        return null;
+      }
       if (queueEnabled) {
         const queued = await queuedRunIds();
-        if (!queued.slice(0, available.length).includes(runId)) return null;
+        if (!queued.slice(0, available.length).includes(runId)) {
+          await markDeferred();
+          return null;
+        }
       }
       const candidateSlot = available[0];
       const candidate = join(leaseRoot, `slot-${candidateSlot}`);
@@ -249,6 +256,7 @@ async function acquireLease() {
       return { path: candidate, slot: candidateSlot };
     });
     if (acquired) return acquired;
+    if (stoppingSignal) throw new Error(`stopped while acquiring a heavyweight slot (${stoppingSignal})`);
     if (queueEnabled) throw new DeferredError();
     await delay(pollMs);
   }
@@ -266,12 +274,20 @@ async function deferredRunForWorkspace() {
   return null;
 }
 
+async function markDeferred() {
+  state = "waiting";
+  await updateOwner();
+}
+
 async function queuedRunIds() {
   const queued = [];
   for (const candidateRunId of await readdir(join(leaseRoot, "runs")).catch(() => [])) {
     try {
       const owner = JSON.parse(await readFile(join(leaseRoot, "runs", candidateRunId, "owner.json"), "utf8"));
-      if (owner.version === 4 && owner.state === "waiting") queued.push({ runId: candidateRunId, queuedAt: owner.queuedAt });
+      if (owner.version === 4 && (owner.state === "acquiring" || owner.state === "waiting")) {
+        if (owner.state === "acquiring" && (!validSocketPath(owner.controlSocket) || !await probeSocket(owner.controlSocket))) continue;
+        queued.push({ runId: candidateRunId, queuedAt: owner.queuedAt });
+      }
     } catch { /* ignore incomplete records */ }
   }
   return queued.sort((left, right) => String(left.queuedAt).localeCompare(String(right.queuedAt)) || left.runId.localeCompare(right.runId)).map((entry) => entry.runId);

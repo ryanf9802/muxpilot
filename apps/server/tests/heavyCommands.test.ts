@@ -13,6 +13,36 @@ afterEach(async () => {
 });
 
 describe("HeavyCommandService", () => {
+  it("ignores wrapper-owned acquiring records until they become queue eligible", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const runId = "mabc123-aaaaaaaaaaaa";
+    await writeQueueOwner(leases, runId, new Date().toISOString());
+    const ownerPath = join(leases, "runs", runId, "owner.json");
+    const initial = JSON.parse(await readFile(ownerPath, "utf8"));
+    await writeFile(ownerPath, JSON.stringify({ ...initial, state: "acquiring" }));
+    const messages: string[] = [];
+    const service = new HeavyCommandService(leases, sessions, 1, 120_000);
+    service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+    });
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+      expect(messages).toHaveLength(0);
+      expect((await service.list("workspace-a")).commands).toHaveLength(0);
+      await expect(stat(join(leases, "slot-0"))).rejects.toThrow();
+
+      await writeFile(ownerPath, JSON.stringify({ ...initial, state: "waiting", heartbeatAt: new Date().toISOString() }));
+      await waitFor(async () => messages.length === 1);
+      expect(JSON.parse(await readFile(ownerPath, "utf8"))).toMatchObject({ state: "reserved", slot: 0 });
+    } finally {
+      await service.stop();
+    }
+  });
+
   it("isolates active metadata and bounded output by workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);

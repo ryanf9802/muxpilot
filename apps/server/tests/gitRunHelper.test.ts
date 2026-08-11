@@ -16,6 +16,152 @@ afterEach(async () => {
 });
 
 describe("heavyweight validation helper", () => {
+  it("keeps a managed run private from the scheduler while acquiring a free slot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const output = join(root, "ran.txt");
+    await mkdir(join(leases, "scheduler-lock"), { recursive: true });
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", output
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+      }
+    });
+
+    await waitForState(leases, "acquiring");
+    await expect(stat(output)).rejects.toThrow();
+    await rm(join(leases, "scheduler-lock"), { recursive: true, force: true });
+
+    const result = await run;
+    expect(result.stderr).not.toContain("QUEUED_NOT_RUN");
+    expect(await readFile(output, "utf8")).toBe("ran");
+  });
+
+  it("honors operator termination while a managed run is acquiring", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const output = join(root, "ran.txt");
+    await mkdir(join(leases, "scheduler-lock"), { recursive: true });
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", output
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+      }
+    });
+    const outcome = run.then(() => null, (error) => error as { code: number; stderr: string });
+    const runId = await waitForState(leases, "acquiring");
+
+    expect(await control(join(leases, "runs", runId, "control.sock"), { action: "terminate" }))
+      .toMatchObject({ ok: true, accepted: true, state: "terminating" });
+    await rm(join(leases, "scheduler-lock"), { recursive: true, force: true });
+
+    expect(await outcome).toMatchObject({ code: 143, stderr: expect.stringContaining("TERMINATING") });
+    await expect(stat(output)).rejects.toThrow();
+  });
+
+  it("does not let an abandoned acquiring record block a free slot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const abandonedRunDir = join(leases, "runs", "mabandoned-aaaaaaaaaaaa");
+    const output = join(root, "ran.txt");
+    await mkdir(abandonedRunDir, { recursive: true });
+    await writeFile(join(abandonedRunDir, "owner.json"), JSON.stringify({
+      version: 4,
+      state: "acquiring",
+      queuedAt: "2026-01-01T00:00:00.000Z",
+      controlSocket: join(abandonedRunDir, "control.sock")
+    }));
+
+    const result = await execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", output
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+      }
+    });
+
+    expect(result.stderr).not.toContain("QUEUED_NOT_RUN");
+    expect(await readFile(output, "utf8")).toBe("ran");
+  });
+
+  it("does not jump an older managed queue ticket when a slot is free", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const olderRunId = "molder-111111111111";
+    const olderRunDir = join(leases, "runs", olderRunId);
+    const output = join(root, "ran.txt");
+    await mkdir(olderRunDir, { recursive: true });
+    await writeFile(join(olderRunDir, "owner.json"), JSON.stringify({
+      version: 4,
+      runId: olderRunId,
+      workspaceId: "workspace-b",
+      state: "waiting",
+      command: ["make", "test"],
+      commandDisplay: "make test",
+      cwd: root,
+      wrapperPid: 1,
+      childPid: null,
+      slot: null,
+      controlSocket: join(olderRunDir, "control.sock"),
+      runnerPath: helper,
+      runnerOptions: [],
+      logPath: null,
+      queuedAt: "2026-01-01T00:00:00.000Z",
+      startedAt: null,
+      lastOutputAt: null,
+      lastActivityAt: null,
+      activity: { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 },
+      heartbeatAt: new Date().toISOString(),
+      deadlines: { inactivityWarnMs: 60_000, inactivityTimeoutMs: 600_000, runtimeTimeoutMs: 1_800_000, terminationGraceMs: 30_000 },
+      packageDiagnostics: null,
+      terminationReason: null,
+      resumeSentAt: null,
+      resumeDeadlineAt: null,
+      exitCode: null
+    }));
+
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", output
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
+      }
+    });
+
+    await expect(run).rejects.toMatchObject({ code: 75, stderr: expect.stringContaining("QUEUED_NOT_RUN") });
+    await expect(stat(output)).rejects.toThrow();
+    const owners = await readdir(join(leases, "runs"));
+    const deferredRunId = owners.find((entry) => entry !== olderRunId);
+    expect(deferredRunId).toBeTruthy();
+    expect(JSON.parse(await readFile(join(leases, "runs", deferredRunId!, "owner.json"), "utf8"))).toMatchObject({ state: "waiting" });
+  });
+
   it("allows two heavyweight commands by default", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
