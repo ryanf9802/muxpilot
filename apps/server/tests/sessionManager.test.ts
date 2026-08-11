@@ -1736,7 +1736,7 @@ describe("SessionManager transcript isolation", () => {
     expect(harness.manager.getSession(session.id)?.status).toBe("working");
 
     await harness.manager.discover();
-    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+    expect(harness.manager.getSession(session.id)?.status).toBe("working");
     harness.db.close();
   });
 
@@ -2634,6 +2634,65 @@ describe("SessionManager transcript isolation", () => {
     expect(harness.manager.getSession(session.id)).toMatchObject({ status: "planning", inputMode: "plan", preview: "next prompt" });
     expect(published).toEqual(expect.arrayContaining(["message.appended", "status.changed", "session.updated"]));
     harness.db.close();
+  });
+
+  it("keeps a muxpilot submission active across stale composer discovery until the turn completes", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "submission-lifecycle.jsonl");
+    await writeCodexSession(harness.codexHome, "submission-lifecycle.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendKeys = async () => undefined;
+    harness.tmux.sendInput = async () => undefined;
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+    await harness.manager.ingest();
+
+    await harness.manager.sendInput(session.id, "next prompt", "plan");
+    await harness.manager.discover();
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "planning", inputMode: "plan" });
+
+    const taskStartedAt = new Date().toISOString();
+    const userEchoAt = new Date(Date.now() + 1).toISOString();
+    await appendFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: taskStartedAt,
+          type: "event_msg",
+          payload: { type: "task_started", collaboration_mode_kind: "default" }
+        }),
+        JSON.stringify({
+          timestamp: userEchoAt,
+          type: "event_msg",
+          payload: { type: "user_message", message: "next prompt" }
+        }),
+        ""
+      ].join("\n")
+    );
+    await harness.manager.ingest();
+    await harness.manager.discover();
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "working", inputMode: "default" });
+
+    await appendFile(
+      path,
+      `${JSON.stringify({ timestamp: new Date(Date.now() + 2).toISOString(), type: "event_msg", payload: { type: "task_complete" } })}\n`
+    );
+    await harness.manager.ingest();
+    await harness.manager.discover();
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+    await harness.db.close();
   });
 
   it("sends input after one mode switch when Codex mode verification is ambiguous", async () => {

@@ -84,6 +84,7 @@ interface IngestSessionResult {
 }
 
 const MAX_LIVE_INGEST_PASSES_PER_TICK = 8;
+const PLAN_ACTION_START_GRACE_MS = 15_000;
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -92,6 +93,7 @@ export class SessionManager {
   private ingestRunning = false;
   private readonly answeredPlanMessageIds = new Set<string>();
   private readonly answeredQuestionMessageIds = new Set<string>();
+  private readonly pendingPlanActionStatuses = new Map<string, { status: SessionStatus; expiresAtMs: number }>();
   private readonly processingQueuedSessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
@@ -271,6 +273,8 @@ export class SessionManager {
         await this.latestQuestionAnswerMessage(lookupId, latestQuestionMessage),
         await this.db.latestPlanReadyMessage(lookupId),
         latestUserMessage,
+        await this.db.latestTurnLifecycleMessage(lookupId),
+        this.pendingPlanActionStatus(lookupId),
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
       );
@@ -349,10 +353,10 @@ export class SessionManager {
         this.liveApprovals.delete(migratingLegacy.id);
         this.resolvingRepositoryApprovals.delete(migratingLegacy.id);
       } else {
-        await this.db.upsertSession(session, now);
+        await this.db.upsertSession(session, now, true);
       }
       await this.recordTouchedRepository(session, now);
-      if (changed) this.publish("session.updated", session.id, session);
+      if (changed) this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? session);
       await this.processQueuedInputs(session.id);
       if (liveApprovalPrompt) {
         await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt);
@@ -486,16 +490,11 @@ export class SessionManager {
           sessionId: session.id,
           sequence: await this.db.nextSequence(session.id)
         });
-        if (await this.db.appendMessage(message)) {
+        const appended = await this.db.appendMessage(message);
+        if (isTurnCompletionMessage(message)) this.pendingPlanActionStatuses.delete(session.id);
+        if (appended) {
           this.publish("message.appended", session.id, message);
-          if (message.role === "user") {
-            this.activitySummarizer?.schedule(session.id);
-            const messageMode = collaborationModeFromMessage(message);
-            if (messageMode) {
-              await this.db.setSessionInputMode(session.id, messageMode, nowIso());
-              this.publish("session.updated", session.id, await this.db.getSession(session.id));
-            }
-          }
+          if (message.role === "user") this.activitySummarizer?.schedule(session.id);
           if (!session.transcriptSyncing && message.type === "approval_request") {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "approval", now);
@@ -510,6 +509,16 @@ export class SessionManager {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "plan_ready", now);
             this.publish("status.changed", session.id, { status: "plan_ready" });
+          }
+        }
+        if (message.role === "user") {
+          const messageMode = collaborationModeFromMessage(message);
+          if (messageMode) {
+            const current = await this.db.getSession(session.id);
+            if (current?.inputMode !== messageMode) {
+              await this.db.setSessionInputMode(session.id, messageMode, nowIso());
+              this.publish("session.updated", session.id, await this.db.getSession(session.id));
+            }
           }
         }
       }
@@ -534,6 +543,8 @@ export class SessionManager {
           await this.latestQuestionAnswerMessage(session.id, latestQuestionMessage),
           await this.db.latestPlanReadyMessage(session.id),
           latestUserMessage,
+          await this.db.latestTurnLifecycleMessage(session.id),
+          this.pendingPlanActionStatus(session.id),
           this.answeredPlanMessageIds,
           this.answeredQuestionMessageIds
         );
@@ -1283,6 +1294,7 @@ export class SessionManager {
       const status = activeInputStatus(mode);
       await this.db.setSessionInputMode(sessionId, mode, now);
       await this.db.setSessionStatus(sessionId, status, now);
+      this.pendingPlanActionStatuses.set(sessionId, { status, expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
       this.publish("status.changed", sessionId, { status });
     }
     if (action.type === "rename") {
@@ -1325,6 +1337,14 @@ export class SessionManager {
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
     return updatedSession;
+  }
+
+  private pendingPlanActionStatus(sessionId: string): SessionStatus | null {
+    const pending = this.pendingPlanActionStatuses.get(sessionId);
+    if (!pending) return null;
+    if (pending.expiresAtMs > Date.now()) return pending.status;
+    this.pendingPlanActionStatuses.delete(sessionId);
+    return null;
   }
 
   private async answerInteractiveQuestion(
@@ -1730,6 +1750,8 @@ function resolveSessionStatus(
   latestQuestionAnswerMessage: ChatMessage | null,
   latestPlanReadyMessage: ChatMessage | null,
   latestUserMessage: ChatMessage | null,
+  latestTurnLifecycleMessage: ChatMessage | null,
+  pendingPlanActionStatus: SessionStatus | null,
   answeredPlanMessageIds: Set<string>,
   answeredQuestionMessageIds: Set<string>
 ): SessionStatus {
@@ -1743,12 +1765,35 @@ function resolveSessionStatus(
     answeredPlanMessageIds,
     answeredQuestionMessageIds
   );
+  if (
+    pendingStatus === "waiting" &&
+    (pendingPlanActionStatus || isPendingMuxpilotSubmission(latestUserMessage, latestTurnLifecycleMessage))
+  ) {
+    return pendingPlanActionStatus ?? activeInputStatus(inputMode);
+  }
   if (isWorkingStatus(pendingStatus) && isPlanModeTurn(latestUserMessage, inputMode)) return "planning";
   return pendingStatus;
 }
 
 function activeInputStatus(mode: CollaborationMode): SessionStatus {
   return mode === "plan" ? "planning" : "working";
+}
+
+function isPendingMuxpilotSubmission(
+  latestUserMessage: ChatMessage | null,
+  latestTurnLifecycleMessage: ChatMessage | null
+): boolean {
+  if (!latestUserMessage || !recordValue(latestUserMessage.payload.muxpilotSubmission)) return false;
+  if (!latestTurnLifecycleMessage || latestTurnLifecycleMessage.sequence < latestUserMessage.sequence) return true;
+  return latestTurnLifecycleMessage.text === "task_started";
+}
+
+function isTurnCompletionMessage(message: ChatMessage): boolean {
+  return message.type === "status" && (
+    message.text === "task_complete" ||
+    message.text === "turn_complete" ||
+    message.text === "turn_aborted"
+  );
 }
 
 function requireSessionName(input: string): string {

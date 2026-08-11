@@ -17,6 +17,23 @@ describe("AppDatabase session visibility", () => {
     expect((await db.listSessions(false, true)).map((session) => session.id).sort()).toEqual([active.id, missing.id].sort());
     await db.close();
   });
+
+  it("does not let an older discovery snapshot overwrite newer session state", async () => {
+    const db = await tempDb();
+    const session = testSession("session-concurrent-update");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    await db.setSessionInputMode(session.id, "plan", "2026-07-07T00:00:02.000Z");
+    await db.setSessionStatus(session.id, "planning", "2026-07-07T00:00:02.000Z");
+
+    await db.upsertSession(
+      { ...session, status: "waiting", inputMode: "default" },
+      "2026-07-07T00:00:01.000Z",
+      true
+    );
+
+    expect(await db.getSession(session.id)).toMatchObject({ status: "planning", inputMode: "plan" });
+    await db.close();
+  });
 });
 
 describe("AppDatabase activity summaries", () => {
@@ -83,7 +100,11 @@ describe("AppDatabase activity summaries", () => {
 
     const messages = await db.listMessages(session.id, 0);
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({ id: submitted.id, sequence: 1, payload: echoed.payload });
+    expect(messages[0]).toMatchObject({
+      id: submitted.id,
+      sequence: 1,
+      payload: { ...echoed.payload, muxpilotSubmission: submitted.payload.muxpilotSubmission }
+    });
     expect((await db.getSession(session.id))?.unreadCount).toBe(1);
     await db.close();
   });

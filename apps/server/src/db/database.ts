@@ -256,8 +256,8 @@ export class AppDatabase {
     await this.worker.terminate();
   }
 
-  upsertSession(session: ManagedSession, updatedAt: string): Promise<void> {
-    return this.call("upsertSession", session, updatedAt) as Promise<void>;
+  upsertSession(session: ManagedSession, updatedAt: string, rejectIfNewer = false): Promise<void> {
+    return this.call("upsertSession", session, updatedAt, rejectIfNewer) as Promise<void>;
   }
 
   rekeySession(
@@ -374,6 +374,10 @@ export class AppDatabase {
 
   latestMessage(sessionId: string): Promise<ChatMessage | null> {
     return this.call("latestMessage", sessionId) as Promise<ChatMessage | null>;
+  }
+
+  latestTurnLifecycleMessage(sessionId: string): Promise<ChatMessage | null> {
+    return this.call("latestTurnLifecycleMessage", sessionId) as Promise<ChatMessage | null>;
   }
 
   latestAssistantMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -622,8 +626,10 @@ export class SyncAppDatabase {
     this.db.close();
   }
 
-  upsertSession(session: ManagedSession, updatedAt: string): void {
-    const existing = this.getSession(session.id);
+  upsertSession(session: ManagedSession, updatedAt: string, rejectIfNewer = false): void {
+    const existingRow = this.db.prepare("SELECT * FROM managed_sessions WHERE id = ?").get(session.id) as SessionRow | undefined;
+    if (rejectIfNewer && existingRow && existingRow.updated_at > updatedAt) return;
+    const existing = existingRow ? this.hydrateSession(existingRow) : null;
     const nextSession = {
       ...session,
       initializing: existing ? existing.initializing === true : session.initializing === true,
@@ -1033,13 +1039,18 @@ export class SyncAppDatabase {
       !timestampsAreNear(submitted.timestamp, message.timestamp)
     ) return false;
 
+    const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
+    const reconciledPayload = muxpilotSubmission
+      ? { ...message.payload, muxpilotSubmission }
+      : message.payload;
+
     const result = this.db
       .prepare(
         `UPDATE messages
          SET type = ?, payload_json = ?
          WHERE id = ? AND session_id = ?`
       )
-      .run(message.type, JSON.stringify(message.payload), submitted.id, submitted.sessionId);
+      .run(message.type, JSON.stringify(reconciledPayload), submitted.id, submitted.sessionId);
     return Number(result.changes) > 0;
   }
 
@@ -1070,6 +1081,20 @@ export class SyncAppDatabase {
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ?
+         ORDER BY sequence DESC
+         LIMIT 1`
+      )
+      .get(sessionId) as MessageRow | undefined;
+    return row ? hydrateMessage(row) : null;
+  }
+
+  latestTurnLifecycleMessage(sessionId: string): ChatMessage | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ?
+           AND type = 'status'
+           AND text IN ('task_started', 'task_complete', 'turn_complete', 'turn_aborted')
          ORDER BY sequence DESC
          LIMIT 1`
       )
