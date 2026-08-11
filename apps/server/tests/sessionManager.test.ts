@@ -2351,24 +2351,40 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("cancels a deferred heavyweight ticket before interrupting its session", async () => {
+  it("cancels a deferred heavyweight ticket before interrupting and releases queued input", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0]!;
     await harness.db.upsertSession({ ...session, gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" } }, new Date().toISOString());
     const operations: string[] = [];
+    const sentInputs: string[] = [];
+    let deferred = true;
     harness.manager.setHeavyCommandQueue({
-      hasDeferred: async () => true,
-      cancelWorkspace: async () => { operations.push("cancel"); }
+      hasDeferred: async () => deferred,
+      cancelWorkspace: async () => { operations.push("cancel"); deferred = false; }
     });
     harness.tmux.interrupt = async () => { operations.push("interrupt"); };
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+
+    await harness.manager.sendInput(session.id, "continue after interrupt");
+    expect(sentInputs).toEqual([]);
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([
+      { text: "continue after interrupt", status: "queued" }
+    ]);
 
     await harness.manager.act(session.id, { type: "interrupt" });
     expect(operations).toEqual(["cancel", "interrupt"]);
     expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+
+    await harness.manager.discover();
+    expect(sentInputs).toEqual(["continue after interrupt "]);
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([
+      { text: "continue after interrupt", status: "sent" }
+    ]);
     harness.db.close();
   });
 
