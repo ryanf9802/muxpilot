@@ -25,6 +25,7 @@ import {
   isPromptHistoryShortcut,
   isSessionTransferFileName,
   importTargetBranchValue,
+  isLatestSessionListRequest,
   isSessionHistoryResultActive,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
@@ -37,6 +38,9 @@ import {
   sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
+  sessionEventRequiresReconcile,
+  sessionEventUpdatesShellSessions,
+  sessionStreamMessageRequiresReconcile,
   sessionDirectorySuggestionsFromSessions,
   sessionNameValidationMessage,
   shouldHandlePrimaryInputFocusShortcut,
@@ -708,6 +712,13 @@ describe("syncSessionIntoStoplightSessions", () => {
     expect(syncSessionIntoStoplightSessions([first, second], testSession({ id: "a", status: "missing" }))).toEqual([second]);
     expect(syncSessionIntoStoplightSessions([first, second], testSession({ id: "b", archived: true }))).toEqual([first]);
   });
+
+  it("keeps an initializing session visible while discovery is incomplete", () => {
+    const starting = testSession({ id: "a", status: "unknown", initializing: true });
+    const transientMissing = testSession({ id: "a", status: "missing", initializing: true });
+
+    expect(syncSessionIntoStoplightSessions([starting], transientMissing)).toEqual([transientMissing]);
+  });
 });
 
 describe("applySessionEventToSessions", () => {
@@ -721,6 +732,37 @@ describe("applySessionEventToSessions", () => {
     const session = testSession({ id: "a", status: "working" });
     const event = { id: "event", type: "status.changed" as const, sessionId: "a", payload: { status: "missing" }, timestamp: "2026-08-09T00:00:00.000Z" };
     expect(applySessionEventToSessions([session], event)).toEqual([]);
+  });
+});
+
+describe("live session reconciliation", () => {
+  it("uses the connected stream message as a snapshot barrier", () => {
+    expect(sessionStreamMessageRequiresReconcile({ type: "connected" })).toBe(true);
+    expect(sessionStreamMessageRequiresReconcile({ type: "status.changed" })).toBe(false);
+  });
+
+  it("rejects a session list response superseded by a live event", () => {
+    expect(isLatestSessionListRequest(4, 5)).toBe(false);
+    expect(isLatestSessionListRequest(5, 5)).toBe(true);
+  });
+
+  it("immediately reconciles a status event for a session absent from shell state", () => {
+    const known = testSession({ id: "a", status: "working" });
+    const knownEvent = { id: "known", type: "status.changed" as const, sessionId: "a", payload: { status: "waiting" }, timestamp: "2026-08-11T00:00:00.000Z" };
+    const unknownEvent = { ...knownEvent, id: "unknown", sessionId: "b" };
+    const fullUpdate = { ...unknownEvent, type: "session.updated" as const, payload: testSession({ id: "b" }) };
+
+    expect(sessionEventRequiresReconcile([known], knownEvent)).toBe(false);
+    expect(sessionEventRequiresReconcile([known], unknownEvent)).toBe(true);
+    expect(sessionEventRequiresReconcile([known], fullUpdate)).toBe(false);
+  });
+
+  it("supersedes list requests only for events that update shell session state", () => {
+    const event = { id: "event", type: "status.changed" as const, sessionId: "a", payload: { status: "waiting" }, timestamp: "2026-08-11T00:00:00.000Z" };
+
+    expect(sessionEventUpdatesShellSessions(event)).toBe(true);
+    expect(sessionEventUpdatesShellSessions({ ...event, type: "session.updated", payload: testSession({ id: "a" }) })).toBe(true);
+    expect(sessionEventUpdatesShellSessions({ ...event, type: "message.appended" })).toBe(false);
   });
 });
 
@@ -788,7 +830,7 @@ function directorySuggestion(input: {
 }
 
 function testSession(
-  input: { id: string } & Partial<Pick<ManagedSession, "status" | "archived" | "lastActivityAt">> & {
+  input: { id: string } & Partial<Pick<ManagedSession, "status" | "initializing" | "archived" | "lastActivityAt">> & {
       cwd?: string;
       repoRoot?: string | null;
       repoName?: string;
@@ -823,6 +865,7 @@ function testSession(
     codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
+    initializing: input.initializing,
     lastActivityAt: input.lastActivityAt ?? null,
     preview: "",
     recentUserPrompts: [],

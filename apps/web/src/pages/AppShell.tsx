@@ -123,6 +123,8 @@ export function AppShell() {
   const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
   const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
   const sessionRequestIdRef = useRef(0);
+  const sessionsRef = useRef<ManagedSession[]>([]);
+  const sessionReconcileTimerRef = useRef<number | null>(null);
   const sessionEventListenersRef = useRef(new Set<(event: SessionEvent) => void>());
   const connectionStateRef = useRef<ShellConnectionState>("connecting");
   const connectionGraceStartedAtRef = useRef(Date.now());
@@ -284,18 +286,32 @@ export function AppShell() {
   const loadSessions = useCallback(async () => {
     const requestId = ++sessionRequestIdRef.current;
     const sessionResponse = await api.sessions();
-    if (requestId === sessionRequestIdRef.current) {
+    if (isLatestSessionListRequest(requestId, sessionRequestIdRef.current)) {
+      sessionsRef.current = sessionResponse.sessions;
       setSessions(sessionResponse.sessions);
       setSessionsLoaded(true);
     }
   }, []);
+
+  const scheduleSessionReconcile = useCallback(() => {
+    if (sessionReconcileTimerRef.current !== null) return;
+    sessionReconcileTimerRef.current = window.setTimeout(() => {
+      sessionReconcileTimerRef.current = null;
+      void loadSessions().catch(handleConnectedRequestFailure);
+    }, 0);
+  }, [handleConnectedRequestFailure, loadSessions]);
 
   const loadNotificationSettings = useCallback(async () => {
     setNotificationSettings(await api.notificationSettings());
   }, []);
 
   const syncSessionStoplight = useCallback((session: ManagedSession) => {
-    setSessions((currentSessions) => syncSessionIntoStoplightSessions(currentSessions, session));
+    sessionRequestIdRef.current += 1;
+    setSessions((currentSessions) => {
+      const nextSessions = syncSessionIntoStoplightSessions(currentSessions, session);
+      sessionsRef.current = nextSessions;
+      return nextSessions;
+    });
   }, []);
 
   const subscribeSessionEvents = useCallback((listener: (event: SessionEvent) => void) => {
@@ -344,9 +360,21 @@ export function AppShell() {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
+      if (sessionStreamMessageRequiresReconcile(event)) {
+        void loadSessions().catch(handleConnectedRequestFailure);
+      }
       if ("sessionId" in event) {
         const sessionEvent = event as SessionEvent;
-        setSessions((current) => applySessionEventToSessions(current, sessionEvent));
+        if (sessionEventUpdatesShellSessions(sessionEvent)) {
+          sessionRequestIdRef.current += 1;
+          const reconcile = sessionEventRequiresReconcile(sessionsRef.current, sessionEvent);
+          setSessions((currentSessions) => {
+            const nextSessions = applySessionEventToSessions(currentSessions, sessionEvent);
+            sessionsRef.current = nextSessions;
+            return nextSessions;
+          });
+          if (reconcile) scheduleSessionReconcile();
+        }
         for (const listener of sessionEventListenersRef.current) listener(sessionEvent);
       }
       if (isNotificationTriggeredEvent(event)) {
@@ -372,10 +400,14 @@ export function AppShell() {
     return () => {
       closing = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (sessionReconcileTimerRef.current !== null) {
+        window.clearTimeout(sessionReconcileTimerRef.current);
+        sessionReconcileTimerRef.current = null;
+      }
       clearInterval(interval);
       socket.close();
     };
-  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, shellSocketEpoch]);
+  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, scheduleSessionReconcile, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "connecting" && connectionState !== "reconnecting" && connectionState !== "disconnected") return undefined;
@@ -847,6 +879,7 @@ export function AppShell() {
           } }
         : { cwd, name, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
+      syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
       void loadSessions().catch(handleConnectedRequestFailure);
@@ -1551,7 +1584,9 @@ function updateDirectorySuggestionRef(refs: Map<string, HTMLButtonElement>, path
 }
 
 export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession[], session: ManagedSession): ManagedSession[] {
-  if (session.archived || session.status === "missing") return currentSessions.filter((item) => item.id !== session.id);
+  if (session.archived || (session.status === "missing" && session.initializing !== true)) {
+    return currentSessions.filter((item) => item.id !== session.id);
+  }
   const index = currentSessions.findIndex((item) => item.id === session.id);
   if (index === -1) return [...currentSessions, session];
   const nextSessions = [...currentSessions];
@@ -1569,6 +1604,22 @@ export function applySessionEventToSessions(currentSessions: ManagedSession[], e
   const current = currentSessions.find((session) => session.id === event.sessionId);
   if (!current) return currentSessions;
   return syncSessionIntoStoplightSessions(currentSessions, { ...current, status });
+}
+
+export function isLatestSessionListRequest(requestId: number, latestRequestId: number): boolean {
+  return requestId === latestRequestId;
+}
+
+export function sessionEventRequiresReconcile(currentSessions: ManagedSession[], event: SessionEvent): boolean {
+  return event.type === "status.changed" && !currentSessions.some((session) => session.id === event.sessionId);
+}
+
+export function sessionEventUpdatesShellSessions(event: SessionEvent): boolean {
+  return event.type === "session.updated" || event.type === "status.changed";
+}
+
+export function sessionStreamMessageRequiresReconcile(event: { type: string }): boolean {
+  return event.type === "connected";
 }
 
 export function sessionStoplightSearch(currentSearch: string): string {
