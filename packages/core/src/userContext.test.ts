@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
 import { isDisplayableUserPromptText, normalizeUserContextText } from "./userContext.js";
 
 describe("user context normalization", () => {
@@ -17,6 +18,22 @@ describe("user context normalization", () => {
     expect(normalizeUserContextText(text)).toMatchObject({
       kind: "action",
       text: expect.stringContaining("Subagent completed: 019f428a-0df4-7ef3-acd5-ec042babc237")
+    });
+  });
+
+  it("classifies heavyweight queue automation as an action instead of prompt history", () => {
+    const text = serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "queue_released",
+      runId: "mabc-012345abcdef",
+      commandDisplay: "printf '<environment_context>literal argument</environment_context>'",
+      skill: "$muxpilot-heavy-command-queue"
+    });
+    expect(isDisplayableUserPromptText(text)).toBe(false);
+    expect(normalizeUserContextText(text)).toEqual({
+      kind: "action",
+      text: "Heavyweight command queued · session released while waiting",
+      skillNames: []
     });
   });
 

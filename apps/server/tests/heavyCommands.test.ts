@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
 import { HeavyCommandService } from "../src/services/heavyCommands.js";
 
 const roots: string[] = [];
@@ -85,8 +86,16 @@ describe("HeavyCommandService", () => {
       expect(firstOwner).toMatchObject({ state: "reserved", slot: 0 });
       expect(secondOwner).toMatchObject({ state: "waiting", slot: null });
       expect((await service.list("workspace-a")).commands.find((command) => command.runId === second)?.queuePosition).toBe(1);
-      expect(messages[0]).toContain(`--resume' '${first}`);
-      expect(messages[0]).toContain("$muxpilot-heavy-command-queue");
+      expect(normalizeHeavyCommandQueueEvent(messages[0] ?? "")).toMatchObject({
+        legacy: false,
+        event: {
+          kind: "resume_requested",
+          runId: first,
+          commandDisplay: "make lint",
+          slot: 0,
+          resumeCommand: expect.stringContaining(`--resume' '${first}`)
+        }
+      });
       expect(await service.terminate("workspace-a", first)).toBe("accepted");
       await expect(stat(join(leases, "slot-0"))).rejects.toThrow();
     } finally {

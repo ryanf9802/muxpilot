@@ -3540,6 +3540,121 @@ select:focus-visible {
   font-size: 12px;
 }
 
+.queue-automation-event {
+  justify-self: stretch;
+  min-width: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--color-input));
+  border: 1px solid color-mix(in srgb, var(--color-warning) 34%, var(--color-border));
+  border-radius: 8px;
+}
+
+.queue-automation-event > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  padding: 7px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.queue-automation-event > summary::before {
+  flex: 0 0 auto;
+  content: "›";
+  color: var(--color-warning);
+  font-size: 18px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.queue-automation-event[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.queue-automation-event > summary::-webkit-details-marker {
+  display: none;
+}
+
+.queue-automation-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.queue-automation-direction {
+  flex: 0 0 auto;
+  color: var(--color-warning);
+  font-weight: 700;
+}
+
+.queue-automation-main strong {
+  flex: 0 1 auto;
+  color: var(--color-text);
+}
+
+.queue-automation-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-automation-event time {
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.queue-automation-details {
+  display: grid;
+  gap: 10px;
+  padding: 0 10px 10px;
+}
+
+.queue-automation-details dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0;
+}
+
+.queue-automation-details dl div {
+  display: flex;
+  gap: 6px;
+}
+
+.queue-automation-details dt {
+  color: var(--color-text-muted);
+}
+
+.queue-automation-details dd {
+  margin: 0;
+  color: var(--color-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+.queue-automation-payload summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.queue-automation-payload pre {
+  max-height: 220px;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--color-input);
+  border-radius: 6px;
+}
+
 .message-tool {
   background: color-mix(in srgb, var(--color-surface) 70%, var(--color-input));
 }
@@ -4411,6 +4526,20 @@ select:focus-visible {
 }
 
 @media (max-width: 819px) {
+  .queue-automation-command {
+    display: none;
+  }
+
+  .queue-automation-event > summary {
+    align-items: flex-start;
+  }
+
+  .queue-automation-main {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
   .loading-topbar-status .skeleton-dot:last-child {
     display: none;
   }

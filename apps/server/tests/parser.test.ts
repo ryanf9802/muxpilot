@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { serializeHeavyCommandQueueEvent } from "@muxpilot/core";
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
@@ -128,6 +129,43 @@ describe("parseCodexJsonl", () => {
 
     expect(result.messages.map((message) => message.text)).toEqual(["Continue", "Continue"]);
     expect(result.messages.map((message) => message.payload.type)).toEqual(["event_msg", "event_msg"]);
+  });
+
+  it("reclassifies and deduplicates queue automation echoes in both directions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const resume = serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "resume_requested",
+      runId: "mabc-012345abcdef",
+      commandDisplay: "pnpm test",
+      skill: "$muxpilot-heavy-command-queue",
+      slot: 0,
+      resumeCommand: "'node' 'run.mjs' '--resume' 'mabc-012345abcdef' '--' 'pnpm' 'test'"
+    });
+    const released = serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "queue_released",
+      runId: "mdef-fedcba654321",
+      commandDisplay: "pnpm lint",
+      skill: "$muxpilot-heavy-command-queue"
+    });
+    await writeFile(path, [
+      JSON.stringify({ timestamp: "2026-07-07T00:00:00.000Z", type: "event_msg", payload: { type: "user_message", message: resume } }),
+      JSON.stringify({ timestamp: "2026-07-07T00:00:00.100Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: resume }] } }),
+      JSON.stringify({ timestamp: "2026-07-07T00:00:01.000Z", type: "event_msg", payload: { type: "agent_message", message: released } }),
+      JSON.stringify({ timestamp: "2026-07-07T00:00:01.100Z", type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: released }] } }),
+      ""
+    ].join("\n"));
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(2);
+    expect(result.messages).toEqual([
+      expect.objectContaining({ role: "system", type: "status", text: "Heavyweight slot ready · session resumed automatically" }),
+      expect.objectContaining({ role: "system", type: "status", text: "Heavyweight command queued · session released while waiting" })
+    ]);
+    expect(result.messages[0]?.payload).toHaveProperty("muxpilotHeavyCommandQueue");
   });
 
   it("keeps escalated function calls as tool transcript context", async () => {

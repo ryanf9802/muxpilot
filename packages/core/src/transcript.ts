@@ -1,4 +1,10 @@
 import type { ChatMessage, TranscriptItem } from "./types.js";
+import {
+  heavyCommandQueueEventFromPayload,
+  heavyCommandQueueEventSummary,
+  normalizeHeavyCommandQueueEvent,
+  withHeavyCommandQueueEventPayload
+} from "./heavyCommandQueueEvent.js";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "./userContext.js";
 
 type InternalTranscriptItem =
@@ -221,6 +227,16 @@ function replaceDuplicateAssistantUpdateResponse(messages: ChatMessage[], messag
 }
 
 function displayMessage(message: ChatMessage): ChatMessage | null {
+  const queueEvent = heavyCommandQueueEventFromPayload(message.payload) ?? normalizeHeavyCommandQueueEvent(message.text);
+  if (queueEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: heavyCommandQueueEventSummary(queueEvent.event),
+      payload: withHeavyCommandQueueEventPayload(message.payload, queueEvent)
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -293,7 +309,7 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
+  return Boolean(heavyCommandQueueEventFromPayload(message.payload)) || isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
 }
 
 function isTurnAbortedStatus(message: ChatMessage): boolean {

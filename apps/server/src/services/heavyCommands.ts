@@ -1,3 +1,4 @@
+import { serializeHeavyCommandQueueEvent } from "@muxpilot/core";
 import type { HeavyCommand, HeavyCommandOutputResponse, HeavyCommandsResponse } from "@muxpilot/core";
 import { createConnection } from "node:net";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -171,13 +172,20 @@ export class HeavyCommandService {
     await this.withSchedulerLock(async () => {
       const current = await this.readQueueOwner(owner.runId);
       if (!current || current.state !== "reserved" || current.resumeSentAt) return;
+      if (current.slot === null) {
+        await this.cancelOwner(current, "reserved heavyweight command has no slot");
+        return;
+      }
       const command = [process.execPath, current.runnerPath, "--heavy", "--resume", current.runId, ...current.runnerOptions, "--", ...current.command];
-      const message = [
-        `Muxpilot reserved heavyweight slot ${current.slot} for run ${current.runId}.`,
-        "Use $muxpilot-heavy-command-queue and run this exact command now:",
-        command.map(shellQuote).join(" "),
-        "Do not replace it with a fresh heavyweight command."
-      ].join("\n");
+      const message = serializeHeavyCommandQueueEvent({
+        version: 1,
+        kind: "resume_requested",
+        runId: current.runId,
+        commandDisplay: current.commandDisplay,
+        skill: "$muxpilot-heavy-command-queue",
+        slot: current.slot,
+        resumeCommand: command.map(shellQuote).join(" ")
+      });
       if (!await this.coordinator!.resumeHeavyCommand(sessionId, message)) return;
       const sentAt = new Date();
       current.resumeSentAt = sentAt.toISOString();

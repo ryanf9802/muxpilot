@@ -75,8 +75,23 @@ import type {
   TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
-import { canToggleFastMode, hasCompleteProposedPlan, itemFirstSequence, itemLastSequence, normalizeGitWorkspaceSummary, transcriptMessages } from "@muxpilot/core";
-import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
+import {
+  appendSkillNamesToText,
+  canToggleFastMode,
+  hasCompleteProposedPlan,
+  heavyCommandQueueCommandSummary,
+  heavyCommandQueueEventDirection,
+  heavyCommandQueueEventFromPayload,
+  heavyCommandQueueEventSummary,
+  itemFirstSequence,
+  itemLastSequence,
+  normalizeGitWorkspaceSummary,
+  normalizeHeavyCommandQueueEvent,
+  normalizeSubagentNotificationText,
+  normalizeUserContextText,
+  transcriptMessages,
+  withHeavyCommandQueueEventPayload
+} from "@muxpilot/core";
 import { api } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
@@ -385,6 +400,13 @@ export function transcriptFindMatches(entries: TranscriptFindEntry[], query: str
 
 function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
   if (item.type === "range") return { id: item.id, text: item.label };
+  const queueEvent = heavyCommandQueueEventFromPayload(item.message.payload);
+  if (queueEvent) {
+    return {
+      id: item.id,
+      text: `${heavyCommandQueueEventDirection(queueEvent.event)} ${heavyCommandQueueEventSummary(queueEvent.event)} ${queueEvent.event.commandDisplay}`
+    };
+  }
   return { id: item.id, text: copyableMessageText(item.message) };
 }
 
@@ -3711,7 +3733,7 @@ export function MessageBubble({
   );
 }
 
-function UserAction({
+export function UserAction({
   message,
   itemId,
   onOpenMenu
@@ -3721,6 +3743,38 @@ function UserAction({
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
+  const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
+  if (queueEvent) {
+    const { event, rawText, legacy } = queueEvent;
+    return (
+      <details
+        className={`queue-automation-event${onOpenMenu ? " user-action-copyable" : ""}`}
+        data-transcript-item-id={itemId}
+        {...menuTrigger.triggerProps}
+      >
+        <summary>
+          <span className="queue-automation-main">
+            <span className="queue-automation-direction">{heavyCommandQueueEventDirection(event)}</span>
+            <strong>{heavyCommandQueueEventSummary(event)}</strong>
+            <span className="queue-automation-command">{heavyCommandQueueCommandSummary(event)}</span>
+          </span>
+          <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
+        </summary>
+        <div className="queue-automation-details">
+          <dl>
+            <div><dt>Run</dt><dd>{event.runId}</dd></div>
+            {event.slot !== undefined ? <div><dt>Slot</dt><dd>{event.slot}</dd></div> : null}
+            <div><dt>Format</dt><dd>{legacy ? "Legacy" : "Structured"}</dd></div>
+          </dl>
+          <CodeBlock text={event.resumeCommand ?? event.commandDisplay} />
+          <details className="queue-automation-payload">
+            <summary>Raw automation payload</summary>
+            <pre>{rawText}</pre>
+          </details>
+        </div>
+      </details>
+    );
+  }
   return (
     <div className={`user-action${onOpenMenu ? " user-action-copyable" : ""}`} data-transcript-item-id={itemId} {...menuTrigger.triggerProps}>
       <span>{message.text}</span>
@@ -3761,6 +3815,7 @@ function TranscriptRange({
 }
 
 function label(message: ChatMessage): string {
+  if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
   if (isSubagentMessage(message)) return "Subagent";
   if (isAssistantUpdate(message)) return "Progress";
   if (message.type === "tool_call") return "Tool";
@@ -3812,6 +3867,8 @@ function displayText(message: ChatMessage): string | null {
 }
 
 export function copyableMessageText(message: ChatMessage): string {
+  const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
+  if (queueEvent) return queueEvent.rawText;
   if (isToolOutput(message)) return message.text;
   if (message.role === "assistant") {
     return parseProposedPlanSegments(displayText(message) ?? "")
@@ -4170,6 +4227,16 @@ function replaceDuplicateAssistantUpdateResponse(messages: ChatMessage[], messag
 }
 
 function displayMessage(message: ChatMessage): ChatMessage | null {
+  const queueEvent = heavyCommandQueueEventFromPayload(message.payload) ?? normalizeHeavyCommandQueueEvent(message.text);
+  if (queueEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: heavyCommandQueueEventSummary(queueEvent.event),
+      payload: withHeavyCommandQueueEventPayload(message.payload, queueEvent)
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -4266,7 +4333,7 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
+  return Boolean(heavyCommandQueueEventFromPayload(message.payload)) || isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
 }
 
 function isTurnAbortedStatus(message: ChatMessage): boolean {

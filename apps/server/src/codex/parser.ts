@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
-import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "@muxpilot/core";
+import {
+  appendSkillNamesToText,
+  heavyCommandQueueEventFromPayload,
+  heavyCommandQueueEventSummary,
+  normalizeHeavyCommandQueueEvent,
+  normalizeSubagentNotificationText,
+  normalizeUserContextText,
+  withHeavyCommandQueueEventPayload
+} from "@muxpilot/core";
 import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
 
 export const PARSER_VERSION = "codex-jsonl-v1";
@@ -126,7 +134,7 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
       continue;
     }
     const mapped = mapEvent(line, collaborationMode);
-    if (mapped && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
+    if (mapped && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
   }
 
   return { messages, nextOffset: consumed, pendingSkillNames };
@@ -161,6 +169,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
 
   if (topType === "event_msg" && payloadType === "user_message") {
     const rawMessage = String(event.payload?.message ?? "");
+    const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (queueMessage) return queueMessage;
     const subagentNotification = normalizeSubagentNotificationText(rawMessage);
     if (subagentNotification) {
       return message(
@@ -176,11 +186,14 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
   }
 
   if (topType === "event_msg" && payloadType === "agent_message") {
+    const rawMessage = String(event.payload?.message ?? "");
+    const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (queueMessage) return queueMessage;
     return message(
       "assistant_update",
       "assistant",
       timestamp,
-      String(event.payload?.message ?? ""),
+      rawMessage,
       event as unknown as Record<string, unknown>,
       collaborationMode
     );
@@ -214,12 +227,32 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
     if (role === "assistant" || role === "user") {
       const text = contentToText(event.payload?.content);
       if (!text) return null;
+      const queueMessage = heavyCommandQueueMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+      if (queueMessage) return queueMessage;
       if (role === "user") return userMessageFromText(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
       return message(role, role, timestamp, text, event as unknown as Record<string, unknown>, collaborationMode);
     }
   }
 
   return null;
+}
+
+function heavyCommandQueueMessage(
+  text: string,
+  timestamp: string,
+  payload: Record<string, unknown>,
+  collaborationMode: CollaborationMode | null
+): Omit<ChatMessage, "sessionId" | "sequence"> | null {
+  const normalized = normalizeHeavyCommandQueueEvent(text);
+  if (!normalized) return null;
+  return message(
+    "status",
+    "system",
+    timestamp,
+    heavyCommandQueueEventSummary(normalized.event),
+    withHeavyCommandQueueEventPayload(payload, normalized),
+    collaborationMode
+  );
 }
 
 function userMessageFromText(
@@ -245,6 +278,24 @@ function isDuplicateUserEcho(
     isResponseItemUserMessage(message) !== isResponseItemUserMessage(previousUser) &&
     timestampsAreNear(previousUser.timestamp, message.timestamp)
   );
+}
+
+function isDuplicateHeavyCommandQueueEvent(
+  message: Omit<ChatMessage, "sessionId" | "sequence">,
+  messages: Omit<ChatMessage, "sessionId" | "sequence">[]
+): boolean {
+  const current = heavyCommandQueueEventFromPayload(message.payload);
+  if (!current) return false;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const previous = messages[index];
+    if (!previous) continue;
+    const candidate = heavyCommandQueueEventFromPayload(previous.payload);
+    if (!candidate) continue;
+    if (candidate.event.kind === current.event.kind &&
+      candidate.event.runId === current.event.runId &&
+      timestampsAreNear(previous.timestamp, message.timestamp)) return true;
+  }
+  return false;
 }
 
 function userEchoTextMatches(first: string, second: string): boolean {

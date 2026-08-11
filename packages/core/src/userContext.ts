@@ -1,3 +1,5 @@
+import { heavyCommandQueueEventSummary, normalizeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
+
 export type NormalizedUserContext =
   | { kind: "action"; text: string; skillNames: string[] }
   | { kind: "hidden"; text: ""; skillNames: string[] }
@@ -26,6 +28,9 @@ const COMPACTED_SKILLS_PATTERN = /\n\nSkills:\s*([^\n]+)\s*$/;
 const SUBAGENT_NOTIFICATION_PATTERN = /^<subagent_notification>\s*([\s\S]*?)\s*<\/subagent_notification>$/i;
 
 export function normalizeUserContextText(text: string): NormalizedUserContext {
+  const queueEvent = normalizeHeavyCommandQueueEvent(text);
+  if (queueEvent) return { kind: "action", text: heavyCommandQueueEventSummary(queueEvent.event), skillNames: [] };
+
   const withoutEnvironment = cleanText(
     text.replace(RECOMMENDED_PLUGINS_BLOCK_PATTERN, "").replace(ENVIRONMENT_CONTEXT_BLOCK_PATTERN, "")
   );

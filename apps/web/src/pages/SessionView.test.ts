@@ -3,6 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
+import { normalizeHeavyCommandQueueEvent, serializeHeavyCommandQueueEvent, withHeavyCommandQueueEventPayload } from "@muxpilot/core";
 import {
   activeSkillToken,
   ApprovalBanner,
@@ -101,6 +102,7 @@ import {
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
+  UserAction,
   UserText
 } from "./SessionView.js";
 
@@ -1909,6 +1911,35 @@ describe("MessageBubble", () => {
   });
 });
 
+describe("heavyweight queue automation events", () => {
+  it("renders a compact directional event with expandable command details", () => {
+    const queueMessage = heavyQueueMessage("resume_requested");
+    const html = renderToStaticMarkup(createElement(UserAction, { message: queueMessage }));
+
+    expect(html).toContain("queue-automation-event");
+    expect(html).toContain("Muxpilot → Agent");
+    expect(html).toContain("Heavyweight slot ready · session resumed automatically");
+    expect(html).toContain("pnpm test -- --quoted");
+    expect(html).toContain("Raw automation payload");
+  });
+
+  it("copies the raw envelope while transcript find uses the human summary", () => {
+    const queueMessage = heavyQueueMessage("queue_released");
+    const item: TranscriptItem = {
+      type: "user_action",
+      id: queueMessage.id,
+      message: queueMessage,
+      firstSequence: queueMessage.sequence,
+      lastSequence: queueMessage.sequence
+    };
+
+    expect(copyableMessageText(queueMessage)).toContain("<muxpilot_heavy_command_queue>");
+    expect(visibleTranscriptFindEntries([item], new Set(), {})[0]?.text).toBe(
+      "Agent → Muxpilot Heavyweight command queued · session released while waiting pnpm test -- --quoted"
+    );
+  });
+});
+
 describe("pending user messages", () => {
   it("creates render-only user messages with collaboration mode metadata", () => {
     const pending = createPendingUserMessage("session-a", "Plan this", "plan", "2026-07-07T00:00:00.000Z");
@@ -2513,6 +2544,28 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
 
 function proposedPlanText(body: string): string {
   return `<proposed_plan>\n${body}\n</proposed_plan>`;
+}
+
+function heavyQueueMessage(kind: "queue_released" | "resume_requested"): ChatMessage {
+  const raw = serializeHeavyCommandQueueEvent({
+    version: 1,
+    kind,
+    runId: "mabc-012345abcdef",
+    commandDisplay: "pnpm test -- --quoted",
+    skill: "$muxpilot-heavy-command-queue",
+    ...(kind === "resume_requested" ? { slot: 1, resumeCommand: "'node' 'run.mjs' '--resume' 'mabc-012345abcdef'" } : {})
+  });
+  const normalized = normalizeHeavyCommandQueueEvent(raw)!;
+  return message(
+    "session-a",
+    1,
+    kind === "queue_released"
+      ? "Heavyweight command queued · session released while waiting"
+      : "Heavyweight slot ready · session resumed automatically",
+    "system",
+    "status",
+    withHeavyCommandQueueEventPayload({}, normalized)
+  );
 }
 
 function transcriptMessageItem(message: ChatMessage): TranscriptItem {

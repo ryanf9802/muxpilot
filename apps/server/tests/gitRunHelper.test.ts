@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { createConnection } from "node:net";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -101,7 +102,15 @@ describe("heavyweight validation helper", () => {
     await waitForRun(leases);
     const command = [process.execPath, "-e", "require('node:fs').writeFileSync('deferred.txt', 'ran')"];
     const deferred = execFileAsync(process.execPath, [helper, "--heavy", "--", ...command], { env: environment, cwd: commandCwd });
-    await expect(deferred).rejects.toMatchObject({ code: 75, stderr: expect.stringContaining("QUEUED_NOT_RUN") });
+    let deferredStderr = "";
+    await deferred.catch((error: { code: number; stderr: string }) => {
+      expect(error).toMatchObject({ code: 75, stderr: expect.stringContaining("QUEUED_NOT_RUN") });
+      deferredStderr = error.stderr;
+    });
+    const eventText = deferredStderr.slice(deferredStderr.indexOf("<muxpilot_heavy_command_queue>"));
+    expect(normalizeHeavyCommandQueueEvent(eventText)).toMatchObject({
+      event: { kind: "queue_released", commandDisplay: expect.stringContaining("writeFileSync") }
+    });
     await expect(stat(output)).rejects.toThrow();
 
     const runId = await waitForState(leases, "waiting");

@@ -138,6 +138,7 @@ try {
   if (error instanceof DeferredError) {
     deferred = true;
     lifecycle("QUEUED_NOT_RUN", `run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("use $muxpilot-heavy-command-queue; do not poll or retry")}`);
+    queueEvent("queue_released", { commandDisplay: formatCommand(command) });
     process.exitCode = 75;
   } else {
     lifecycle("RUNNER_ERROR", error instanceof Error ? error.message : String(error));
@@ -496,6 +497,19 @@ function writeLog(chunk) {
 
 function lifecycle(event, details = "") {
   const message = `[muxpilot-heavy] ${new Date().toISOString()} ${event}${details ? ` ${details}` : ""}\n`;
+  process.stderr.write(message);
+  writeLog(message);
+}
+
+function queueEvent(kind, details) {
+  const event = {
+    version: 1,
+    kind,
+    runId,
+    commandDisplay: details.commandDisplay,
+    skill: "$muxpilot-heavy-command-queue"
+  };
+  const message = `<muxpilot_heavy_command_queue>\n${JSON.stringify(event)}\n</muxpilot_heavy_command_queue>\n`;
   process.stderr.write(message);
   writeLog(message);
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildExpandedTranscriptItems, buildTranscriptItems } from "./transcript.js";
+import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
@@ -114,6 +115,30 @@ describe("buildTranscriptItems", () => {
         type: "range",
         rangeKind: "stack",
         label: "1 event: 1 subagent"
+      })
+    ]);
+  });
+
+  it("renders queue automation in standalone compact action rows", () => {
+    const items = buildTranscriptItems([
+      message(1, serializeHeavyCommandQueueEvent({
+        version: 1,
+        kind: "queue_released",
+        runId: "mabc-012345abcdef",
+        commandDisplay: "pnpm test",
+        skill: "$muxpilot-heavy-command-queue"
+      }), "assistant", "assistant")
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        type: "user_action",
+        message: expect.objectContaining({
+          role: "system",
+          type: "status",
+          text: "Heavyweight command queued · session released while waiting",
+          payload: expect.objectContaining({ muxpilotHeavyCommandQueue: expect.any(Object) })
+        })
       })
     ]);
   });
