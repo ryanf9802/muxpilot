@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { buildTranscriptItems } from "./transcript.js";
+import { buildExpandedTranscriptItems, buildTranscriptItems } from "./transcript.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
-  it("collapses leading partial-turn assistant activity before the newest assistant message", () => {
+  it("keeps every assistant message visible while collapsing intervening activity", () => {
     const items = buildTranscriptItems([
       message(1, "first answer", "assistant", "assistant"),
       message(2, "tool_result", "tool", "tool_output"),
@@ -13,9 +13,13 @@ describe("buildTranscriptItems", () => {
 
     expect(items).toEqual([
       expect.objectContaining({
+        type: "message",
+        message: expect.objectContaining({ text: "first answer" })
+      }),
+      expect.objectContaining({
         type: "range",
         rangeKind: "activity",
-        firstSequence: 1,
+        firstSequence: 2,
         lastSequence: 2
       }),
       expect.objectContaining({
@@ -27,6 +31,44 @@ describe("buildTranscriptItems", () => {
         message: expect.objectContaining({ text: "next prompt" })
       })
     ]);
+  });
+
+  it("keeps live assistant progress visible without a final response", () => {
+    const items = buildTranscriptItems([
+      message(1, "prompt"),
+      message(2, "checking files", "assistant", "assistant_update"),
+      message(3, "tool_result", "tool", "tool_output"),
+      message(4, "reviewing results", "assistant", "assistant_update")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "range", "message"]);
+    expect(items[1]).toMatchObject({ message: { text: "checking files" } });
+    expect(items[2]).toMatchObject({ rangeKind: "activity", firstSequence: 3, lastSequence: 3 });
+    expect(items[3]).toMatchObject({ message: { text: "reviewing results" } });
+  });
+
+  it("coalesces duplicate update and response records for the same assistant output", () => {
+    const items = buildTranscriptItems([
+      message(1, "prompt"),
+      message(2, "checking files", "assistant", "assistant_update"),
+      message(3, "checking files", "assistant", "assistant")
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({ type: "message", message: expect.objectContaining({ text: "prompt" }) }),
+      expect.objectContaining({ type: "message", message: expect.objectContaining({ type: "assistant" }) })
+    ]);
+  });
+
+  it("never puts assistant updates inside expanded event stacks", () => {
+    const items = buildExpandedTranscriptItems([
+      message(1, "tool_result", "tool", "tool_output"),
+      message(2, "still working", "assistant", "assistant_update"),
+      message(3, "task_complete", "system", "status")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "message"]);
+    expect(items[1]).toMatchObject({ message: { text: "still working", role: "assistant" } });
   });
 
   it("collapses persisted subagent notifications as subagent activity", () => {

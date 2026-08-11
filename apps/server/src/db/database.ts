@@ -21,7 +21,6 @@ import type {
   SessionDirectorySuggestion,
   SessionStatus,
   TranscriptItem,
-  TranscriptRangeKind,
   TranscriptPageResponse,
   TranscriptSearchResponse
 } from "@muxpilot/core";
@@ -1307,115 +1306,47 @@ export class SyncAppDatabase {
     return output.sequence;
   }
 
-  private compactActiveTailItems(sessionId: string, prompt: MessageRow, previousOutput: MessageRow | null): TranscriptItem[] {
-    const boundaryRows = [
-      previousOutput,
-      prompt,
-      ...this.activeTailBoundaryRowsAfterPrompt(sessionId, prompt.sequence)
-    ].filter((row): row is MessageRow => Boolean(row));
-    const items: TranscriptItem[] = [];
-    let previousSequence = previousOutput ? this.activeTailOutputAnchorSequence(sessionId, previousOutput) - 1 : prompt.sequence - 1;
-    let inPromptTurn = false;
-    let afterVisibleAssistant = false;
-
-    for (const row of boundaryRows) {
-      const rangeKind: TranscriptRangeKind = inPromptTurn && !afterVisibleAssistant ? "activity" : "stack";
-      appendRangeItem(items, this.collapsedRangeItem(sessionId, previousSequence + 1, row.sequence - 1, rangeKind));
-      items.push(...buildTranscriptItems([hydrateMessage(row)]));
-      previousSequence = row.sequence;
-      if (row.sequence === prompt.sequence) {
-        inPromptTurn = true;
-        afterVisibleAssistant = false;
-      } else if (inPromptTurn && row.role === "assistant" && row.type === "assistant") {
-        afterVisibleAssistant = true;
-      }
-    }
-
-    const tailKind: TranscriptRangeKind = inPromptTurn && !afterVisibleAssistant ? "activity" : "stack";
-    appendRangeItem(items, this.collapsedRangeItem(sessionId, previousSequence + 1, Number.MAX_SAFE_INTEGER, tailKind));
-    return items;
+  private transcriptBoundaryAnchorSequence(sessionId: string, sequence: number): number {
+    const row = this.db
+      .prepare(`SELECT * FROM messages WHERE session_id = ? AND sequence = ?`)
+      .get(sessionId, sequence) as MessageRow | undefined;
+    return row?.role === "assistant" ? this.activeTailOutputAnchorSequence(sessionId, row) : sequence;
   }
 
-  private activeTailBoundaryRowsAfterPrompt(sessionId: string, promptSequence: number): MessageRow[] {
+  private compactActiveTailItems(sessionId: string, prompt: MessageRow, previousOutput: MessageRow | null): TranscriptItem[] {
+    const firstSequence = previousOutput ? this.activeTailOutputAnchorSequence(sessionId, previousOutput) : prompt.sequence;
     const rows = this.db
       .prepare(
         `SELECT * FROM messages
-         WHERE session_id = ?
-           AND sequence > ?
-           AND (
-             role = 'user'
-             OR type = 'question_request'
-             OR (
-               role = 'assistant'
-               AND type = 'assistant'
-               AND payload_json NOT LIKE '%"type":"event_msg"%'
-               AND sequence = (
-                 SELECT MAX(sequence)
-                 FROM messages
-                 WHERE session_id = ?
-                   AND sequence > ?
-                   AND role = 'assistant'
-                   AND type = 'assistant'
-                   AND payload_json NOT LIKE '%"type":"event_msg"%'
-               )
-             )
-           )
+         WHERE session_id = ? AND sequence >= ?
          ORDER BY sequence ASC`
       )
-      .all(sessionId, promptSequence, sessionId, promptSequence) as unknown as MessageRow[];
-    return rows.filter(isActiveTailBoundaryRow);
+      .all(sessionId, firstSequence) as unknown as MessageRow[];
+    return buildTranscriptItems(rows.map(hydrateMessage));
   }
 
   private listTranscriptItemsBefore(sessionId: string, beforeSequence: number, limit: number): TranscriptItem[] {
+    const boundarySequence = this.transcriptBoundaryAnchorSequence(sessionId, beforeSequence);
     const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ? AND sequence < ?
          ORDER BY sequence ASC`
       )
-      .all(sessionId, beforeSequence) as unknown as MessageRow[];
+      .all(sessionId, boundarySequence) as unknown as MessageRow[];
     const pageItems = activeTailPageItems(buildTranscriptItems(rows.map(hydrateMessage)), limit);
     return topLevelTranscriptItemCount(pageItems) > 0 ? pageItems : [];
   }
 
-  private collapsedRangeItem(
-    sessionId: string,
-    fromSequence: number,
-    toSequence: number,
-    rangeKind: TranscriptRangeKind
-  ): Extract<TranscriptItem, { type: "range" }> | null {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM messages
-         WHERE session_id = ?
-           AND sequence >= ?
-           AND sequence <= ?
-         ORDER BY sequence ASC`
-      )
-      .all(sessionId, fromSequence, toSequence) as unknown as MessageRow[];
-    const rangeRows = rows.filter((row) => !isHiddenUserContextRow(row));
-    const first = rangeRows[0];
-    const last = rangeRows.at(-1) ?? first;
-    if (!first || !last) return null;
-    return {
-      type: "range",
-      id: `${rangeKind}-${sessionId}-${first.sequence}-${last.sequence}-${rangeRows.length}`,
-      rangeKind,
-      label: collapsedRangeLabel(rangeKind, rangeRows.length),
-      firstSequence: first.sequence,
-      lastSequence: last.sequence,
-      messageCount: rangeRows.length
-    };
-  }
-
   listMessagesBefore(sessionId: string, beforeSequence: number, limit: number): TranscriptPageResponse {
+    const boundarySequence = this.transcriptBoundaryAnchorSequence(sessionId, beforeSequence);
     const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ? AND sequence < ?
          ORDER BY sequence ASC`
       )
-      .all(sessionId, beforeSequence) as unknown as MessageRow[];
+      .all(sessionId, boundarySequence) as unknown as MessageRow[];
     const items = buildTranscriptItems(rows.map(hydrateMessage));
     const pageItems = activeTailPageItems(items, limit);
 
@@ -1496,13 +1427,14 @@ export class SyncAppDatabase {
   }
 
   private topLevelMessageCountBefore(sessionId: string, sequence: number): number {
+    const boundarySequence = this.transcriptBoundaryAnchorSequence(sessionId, sequence);
     const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ? AND sequence < ?
          ORDER BY sequence ASC`
       )
-      .all(sessionId, sequence) as unknown as MessageRow[];
+      .all(sessionId, boundarySequence) as unknown as MessageRow[];
     return topLevelTranscriptItemCount(buildTranscriptItems(rows.map(hydrateMessage)));
   }
 
@@ -2789,10 +2721,6 @@ function transcriptItemsPage(
   };
 }
 
-function appendRangeItem(items: TranscriptItem[], item: Extract<TranscriptItem, { type: "range" }> | null): void {
-  if (item) items.push(item);
-}
-
 function activeTailPageItems(items: TranscriptItem[], limit: number): TranscriptItem[] {
   let remaining = limit;
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -2809,26 +2737,6 @@ function topLevelTranscriptItemCount(items: TranscriptItem[]): number {
 
 function isTopLevelTranscriptItem(item: TranscriptItem): boolean {
   return item.type !== "range";
-}
-
-function isActiveTailBoundaryRow(row: MessageRow): boolean {
-  if (row.role !== "user") return true;
-  const normalized = normalizeUserContextText(row.text);
-  if (normalized.kind === "message") return true;
-  return normalized.kind === "action" && !normalizeSubagentNotificationText(row.text);
-}
-
-function isHiddenUserContextRow(row: MessageRow): boolean {
-  return row.role === "user" && normalizeUserContextText(row.text).kind === "hidden";
-}
-
-function collapsedRangeLabel(kind: TranscriptRangeKind, count: number): string {
-  if (kind === "activity") return `${count} intermediate ${pluralize(count, "item")}`;
-  return `${count} ${pluralize(count, "event")}`;
-}
-
-function pluralize(count: number, singular: string): string {
-  return count === 1 ? singular : `${singular}s`;
 }
 
 function isResponseItemUserMessage(message: ChatMessage): boolean {

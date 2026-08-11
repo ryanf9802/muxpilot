@@ -4090,48 +4090,35 @@ function groupEventStackItems(messages: ChatMessage[]): TranscriptItem[] {
 }
 
 function groupLooseActivityItems(messages: ChatMessage[]): TranscriptItem[] {
-  const visibleIndex = latestVisibleAssistantIndex(messages);
-  if (visibleIndex < 0) return groupEventStackItems(messages);
-
-  const items: TranscriptItem[] = [];
-  const beforeVisible = messages.slice(0, visibleIndex);
-  const visibleMessage = messages[visibleIndex];
-  const afterVisible = messages.slice(visibleIndex + 1);
-
-  pushActivity(items, beforeVisible);
-  if (visibleMessage) items.push({ type: "message", message: visibleMessage });
-  items.push(...groupEventStackItems(afterVisible));
-  return items;
+  return groupAssistantActivity(messages, "stack");
 }
 
 function appendTurnActivity(items: TranscriptItem[], messages: ChatMessage[]): void {
   if (messages.length === 0) return;
 
-  const visibleIndex = latestVisibleAssistantIndex(messages);
-  if (visibleIndex < 0) {
-    pushActivity(items, messages);
-    return;
-  }
-
-  const beforeVisible = messages.slice(0, visibleIndex);
-  const visibleMessage = messages[visibleIndex];
-  const afterVisible = messages.slice(visibleIndex + 1);
-
-  pushActivity(items, beforeVisible);
-  if (visibleMessage) items.push({ type: "message", message: visibleMessage });
-  items.push(...groupEventStackItems(afterVisible));
+  items.push(...groupAssistantActivity(messages, "activity"));
 }
 
-function latestVisibleAssistantIndex(messages: ChatMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message && isRegularAssistantMessage(message)) return index;
+function groupAssistantActivity(messages: ChatMessage[], fallbackKind: "activity" | "stack"): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let pendingEvents: ChatMessage[] = [];
+  let hasAssistantMessage = false;
+
+  for (const message of messages) {
+    if (message.role !== "assistant") {
+      pendingEvents.push(message);
+      continue;
+    }
+
+    pushActivity(items, pendingEvents);
+    pendingEvents = [];
+    items.push({ type: "message", message });
+    hasAssistantMessage = true;
   }
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message && isAssistantUpdate(message)) return index;
-  }
-  return -1;
+
+  if (hasAssistantMessage || fallbackKind === "stack") items.push(...groupEventStackItems(pendingEvents));
+  else pushActivity(items, pendingEvents);
+  return items;
 }
 
 function pushActivity(items: TranscriptItem[], messages: ChatMessage[]): void {
@@ -4221,8 +4208,8 @@ function flushStack(items: TranscriptItem[], stack: ChatMessage[]): void {
 
 function isStackableMessage(message: ChatMessage): boolean {
   if (isStandaloneActionMessage(message)) return false;
+  if (message.role === "assistant") return false;
   if (message.role === "tool" || message.role === "system") return true;
-  if (isAssistantUpdate(message)) return true;
   return (
     message.type === "tool_call" ||
     message.type === "tool_output" ||
@@ -4267,16 +4254,7 @@ function stackLabel(messages: ChatMessage[]): string {
 }
 
 function activityLabel(messages: ChatMessage[]): string {
-  const assistantMessages = messages.filter(isRegularAssistantMessage).length;
-  const events = messages.length - assistantMessages;
-  if (assistantMessages > 0 && events > 0) {
-    return `${messages.length} intermediate ${pluralize(messages.length, "item")}: ${assistantMessages} ${pluralize(
-      assistantMessages,
-      "message"
-    )}, ${events} ${pluralize(events, "event")}`;
-  }
-  if (assistantMessages > 0) return `${assistantMessages} intermediate ${pluralize(assistantMessages, "message")}`;
-  return `${events} intermediate ${pluralize(events, "event")}`;
+  return `${messages.length} intermediate ${pluralize(messages.length, "event")}`;
 }
 
 function pluralize(count: number, singular: string): string {

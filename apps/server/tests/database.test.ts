@@ -577,7 +577,7 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("collapses repeated assistant output in the active turn to the latest assistant message", async () => {
+  it("keeps repeated assistant output visible throughout the active turn", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-assistant-churn");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -594,29 +594,39 @@ describe("AppDatabase activity summaries", () => {
 
     const tail = db.listActiveTailMessages(session.id, 10);
     const assistantMessages = tail.items.filter((item) => item.type === "message" && item.message.role === "assistant");
-    const activeRange = tail.items.find((item) => item.type === "range" && item.firstSequence === 4 && item.lastSequence === 8);
-    const expandedRange =
-      activeRange?.type === "range" ? db.listMessageRange(session.id, activeRange.firstSequence, activeRange.lastSequence) : null;
+    const expandedRangeMessages = tail.items.flatMap((item) =>
+      item.type === "range"
+        ? db.listMessageRange(session.id, item.firstSequence, item.lastSequence).items.flatMap((expanded) =>
+            expanded.type === "message" ? [expanded.message] : []
+          )
+        : []
+    );
 
     expect(itemSpans(tail)).toEqual([
       [1, 1, "message"],
       [2, 2, "message"],
       [3, 3, "message"],
-      [4, 8, "range:activity"],
+      [4, 4, "range:activity"],
+      [5, 5, "message"],
+      [6, 6, "range:activity"],
+      [7, 7, "message"],
+      [8, 8, "range:activity"],
       [9, 9, "message"],
       [10, 10, "range:stack"]
     ]);
     expect(assistantMessages.map((item) => (item.type === "message" ? item.message.text : ""))).toEqual([
       "Older answer",
+      "Assistant update 1",
+      "Assistant update 2",
       "Newest assistant output"
     ]);
-    expect(expandedRange?.items.map((item) => (item.type === "message" ? item.message.text : item.label))).toEqual([
+    expect(expandedRangeMessages.map((message) => message.text)).toEqual([
       "Tool batch 1",
-      "Assistant update 1",
       "Tool batch 2",
-      "Assistant update 2",
-      "Tool batch 3"
+      "Tool batch 3",
+      "Trailing tool output"
     ]);
+    expect(expandedRangeMessages.some((message) => message.role === "assistant")).toBe(false);
     db.close();
   });
 
@@ -696,7 +706,7 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("anchors active tail at the progress update when the prior assistant output is a duplicate response", async () => {
+  it("deduplicates progress and response records across the active-tail pagination boundary", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-duplicate-progress");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -710,7 +720,6 @@ describe("AppDatabase activity summaries", () => {
 
     expect(itemSpans(tail)).toEqual([
       [1, 1, "message"],
-      [2, 2, "range:stack"],
       [3, 3, "message"],
       [4, 4, "message"],
       [5, 5, "range:activity"]
@@ -816,7 +825,7 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
-  it("collapses assistant activity when a newer transcript page starts mid-turn", async () => {
+  it("keeps assistant activity visible when a newer transcript page starts mid-turn", async () => {
     const db = await tempDb();
     const session = testSession("session-newer-page-mid-turn");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -828,7 +837,12 @@ describe("AppDatabase activity summaries", () => {
 
     const newer = db.listMessagesAfterPage(session.id, 1, 10);
 
-    expect(itemSpans(newer)).toEqual([[2, 3, "range:activity"], [4, 4, "message"], [5, 5, "message"]]);
+    expect(itemSpans(newer)).toEqual([
+      [2, 2, "message"],
+      [3, 3, "range:activity"],
+      [4, 4, "message"],
+      [5, 5, "message"]
+    ]);
     db.close();
   });
 

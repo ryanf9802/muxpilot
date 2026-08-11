@@ -1495,7 +1495,7 @@ describe("groupStackableMessages", () => {
     });
   });
 
-  it("collapses intermediate turn activity before the newest assistant message", () => {
+  it("keeps assistant progress visible while collapsing intermediate tool activity", () => {
     const items = groupStackableMessages([
       message("session-a", 1, "prompt"),
       message("session-a", 2, "planning", "assistant", "assistant_update"),
@@ -1504,15 +1504,15 @@ describe("groupStackableMessages", () => {
       message("session-a", 5, "done", "assistant", "assistant")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
-    expect(items[1]).toMatchObject({
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "activity", "message"]);
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "planning" }) });
+    expect(items[2]).toMatchObject({
       messages: [
-        expect.objectContaining({ text: "planning" }),
         expect.objectContaining({ text: "exec_command(ls)" }),
         expect.objectContaining({ text: "Process exited with code 0" })
       ]
     });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "done" }) });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "done" }) });
   });
 
   it("prefers assistant response items over duplicate progress updates", () => {
@@ -1526,24 +1526,17 @@ describe("groupStackableMessages", () => {
       message("session-a", 7, proposedPlanText("Do it."), "assistant", "assistant")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
-    expect(items[1]).toMatchObject({
-      messages: [
-        expect.objectContaining({ text: "checking files", type: "assistant" }),
-        expect.objectContaining({ text: "tool_result" }),
-        expect.objectContaining({ text: "writing plan", type: "assistant" })
-      ]
-    });
-    expect(items[1]).not.toMatchObject({
-      messages: expect.arrayContaining([expect.objectContaining({ text: "checking files", type: "assistant_update" })])
-    });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: proposedPlanText("Do it.") }) });
-    if (items[2]?.type !== "message") throw new Error("Expected visible assistant message");
-    const html = renderToStaticMarkup(createElement(MessageBubble, { message: items[2].message }));
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "activity", "message", "message"]);
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "checking files", type: "assistant" }) });
+    expect(items[2]).toMatchObject({ messages: [expect.objectContaining({ text: "tool_result" })] });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "writing plan", type: "assistant" }) });
+    expect(items[4]).toMatchObject({ message: expect.objectContaining({ text: proposedPlanText("Do it.") }) });
+    if (items[4]?.type !== "message") throw new Error("Expected visible assistant message");
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: items[4].message }));
     expect(html).not.toContain("Progress");
   });
 
-  it("keeps only the newest assistant message visible when a turn has multiple assistant messages", () => {
+  it("keeps every assistant message visible when a turn has multiple assistant messages", () => {
     const items = groupStackableMessages([
       message("session-a", 1, "prompt"),
       message("session-a", 2, "first answer", "assistant", "assistant"),
@@ -1551,17 +1544,13 @@ describe("groupStackableMessages", () => {
       message("session-a", 4, "second answer", "assistant", "assistant")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
-    expect(items[1]).toMatchObject({
-      messages: [
-        expect.objectContaining({ text: "first answer" }),
-        expect.objectContaining({ text: "tool_result" })
-      ]
-    });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "activity", "message"]);
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "first answer" }) });
+    expect(items[2]).toMatchObject({ messages: [expect.objectContaining({ text: "tool_result" })] });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
   });
 
-  it("keeps only the newest assistant message visible when a page starts mid-turn", () => {
+  it("keeps every assistant message visible when a page starts mid-turn", () => {
     const items = groupStackableMessages([
       message("session-a", 2, "first answer", "assistant", "assistant"),
       message("session-a", 3, "tool_result", "tool", "tool_output"),
@@ -1569,15 +1558,11 @@ describe("groupStackableMessages", () => {
       message("session-a", 5, "next prompt")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["activity", "message", "message"]);
-    expect(items[0]).toMatchObject({
-      messages: [
-        expect.objectContaining({ text: "first answer" }),
-        expect.objectContaining({ text: "tool_result" })
-      ]
-    });
-    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "next prompt" }) });
+    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message", "message"]);
+    expect(items[0]).toMatchObject({ message: expect.objectContaining({ text: "first answer" }) });
+    expect(items[1]).toMatchObject({ messages: [expect.objectContaining({ text: "tool_result" })] });
+    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "second answer" }) });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "next prompt" }) });
   });
 
   it("uses the newest assistant response when duplicate progress responses are present", () => {
@@ -1590,17 +1575,13 @@ describe("groupStackableMessages", () => {
       message("session-a", 6, "editing tests", "assistant", "assistant")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
-    expect(items[1]).toMatchObject({
-      messages: [
-        expect.objectContaining({ text: "checking files", type: "assistant" }),
-        expect.objectContaining({ text: "tool_result" })
-      ]
-    });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "editing tests", type: "assistant" }) });
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "activity", "message"]);
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "checking files", type: "assistant" }) });
+    expect(items[2]).toMatchObject({ messages: [expect.objectContaining({ text: "tool_result" })] });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "editing tests", type: "assistant" }) });
   });
 
-  it("uses the newest progress update as the visible item for live turns without an assistant response", () => {
+  it("keeps every progress update visible for live turns without an assistant response", () => {
     const items = groupStackableMessages([
       message("session-a", 1, "prompt"),
       message("session-a", 2, "checking files", "assistant", "assistant_update"),
@@ -1608,14 +1589,10 @@ describe("groupStackableMessages", () => {
       message("session-a", 4, "editing tests", "assistant", "assistant_update")
     ]);
 
-    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
-    expect(items[1]).toMatchObject({
-      messages: [
-        expect.objectContaining({ text: "checking files" }),
-        expect.objectContaining({ text: "tool_result" })
-      ]
-    });
-    expect(items[2]).toMatchObject({ message: expect.objectContaining({ text: "editing tests" }) });
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "activity", "message"]);
+    expect(items[1]).toMatchObject({ message: expect.objectContaining({ text: "checking files" }) });
+    expect(items[2]).toMatchObject({ messages: [expect.objectContaining({ text: "tool_result" })] });
+    expect(items[3]).toMatchObject({ message: expect.objectContaining({ text: "editing tests" }) });
   });
 
   it("collapses all turn activity when no assistant or progress message exists", () => {
