@@ -97,6 +97,8 @@ export class SessionManager {
   private readonly processingQueuedSessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
+  private readonly readySessionDiscoveryGeneration = new Map<string, number>();
+  private discoveryGeneration = 0;
   private codexFileObservations = new Map<string, { sizeBytes: number; updatedAtMs: number }>();
   private missingIngestCursor = 0;
   private resourceUsageLookup: SessionResourceUsageLookup | null = null;
@@ -191,6 +193,7 @@ export class SessionManager {
   }
 
   async discover(): Promise<void> {
+    const discoveryGeneration = ++this.discoveryGeneration;
     const panes = await this.tmux.listPanes();
     const codexFiles = await this.codexStore.listRecent();
     const growingCodexFilePaths = growingCodexFiles(codexFiles, this.codexFileObservations);
@@ -366,6 +369,9 @@ export class SessionManager {
 
     for (const session of await this.db.listSessions(true)) {
       if (!seen.has(session.id) && !session.initializing && session.status !== "missing") {
+        const readyGeneration = this.readySessionDiscoveryGeneration.get(session.id);
+        if (readyGeneration !== undefined && discoveryGeneration <= readyGeneration) continue;
+        this.readySessionDiscoveryGeneration.delete(session.id);
         if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session is missing");
         this.liveApprovals.delete(session.id);
         await this.db.setSessionStatus(session.id, "missing", now);
@@ -1250,17 +1256,19 @@ export class SessionManager {
     void ready
       .then(
         async () => {
-          await this.runDiscoverTick();
           const discovered = await this.db.getSession(sessionId);
+          this.readySessionDiscoveryGeneration.set(sessionId, this.discoveryGeneration);
           const session = await this.db.setSessionInitializationResult(
             sessionId,
-            discovered?.status === "startup_failed" ? "unknown" : discovered?.status ?? "unknown",
+            startupReadyStatus(discovered?.status),
             null,
             nowIso()
           );
           if (session) this.publish("session.updated", sessionId, session);
+          this.runBackgroundTask("discovery", () => this.runDiscoverTick());
         },
         async (error) => {
+          this.readySessionDiscoveryGeneration.delete(sessionId);
           console.error(`Muxpilot session ${sessionId} readiness check failed`, error);
           const startupError = error instanceof Error ? error.message : "Codex exited before startup completed.";
           const session = await this.db.setSessionInitializationResult(sessionId, "startup_failed", startupError, nowIso());
@@ -1305,10 +1313,14 @@ export class SessionManager {
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
     if (action.type === "kill") {
+      this.readySessionDiscoveryGeneration.delete(sessionId);
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session was killed");
       await this.tmux.killPane(session.tmux.paneId);
     }
-    if (action.type === "archiveTranscript") await this.db.markSessionArchived(sessionId, true, nowIso());
+    if (action.type === "archiveTranscript") {
+      this.readySessionDiscoveryGeneration.delete(sessionId);
+      await this.db.markSessionArchived(sessionId, true, nowIso());
+    }
     if (action.type === "setInputMode") {
       await this.ensureInputMode(session, action.mode);
       const updatedAt = nowIso();
@@ -2733,6 +2745,11 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
   if (titleStatus && titleStatus !== "approval") return titleStatus;
   if (previous && previous !== "approval" && previous !== "missing") return previous;
   return "waiting";
+}
+
+function startupReadyStatus(status: SessionStatus | undefined): SessionStatus {
+  if (!status || status === "unknown" || status === "missing" || status === "startup_failed") return "waiting";
+  return status;
 }
 
 function inferStatusFromScreen(capture: string): SessionStatus | null {

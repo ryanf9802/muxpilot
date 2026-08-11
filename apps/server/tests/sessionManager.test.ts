@@ -4319,6 +4319,56 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("does not let a pre-creation discovery snapshot mark a ready session missing", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let resolveReady: (() => void) | null = null;
+    const ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    let releaseStaleSnapshot: (() => void) | null = null;
+    const staleSnapshot = new Promise<void>((resolve) => {
+      releaseStaleSnapshot = resolve;
+    });
+    let staleSnapshotStarted: (() => void) | null = null;
+    const snapshotStarted = new Promise<void>((resolve) => {
+      staleSnapshotStarted = resolve;
+    });
+    const pane = testPane({
+      cwd: repo,
+      paneId: "%2",
+      windowId: "@2",
+      windowName: "new-work",
+      title: "repo",
+      pid: 456,
+      sessionName: "muxpilot",
+      currentCommand: "bash"
+    });
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready });
+
+    const created = await harness.manager.createSessionInDirectory(repo, "new-work");
+    harness.tmux.listPanes = async () => {
+      staleSnapshotStarted?.();
+      await staleSnapshot;
+      return [];
+    };
+    const discover = harness.manager.discoverNow();
+    await snapshotStarted;
+
+    resolveReady?.();
+    await expect.poll(async () => (await harness.manager.getSession(created.id))?.initializing).toBe(false);
+    expect((await harness.manager.getSession(created.id))?.status).toBe("waiting");
+
+    releaseStaleSnapshot?.();
+    await discover;
+    expect((await harness.manager.getSession(created.id))?.status).toBe("waiting");
+
+    await harness.manager.discoverNow();
+    expect((await harness.manager.getSession(created.id))?.status).toBe("missing");
+    harness.db.close();
+  });
+
   it("persists a startup failure instead of allowing the session to become missing", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
