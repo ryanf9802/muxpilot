@@ -525,8 +525,10 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body: SendInputRequest = sendInputSchema.parse(request.body);
     try {
-      await manager.sendInput(id, body.text, body.mode);
-      return reply.code(202).send({ ok: true });
+      const result = await manager.sendInput(id, body.text, body.mode);
+      return reply.code(202).send("queuedInput" in result
+        ? { ok: true, session: null, message: null, queuedInput: result.queuedInput }
+        : { ok: true, ...result, queuedInput: null });
     } catch (error) {
       if (error instanceof InputModeSwitchError) {
         return reply.code(error.statusCode).send({ error: error.message });

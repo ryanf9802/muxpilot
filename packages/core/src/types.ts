@@ -521,6 +521,10 @@ export interface SendInputRequest {
   mode?: CollaborationMode;
 }
 
+export type SendInputResponse =
+  | { ok: true; session: ManagedSession; message: ChatMessage; queuedInput: null }
+  | { ok: true; session: null; message: null; queuedInput: QueuedInput };
+
 export type CreateSessionRequest =
   | {
       cwd: string;

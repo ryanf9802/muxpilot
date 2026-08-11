@@ -6,6 +6,7 @@ import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, M
 import { normalizeHeavyCommandQueueEvent, serializeHeavyCommandQueueEvent, withHeavyCommandQueueEventPayload } from "@muxpilot/core";
 import {
   activeSkillToken,
+  applyPlanActionResponse,
   ApprovalBanner,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
@@ -2276,6 +2277,40 @@ describe("planActionText", () => {
       type: "choosePlanAction",
       action: "stay_in_plan"
     });
+  });
+
+  it("applies the returned plan-action session immediately when the request is current", () => {
+    const session = managedSession({ status: "working", inputMode: "default" });
+    const setCurrentSession = vi.fn();
+    const syncSession = vi.fn();
+
+    expect(applyPlanActionResponse(
+      { ok: true, session },
+      session.id,
+      7,
+      (targetId, token) => targetId === session.id && token === 7,
+      setCurrentSession,
+      syncSession
+    )).toBe(true);
+    expect(setCurrentSession).toHaveBeenCalledWith(session);
+    expect(syncSession).toHaveBeenCalledWith(session);
+  });
+
+  it("ignores a plan-action response after the session request token changes", () => {
+    const session = managedSession({ status: "working" });
+    const setCurrentSession = vi.fn();
+    const syncSession = vi.fn();
+
+    expect(applyPlanActionResponse(
+      { ok: true, session },
+      session.id,
+      7,
+      () => false,
+      setCurrentSession,
+      syncSession
+    )).toBe(false);
+    expect(setCurrentSession).not.toHaveBeenCalled();
+    expect(syncSession).not.toHaveBeenCalled();
   });
 });
 

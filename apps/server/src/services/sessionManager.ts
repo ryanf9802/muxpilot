@@ -901,11 +901,14 @@ export class SessionManager {
     return materializeQuestion(message);
   }
 
-  async sendInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<void> {
+  async sendInput(
+    sessionId: string,
+    text: string,
+    mode?: CollaborationMode
+  ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const session = requireSession(await this.db.getSession(sessionId));
     if (await this.shouldQueueInput(session, text)) {
-      await this.enqueueInput(sessionId, text, mode);
-      return;
+      return { queuedInput: await this.enqueueInput(sessionId, text, mode) };
     }
     const targetMode = mode ?? session.inputMode;
     const liveSession = await this.ensureInputMode(session, targetMode);
@@ -915,11 +918,16 @@ export class SessionManager {
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
     }
     const now = nowIso();
+    const message = await this.recordSubmittedInput(session, text, targetMode, now);
     await this.db.setSessionInputMode(sessionId, targetMode, now);
-    await this.db.setSessionStatus(sessionId, "waiting", now);
+    const status = activeInputStatus(targetMode);
+    await this.db.setSessionStatus(sessionId, status, now);
     await this.db.addAudit("local", `send_input:${targetMode}`, sessionId, "ok", now);
-    this.publish("status.changed", sessionId, { status: "waiting" });
-    this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+    const updatedSession = requireSession(await this.db.getSession(sessionId));
+    this.publish("message.appended", sessionId, message);
+    this.publish("status.changed", sessionId, { status });
+    this.publish("session.updated", sessionId, updatedSession);
+    return { session: updatedSession, message };
   }
 
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
@@ -933,6 +941,32 @@ export class SessionManager {
   private async sendRawInput(session: ManagedSession, text: string): Promise<void> {
     const pane = await this.livePane(session);
     await this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
+  }
+
+  private async recordSubmittedInput(
+    session: ManagedSession,
+    text: string,
+    mode: CollaborationMode,
+    timestamp: string
+  ): Promise<ChatMessage> {
+    const message: ChatMessage = {
+      id: eventId(),
+      sessionId: session.id,
+      sequence: await this.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp,
+      text,
+      payload: {
+        collaborationMode: mode,
+        muxpilotSubmission: {
+          codexSessionId: session.codexSessionId,
+          codexJsonlPath: session.codexJsonlPath
+        }
+      }
+    };
+    if (!await this.db.appendMessage(message)) throw new Error("Could not persist submitted input");
+    return message;
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
@@ -1245,9 +1279,11 @@ export class SessionManager {
       await this.tmux.sendKeys(pane.paneId, keysForPlanAction(action.action));
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
       const now = nowIso();
-      await this.db.setSessionInputMode(sessionId, inputModeForPlanAction(action.action), now);
-      await this.db.setSessionStatus(sessionId, "waiting", now);
-      this.publish("status.changed", sessionId, { status: "waiting" });
+      const mode = inputModeForPlanAction(action.action);
+      const status = activeInputStatus(mode);
+      await this.db.setSessionInputMode(sessionId, mode, now);
+      await this.db.setSessionStatus(sessionId, status, now);
+      this.publish("status.changed", sessionId, { status });
     }
     if (action.type === "rename") {
       await this.tmux.renameWindow(session.tmux.paneId, requireSessionName(action.name));
@@ -1355,10 +1391,13 @@ export class SessionManager {
         await this.sendRawInput(liveSession, sending.text);
         const now = nowIso();
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });
+        const message = await this.recordSubmittedInput(session, sending.text, sending.mode, now);
         await this.db.setSessionInputMode(sessionId, sending.mode, now);
-        await this.db.setSessionStatus(sessionId, "waiting", now);
+        const status = activeInputStatus(sending.mode);
+        await this.db.setSessionStatus(sessionId, status, now);
         await this.db.addAudit("local", `send_queued_input:${sending.mode}`, sessionId, "ok", now);
-        this.publish("status.changed", sessionId, { status: "waiting" });
+        this.publish("message.appended", sessionId, message);
+        this.publish("status.changed", sessionId, { status });
         this.publish("queue.updated", sessionId, { queuedInputs: await this.db.listQueuedInputs(sessionId) });
         this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
       } catch (error) {
@@ -1706,6 +1745,10 @@ function resolveSessionStatus(
   );
   if (isWorkingStatus(pendingStatus) && isPlanModeTurn(latestUserMessage, inputMode)) return "planning";
   return pendingStatus;
+}
+
+function activeInputStatus(mode: CollaborationMode): SessionStatus {
+  return mode === "plan" ? "planning" : "working";
 }
 
 function requireSessionName(input: string): string {

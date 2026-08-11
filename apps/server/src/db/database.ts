@@ -983,7 +983,8 @@ export class SyncAppDatabase {
   }
 
   appendMessage(message: ChatMessage): boolean {
-    if (this.isDuplicateUserEcho(message)) return false;
+    if (this.reconcileMuxpilotSubmissionEcho(message)) return false;
+    if (!isMuxpilotSubmissionMessage(message) && this.isDuplicateUserEcho(message)) return false;
 
     const result = this.db
       .prepare(
@@ -1020,6 +1021,26 @@ export class SyncAppDatabase {
     }
 
     return false;
+  }
+
+  private reconcileMuxpilotSubmissionEcho(message: ChatMessage): boolean {
+    if (message.role !== "user" || isMuxpilotSubmissionMessage(message)) return false;
+    const submitted = this.latestUserMessage(message.sessionId);
+    if (
+      !submitted ||
+      !isMuxpilotSubmissionMessage(submitted) ||
+      submitted.text !== message.text ||
+      !timestampsAreNear(submitted.timestamp, message.timestamp)
+    ) return false;
+
+    const result = this.db
+      .prepare(
+        `UPDATE messages
+         SET type = ?, payload_json = ?
+         WHERE id = ? AND session_id = ?`
+      )
+      .run(message.type, JSON.stringify(message.payload), submitted.id, submitted.sessionId);
+    return Number(result.changes) > 0;
   }
 
   private isDuplicateUserEcho(message: ChatMessage): boolean {
@@ -2743,6 +2764,10 @@ function isResponseItemUserMessage(message: ChatMessage): boolean {
   const payload = message.payload;
   const item = recordValue(payload.payload);
   return payload.type === "response_item" && item?.type === "message" && item.role === "user";
+}
+
+function isMuxpilotSubmissionMessage(message: ChatMessage): boolean {
+  return recordValue(message.payload.muxpilotSubmission) !== null;
 }
 
 function timestampsAreNear(first: string, second: string): boolean {

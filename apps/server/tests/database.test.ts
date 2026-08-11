@@ -65,6 +65,45 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("reconciles a Codex user echo into a persisted muxpilot submission", async () => {
+    const db = await tempDb();
+    const session = testSession("session-submitted-input");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Implement the change"),
+      payload: { collaborationMode: "plan", muxpilotSubmission: { codexSessionId: "codex-session" } }
+    };
+    const echoed = {
+      ...testMessage(session.id, 2, "user", "Implement the change"),
+      payload: { type: "event_msg", payload: { type: "user_message", message: "Implement the change" } }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(echoed)).toBe(false);
+
+    const messages = await db.listMessages(session.id, 0);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ id: submitted.id, sequence: 1, payload: echoed.payload });
+    expect((await db.getSession(session.id))?.unreadCount).toBe(1);
+    await db.close();
+  });
+
+  it("keeps a later identical prompt distinct from an unmatched muxpilot submission", async () => {
+    const db = await tempDb();
+    const session = testSession("session-repeated-submitted-input");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Repeat this", "2026-07-07T00:00:01.000Z"),
+      payload: { muxpilotSubmission: { codexSessionId: "codex-session" } }
+    };
+    const later = testMessage(session.id, 2, "user", "Repeat this", "2026-07-07T00:01:01.000Z");
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(later)).toBe(true);
+    expect(await db.listMessages(session.id, 0)).toHaveLength(2);
+    await db.close();
+  });
+
   it("excludes initial instruction context from recent prompt metadata", async () => {
     const db = await tempDb();
     const session = testSession("session-context-preview");

@@ -71,6 +71,7 @@ import type {
   SessionEvent,
   SessionModelSettings,
   SessionAction,
+  SessionActionResponse,
   TranscriptPageResponse,
   TranscriptSearchMatch,
   TranscriptItem as CoreTranscriptItem
@@ -1670,8 +1671,14 @@ export function SessionView() {
         await loadQueuedInputs(id, requestTokenRef.current);
         setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
       } else {
-        await api.send(id, value, session?.inputMode ?? "default");
-        void refreshSessionStoplight().catch(() => undefined);
+        const response = await api.send(id, value, session?.inputMode ?? "default");
+        if (response.queuedInput) {
+          await loadQueuedInputs(id, requestTokenRef.current);
+          setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
+        } else {
+          setSession(response.session);
+          syncSessionStoplight(response.session);
+        }
       }
     } catch (error) {
       updateComposerText(value);
@@ -1823,10 +1830,9 @@ export function SessionView() {
     setPlanActionBusy(action);
     setPlanActionError("");
     try {
-      await api.action(targetId, planActionRequest(action));
-      if (!isCurrentRequest(targetId, token)) return;
+      const response = await api.action(targetId, planActionRequest(action));
+      if (!applyPlanActionResponse(response, targetId, token, isCurrentRequest, setSession, syncSessionStoplight)) return;
       setSuppressedPlanMessageId(pendingPlan.id);
-      void refreshSessionStoplight().catch(() => undefined);
     } catch (error) {
       if (!isCurrentRequest(targetId, token)) return;
       setPlanActionError(error instanceof Error ? error.message : String(error));
@@ -3557,6 +3563,20 @@ export function planActionText(action: PlanAction): string {
 
 export function planActionRequest(action: PlanAction): SessionAction {
   return { type: "choosePlanAction", action };
+}
+
+export function applyPlanActionResponse(
+  response: SessionActionResponse,
+  targetId: string,
+  requestToken: number,
+  isCurrentRequest: (targetId: string, requestToken: number) => boolean,
+  setCurrentSession: (session: ManagedSession) => void,
+  syncSession: (session: ManagedSession) => void
+): boolean {
+  if (!response.session || !isCurrentRequest(targetId, requestToken)) return false;
+  setCurrentSession(response.session);
+  syncSession(response.session);
+  return true;
 }
 
 export function questionRemainingSeconds(question: QuestionRequest, nowMs = Date.now()): number | null {

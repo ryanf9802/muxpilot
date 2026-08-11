@@ -1730,9 +1730,10 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     expect(harness.manager.getSession(session.id)?.status).toBe("plan_ready");
 
-    await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
+    const actionSession = await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
     expect(sentKeys).toEqual([["Down", "Enter"]]);
-    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+    expect(actionSession?.status).toBe("working");
+    expect(harness.manager.getSession(session.id)?.status).toBe("working");
 
     await harness.manager.discover();
     expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
@@ -1776,12 +1777,75 @@ describe("SessionManager transcript isolation", () => {
     expect(session).toBeDefined();
     await harness.manager.ingest();
 
-    await harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" });
-    await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
-    await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.sessionId !== session.id || event.type !== "status.changed") return;
+      publishedStatuses.push(String((event.payload as { status?: unknown }).status));
+    });
+    const implement = await harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" });
+    expect(implement).toMatchObject({ status: "working", inputMode: "default" });
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "working", inputMode: "default" });
+    const clearContext = await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
+    expect(clearContext).toMatchObject({ status: "working", inputMode: "default" });
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "working", inputMode: "default" });
+    const stayInPlan = await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
+    unsubscribe();
+    expect(stayInPlan).toMatchObject({ status: "planning", inputMode: "plan" });
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "planning", inputMode: "plan" });
 
     expect(sentKeys).toEqual([["Enter"], ["Down", "Enter"], ["Down", "Down", "Enter"]]);
-    expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
+    expect(publishedStatuses).toEqual(["working", "working", "planning"]);
+    harness.db.close();
+  });
+
+  it("does not transition a plan-ready session when plan-action key submission fails", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "plan-action-send-failure.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "<proposed_plan>\nDo it.\n</proposed_plan>" }]
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.sendKeys = async () => {
+      throw new Error("tmux key submission failed");
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.sessionId === session.id && event.type === "status.changed") {
+        publishedStatuses.push(String((event.payload as { status?: unknown }).status));
+      }
+    });
+
+    await expect(harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" })).rejects.toThrow(
+      "tmux key submission failed"
+    );
+    unsubscribe();
+
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "plan_ready", inputMode: "default" });
+    expect(publishedStatuses).toEqual([]);
     harness.db.close();
   });
 
@@ -1820,10 +1884,10 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.ingest();
 
     await harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" });
-    expect(harness.manager.getSession(session.id)?.inputMode).toBe("default");
+    expect(harness.manager.getSession(session.id)).toMatchObject({ inputMode: "default", status: "working" });
 
     await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
-    expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
+    expect(harness.manager.getSession(session.id)).toMatchObject({ inputMode: "plan", status: "planning" });
     harness.db.close();
   });
 
@@ -2085,9 +2149,31 @@ describe("SessionManager transcript isolation", () => {
     const session = harness.manager.listSessions(true)[0];
     expect(session).toBeDefined();
 
-    await harness.manager.sendInput(session.id, "run $test-example");
+    const result = await harness.manager.sendInput(session.id, "run $test-example");
 
     expect(sentInputs).toEqual(["run $test-example "]);
+    expect(result).toMatchObject({ session: { status: "working", preview: "run $test-example" } });
+    expect(harness.manager.getSession(session.id)?.status).toBe("working");
+    harness.db.close();
+  });
+
+  it("does not persist an optimistic prompt when tmux submission fails", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async () => {
+      throw new Error("tmux send failed");
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+
+    await expect(harness.manager.sendInput(session.id, "do not persist")).rejects.toThrow("tmux send failed");
+
+    expect(await harness.db.listMessages(session.id, 0)).toEqual([]);
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "waiting", preview: "" });
     harness.db.close();
   });
 
@@ -2222,6 +2308,7 @@ describe("SessionManager transcript isolation", () => {
     const sentQueue = await harness.manager.listQueuedInputs(session.id);
     expect(sentInputs).toEqual(["edited queued prompt "]);
     expect(sentQueue).toMatchObject([{ text: "edited queued prompt", status: "sent" }]);
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "working", preview: "edited queued prompt" });
 
     await harness.db.appendMessage({
       id: "queued-echo",
@@ -2510,11 +2597,26 @@ describe("SessionManager transcript isolation", () => {
     const session = harness.manager.listSessions(true)[0];
     expect(session).toBeDefined();
 
-    await harness.manager.sendInput(session.id, "next prompt", "plan");
+    const published: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.sessionId === session.id) published.push(event.type);
+    });
+    const result = await harness.manager.sendInput(session.id, "next prompt", "plan");
+    unsubscribe();
 
     expect(sentKeys).toEqual([["BTab"]]);
     expect(sentInputs).toEqual(["next prompt "]);
-    expect(harness.manager.getSession(session.id)?.inputMode).toBe("plan");
+    expect(result).toMatchObject({
+      session: {
+        status: "planning",
+        inputMode: "plan",
+        preview: "next prompt",
+        recentUserPrompts: ["next prompt"]
+      },
+      message: { role: "user", text: "next prompt", payload: { collaborationMode: "plan" } }
+    });
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "planning", inputMode: "plan", preview: "next prompt" });
+    expect(published).toEqual(expect.arrayContaining(["message.appended", "status.changed", "session.updated"]));
     harness.db.close();
   });
 
