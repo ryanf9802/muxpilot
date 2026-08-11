@@ -159,9 +159,10 @@ export class SessionManager {
     if (!ready) return false;
     await this.sendRawInput(ready, message);
     const now = nowIso();
-    await this.db.setSessionStatus(sessionId, "waiting", now);
+    const status = activeInputStatus(ready.inputMode);
+    await this.db.setSessionStatus(sessionId, status, now);
     await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
-    this.publish("status.changed", sessionId, { status: "waiting" });
+    this.publish("status.changed", sessionId, { status });
     return true;
   }
 

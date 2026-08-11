@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   Check,
+  Clock3,
   Copy,
   HelpCircle,
   GitBranch,
@@ -824,6 +825,7 @@ export function SessionView() {
   lastSequenceRef.current = lastSequence;
   const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages, suppressedPlanMessageId), [loadedMessages, suppressedPlanMessageId]);
   const showWorkingIndicator = !session?.transcriptSyncing && shouldShowWorkingIndicator(session?.status, hasMoreAfter);
+  const showQueuedIndicator = !session?.transcriptSyncing && shouldShowQueuedIndicator(session?.status, hasMoreAfter);
   const showTranscriptSyncIndicator = session?.transcriptSyncing === true && !hasMoreAfter;
   const effectivePendingUserMessage = useMemo(
     () => latestUnmatchedPendingUserMessage(transcriptItems, [pendingUserMessage, sentQueuedUserMessage]),
@@ -851,6 +853,7 @@ export function SessionView() {
     pendingUserChatMessage?.id ?? "",
     showTranscriptSyncIndicator ? "sync" : "",
     showWorkingIndicator ? `working:${session?.status ?? ""}` : "",
+    showQueuedIndicator ? "queued" : "",
     question && !questionRenderedInline ? `question:${question.messageId}` : "",
     approval ? `approval:${approval.id}` : "",
     queuedInputs.map((input) => `${input.id}:${input.status}`).join(","),
@@ -2077,6 +2080,7 @@ export function SessionView() {
           {pendingUserChatMessage ? <MessageBubble message={pendingUserChatMessage} pending onOpenMenu={openMessageMenu} /> : null}
           {showTranscriptSyncIndicator ? <TranscriptSyncIndicator /> : null}
           {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
+          {showQueuedIndicator ? <QueuedIndicator /> : null}
           {question && !questionRenderedInline ? (
             <QuestionBanner question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
           ) : null}
@@ -3627,6 +3631,10 @@ export function shouldShowWorkingIndicator(status: ManagedSession["status"] | un
   return isWorkingSessionStatus(status) && !hasMoreAfter;
 }
 
+export function shouldShowQueuedIndicator(status: ManagedSession["status"] | undefined, hasMoreAfter = false): boolean {
+  return status === "queued" && !hasMoreAfter;
+}
+
 function isWorkingSessionStatus(status: ManagedSession["status"] | undefined): boolean {
   return status === "working" || status === "generating" || status === "executing" || status === "planning";
 }
@@ -3711,6 +3719,27 @@ export function TranscriptSyncIndicator() {
         <span className="working-indicator-label">
           <LoaderCircle className="spin" size={18} aria-hidden="true" />
           <span>Syncing transcript...</span>
+        </span>
+      </div>
+    </article>
+  );
+}
+
+export function QueuedIndicator() {
+  return (
+    <article className="message message-assistant message-working-indicator message-queued-indicator" aria-live="polite" role="status">
+      <div className="message-meta">
+        <span className="message-meta-main">
+          <span>Codex</span>
+        </span>
+      </div>
+      <div className="working-indicator-content">
+        <span className="working-indicator-label">
+          <Clock3 size={18} aria-hidden="true" />
+          <span className="queued-indicator-copy">
+            <span>Codex is queued</span>
+            <small>Waiting for a heavyweight command slot</small>
+          </span>
         </span>
       </div>
     </article>

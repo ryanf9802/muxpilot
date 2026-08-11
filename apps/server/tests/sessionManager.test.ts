@@ -2351,6 +2351,23 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("marks an automatic heavyweight resume as active work", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+
+    expect(await harness.manager.resumeHeavyCommand(session.id, "resume queued command")).toBe(true);
+    expect(sentInputs).toEqual(["resume queued command "]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("working");
+    harness.db.close();
+  });
+
   it("cancels a deferred heavyweight ticket before interrupting and releases queued input", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

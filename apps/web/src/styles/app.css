@@ -3670,6 +3670,10 @@ select:focus-visible {
   border-color: color-mix(in srgb, var(--color-warning) 46%, var(--color-border));
 }
 
+.message-queued-indicator {
+  background: color-mix(in srgb, var(--color-warning) 8%, var(--color-surface));
+}
+
 .working-indicator-content {
   display: flex;
   align-items: center;
@@ -3695,6 +3699,17 @@ select:focus-visible {
 .working-indicator-label svg {
   flex: 0 0 auto;
   color: var(--color-warning);
+}
+
+.queued-indicator-copy {
+  display: grid;
+  gap: 2px;
+}
+
+.queued-indicator-copy small {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 .working-indicator-elapsed {

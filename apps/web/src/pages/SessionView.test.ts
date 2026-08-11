@@ -47,6 +47,7 @@ import {
   planActionRequest,
   planActionText,
   questionRemainingSeconds,
+  QueuedIndicator,
   parseProposedPlanSegments,
   queuedInputEditable,
   queuedInputHasLineBreaks,
@@ -79,6 +80,7 @@ import {
   shouldIgnoreTranscriptVimKeyTarget,
   shouldResetInitialTranscriptForLiveTail,
   shouldShowSessionLoading,
+  shouldShowQueuedIndicator,
   shouldShowWorkingIndicator,
   isLatestSessionRefresh,
   shouldReplaceTranscriptForSource,
@@ -2118,14 +2120,32 @@ describe("WorkingIndicator", () => {
     expect(html).not.toContain("working-indicator-elapsed");
   });
 
+  it("renders a distinct queued status at the transcript tail", () => {
+    const html = renderToStaticMarkup(createElement(QueuedIndicator));
+
+    expect(html).toContain("Codex is queued");
+    expect(html).toContain("Waiting for a heavyweight command slot");
+    expect(html).toContain('role="status"');
+    expect(html).toContain("message-queued-indicator");
+    expect(html).not.toContain("spin");
+  });
+
   it("only shows for live working sessions at the newest transcript position", () => {
     expect(shouldShowWorkingIndicator("working", false)).toBe(true);
     expect(shouldShowWorkingIndicator("generating", false)).toBe(true);
     expect(shouldShowWorkingIndicator("executing", false)).toBe(true);
     expect(shouldShowWorkingIndicator("planning", false)).toBe(true);
     expect(shouldShowWorkingIndicator("working", true)).toBe(false);
+    expect(shouldShowWorkingIndicator("queued", false)).toBe(false);
     expect(shouldShowWorkingIndicator("idle", false)).toBe(false);
     expect(shouldShowWorkingIndicator(undefined, false)).toBe(false);
+  });
+
+  it("only shows the queued indicator at the newest transcript position", () => {
+    expect(shouldShowQueuedIndicator("queued", false)).toBe(true);
+    expect(shouldShowQueuedIndicator("queued", true)).toBe(false);
+    expect(shouldShowQueuedIndicator("waiting", false)).toBe(false);
+    expect(shouldShowQueuedIndicator("working", false)).toBe(false);
   });
 
   it("finds the latest user prompt timestamp", () => {
