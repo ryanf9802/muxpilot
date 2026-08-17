@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import {
   appendSkillNamesToText,
+  extractGitWorkflowEvents,
+  gitWorkflowEventFromPayload,
+  gitWorkflowEventSummary,
   heavyCommandQueueEventFromPayload,
   heavyCommandQueueEventSummary,
   normalizeHeavyCommandQueueEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
+  withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
 } from "@muxpilot/core";
 import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
@@ -28,7 +32,7 @@ interface RawEvent {
     role?: string;
     name?: string;
     call_id?: string;
-    output?: string;
+    output?: unknown;
     message?: string;
     content?: unknown;
     arguments?: string;
@@ -133,11 +137,40 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
       }
       continue;
     }
+    for (const workflowMessage of gitWorkflowMessages(line, collaborationMode)) {
+      if (!isDuplicateGitWorkflowEvent(workflowMessage, messages)) messages.push(workflowMessage);
+    }
     const mapped = mapEvent(line, collaborationMode);
     if (mapped && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
   }
 
   return { messages, nextOffset: consumed, pendingSkillNames };
+}
+
+function gitWorkflowMessages(
+  line: string,
+  collaborationMode: CollaborationMode | null
+): Omit<ChatMessage, "sessionId" | "sequence">[] {
+  let raw: RawEvent;
+  try {
+    raw = JSON.parse(line) as RawEvent;
+  } catch {
+    return [];
+  }
+  if (raw.type !== "response_item") return [];
+  if (raw.payload?.type !== "function_call_output" && raw.payload?.type !== "custom_tool_call_output") return [];
+  const output = contentToText(raw.payload.output);
+  return extractGitWorkflowEvents(output).map((normalized) => ({
+    ...message(
+      "status",
+      "system",
+      raw.timestamp ?? new Date().toISOString(),
+      gitWorkflowEventSummary(normalized.event),
+      withGitWorkflowEventPayload(raw as unknown as Record<string, unknown>, normalized),
+      collaborationMode
+    ),
+    id: createHash("sha256").update(`git-workflow:${normalized.event.eventId}`).digest("hex")
+  }));
 }
 
 export async function parseCodexJsonlFromStart(path: string): Promise<Omit<ChatMessage, "sessionId" | "sequence">[]> {
@@ -296,6 +329,17 @@ function isDuplicateHeavyCommandQueueEvent(
       timestampsAreNear(previous.timestamp, message.timestamp)) return true;
   }
   return false;
+}
+
+function isDuplicateGitWorkflowEvent(
+  message: Omit<ChatMessage, "sessionId" | "sequence">,
+  messages: Omit<ChatMessage, "sessionId" | "sequence">[]
+): boolean {
+  const current = gitWorkflowEventFromPayload(message.payload);
+  if (!current) return false;
+  return messages.some((previous) =>
+    gitWorkflowEventFromPayload(previous.payload)?.event.eventId === current.event.eventId
+  );
 }
 
 function userEchoTextMatches(first: string, second: string): boolean {

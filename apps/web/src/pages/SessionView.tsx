@@ -80,6 +80,10 @@ import type {
 import {
   appendSkillNamesToText,
   canToggleFastMode,
+  gitWorkflowEventContext,
+  gitWorkflowEventDirection,
+  gitWorkflowEventFromPayload,
+  gitWorkflowEventSummary,
   hasCompleteProposedPlan,
   heavyCommandQueueCommandSummary,
   heavyCommandQueueEventDirection,
@@ -88,10 +92,12 @@ import {
   itemFirstSequence,
   itemLastSequence,
   normalizeGitWorkspaceSummary,
+  normalizeGitWorkflowEvent,
   normalizeHeavyCommandQueueEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
   transcriptMessages,
+  withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
 } from "@muxpilot/core";
 import { api } from "../api/client.js";
@@ -407,6 +413,13 @@ function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
     return {
       id: item.id,
       text: `${heavyCommandQueueEventDirection(queueEvent.event)} ${heavyCommandQueueEventSummary(queueEvent.event)} ${queueEvent.event.commandDisplay}`
+    };
+  }
+  const workflowEvent = gitWorkflowEventFromPayload(item.message.payload);
+  if (workflowEvent) {
+    return {
+      id: item.id,
+      text: `${gitWorkflowEventDirection(workflowEvent.event)} ${gitWorkflowEventSummary(workflowEvent.event)} ${gitWorkflowEventContext(workflowEvent.event)} ${workflowEvent.event.targetBranch} ${workflowEvent.event.sessionBranch ?? ""}`
     };
   }
   return { id: item.id, text: copyableMessageText(item.message) };
@@ -3824,6 +3837,49 @@ export function UserAction({
       </details>
     );
   }
+  const workflowEvent = gitWorkflowEventFromPayload(message.payload);
+  if (workflowEvent) {
+    const { event, rawText } = workflowEvent;
+    const tone = event.kind === "workflow_blocked" || event.kind === "review_required"
+      ? "warning"
+      : event.kind === "workflow_failed" ? "error" : "success";
+    return (
+      <details
+        className={`queue-automation-event workflow-automation-event${onOpenMenu ? " user-action-copyable" : ""}`}
+        data-tone={tone}
+        data-transcript-item-id={itemId}
+        {...menuTrigger.triggerProps}
+      >
+        <summary>
+          <span className="queue-automation-main">
+            <span className="queue-automation-direction">{gitWorkflowEventDirection(event)}</span>
+            <strong>{gitWorkflowEventSummary(event)}</strong>
+            <span className="queue-automation-command">{gitWorkflowEventContext(event)}</span>
+          </span>
+          <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
+        </summary>
+        <div className="queue-automation-details">
+          <dl>
+            <div><dt>Operation</dt><dd>{event.operation}</dd></div>
+            <div><dt>Target</dt><dd>{event.targetBranch}</dd></div>
+            {event.previousTargetBranch ? <div><dt>Previous target</dt><dd>{event.previousTargetBranch}</dd></div> : null}
+            {event.sessionBranch ? <div><dt>Task branch</dt><dd>{event.sessionBranch}</dd></div> : null}
+            {event.targetSha ? <div><dt>Commit</dt><dd>{event.targetSha}</dd></div> : null}
+            {event.cleanup ? <div><dt>Worktree cleanup</dt><dd>{event.cleanup}</dd></div> : null}
+            {event.reviewRequired !== undefined ? <div><dt>Review</dt><dd>{event.reviewRequired ? "required" : "not required"}</dd></div> : null}
+            {event.broker ? <div><dt>Broker</dt><dd>{event.broker}</dd></div> : null}
+            {event.reason ? <div><dt>Reason</dt><dd>{event.reason}</dd></div> : null}
+            {event.error ? <div><dt>Error</dt><dd>{event.error}</dd></div> : null}
+            {event.worktreePath ? <div><dt>Worktree path</dt><dd>{event.worktreePath}</dd></div> : null}
+          </dl>
+          <details className="queue-automation-payload">
+            <summary>Raw automation payload</summary>
+            <pre>{rawText}</pre>
+          </details>
+        </div>
+      </details>
+    );
+  }
   return (
     <div className={`user-action${onOpenMenu ? " user-action-copyable" : ""}`} data-transcript-item-id={itemId} {...menuTrigger.triggerProps}>
       <span>{message.text}</span>
@@ -3865,6 +3921,7 @@ function TranscriptRange({
 
 function label(message: ChatMessage): string {
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
+  if (gitWorkflowEventFromPayload(message.payload)) return "Git workflow";
   if (isSubagentMessage(message)) return "Subagent";
   if (isAssistantUpdate(message)) return "Progress";
   if (message.type === "tool_call") return "Tool";
@@ -3918,6 +3975,8 @@ function displayText(message: ChatMessage): string | null {
 export function copyableMessageText(message: ChatMessage): string {
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
   if (queueEvent) return queueEvent.rawText;
+  const workflowEvent = gitWorkflowEventFromPayload(message.payload);
+  if (workflowEvent) return workflowEvent.rawText;
   if (isToolOutput(message)) return message.text;
   if (message.role === "assistant") {
     return parseProposedPlanSegments(displayText(message) ?? "")
@@ -4286,6 +4345,16 @@ function displayMessage(message: ChatMessage): ChatMessage | null {
       payload: withHeavyCommandQueueEventPayload(message.payload, queueEvent)
     };
   }
+  const workflowEvent = gitWorkflowEventFromPayload(message.payload) ?? normalizeGitWorkflowEvent(message.text);
+  if (workflowEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: gitWorkflowEventSummary(workflowEvent.event),
+      payload: withGitWorkflowEventPayload(message.payload, workflowEvent)
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -4382,7 +4451,10 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return Boolean(heavyCommandQueueEventFromPayload(message.payload)) || isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
+  return Boolean(heavyCommandQueueEventFromPayload(message.payload))
+    || Boolean(gitWorkflowEventFromPayload(message.payload))
+    || isTurnAbortedStatus(message)
+    || isInstructionsLoadedStatus(message);
 }
 
 function isTurnAbortedStatus(message: ChatMessage): boolean {

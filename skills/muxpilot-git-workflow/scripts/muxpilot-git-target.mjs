@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { acquireWorkspaceLock, configuration, git, readStatus, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { acquireWorkspaceLock, configuration, git, readStatus, worktreeExists, writeGitWorkflowEvent, writeStatus } from "./local-workflow.mjs";
 
 const bypasses = process.argv.slice(2)
   .filter((value) => value.startsWith("--bypass="))
@@ -21,9 +21,10 @@ if (positional.length !== 1) {
 }
 
 let releaseWorkspace = null;
+let config = null;
 try {
   releaseWorkspace = await acquireWorkspaceLock();
-  const config = await configuration();
+  config = await configuration();
   const status = await readStatus(config);
   if (status?.state === "integrating") throw new Error("Cannot change the target branch during integration");
 
@@ -67,8 +68,14 @@ try {
   process.stdout.write(
     `TARGET_UPDATED previous=refs/heads/${config.targetBranch} target=refs/heads/${targetBranch} sha=${targetSha} review=${activeWorktree ? "required" : "not-required"}\n`
   );
+  writeGitWorkflowEvent("target_changed", "target", { ...config, targetBranch }, {
+    targetSha,
+    previousTargetBranch: config.targetBranch,
+    reviewRequired: activeWorktree
+  });
 } catch (error) {
   if (releaseWorkspace) await releaseWorkspace().catch(() => undefined);
+  writeGitWorkflowEvent("workflow_failed", "target", config, { error: error.message });
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }

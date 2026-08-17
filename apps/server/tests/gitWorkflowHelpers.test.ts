@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
+import { extractGitWorkflowEvents } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -27,6 +28,10 @@ describe("standalone local Git workflow helpers", () => {
     const begin = await node("muxpilot-git-begin.mjs", environment);
     const worktree = begin.match(/WORKTREE_READY (\S+)/)?.[1];
     expect(worktree).toBeTruthy();
+    expect(workflowEvents(begin)).toMatchObject([{ event: { kind: "worktree_created", worktreePath: worktree } }]);
+    const adopted = await node("muxpilot-git-begin.mjs", environment);
+    expect(adopted).toContain("reused=true");
+    expect(workflowEvents(adopted)).toMatchObject([{ event: { kind: "worktree_adopted", worktreePath: worktree } }]);
     expect((await lstat(join(worktree!, "node_modules"))).isSymbolicLink()).toBe(true);
     await writeFile(join(worktree!, "scratch.txt"), "ignored\n");
     expect(await git(worktree!, ["status", "--porcelain"])).toBe("");
@@ -37,6 +42,7 @@ describe("standalone local Git workflow helpers", () => {
 
     const finish = await node("muxpilot-git-finish.mjs", environment);
     expect(finish).toContain("INTEGRATED target=refs/heads/main");
+    expect(workflowEvents(finish)).toMatchObject([{ event: { kind: "integration_completed", cleanup: "removed" } }]);
     expect(await readFile(join(root, "tracked.txt"), "utf8")).toBe("completed\n");
     await expect(stat(worktree!)).rejects.toThrow();
     expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({ state: "idle", worktreePath: null });
@@ -52,7 +58,9 @@ describe("standalone local Git workflow helpers", () => {
     await git(worktree, ["commit", "-m", "task"]);
     await writeFile(join(root, "local.txt"), "dirty\n");
 
-    await expect(node("muxpilot-git-finish.mjs", environment)).rejects.toThrow("DIRTY_TARGET");
+    const blocked = await node("muxpilot-git-finish.mjs", environment).catch((error: Error) => error.message);
+    expect(blocked).toContain("DIRTY_TARGET");
+    expect(workflowEvents(blocked)).toMatchObject([{ event: { kind: "workflow_blocked", operation: "finish" } }]);
     expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({ state: "blocked" });
     expect(await git(root, ["rev-parse", "main"])).not.toBe(await git(worktree, ["rev-parse", "HEAD"]));
   });
@@ -98,7 +106,9 @@ describe("standalone local Git workflow helpers", () => {
     await git(secondWorktree, ["commit", "-m", "second task"]);
 
     await node("muxpilot-git-finish.mjs", first);
-    await expect(node("muxpilot-git-finish.mjs", second)).rejects.toThrow("REBASED_REVIEW_REQUIRED");
+    const reviewRequired = await node("muxpilot-git-finish.mjs", second).catch((error: Error) => error.message);
+    expect(reviewRequired).toContain("REBASED_REVIEW_REQUIRED");
+    expect(workflowEvents(reviewRequired)).toMatchObject([{ event: { kind: "review_required", reviewRequired: true } }]);
     await node("muxpilot-git-finish.mjs", second);
     expect(await readFile(join(root, "first.txt"), "utf8")).toBe("first\n");
     expect(await readFile(join(root, "second.txt"), "utf8")).toBe("second\n");
@@ -119,6 +129,9 @@ describe("standalone local Git workflow helpers", () => {
 
     const retarget = await node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"]);
     expect(retarget).toContain("TARGET_UPDATED previous=refs/heads/main target=refs/heads/feature");
+    expect(workflowEvents(retarget)).toMatchObject([{
+      event: { kind: "target_changed", previousTargetBranch: "main", targetBranch: "feature" }
+    }]);
     const worktree = (await node("muxpilot-git-begin.mjs", environment)).match(/WORKTREE_READY (\S+)/)![1]!;
     await writeFile(join(worktree, "feature.txt"), "feature task\n");
     await git(worktree, ["add", "feature.txt"]);
@@ -250,8 +263,12 @@ async function node(script: string, env: NodeJS.ProcessEnv, args: string[] = [])
   } catch (error) {
     const value = error as Error & { stderr?: string };
     const stdout = (error as Error & { stdout?: string }).stdout?.trim();
-    throw new Error(value.stderr?.trim() || stdout || value.message);
+    throw new Error([value.stderr?.trim(), stdout].filter(Boolean).join("\n") || value.message);
   }
+}
+
+function workflowEvents(output: string) {
+  return extractGitWorkflowEvents(output);
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {

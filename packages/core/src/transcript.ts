@@ -5,6 +5,12 @@ import {
   normalizeHeavyCommandQueueEvent,
   withHeavyCommandQueueEventPayload
 } from "./heavyCommandQueueEvent.js";
+import {
+  gitWorkflowEventFromPayload,
+  gitWorkflowEventSummary,
+  normalizeGitWorkflowEvent,
+  withGitWorkflowEventPayload
+} from "./gitWorkflowEvent.js";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "./userContext.js";
 
 type InternalTranscriptItem =
@@ -237,6 +243,16 @@ function displayMessage(message: ChatMessage): ChatMessage | null {
       payload: withHeavyCommandQueueEventPayload(message.payload, queueEvent)
     };
   }
+  const workflowEvent = gitWorkflowEventFromPayload(message.payload) ?? normalizeGitWorkflowEvent(message.text);
+  if (workflowEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: gitWorkflowEventSummary(workflowEvent.event),
+      payload: withGitWorkflowEventPayload(message.payload, workflowEvent)
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -309,7 +325,10 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return Boolean(heavyCommandQueueEventFromPayload(message.payload)) || isTurnAbortedStatus(message) || isInstructionsLoadedStatus(message);
+  return Boolean(heavyCommandQueueEventFromPayload(message.payload))
+    || Boolean(gitWorkflowEventFromPayload(message.payload))
+    || isTurnAbortedStatus(message)
+    || isInstructionsLoadedStatus(message);
 }
 
 function isTurnAbortedStatus(message: ChatMessage): boolean {

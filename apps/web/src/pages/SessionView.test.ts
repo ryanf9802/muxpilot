@@ -3,7 +3,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
-import { normalizeHeavyCommandQueueEvent, serializeHeavyCommandQueueEvent, withHeavyCommandQueueEventPayload } from "@muxpilot/core";
+import {
+  normalizeGitWorkflowEvent,
+  normalizeHeavyCommandQueueEvent,
+  serializeGitWorkflowEvent,
+  serializeHeavyCommandQueueEvent,
+  withGitWorkflowEventPayload,
+  withHeavyCommandQueueEventPayload
+} from "@muxpilot/core";
 import {
   activeSkillToken,
   applyPlanActionResponse,
@@ -1943,6 +1950,39 @@ describe("heavyweight queue automation events", () => {
   });
 });
 
+describe("Git workflow automation events", () => {
+  it("renders an expandable local integration event with Git details", () => {
+    const workflowMessage = gitWorkflowMessage("integration_completed");
+    const html = renderToStaticMarkup(createElement(UserAction, { message: workflowMessage }));
+
+    expect(html).toContain("workflow-automation-event");
+    expect(html).toContain('data-tone="success"');
+    expect(html).toContain("Agent → Git");
+    expect(html).toContain("Changes integrated locally");
+    expect(html).toContain("0123456789abcdef");
+    expect(html).toContain("Worktree cleanup");
+    expect(html).toContain("Raw automation payload");
+  });
+
+  it("renders review-required events as warnings", () => {
+    const html = renderToStaticMarkup(createElement(UserAction, { message: gitWorkflowMessage("review_required") }));
+
+    expect(html).toContain('data-tone="warning"');
+    expect(html).toContain("Git → Agent");
+    expect(html).toContain("Fresh validation and self-review required");
+  });
+
+  it("copies the raw envelope while transcript find includes branch context", () => {
+    const workflowMessage = gitWorkflowMessage("integration_completed");
+    const item = transcriptMessageItem(workflowMessage);
+
+    expect(copyableMessageText(workflowMessage)).toContain("<muxpilot_git_workflow>");
+    expect(visibleTranscriptFindEntries([item], new Set(), {})[0]?.text).toContain(
+      "Agent → Git Changes integrated locally main @ 01234567 main"
+    );
+  });
+});
+
 describe("pending user messages", () => {
   it("creates render-only user messages with collaboration mode metadata", () => {
     const pending = createPendingUserMessage("session-a", "Plan this", "plan", "2026-07-07T00:00:00.000Z");
@@ -2620,6 +2660,32 @@ function heavyQueueMessage(kind: "queue_released" | "resume_requested"): ChatMes
     "system",
     "status",
     withHeavyCommandQueueEventPayload({}, normalized)
+  );
+}
+
+function gitWorkflowMessage(kind: "integration_completed" | "review_required"): ChatMessage {
+  const raw = serializeGitWorkflowEvent({
+    version: 1,
+    eventId: kind === "integration_completed" ? "mwf-012345abcdef" : "mwf-fedcba654321",
+    kind,
+    operation: "finish",
+    workspaceId: "workspace-a",
+    targetBranch: "main",
+    sessionBranch: "muxpilot/workspace-a/task",
+    worktreePath: "/tmp/task",
+    skill: "$muxpilot-git-workflow",
+    ...(kind === "integration_completed"
+      ? { targetSha: "0123456789abcdef", cleanup: "removed" as const, broker: "authenticated" as const }
+      : { reviewRequired: true, reason: "Task rebased; repeat focused validation and self-review" })
+  });
+  const normalized = normalizeGitWorkflowEvent(raw)!;
+  return message(
+    "session-a",
+    1,
+    kind === "integration_completed" ? "Changes integrated locally" : "Fresh validation and self-review required",
+    "system",
+    "status",
+    withGitWorkflowEventPayload({}, normalized)
   );
 }
 

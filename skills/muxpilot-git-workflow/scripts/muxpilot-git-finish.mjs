@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { acquireBranchLock, acquireWorkspaceLock, brokerFinish, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { acquireBranchLock, acquireWorkspaceLock, brokerFinish, configuration, git, readStatus, targetCheckout, unlinkSharedDependencies, worktreeExists, writeGitWorkflowEvent, writeStatus } from "./local-workflow.mjs";
 
 const bypasses = process.argv.slice(2).filter((value) => value.startsWith("--bypass=")).map((value) => value.slice(9));
 const allowedBypasses = new Set(["worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target", "local-target-only", "automatic-cleanup", "no-pull-push"]);
@@ -33,6 +33,13 @@ try {
       status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
       await releaseOperationLock();
       process.stdout.write("RETARGETED_REVIEW_REQUIRED: the task target changed; rerun focused checks and the self-review loop before retrying integration\n");
+      writeGitWorkflowEvent("review_required", "finish", config, {
+        targetSha,
+        sessionBranch: status.sessionBranch,
+        worktreePath: status.worktreePath,
+        reviewRequired: true,
+        reason: "Target branch changed; repeat focused validation and self-review"
+      });
       process.exit(3);
     }
     if (!bypasses.includes("automatic-cleanup")) {
@@ -47,6 +54,12 @@ try {
     });
     await releaseOperationLock();
     process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${targetSha} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+    writeGitWorkflowEvent("integration_completed", "finish", config, {
+      targetSha,
+      sessionBranch: status.sessionBranch,
+      worktreePath: status.worktreePath,
+      cleanup: bypasses.includes("automatic-cleanup") ? "retained" : "removed"
+    });
     process.exit(0);
   }
   const commits = Number(await git(worktree, ["rev-list", "--count", `${targetSha}..${taskHead}`]).catch(() => "0"));
@@ -71,6 +84,13 @@ try {
     status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
     await releaseOperationLock();
     process.stdout.write("REBASED_REVIEW_REQUIRED: the target advanced; rerun focused checks and the self-review loop before retrying integration\n");
+    writeGitWorkflowEvent("review_required", "finish", config, {
+      targetSha,
+      sessionBranch: status.sessionBranch,
+      worktreePath: status.worktreePath,
+      reviewRequired: true,
+      reason: "Task rebased onto an advanced target; repeat focused validation and self-review"
+    });
     process.exit(3);
   }
 
@@ -78,6 +98,13 @@ try {
     status = await writeStatus(config, { ...status, state: "worktree", targetSha, lastError: null, reviewRequired: false });
     await releaseOperationLock();
     process.stdout.write("RETARGETED_REVIEW_REQUIRED: the task target changed; rerun focused checks and the self-review loop before retrying integration\n");
+    writeGitWorkflowEvent("review_required", "finish", config, {
+      targetSha,
+      sessionBranch: status.sessionBranch,
+      worktreePath: status.worktreePath,
+      reviewRequired: true,
+      reason: "Target branch changed; repeat focused validation and self-review"
+    });
     process.exit(3);
   }
 
@@ -92,11 +119,25 @@ try {
       await writeStatus(config, { ...status, state: "worktree", targetSha: await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]), lastError: null, reviewRequired: false });
       await releaseOperationLock();
       process.stdout.write("RETARGETED_REVIEW_REQUIRED: the target changed during broker validation; rerun focused checks and self-review\n");
+      writeGitWorkflowEvent("review_required", "finish", config, {
+        targetSha: await git(config.repoRoot, ["rev-parse", `refs/heads/${config.targetBranch}^{commit}`]),
+        sessionBranch: status.sessionBranch,
+        worktreePath: status.worktreePath,
+        reviewRequired: true,
+        reason: "Target changed during integration preflight; repeat focused validation and self-review"
+      });
       process.exit(3);
     }
     if (!brokerResult.ok) throw new Error(brokerResult.error || "Git workflow broker rejected integration");
     await releaseOperationLock();
     process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${brokerResult.sha} worktree=${brokerResult.retained ? "retained" : "removed"} broker=authenticated\n`);
+    writeGitWorkflowEvent("integration_completed", "finish", config, {
+      targetSha: brokerResult.sha,
+      sessionBranch: status.sessionBranch,
+      worktreePath: status.worktreePath,
+      cleanup: brokerResult.retained ? "retained" : "removed",
+      broker: "authenticated"
+    });
     process.exit(0);
   }
 
@@ -110,6 +151,13 @@ try {
       await writeStatus(config, { ...status, state: "worktree", targetSha: lockedTarget, lastError: null, reviewRequired: false });
       await releaseOperationLock();
       process.stdout.write("REBASED_REVIEW_REQUIRED: another task integrated first; rerun focused checks and the self-review loop\n");
+      writeGitWorkflowEvent("review_required", "finish", config, {
+        targetSha: lockedTarget,
+        sessionBranch: status.sessionBranch,
+        worktreePath: status.worktreePath,
+        reviewRequired: true,
+        reason: "Task rebased after another integration; repeat focused validation and self-review"
+      });
       process.exit(3);
     } catch (error) {
       await writeStatus(config, { ...status, state: "blocked", targetSha: lockedTarget, lastError: `Rebase conflict: ${error.message}` });
@@ -141,6 +189,12 @@ try {
   });
   await releaseOperationLock();
   process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${finalHead} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+  writeGitWorkflowEvent("integration_completed", "finish", config, {
+    targetSha: finalHead,
+    sessionBranch: status.sessionBranch,
+    worktreePath: status.worktreePath,
+    cleanup: bypasses.includes("automatic-cleanup") ? "retained" : "removed"
+  });
 } catch (error) {
   if (release) await release().catch(() => undefined);
   if (config) {
@@ -148,6 +202,13 @@ try {
     if (current?.state === "integrating") {
       await writeStatus(config, { ...current, state: "failed", lastError: error.message }).catch(() => undefined);
     }
+    const latest = await readStatus(config).catch(() => null);
+    writeGitWorkflowEvent(latest?.state === "blocked" ? "workflow_blocked" : "workflow_failed", "finish", config, {
+      targetSha: latest?.targetSha,
+      sessionBranch: latest?.sessionBranch,
+      worktreePath: latest?.worktreePath,
+      error: error.message
+    });
   }
   await releaseOperationLock();
   process.stderr.write(`${error.message}\n`);

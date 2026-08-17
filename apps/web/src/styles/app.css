@@ -3550,6 +3550,17 @@ select:focus-visible {
   border-radius: 8px;
 }
 
+.workflow-automation-event {
+  --workflow-event-color: var(--color-success);
+  background: color-mix(in srgb, var(--workflow-event-color) 8%, var(--color-input));
+  border-color: color-mix(in srgb, var(--workflow-event-color) 34%, var(--color-border));
+}
+
+.workflow-automation-event[data-tone="warning"] { --workflow-event-color: var(--color-warning); }
+.workflow-automation-event[data-tone="error"] { --workflow-event-color: var(--color-error); }
+.workflow-automation-event > summary::before,
+.workflow-automation-event .queue-automation-direction { color: var(--workflow-event-color); }
+
 .queue-automation-event > summary {
   display: flex;
   align-items: center;

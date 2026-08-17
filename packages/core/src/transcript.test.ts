@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildExpandedTranscriptItems, buildTranscriptItems } from "./transcript.js";
 import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
+import { serializeGitWorkflowEvent } from "./gitWorkflowEvent.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
@@ -138,6 +139,34 @@ describe("buildTranscriptItems", () => {
           type: "status",
           text: "Heavyweight command queued · session released while waiting",
           payload: expect.objectContaining({ muxpilotHeavyCommandQueue: expect.any(Object) })
+        })
+      })
+    ]);
+  });
+
+  it("renders Git workflow automation in standalone compact action rows", () => {
+    const items = buildTranscriptItems([
+      message(1, serializeGitWorkflowEvent({
+        version: 1,
+        eventId: "mwf-012345abcdef",
+        kind: "worktree_created",
+        operation: "begin",
+        workspaceId: "workspace-a",
+        targetBranch: "main",
+        sessionBranch: "muxpilot/workspace-a/task",
+        worktreePath: "/tmp/task",
+        skill: "$muxpilot-git-workflow"
+      }), "assistant", "assistant")
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        type: "user_action",
+        message: expect.objectContaining({
+          role: "system",
+          type: "status",
+          text: "Implementation worktree created",
+          payload: expect.objectContaining({ muxpilotGitWorkflow: expect.any(Object) })
         })
       })
     ]);

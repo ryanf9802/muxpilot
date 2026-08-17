@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -64,6 +65,21 @@ export async function writeStatus(config, value) {
   await writeFile(temporary, `${JSON.stringify(status, null, 2)}\n`, "utf8");
   await rename(temporary, config.statusFile);
   return status;
+}
+
+export function writeGitWorkflowEvent(kind, operation, config, details = {}) {
+  if (!config?.workspaceId || !config?.targetBranch) return;
+  const event = {
+    version: 1,
+    eventId: `mwf-${randomBytes(6).toString("hex")}`,
+    kind,
+    operation,
+    workspaceId: config.workspaceId,
+    targetBranch: config.targetBranch,
+    skill: "$muxpilot-git-workflow",
+    ...details
+  };
+  process.stdout.write(`<muxpilot_git_workflow>\n${JSON.stringify(event)}\n</muxpilot_git_workflow>\n`);
 }
 
 export async function linkDependencies(config, worktreePath) {

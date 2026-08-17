@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { serializeHeavyCommandQueueEvent } from "@muxpilot/core";
+import { serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent } from "@muxpilot/core";
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
@@ -166,6 +166,63 @@ describe("parseCodexJsonl", () => {
       expect.objectContaining({ role: "system", type: "status", text: "Heavyweight command queued · session released while waiting" })
     ]);
     expect(result.messages[0]?.payload).toHaveProperty("muxpilotHeavyCommandQueue");
+  });
+
+  it("extracts Git workflow events from function and custom tool outputs", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const created = serializeGitWorkflowEvent({
+      version: 1,
+      eventId: "mwf-012345abcdef",
+      kind: "worktree_created",
+      operation: "begin",
+      workspaceId: "workspace-a",
+      targetBranch: "main",
+      sessionBranch: "muxpilot/workspace-a/task",
+      worktreePath: "/tmp/task",
+      skill: "$muxpilot-git-workflow"
+    });
+    const integrated = serializeGitWorkflowEvent({
+      version: 1,
+      eventId: "mwf-fedcba654321",
+      kind: "integration_completed",
+      operation: "finish",
+      workspaceId: "workspace-a",
+      targetBranch: "main",
+      targetSha: "0123456789abcdef",
+      cleanup: "removed",
+      skill: "$muxpilot-git-workflow"
+    });
+    await writeFile(path, [
+      JSON.stringify({
+        timestamp: "2026-07-07T00:00:00.000Z",
+        type: "response_item",
+        payload: { type: "function_call_output", output: `command output\n${created}` }
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-07T00:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call_output",
+          output: [
+            { type: "input_text", text: `wrapper\n${created}` },
+            { type: "input_text", text: `${integrated}\nEXIT 0` }
+          ]
+        }
+      }),
+      ""
+    ].join("\n"));
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages.filter((item) => item.payload.muxpilotGitWorkflow)).toEqual([
+      expect.objectContaining({ role: "system", type: "status", text: "Implementation worktree created" }),
+      expect.objectContaining({ role: "system", type: "status", text: "Changes integrated locally" })
+    ]);
+    const workflowMessages = result.messages.filter((item) => item.payload.muxpilotGitWorkflow);
+    expect(workflowMessages[0]?.id).toHaveLength(64);
+    expect(workflowMessages[0]?.id).not.toBe(workflowMessages[1]?.id);
+    expect(result.messages).toContainEqual(expect.objectContaining({ role: "tool", type: "tool_output" }));
   });
 
   it("keeps escalated function calls as tool transcript context", async () => {

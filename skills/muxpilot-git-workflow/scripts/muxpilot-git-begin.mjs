@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { acquireWorkspaceLock, configuration, git, ignoreSharedDependencies, linkDependencies, readStatus, worktreeExists, writeStatus } from "./local-workflow.mjs";
+import { acquireWorkspaceLock, configuration, git, ignoreSharedDependencies, linkDependencies, readStatus, worktreeExists, writeGitWorkflowEvent, writeStatus } from "./local-workflow.mjs";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.stdout.write("Usage: muxpilot-git-begin\n");
@@ -9,14 +9,20 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 }
 
 let releaseWorkspace = null;
+let config = null;
 try {
   releaseWorkspace = await acquireWorkspaceLock();
-  const config = await configuration();
+  config = await configuration();
   const existing = await readStatus(config);
   if (["worktree", "blocked", "failed"].includes(existing?.state) && await worktreeExists(existing.worktreePath)) {
     await releaseWorkspace();
     releaseWorkspace = null;
     process.stdout.write(`WORKTREE_READY ${existing.worktreePath} branch=${existing.sessionBranch} reused=true\n`);
+    writeGitWorkflowEvent("worktree_adopted", "begin", config, {
+      targetSha: existing.targetSha,
+      sessionBranch: existing.sessionBranch,
+      worktreePath: existing.worktreePath
+    });
     process.exit(0);
   }
   await git(config.repoRoot, ["show-ref", "--verify", `refs/heads/${config.targetBranch}`]);
@@ -32,8 +38,10 @@ try {
   releaseWorkspace = null;
   process.stdout.write(`WORKTREE_READY ${worktreePath} branch=${branch}\n`);
   for (const link of links) process.stdout.write(`DEPENDENCY_REUSED kind=${link.kind} path=${link.relativePath} source=${link.sourcePath}\n`);
+  writeGitWorkflowEvent("worktree_created", "begin", config, { targetSha, sessionBranch: branch, worktreePath });
 } catch (error) {
   if (releaseWorkspace) await releaseWorkspace().catch(() => undefined);
+  writeGitWorkflowEvent("workflow_failed", "begin", config, { error: error.message });
   process.stderr.write(`${error.message}\n`);
   process.exit(1);
 }
