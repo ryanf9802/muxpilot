@@ -25,6 +25,9 @@ import type {
   QuestionAnswerRequest,
   RemoteAccessResponse,
   RestoreSessionResponse,
+  RestoreSessionRecoveryRequest,
+  RestoreSessionRecoveryResponse,
+  SessionRecoveryResponse,
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
@@ -118,6 +121,11 @@ export const api = {
   sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   restoreSession: (id: string) =>
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+  sessionRecovery: () => json<SessionRecoveryResponse>("/api/session-recovery"),
+  restoreSessionRecovery: (request: RestoreSessionRecoveryRequest) =>
+    json<RestoreSessionRecoveryResponse>("/api/session-recovery/restore", { method: "POST", body: JSON.stringify(request) }),
+  dismissSessionRecovery: (id: string) =>
+    json<{ ok: true }>(`/api/session-recovery/${encodeURIComponent(id)}`, { method: "DELETE" }),
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   dismissSessionDirectory: (path: string) =>
     json<{ ok: true }>("/api/session-directories", { method: "DELETE", body: JSON.stringify({ path }) }),

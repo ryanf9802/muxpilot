@@ -17,6 +17,10 @@ import type {
   SessionResourceUsage,
   SessionForkOrigin,
   SessionHistoryResult,
+  SessionRecoveryCandidate,
+  SessionRecoveryIncident,
+  RestoreSessionRecoveryResponse,
+  RestoreSessionRecoveryResult,
   SessionAction,
   SessionDirectorySuggestion,
   SessionModelSettings,
@@ -28,7 +32,7 @@ import type {
   TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { canToggleFastMode, hasCompleteProposedPlan, isValidSessionName, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -103,6 +107,9 @@ export class SessionManager {
   private missingIngestCursor = 0;
   private resourceUsageLookup: SessionResourceUsageLookup | null = null;
   private heavyCommandQueue: HeavyCommandQueueLookup | null = null;
+  private recoveryRunId: string | null = null;
+  private startupRecoveryCandidates: SessionRecoveryCandidate[] = [];
+  private readonly restoreLocks = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -170,6 +177,108 @@ export class SessionManager {
 
   async discoverNow(): Promise<void> {
     await this.runDiscoverTick();
+  }
+
+  async prepareStartupRecovery(): Promise<void> {
+    const previous = await this.db.getSessionRecoveryRuntime();
+    const sessions = await this.db.listSessions(true);
+    this.startupRecoveryCandidates = previous && !previous.cleanShutdown
+      ? previous.sessionIds
+          .map((id) => sessions.find((session) => session.id === id) ?? null)
+          .filter((session): session is ManagedSession => Boolean(
+            session && !session.archived && session.status !== "missing" && session.codexSessionId
+          ))
+          .map(recoveryCandidateFromSession)
+      : [];
+    this.recoveryRunId = eventId();
+    await this.db.setSessionRecoveryRuntime({
+      runId: this.recoveryRunId,
+      cleanShutdown: false,
+      updatedAt: nowIso(),
+      sessionIds: recoverableLiveSessionIds(sessions)
+    });
+  }
+
+  async finishStartupRecovery(): Promise<void> {
+    if (this.startupRecoveryCandidates.length === 0) return;
+    const missing: SessionRecoveryCandidate[] = [];
+    for (const candidate of this.startupRecoveryCandidates) {
+      const session = await this.db.getSession(candidate.sessionId);
+      if (session?.status === "missing" && !session.archived) missing.push(candidate);
+    }
+    this.startupRecoveryCandidates = [];
+    if (missing.length === 0) return;
+    const existing = await this.db.getSessionRecoveryIncident();
+    const sessions = mergeRecoveryCandidates(existing?.sessions ?? [], missing);
+    const incident: SessionRecoveryIncident = {
+      id: existing?.id ?? eventId(),
+      detectedAt: existing?.detectedAt ?? nowIso(),
+      sessions
+    };
+    await this.db.setSessionRecoveryIncident(incident, nowIso());
+  }
+
+  async markCleanShutdown(): Promise<void> {
+    if (!this.recoveryRunId) return;
+    const sessions = await this.db.listSessions(true);
+    await this.db.setSessionRecoveryRuntime({
+      runId: this.recoveryRunId,
+      cleanShutdown: true,
+      updatedAt: nowIso(),
+      sessionIds: recoverableLiveSessionIds(sessions)
+    });
+  }
+
+  async getSessionRecoveryIncident(): Promise<SessionRecoveryIncident | null> {
+    const incident = await this.db.getSessionRecoveryIncident();
+    if (!incident) return null;
+    const sessions = await this.db.listSessions(true);
+    const pending = incident.sessions.filter((candidate) => !sessions.some((session) =>
+      !session.archived && session.status !== "missing" && recoveryIdentityForSession(session) === sessionHistoryIdentity(candidate)
+    ));
+    if (pending.length === incident.sessions.length) return incident;
+    const next = pending.length > 0 ? { ...incident, sessions: pending } : null;
+    await this.db.setSessionRecoveryIncident(next, nowIso());
+    return next;
+  }
+
+  async restoreSessionRecovery(incidentId: string, sessionIds: string[]): Promise<RestoreSessionRecoveryResponse> {
+    const incident = await this.getSessionRecoveryIncident();
+    if (!incident || incident.id !== incidentId) throw new SessionRestoreError("Recovery batch is no longer available");
+    const selected = new Set(sessionIds);
+    const candidates = incident.sessions.filter((candidate) => selected.has(candidate.sessionId));
+    if (candidates.length === 0) throw new SessionRestoreError("Select at least one session to restore", 400);
+    const results: RestoreSessionRecoveryResult[] = [];
+    const failedIds = new Set<string>();
+    for (const candidate of candidates) {
+      try {
+        const restored = await this.restoreSession(candidate.sessionId);
+        results.push({
+          sourceSessionId: candidate.sessionId,
+          status: restored.restored ? "restored" : "reused_live",
+          session: restored.session,
+          error: null
+        });
+      } catch (error) {
+        failedIds.add(candidate.sessionId);
+        results.push({
+          sourceSessionId: candidate.sessionId,
+          status: "failed",
+          session: null,
+          error: error instanceof Error ? error.message : "Could not restore session"
+        });
+      }
+    }
+    const failures = incident.sessions.filter((candidate) => failedIds.has(candidate.sessionId));
+    const current = await this.db.getSessionRecoveryIncident();
+    const next = current?.id === incident.id && failures.length > 0 ? { ...incident, sessions: failures } : null;
+    await this.db.setSessionRecoveryIncident(next, nowIso());
+    return { results, incident: next };
+  }
+
+  async dismissSessionRecovery(incidentId: string): Promise<void> {
+    const incident = await this.db.getSessionRecoveryIncident();
+    if (incident?.id === incidentId) await this.db.setSessionRecoveryIncident(null, nowIso());
   }
 
   async catchUpIngest(): Promise<void> {
@@ -378,6 +487,18 @@ export class SessionManager {
         this.publish("status.changed", session.id, { status: "missing" });
       }
     }
+    await this.recordRecoveryRoster();
+  }
+
+  private async recordRecoveryRoster(): Promise<void> {
+    if (!this.recoveryRunId) return;
+    const sessions = await this.db.listSessions(true);
+    await this.db.setSessionRecoveryRuntime({
+      runId: this.recoveryRunId,
+      cleanShutdown: false,
+      updatedAt: nowIso(),
+      sessionIds: recoverableLiveSessionIds(sessions)
+    });
   }
 
   private async runDiscoverTick(): Promise<void> {
@@ -636,11 +757,29 @@ export class SessionManager {
   }
 
   async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
-    const source = await this.db.getSession(sessionId);
+    const initial = await this.db.getSession(sessionId);
+    if (!initial) throw new SessionNotFoundError("Session not found");
+    if (!initial.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
+    const key = recoveryIdentityForSession(initial);
+    const prior = this.restoreLocks.get(key) ?? Promise.resolve();
+    const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key));
+    this.restoreLocks.set(key, restore);
+    try {
+      const result = await restore;
+      await this.recordRecoveryRoster();
+      return result;
+    } finally {
+      if (this.restoreLocks.get(key) === restore) this.restoreLocks.delete(key);
+    }
+  }
+
+  private async restoreSessionUnlocked(sessionId: string, restoreIdentity: string): Promise<{ session: ManagedSession; restored: boolean }> {
+    const source = await this.db.getSession(sessionId) ??
+      (await this.db.listSessions(true)).find((session) => recoveryIdentityForSession(session) === restoreIdentity) ?? null;
     if (!source) throw new SessionNotFoundError("Session not found");
     if (!source.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
 
-    const live = await this.findLiveSessionByCodexSessionId(source.codexSessionId);
+    const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
       if (live.archived) await this.db.markSessionArchived(live.id, false, nowIso());
       const session = requireSession(await this.db.getSession(live.id));
@@ -1578,11 +1717,24 @@ export class SessionManager {
     throw new Error("Session pane is no longer available in tmux");
   }
 
+  private async findLiveSessionByRecoveryIdentity(identity: string): Promise<ManagedSession | null> {
+    const sessions = await this.db.listSessions(true);
+    for (const session of sessions) {
+      if (recoveryIdentityForSession(session) !== identity) continue;
+      if (session.status === "missing") continue;
+      try {
+        return await this.liveSession(session);
+      } catch {
+        // Discovery will mark stale rows missing on the next tick.
+      }
+    }
+    return null;
+  }
+
   private async findLiveSessionByCodexSessionId(codexSessionId: string): Promise<ManagedSession | null> {
     const sessions = await this.db.listSessions(true);
     for (const session of sessions) {
-      if (session.codexSessionId !== codexSessionId) continue;
-      if (session.status === "missing") continue;
+      if (session.codexSessionId !== codexSessionId || session.status === "missing") continue;
       try {
         return await this.liveSession(session);
       } catch {
@@ -1892,6 +2044,61 @@ function collapseHistoryByIdentity(results: SessionHistoryResult[], limit: numbe
     }
   }
   return [...byIdentity.values()].slice(0, limit);
+}
+
+function recoverableLiveSessionIds(sessions: ManagedSession[]): string[] {
+  return sessions
+    .filter((session) => !session.archived && session.status !== "missing" && Boolean(session.codexSessionId))
+    .map((session) => session.id);
+}
+
+function recoveryCandidateFromSession(session: ManagedSession): SessionRecoveryCandidate {
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+  return {
+    sessionId: session.id,
+    codexSessionId: session.codexSessionId ?? "",
+    codexJsonlPath: session.codexJsonlPath,
+    status: "missing",
+    previousStatus: session.status,
+    archived: false,
+    sessionName: sessionName(session),
+    repoName: session.repo.name,
+    repoBranch: session.repo.branch,
+    cwd: session.tmux.cwd,
+    lastActivityAt: session.lastActivityAt,
+    transcriptSize: session.transcriptSize,
+    matchedPrompts: session.recentUserPrompts.map((text, index) => ({
+      sequence: Math.max(0, session.transcriptSize - index),
+      timestamp: session.lastActivityAt ?? "",
+      text
+    })),
+    gitWorkspace: workspace ? {
+      id: workspace.id,
+      worktreePath: workspace.worktreePath,
+      sessionBranch: workspace.sessionBranch,
+      targetBranch: workspace.targetBranch
+    } : null
+  };
+}
+
+function recoveryIdentityForSession(session: ManagedSession): string {
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+  return workspace ? `workspace:${workspace.id}` : `codex:${session.codexSessionId ?? session.id}`;
+}
+
+function mergeRecoveryCandidates(
+  current: SessionRecoveryCandidate[],
+  discovered: SessionRecoveryCandidate[]
+): SessionRecoveryCandidate[] {
+  const byIdentity = new Map<string, SessionRecoveryCandidate>();
+  for (const candidate of [...current, ...discovered]) {
+    byIdentity.set(sessionHistoryIdentity(candidate), candidate);
+  }
+  return [...byIdentity.values()].sort((first, second) => {
+    const firstTime = first.lastActivityAt ? Date.parse(first.lastActivityAt) : Number.NEGATIVE_INFINITY;
+    const secondTime = second.lastActivityAt ? Date.parse(second.lastActivityAt) : Number.NEGATIVE_INFINITY;
+    return secondTime - firstTime || first.sessionName.localeCompare(second.sessionName);
+  });
 }
 
 function preferredForkSource(sessions: ManagedSession[]): ManagedSession | null {

@@ -9,6 +9,9 @@ import type {
   QuestionAnswerRequest,
   ResolveApprovalRequest,
   RestoreSessionResponse,
+  RestoreSessionRecoveryRequest,
+  RestoreSessionRecoveryResponse,
+  SessionRecoveryResponse,
   SendInputRequest,
   SessionDirectoriesResponse,
   SessionHistoryResponse,
@@ -49,6 +52,10 @@ import { SessionTransferError, type SessionTransferService } from "../services/s
 import type { HeavyCommandService } from "../services/heavyCommands.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
+const restoreSessionRecoverySchema = z.object({
+  incidentId: z.string().trim().min(1).max(200),
+  sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100)
+});
 const inputBodySchema = z
   .object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() })
   .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
@@ -334,6 +341,29 @@ export function registerRoutes(
       }
       throw error;
     }
+  });
+
+  app.get("/api/session-recovery", { preHandler: access.requireAccess }, async (): Promise<SessionRecoveryResponse> => ({
+    incident: await manager.getSessionRecoveryIncident()
+  }));
+
+  app.post("/api/session-recovery/restore", { preHandler: access.requireAccess }, async (request, reply): Promise<RestoreSessionRecoveryResponse | void> => {
+    const body = restoreSessionRecoverySchema.parse(request.body) as RestoreSessionRecoveryRequest;
+    try {
+      return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds);
+    } catch (error) {
+      if (error instanceof SessionRestoreError || error instanceof SessionNotFoundError || error instanceof CreateSessionError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.delete("/api/session-recovery/:id", { preHandler: access.requireAccess }, async (request) => {
+    const { id } = request.params as { id: string };
+    await manager.dismissSessionRecovery(id);
+    return { ok: true as const };
   });
 
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {

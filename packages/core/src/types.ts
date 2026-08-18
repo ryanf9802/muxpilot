@@ -591,6 +591,37 @@ export interface RestoreSessionResponse {
   restored: boolean;
 }
 
+export interface SessionRecoveryCandidate extends SessionHistoryResult {
+  previousStatus: SessionStatus;
+}
+
+export interface SessionRecoveryIncident {
+  id: string;
+  detectedAt: string;
+  sessions: SessionRecoveryCandidate[];
+}
+
+export interface SessionRecoveryResponse {
+  incident: SessionRecoveryIncident | null;
+}
+
+export interface RestoreSessionRecoveryRequest {
+  incidentId: string;
+  sessionIds: string[];
+}
+
+export interface RestoreSessionRecoveryResult {
+  sourceSessionId: string;
+  status: "restored" | "reused_live" | "failed";
+  session: ManagedSession | null;
+  error: string | null;
+}
+
+export interface RestoreSessionRecoveryResponse {
+  results: RestoreSessionRecoveryResult[];
+  incident: SessionRecoveryIncident | null;
+}
+
 export interface SessionTransferExportRequest {
   sessionIds: string[];
 }

@@ -2,10 +2,30 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ManagedSession, QueuedInput, TranscriptPageResponse } from "@muxpilot/core";
+import type { ChatMessage, ManagedSession, QueuedInput, SessionHistoryResult, TranscriptPageResponse } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
+  it("persists runtime and pending crash-recovery state", async () => {
+    const db = await tempDb();
+    const updatedAt = "2026-08-17T20:00:00.000Z";
+    await db.setSessionRecoveryRuntime({ runId: "run-1", cleanShutdown: false, updatedAt, sessionIds: ["session-1"] });
+    await db.setSessionRecoveryIncident({
+      id: "incident-1",
+      detectedAt: updatedAt,
+      sessions: [{
+        ...sessionHistoryResult(testSession("session-1")),
+        previousStatus: "working"
+      }]
+    }, updatedAt);
+
+    expect(await db.getSessionRecoveryRuntime()).toEqual({ runId: "run-1", cleanShutdown: false, updatedAt, sessionIds: ["session-1"] });
+    expect(await db.getSessionRecoveryIncident()).toMatchObject({ id: "incident-1", sessions: [{ sessionId: "session-1", previousStatus: "working" }] });
+    await db.setSessionRecoveryIncident(null, updatedAt);
+    expect(await db.getSessionRecoveryIncident()).toBeNull();
+    await db.close();
+  });
+
   it("filters missing rows in SQL before session hydration", async () => {
     const db = await tempDb();
     const active = testSession("session-active");
@@ -1444,6 +1464,24 @@ function testSession(id: string): ManagedSession {
     unreadCount: 0,
     pinned: false,
     archived: false
+  };
+}
+
+function sessionHistoryResult(session: ManagedSession): SessionHistoryResult {
+  return {
+    sessionId: session.id,
+    codexSessionId: session.codexSessionId ?? "",
+    codexJsonlPath: session.codexJsonlPath,
+    status: session.status,
+    archived: session.archived,
+    sessionName: session.tmux.windowName,
+    repoName: session.repo.name,
+    repoBranch: session.repo.branch,
+    cwd: session.tmux.cwd,
+    lastActivityAt: session.lastActivityAt,
+    transcriptSize: session.transcriptSize,
+    matchedPrompts: [],
+    gitWorkspace: null
   };
 }
 

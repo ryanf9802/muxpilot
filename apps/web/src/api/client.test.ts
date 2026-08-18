@@ -275,6 +275,20 @@ describe("api client request headers", () => {
     expect((fetchMock.mock.calls[1]?.[1] as RequestInit).method).toBe("POST");
   });
 
+  it("reads, restores, and dismisses a crash-recovery batch", async () => {
+    const fetchMock = mockJsonResponse({ incident: null, results: [] });
+
+    await api.sessionRecovery();
+    await api.restoreSessionRecovery({ incidentId: "incident-1", sessionIds: ["session-1", "session-2"] });
+    await api.dismissSessionRecovery("incident-1");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session-recovery");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/session-recovery/restore");
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).body).toBe(JSON.stringify({ incidentId: "incident-1", sessionIds: ["session-1", "session-2"] }));
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/session-recovery/incident-1");
+    expect((fetchMock.mock.calls[2]?.[1] as RequestInit).method).toBe("DELETE");
+  });
+
   it("manages queued inputs for a session", async () => {
     const fetchMock = mockJsonResponse({ queuedInputs: [] });
 

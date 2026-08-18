@@ -70,6 +70,10 @@ The History tab in the new-session dialog searches sessions previously managed b
 
 Selecting a live result opens its existing pane. Selecting a missing or archived result starts a new tmux window with Codex's native resume command and opens the restored session.
 
+If muxpilot stops without a clean shutdown, it records which non-archived Codex panes were open. On the next startup, any of those panes that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
+
+Recovery restores the durable Codex conversation, muxpilot metadata, and any managed Git workspace binding. It cannot recreate an operating-system process or automatically restart a command that was executing when WSL, tmux, or the host stopped.
+
 ## Forking sessions
 
 Use **Fork session** from the session header or dashboard action menu to branch a conversation at its current persisted tip. The child retains a **Forked from** link while the source remains available locally.

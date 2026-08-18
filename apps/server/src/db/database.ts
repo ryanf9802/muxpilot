@@ -16,6 +16,7 @@ import type {
   PushSubscriptionInput,
   QueuedInput,
   SessionHistoryResult,
+  SessionRecoveryIncident,
   SessionModelSettings,
   SessionModelSelections,
   SessionDirectorySuggestion,
@@ -40,6 +41,15 @@ const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
+const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
+const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
+
+export interface SessionRecoveryRuntimeState {
+  runId: string;
+  cleanShutdown: boolean;
+  updatedAt: string;
+  sessionIds: string[];
+}
 
 interface SessionRow {
   id: string;
@@ -596,6 +606,22 @@ export class AppDatabase {
 
   addAudit(actor: string, action: string, target: string, result: string, timestamp: string): Promise<void> {
     return this.call("addAudit", actor, action, target, result, timestamp) as Promise<void>;
+  }
+
+  getSessionRecoveryRuntime(): Promise<SessionRecoveryRuntimeState | null> {
+    return this.call("getSessionRecoveryRuntime") as Promise<SessionRecoveryRuntimeState | null>;
+  }
+
+  setSessionRecoveryRuntime(state: SessionRecoveryRuntimeState): Promise<void> {
+    return this.call("setSessionRecoveryRuntime", state) as Promise<void>;
+  }
+
+  getSessionRecoveryIncident(): Promise<SessionRecoveryIncident | null> {
+    return this.call("getSessionRecoveryIncident") as Promise<SessionRecoveryIncident | null>;
+  }
+
+  setSessionRecoveryIncident(incident: SessionRecoveryIncident | null, updatedAt: string): Promise<void> {
+    return this.call("setSessionRecoveryIncident", incident, updatedAt) as Promise<void>;
   }
 
   private call(method: DbMethod, ...args: unknown[]): Promise<unknown> {
@@ -1849,6 +1875,22 @@ export class SyncAppDatabase {
     return keys;
   }
 
+  getSessionRecoveryRuntime(): SessionRecoveryRuntimeState | null {
+    return parseStoredJson<SessionRecoveryRuntimeState>(this.getSetting(SESSION_RECOVERY_RUNTIME_SETTING));
+  }
+
+  setSessionRecoveryRuntime(state: SessionRecoveryRuntimeState): void {
+    this.setSetting(SESSION_RECOVERY_RUNTIME_SETTING, JSON.stringify(state), state.updatedAt);
+  }
+
+  getSessionRecoveryIncident(): SessionRecoveryIncident | null {
+    return parseStoredJson<SessionRecoveryIncident>(this.getSetting(SESSION_RECOVERY_INCIDENT_SETTING));
+  }
+
+  setSessionRecoveryIncident(incident: SessionRecoveryIncident | null, updatedAt: string): void {
+    this.setSetting(SESSION_RECOVERY_INCIDENT_SETTING, JSON.stringify(incident), updatedAt);
+  }
+
   private getBooleanSetting(key: string, defaultValue: boolean): boolean {
     const value = this.getSetting(key);
     if (value === null) return defaultValue;
@@ -2601,6 +2643,15 @@ function ftsPromptQuery(query: string): string {
     .filter(Boolean)
     .slice(0, 12) ?? [];
   return tokens.map((token) => `"${token}"*`).join(" AND ");
+}
+
+function parseStoredJson<T>(value: string | null): T | null {
+  if (!value || value === "null") return null;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
 }
 
 function searchableTranscriptText(message: ChatMessage): string {

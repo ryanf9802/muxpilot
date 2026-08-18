@@ -4566,6 +4566,107 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("offers every previously open session after an unclean startup loses its panes", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "recovery.jsonl", {
+      sessionId: "codex-recovery",
+      cwd: repo,
+      user: "recover this work",
+      assistant: "working on it",
+      mtime: new Date("2026-08-17T20:00:00.000Z")
+    });
+    let panes = [testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "recovery-work" })];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.prepareStartupRecovery();
+    await harness.manager.discoverNow();
+    const original = (await harness.manager.listSessions(true))[0]!;
+    expect(original.codexSessionId).toBe("codex-recovery");
+
+    await harness.manager.prepareStartupRecovery();
+    panes = [];
+    await harness.manager.discoverNow();
+    await harness.manager.finishStartupRecovery();
+
+    expect(await harness.manager.getSessionRecoveryIncident()).toMatchObject({
+      sessions: [{
+        sessionId: original.id,
+        codexSessionId: "codex-recovery",
+        sessionName: "recovery-work",
+        previousStatus: original.status,
+        status: "missing"
+      }]
+    });
+    harness.db.close();
+  });
+
+  it("does not offer recovery after a clean shutdown", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "clean.jsonl", {
+      sessionId: "codex-clean",
+      cwd: repo,
+      user: "clean shutdown",
+      assistant: "ready",
+      mtime: new Date("2026-08-17T20:00:00.000Z")
+    });
+    let panes = [testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "clean-work" })];
+    harness.tmux.listPanes = async () => panes;
+
+    await harness.manager.prepareStartupRecovery();
+    await harness.manager.discoverNow();
+    await harness.manager.markCleanShutdown();
+    await harness.manager.prepareStartupRecovery();
+    panes = [];
+    await harness.manager.discoverNow();
+    await harness.manager.finishStartupRecovery();
+
+    expect(await harness.manager.getSessionRecoveryIncident()).toBeNull();
+    harness.db.close();
+  });
+
+  it("restores an interrupted recovery batch without navigating session by session", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "batch-recovery.jsonl", {
+      sessionId: "codex-batch-recovery",
+      cwd: repo,
+      user: "restore this batch",
+      assistant: "ready",
+      mtime: new Date("2026-08-17T20:00:00.000Z")
+    });
+    let panes = [testPane({ cwd: repo, paneId: "%1", windowId: "@1", windowName: "batch-work" })];
+    harness.tmux.listPanes = async () => panes;
+    await harness.manager.prepareStartupRecovery();
+    await harness.manager.discoverNow();
+    const original = (await harness.manager.listSessions(true))[0]!;
+    await harness.manager.prepareStartupRecovery();
+    panes = [];
+    await harness.manager.discoverNow();
+    await harness.manager.finishStartupRecovery();
+    const incident = (await harness.manager.getSessionRecoveryIncident())!;
+    let resumeCalls = 0;
+    harness.tmux.createCodexResumeWindowInMuxpilotSession = async (cwd, name, codexSessionId) => {
+      resumeCalls += 1;
+      const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, pid: 456, sessionName: "muxpilot" });
+      harness.processLookup.set(pane.pid, { pid: 457, sessionId: codexSessionId, startedAtMs: null });
+      panes = [pane];
+      return { pane, ready: pendingReadiness() };
+    };
+
+    const response = await harness.manager.restoreSessionRecovery(incident.id, [original.id]);
+
+    expect(resumeCalls).toBe(1);
+    expect(response.results).toMatchObject([{ sourceSessionId: original.id, status: "restored", error: null }]);
+    expect(response.incident).toBeNull();
+    expect(await harness.manager.getSessionRecoveryIncident()).toBeNull();
+    harness.db.close();
+  });
+
   it("restores a missing managed session with codex resume", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -4604,10 +4705,14 @@ describe("SessionManager transcript isolation", () => {
       return { pane, ready: pendingReadiness() };
     };
 
-    const restored = await harness.manager.restoreSession(original!.id);
+    const [restored, duplicate] = await Promise.all([
+      harness.manager.restoreSession(original!.id),
+      harness.manager.restoreSession(original!.id)
+    ]);
 
     expect(resumeCalls).toEqual([{ cwd: repo, name: "old-work", codexSessionId: "codex-restorable" }]);
     expect(restored.restored).toBe(true);
+    expect(duplicate).toMatchObject({ restored: false, session: { id: restored.session.id } });
     expect(restored.session.tmux.paneId).toBe("%2");
     expect(restored.session.codexSessionId).toBe("codex-restorable");
     expect(restored.session.status).toBe("unknown");

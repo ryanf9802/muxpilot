@@ -19,6 +19,7 @@ import type {
   SessionDirectorySuggestion,
   SessionEvent,
   SessionHistoryResult,
+  SessionRecoveryIncident,
   SessionTransferImportResponse,
   SessionTransferInspectResponse
 } from "@muxpilot/core";
@@ -109,6 +110,10 @@ export function AppShell() {
   const [sessionHistoryLoading, setSessionHistoryLoading] = useState(false);
   const [sessionHistoryError, setSessionHistoryError] = useState("");
   const [sessionHistoryRestoreId, setSessionHistoryRestoreId] = useState<string | null>(null);
+  const [sessionRecoveryIncident, setSessionRecoveryIncident] = useState<SessionRecoveryIncident | null>(null);
+  const [sessionRecoverySelectedIds, setSessionRecoverySelectedIds] = useState<Set<string>>(() => new Set());
+  const [sessionRecoveryBusy, setSessionRecoveryBusy] = useState(false);
+  const [sessionRecoveryErrors, setSessionRecoveryErrors] = useState<Record<string, string>>({});
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
@@ -408,6 +413,18 @@ export function AppShell() {
       socket.close();
     };
   }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, scheduleSessionReconcile, shellSocketEpoch]);
+
+  useEffect(() => {
+    if (connectionState !== "connected") return;
+    let cancelled = false;
+    void api.sessionRecovery().then(({ incident }) => {
+      if (cancelled) return;
+      setSessionRecoveryIncident(incident);
+      setSessionRecoverySelectedIds(new Set(incident?.sessions.map((session) => session.sessionId) ?? []));
+      setSessionRecoveryErrors({});
+    }).catch(handleConnectedRequestFailure);
+    return () => { cancelled = true; };
+  }, [connectionEpoch, connectionState, handleConnectedRequestFailure]);
 
   useEffect(() => {
     if (connectionState !== "connecting" && connectionState !== "reconnecting" && connectionState !== "disconnected") return undefined;
@@ -843,6 +860,61 @@ export function AppShell() {
     }
   }
 
+  async function dismissSessionRecovery() {
+    const incident = sessionRecoveryIncident;
+    if (!incident || sessionRecoveryBusy) return;
+    setSessionRecoveryBusy(true);
+    try {
+      await api.dismissSessionRecovery(incident.id);
+      setSessionRecoveryIncident(null);
+      setSessionRecoveryErrors({});
+    } catch (error) {
+      handleConnectedRequestFailure(error);
+      toast.error("Could not dismiss session recovery.");
+    } finally {
+      setSessionRecoveryBusy(false);
+    }
+  }
+
+  function toggleSessionRecoverySelection(sessionId: string) {
+    if (sessionRecoveryBusy) return;
+    setSessionRecoverySelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }
+
+  async function restoreSessionRecovery() {
+    const incident = sessionRecoveryIncident;
+    if (!incident || sessionRecoveryBusy || sessionRecoverySelectedIds.size === 0) return;
+    setSessionRecoveryBusy(true);
+    setSessionRecoveryErrors({});
+    try {
+      const response = await api.restoreSessionRecovery({
+        incidentId: incident.id,
+        sessionIds: [...sessionRecoverySelectedIds]
+      });
+      for (const result of response.results) {
+        if (result.session) syncSessionStoplight(result.session);
+      }
+      const errors = Object.fromEntries(response.results
+        .filter((result) => result.status === "failed" && result.error)
+        .map((result) => [result.sourceSessionId, result.error!]));
+      setSessionRecoveryErrors(errors);
+      setSessionRecoveryIncident(response.incident);
+      setSessionRecoverySelectedIds(new Set(response.incident?.sessions.map((session) => session.sessionId) ?? []));
+      await loadSessions();
+      if (!response.incident) toast.success(`${response.results.length} session${response.results.length === 1 ? "" : "s"} restored.`);
+    } catch (error) {
+      handleConnectedRequestFailure(error);
+      toast.error(error instanceof Error ? error.message : "Could not restore sessions.");
+    } finally {
+      setSessionRecoveryBusy(false);
+    }
+  }
+
   async function submitCreateSession(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (createSessionBusy) return;
@@ -1042,6 +1114,24 @@ export function AppShell() {
         />
       </main>
       <ToastContainer theme="dark" newestOnTop closeButton closeOnClick pauseOnFocusLoss={false} />
+      <Modal
+        open={Boolean(sessionRecoveryIncident)}
+        onClose={dismissSessionRecovery}
+        title="Restore interrupted sessions"
+        panelClassName="session-recovery-dialog"
+        dismissible={!sessionRecoveryBusy}
+        loading={sessionRecoveryBusy}
+      >
+        {sessionRecoveryIncident ? <SessionRecoveryContent
+          incident={sessionRecoveryIncident}
+          selectedIds={sessionRecoverySelectedIds}
+          busy={sessionRecoveryBusy}
+          errors={sessionRecoveryErrors}
+          onToggle={toggleSessionRecoverySelection}
+          onDismiss={() => void dismissSessionRecovery()}
+          onRestore={() => void restoreSessionRecovery()}
+        /> : null}
+      </Modal>
       {forkSessionSource ? (
         <ForkSessionDialog
           source={forkSessionSource}
@@ -1265,6 +1355,50 @@ export function AppShell() {
 }
 
 export { AppBrand };
+
+export function SessionRecoveryContent({
+  incident,
+  selectedIds,
+  busy,
+  errors,
+  onToggle,
+  onDismiss,
+  onRestore
+}: {
+  incident: SessionRecoveryIncident;
+  selectedIds: ReadonlySet<string>;
+  busy: boolean;
+  errors: Record<string, string>;
+  onToggle: (sessionId: string) => void;
+  onDismiss: () => void;
+  onRestore: () => void;
+}) {
+  return (
+    <>
+      <p className="session-recovery-copy">
+        muxpilot stopped unexpectedly. Reopen the conversations you had running before the interruption. Commands that were executing will not restart automatically.
+      </p>
+      <div className="session-recovery-results" role="group" aria-label="Sessions to restore">
+        {incident.sessions.map((session) => (
+          <label className="session-recovery-result" key={sessionHistoryResultKey(session)}>
+            <input type="checkbox" checked={selectedIds.has(session.sessionId)} disabled={busy} onChange={() => onToggle(session.sessionId)} />
+            <span className="session-recovery-result-main">
+              <strong>{session.sessionName}</strong>
+              <span>{sessionHistoryResultMeta({ ...session, status: session.previousStatus })}</span>
+              {errors[session.sessionId] ? <small role="alert">{errors[session.sessionId]}</small> : null}
+            </span>
+          </label>
+        ))}
+      </div>
+      <div className="dialog-actions">
+        <button type="button" onClick={onDismiss} disabled={busy}>Not now</button>
+        <button type="button" className="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0} aria-busy={busy}>
+          {busy ? <><LoaderCircle className="spin" size={15} aria-hidden="true" /> Restoring</> : `Restore selected (${selectedIds.size})`}
+        </button>
+      </div>
+    </>
+  );
+}
 
 export interface AppShellOutletContext {
   refreshSessionStoplight: () => Promise<void>;

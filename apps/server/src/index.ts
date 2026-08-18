@@ -167,7 +167,9 @@ app.get("/healthz", async () => ({
 
 let closing = false;
 
+await manager.prepareStartupRecovery();
 await manager.discoverNow();
+await manager.finishStartupRecovery();
 manager.start({ runInitialTick: false });
 resourceGovernor.start();
 pwaTrustServer.start();
@@ -198,6 +200,7 @@ const close = async () => {
   await pwaTrustServer.close();
   await dockerProxy?.close();
   await gitWorkflowBroker.close();
+  await manager.markCleanShutdown();
   await db.close();
   await app.close();
 };

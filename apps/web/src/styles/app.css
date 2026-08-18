@@ -1576,6 +1576,68 @@ select:focus-visible {
   overflow-y: auto;
 }
 
+.session-recovery-dialog {
+  display: grid;
+  gap: 14px;
+  width: min(100%, 620px);
+  max-height: calc(100dvh - 36px);
+  padding: 16px;
+  overflow-y: auto;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-elevated);
+}
+
+.session-recovery-copy {
+  margin: 0;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.session-recovery-results {
+  display: grid;
+  gap: 6px;
+  max-height: min(460px, calc(100dvh - 270px));
+  overflow-y: auto;
+}
+
+.session-recovery-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px;
+  cursor: pointer;
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+}
+
+.session-recovery-result:focus-within {
+  border-color: var(--color-brand);
+}
+
+.session-recovery-result input {
+  margin-top: 3px;
+}
+
+.session-recovery-result-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.session-recovery-result-main span,
+.session-recovery-result-main small {
+  overflow-wrap: anywhere;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
+.session-recovery-result-main small {
+  color: var(--color-error);
+}
+
 .session-transfer-panel,
 .session-transfer-list,
 .session-transfer-mappings,

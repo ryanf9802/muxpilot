@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion } from "@muxpilot/core";
+import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
@@ -14,6 +14,7 @@ import {
   SHELL_RECONNECT_INTERVAL_MS,
   SHELL_CONNECTION_PROBE_TIMEOUT_MS,
   SessionStoplight,
+  SessionRecoveryContent,
   filterSessionDirectorySuggestions,
   foregroundConnectionDisplayState,
   forkSessionWarnings,
@@ -53,6 +54,45 @@ import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
+  it("renders every interrupted session selected with crash limitations and failures", () => {
+    const incident: SessionRecoveryIncident = {
+      id: "incident-1",
+      detectedAt: "2026-08-17T20:00:00.000Z",
+      sessions: [{
+        sessionId: "session-1",
+        codexSessionId: "codex-1",
+        codexJsonlPath: "/codex/session.jsonl",
+        status: "missing",
+        previousStatus: "working",
+        archived: false,
+        sessionName: "recovery-work",
+        repoName: "muxpilot",
+        repoBranch: "main",
+        cwd: "/repo",
+        lastActivityAt: "2026-08-17T19:59:00.000Z",
+        transcriptSize: 8,
+        matchedPrompts: [],
+        gitWorkspace: null
+      }]
+    };
+    const html = renderToStaticMarkup(createElement(SessionRecoveryContent, {
+      incident,
+      selectedIds: new Set(["session-1"]),
+      busy: false,
+      errors: { "session-1": "Directory is unavailable" },
+      onToggle: () => undefined,
+      onDismiss: () => undefined,
+      onRestore: () => undefined
+    }));
+
+    expect(html).toContain("muxpilot stopped unexpectedly");
+    expect(html).toContain("will not restart automatically");
+    expect(html).toContain("recovery-work");
+    expect(html).toContain("checked=\"\"");
+    expect(html).toContain("Restore selected (1)");
+    expect(html).toContain("Directory is unavailable");
+  });
+
   it("builds a valid editable name for a fork", () => {
     const session = testSession({ id: "fork-name" });
     session.tmux.windowName = "a-very-long-session-name-that-needs-truncation";
