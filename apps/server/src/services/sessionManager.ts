@@ -3139,11 +3139,38 @@ function interactiveApprovalHasTranscriptContext(
 
 function nestedExecCommandMatchesPrompt(input: string, prompt: InteractiveApprovalPrompt): boolean {
   const command = nestedExecCommand(input);
-  const visibleCommand = prompt.prefixRule?.join(" ") ?? prompt.command;
-  if (!command || !visibleCommand) return false;
+  if (!command) return false;
   const normalizedCommand = normalizeCommandText(command);
+  const visibleCommands = [prompt.prefixRule?.join(" ") ?? null, prompt.command]
+    .filter((candidate): candidate is string => Boolean(candidate));
+  return visibleCommands.some((visibleCommand) => commandMatchesVisibleText(normalizedCommand, visibleCommand));
+}
+
+function commandMatchesVisibleText(normalizedCommand: string, visibleCommand: string): boolean {
+  const minElidedCommandContextLength = 16;
   const normalizedVisibleCommand = normalizeCommandText(visibleCommand);
-  return normalizedCommand === normalizedVisibleCommand || normalizedCommand.startsWith(`${normalizedVisibleCommand} `);
+  if (
+    normalizedCommand === normalizedVisibleCommand ||
+    normalizedCommand.startsWith(`${normalizedVisibleCommand} `)
+  ) {
+    return true;
+  }
+
+  const elisionPattern = /(?:\u2026|\.{3,})/u;
+  if (!elisionPattern.test(normalizedVisibleCommand)) return false;
+  const fragments = normalizedVisibleCommand
+    .split(elisionPattern)
+    .map(normalizeCommandText)
+    .filter(Boolean);
+  if (fragments.reduce((length, fragment) => length + fragment.length, 0) < minElidedCommandContextLength) return false;
+
+  let cursor = 0;
+  for (const [index, fragment] of fragments.entries()) {
+    const fragmentIndex = normalizedCommand.indexOf(fragment, cursor);
+    if (fragmentIndex < 0 || index === 0 && fragmentIndex !== 0) return false;
+    cursor = fragmentIndex + fragment.length;
+  }
+  return /(?:\u2026|\.{3,})$/u.test(normalizedVisibleCommand) || cursor === normalizedCommand.length;
 }
 
 function nestedExecCommand(input: string): string | null {

@@ -878,6 +878,59 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces an elided destructive command approval during background discovery", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "elided-destructive-approval.jsonl");
+    const command = [
+      "rm -rf /tmp/rand-fixes-stage-2026-08-21",
+      "&& python3 build_rand_reconciliation.py",
+      "--v1-dir /home/dev/workspace/rand-migration",
+      "--v2-dir /tmp/rand-v2-snapshot-2026-08-21",
+      "--output-dir /tmp/rand-fixes-stage-2026-08-21"
+    ].join(" ");
+    await writeFile(path, [
+      JSON.stringify({
+        timestamp: "2026-08-21T17:29:00.000Z",
+        type: "session_meta",
+        payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-08-21T17:29:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: "call-elided-destructive-approval",
+          input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(command)} }); text(r.output);`
+        }
+      }),
+      ""
+    ].join("\n"));
+    const displayedCommand =
+      "rm -rf /tmp/rand-fixes-stage-2026-08-21 && python3 … --output-dir /tmp/rand-fixes-stage-2026-08-21";
+    const capture = commandApprovalCapture(1).replaceAll("pnpm app restart prod", displayedCommand);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", title: "⠸ codex-session" })];
+    harness.tmux.capturePane = async () => capture;
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    expect(session.status).toBe("working");
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "session.updated") publishedStatuses.push((event.payload as ManagedSession).status);
+    });
+
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(publishedStatuses).toContain("approval");
+    unsubscribe();
+    harness.db.close();
+  });
+
   it("rejects a visible command approval that does not match the latest custom command", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -906,6 +959,47 @@ describe("SessionManager transcript isolation", () => {
     );
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => commandApprovalCapture(1).replaceAll("pnpm app restart prod", "rm -rf /tmp/results");
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
+  it("rejects an elided command approval with an unrelated visible suffix", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "mismatched-elided-command-approval.jsonl");
+    await writeFile(path, [
+      JSON.stringify({
+        timestamp: "2026-08-21T17:29:00.000Z",
+        type: "session_meta",
+        payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+      }),
+      JSON.stringify({
+        timestamp: "2026-08-21T17:29:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: "call-mismatched-elided-command",
+          input: [
+            "const r = await tools.exec_command({",
+            '  cmd: "rm -rf /tmp/rand-fixes-stage-2026-08-21 && python3 unrelated.py --output-dir /tmp/unrelated"',
+            "}); text(r.output);"
+          ].join("\n")
+        }
+      }),
+      ""
+    ].join("\n"));
+    const displayedCommand =
+      "rm -rf /tmp/rand-fixes-stage-2026-08-21 && python3 … --output-dir /tmp/rand-fixes-stage-2026-08-21";
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1).replaceAll("pnpm app restart prod", displayedCommand);
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0]!;
