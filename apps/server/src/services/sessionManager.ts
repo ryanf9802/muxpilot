@@ -1309,7 +1309,14 @@ export class SessionManager {
     const question = await this.getPendingQuestion(sessionId);
     if (!question) throw new QuestionResolutionError("No pending question for this session");
     const normalized = normalizeQuestionAnswer(question, request);
-    await this.answerInteractiveQuestion(session, question, normalized);
+    try {
+      await this.answerInteractiveQuestion(session, question, normalized);
+    } catch (error) {
+      if (error instanceof QuestionResolutionError) throw error;
+      throw new QuestionResolutionError(
+        "Could not submit the answer to the active Codex question. The pane may have changed or become unavailable; restore or restart the session and try again."
+      );
+    }
     this.answeredQuestionMessageIds.add(question.messageId);
     const now = nowIso();
     await this.db.setSessionStatus(sessionId, "waiting", now);
@@ -1805,31 +1812,37 @@ export class SessionManager {
     request: QuestionAnswerRequest
   ): Promise<void> {
     const pane = await this.livePane(session);
-    const followupText: string[] = [];
     for (const prompt of question.questions) {
       const values = request.answers[prompt.id]?.answers.map((answer) => answer.trim()).filter(Boolean) ?? [];
       const value = values[0];
       if (!value) throw new QuestionResolutionError(`Answer is required for question: ${prompt.id}`);
       const optionIndex = prompt.options.findIndex((option) => option.label === value);
       if (optionIndex >= 0) {
-        await this.tmux.sendKeys(pane.paneId, menuSelectionKeys(optionIndex));
-        followupText.push(...values.slice(1));
+        await this.submitInteractiveQuestionAnswer(pane.paneId, optionIndex, values.slice(1));
         continue;
       }
       if (value === NONE_OF_THE_ABOVE_ANSWER && prompt.options.length > 0) {
-        await this.tmux.sendKeys(pane.paneId, menuSelectionKeys(prompt.options.length));
-        followupText.push(...values.slice(1));
+        await this.submitInteractiveQuestionAnswer(pane.paneId, prompt.options.length, values.slice(1));
         continue;
       }
-      if (prompt.options.length > 0) await this.tmux.sendKeys(pane.paneId, menuSelectionKeys(prompt.options.length));
-      await this.tmux.pasteText(pane.paneId, codexTerminalUserText(value));
+      if (prompt.options.length > 0) {
+        await this.submitInteractiveQuestionAnswer(pane.paneId, prompt.options.length, values);
+        continue;
+      }
+      await this.tmux.pasteText(pane.paneId, codexTerminalUserText(values.join("\n\n")));
       await this.tmux.sendKeys(pane.paneId, ["Enter"]);
-      followupText.push(...values.slice(1));
     }
-    if (followupText.length > 0) {
-      await this.tmux.interrupt(pane.paneId);
-      await this.tmux.sendInput(pane.paneId, codexTerminalUserText(followupText.join("\n\n")));
+  }
+
+  private async submitInteractiveQuestionAnswer(paneId: string, optionIndex: number, notes: string[]): Promise<void> {
+    const note = notes.join("\n\n").trim();
+    if (!note) {
+      await this.tmux.sendKeys(paneId, menuSelectionKeys(optionIndex));
+      return;
     }
+    await this.tmux.sendKeys(paneId, [...menuNavigationKeys(optionIndex), "Tab"]);
+    await this.tmux.pasteText(paneId, codexTerminalUserText(note));
+    await this.tmux.sendKeys(paneId, ["Enter"]);
   }
 
   private async processQueuedInputs(sessionId: string): Promise<void> {
@@ -2578,7 +2591,11 @@ function inputModeForPlanAction(action: PlanActionChoice): CollaborationMode {
 }
 
 function menuSelectionKeys(index: number): string[] {
-  return [...Array.from({ length: index }, () => "Down"), "Enter"];
+  return [...menuNavigationKeys(index), "Enter"];
+}
+
+function menuNavigationKeys(index: number): string[] {
+  return Array.from({ length: index }, () => "Down");
 }
 
 const NONE_OF_THE_ABOVE_ANSWER = "None of the above";

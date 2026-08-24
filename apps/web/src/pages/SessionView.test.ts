@@ -19,6 +19,7 @@ import {
   appendUniqueMessages,
   blurActiveElementForVimSubmit,
   buildQuestionAnswerRequest,
+  clearQuestionAnswerDraft,
   composerLockReason,
   composerDraftStorageKey,
   composerHasContent,
@@ -55,6 +56,7 @@ import {
   pendingUserMessageToChatMessage,
   planActionRequest,
   planActionText,
+  questionAnswerDraftStorageKey,
   questionRemainingSeconds,
   QueuedIndicator,
   parseProposedPlanSegments,
@@ -65,10 +67,12 @@ import {
   retainLatestSentQueuedUserMessage,
   replaceTranscriptTail,
   loadComposerDraft,
+  loadQuestionAnswerDraft,
   loadVimModePreference,
   sessionWithPendingInputMode,
   sessionWithPendingFastMode,
   saveComposerDraft,
+  saveQuestionAnswerDraft,
   saveVimModePreference,
   sentQueuedInputToPendingUserMessage,
   restoreScrollTopForAnchor,
@@ -450,6 +454,86 @@ describe("composer draft storage", () => {
 
     expect(loadComposerDraft("session-a")).toBe("");
     expect(storage.getItem(composerDraftStorageKey("session-a"))).toBeNull();
+  });
+});
+
+describe("question answer draft storage", () => {
+  it("drops malformed stored data", () => {
+    const storage = installLocalStorage();
+    const question = questionRequest();
+    storage.setItem(questionAnswerDraftStorageKey(question.sessionId), "{");
+
+    expect(loadQuestionAnswerDraft(question)).toEqual({});
+    expect(storage.getItem(questionAnswerDraftStorageKey(question.sessionId))).toBeNull();
+  });
+
+  it("round-trips choices and notes for the active question", () => {
+    installLocalStorage();
+    const question = questionRequest({ questions: [{
+      id: "loading_treatment",
+      header: "Loading UI",
+      question: "What should change?",
+      options: [{ label: "Input only (Recommended)", description: "" }]
+    }] });
+
+    saveQuestionAnswerDraft(question, {
+      loading_treatment: { selectedOption: "Input only (Recommended)", other: "Keep the button visible." }
+    });
+
+    expect(loadQuestionAnswerDraft(question)).toEqual({
+      loading_treatment: { selectedOption: "Input only (Recommended)", other: "Keep the button visible." }
+    });
+  });
+
+  it("discards a draft when a newer question replaces it", () => {
+    const storage = installLocalStorage();
+    const question = questionRequest({ questions: [{
+      id: "loading_treatment",
+      header: "Loading UI",
+      question: "What should change?",
+      options: [{ label: "Input only (Recommended)", description: "" }]
+    }] });
+    saveQuestionAnswerDraft(question, {
+      loading_treatment: { selectedOption: "Input only (Recommended)", other: "Persist me" }
+    });
+
+    expect(loadQuestionAnswerDraft({ ...question, id: "call-replacement" })).toEqual({});
+    expect(storage.getItem(questionAnswerDraftStorageKey(question.sessionId))).toBeNull();
+  });
+
+  it("drops invalid prompts and selections while preserving valid free text", () => {
+    const storage = installLocalStorage();
+    const question = questionRequest();
+    storage.setItem(questionAnswerDraftStorageKey(question.sessionId), JSON.stringify({
+      questionId: question.id,
+      answers: {
+        loading_treatment: { selectedOption: "Removed option", other: "Still useful" },
+        unknown: { selectedOption: null, other: "Wrong prompt" }
+      }
+    }));
+
+    expect(loadQuestionAnswerDraft(question)).toEqual({
+      loading_treatment: { selectedOption: null, other: "Still useful" }
+    });
+  });
+
+  it("clears only the matching submitted question draft", () => {
+    const storage = installLocalStorage();
+    const question = questionRequest({ questions: [{
+      id: "loading_treatment",
+      header: "Loading UI",
+      question: "What should change?",
+      options: [{ label: "Input only (Recommended)", description: "" }]
+    }] });
+    saveQuestionAnswerDraft(question, {
+      loading_treatment: { selectedOption: "Input only (Recommended)", other: "" }
+    });
+
+    clearQuestionAnswerDraft({ ...question, id: "different-question" });
+    expect(storage.getItem(questionAnswerDraftStorageKey(question.sessionId))).not.toBeNull();
+
+    clearQuestionAnswerDraft(question);
+    expect(storage.getItem(questionAnswerDraftStorageKey(question.sessionId))).toBeNull();
   });
 });
 

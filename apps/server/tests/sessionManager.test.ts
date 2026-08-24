@@ -1293,7 +1293,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("answers option prompts before interrupting and sending other text", async () => {
+  it("submits option notes within the native question overlay without interrupting", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -1373,13 +1373,68 @@ describe("SessionManager transcript isolation", () => {
     });
 
     expect(operations).toEqual([
-      "keys:Down,Enter",
-      "keys:Down,Enter",
-      "paste:Typed only ",
+      "keys:Down,Tab",
+      "paste:Include tests ",
       "keys:Enter",
-      "interrupt",
-      "input:Include tests\n\nShip it "
+      "keys:Down,Tab",
+      "paste:Ship it ",
+      "keys:Enter",
+      "paste:Typed only ",
+      "keys:Enter"
     ]);
+    harness.db.close();
+  });
+
+  it("returns a question conflict when the bound pane disappeared", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "missing-question-pane.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "request_user_input",
+            call_id: "call-question",
+            arguments: JSON.stringify({
+              questions: [{
+                id: "scope",
+                header: "Scope",
+                question: "How far should this go?",
+                options: [{ label: "Complete", description: "" }]
+              }]
+            })
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toBeDefined();
+    await harness.manager.ingest();
+    harness.tmux.listPanes = async () => [];
+
+    await expect(harness.manager.answerQuestion(session.id, {
+      answers: { scope: { answers: ["Complete"] } }
+    })).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining("pane may have changed or become unavailable")
+    });
+    expect((await harness.manager.getSession(session.id))?.status).toBe("question");
+    expect(await harness.manager.getPendingQuestion(session.id)).not.toBeNull();
     harness.db.close();
   });
 

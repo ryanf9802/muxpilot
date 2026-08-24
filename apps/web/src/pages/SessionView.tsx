@@ -166,6 +166,7 @@ export class LatestGenerationRefreshGate {
 }
 
 const COMPOSER_DRAFT_STORAGE_PREFIX = "muxpilot.session-draft.v1:";
+const QUESTION_ANSWER_DRAFT_STORAGE_PREFIX = "muxpilot.question-answer-draft.v1:";
 export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
 export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (any-hover: hover) and (any-pointer: fine)";
 const composerRootInputHints: Record<string, string | boolean> = {
@@ -206,6 +207,92 @@ export function saveComposerDraft(sessionId: string, value: string): void {
   } catch {
     // Draft persistence is best effort; the composer must stay usable.
   }
+}
+
+export interface QuestionAnswerDraft {
+  selectedOption: string | null;
+  other: string;
+}
+
+export function questionAnswerDraftStorageKey(sessionId: string): string {
+  return `${QUESTION_ANSWER_DRAFT_STORAGE_PREFIX}${sessionId}`;
+}
+
+export function loadQuestionAnswerDraft(question: QuestionRequest): Record<string, QuestionAnswerDraft> {
+  if (!question.sessionId || typeof window === "undefined") return {};
+  const key = questionAnswerDraftStorageKey(question.sessionId);
+  try {
+    const value = window.localStorage.getItem(key);
+    if (!value) return {};
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || (parsed as { questionId?: unknown }).questionId !== question.id) {
+      window.localStorage.removeItem(key);
+      return {};
+    }
+    const storedAnswers = (parsed as { answers?: unknown }).answers;
+    if (!storedAnswers || typeof storedAnswers !== "object" || Array.isArray(storedAnswers)) {
+      window.localStorage.removeItem(key);
+      return {};
+    }
+    return sanitizeQuestionAnswerDraft(question, storedAnswers as Record<string, unknown>);
+  } catch {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // Storage remains best effort.
+    }
+    return {};
+  }
+}
+
+export function saveQuestionAnswerDraft(
+  question: QuestionRequest,
+  answers: Record<string, QuestionAnswerDraft>
+): void {
+  if (!question.sessionId || typeof window === "undefined") return;
+  try {
+    const key = questionAnswerDraftStorageKey(question.sessionId);
+    const sanitized = sanitizeQuestionAnswerDraft(question, answers);
+    if (Object.keys(sanitized).length === 0) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, JSON.stringify({ questionId: question.id, answers: sanitized }));
+  } catch {
+    // Draft persistence is best effort; question controls must stay usable.
+  }
+}
+
+export function clearQuestionAnswerDraft(question: QuestionRequest): void {
+  if (!question.sessionId || typeof window === "undefined") return;
+  try {
+    const key = questionAnswerDraftStorageKey(question.sessionId);
+    const value = window.localStorage.getItem(key);
+    if (!value) return;
+    const parsed = JSON.parse(value) as { questionId?: unknown };
+    if (parsed?.questionId === question.id) window.localStorage.removeItem(key);
+  } catch {
+    // Invalid draft data is harmless and can be replaced by the next edit.
+  }
+}
+
+function sanitizeQuestionAnswerDraft(
+  question: QuestionRequest,
+  answers: Record<string, unknown>
+): Record<string, QuestionAnswerDraft> {
+  const sanitized: Record<string, QuestionAnswerDraft> = {};
+  for (const prompt of question.questions) {
+    const value = answers[prompt.id];
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const candidate = value as { selectedOption?: unknown; other?: unknown };
+    const selectedOption = typeof candidate.selectedOption === "string"
+      && prompt.options.some((option) => option.label === candidate.selectedOption)
+      ? candidate.selectedOption
+      : null;
+    const other = typeof candidate.other === "string" ? candidate.other : "";
+    if (selectedOption || other) sanitized[prompt.id] = { selectedOption, other };
+  }
+  return sanitized;
 }
 
 export function composerHasContent(value: string): boolean {
@@ -1106,7 +1193,7 @@ export function SessionView() {
           }
           questionAction={
             question?.messageId === item.message.id ? (
-              <QuestionBanner question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
+              <QuestionBanner key={question.id} question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
             ) : null
           }
         />
@@ -1854,10 +1941,12 @@ export function SessionView() {
   async function answerQuestion(request: QuestionAnswerRequest) {
     const targetId = id;
     const token = requestTokenRef.current;
+    const answeredQuestion = question;
     setQuestionBusy(true);
     setQuestionError("");
     try {
       await api.answerQuestion(targetId, request);
+      if (answeredQuestion) clearQuestionAnswerDraft(answeredQuestion);
       if (!isCurrentRequest(targetId, token)) return;
       setQuestion(null);
       await Promise.all([loadSession(targetId, token), loadQuestion(targetId, token)]);
@@ -2135,7 +2224,7 @@ export function SessionView() {
           {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
           {showQueuedIndicator ? <QueuedIndicator /> : null}
           {question && !questionRenderedInline ? (
-            <QuestionBanner question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
+            <QuestionBanner key={question.id} question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
           ) : null}
           {hasMoreAfter ? (
             <button
@@ -3459,13 +3548,13 @@ function QuestionBanner({
   error: string;
   onAnswer: (request: QuestionAnswerRequest) => void;
 }) {
-  const [answers, setAnswers] = useState<Record<string, QuestionAnswerDraft>>({});
+  const [answers, setAnswers] = useState<Record<string, QuestionAnswerDraft>>(() => loadQuestionAnswerDraft(question));
   const [nowMs, setNowMs] = useState(() => Date.now());
   const remainingSeconds = questionRemainingSeconds(question, nowMs);
   const complete = question.questions.every((prompt) => questionAnswerDraftComplete(answers[prompt.id]));
 
   useEffect(() => {
-    setAnswers({});
+    setAnswers(loadQuestionAnswerDraft(question));
   }, [question.id]);
 
   useEffect(() => {
@@ -3479,6 +3568,14 @@ function QuestionBanner({
     event.preventDefault();
     if (busy || !complete) return;
     onAnswer(buildQuestionAnswerRequest(question, answers));
+  }
+
+  function updateAnswers(update: (current: Record<string, QuestionAnswerDraft>) => Record<string, QuestionAnswerDraft>) {
+    setAnswers((current) => {
+      const next = update(current);
+      saveQuestionAnswerDraft(question, next);
+      return next;
+    });
   }
 
   return (
@@ -3505,7 +3602,7 @@ function QuestionBanner({
                     className={answers[prompt.id]?.selectedOption === option.label ? "selected" : ""}
                     disabled={busy}
                     onClick={() =>
-                      setAnswers((current) => {
+                      updateAnswers((current) => {
                         const draft = current[prompt.id] ?? emptyQuestionAnswerDraft();
                         return {
                           ...current,
@@ -3527,7 +3624,7 @@ function QuestionBanner({
               {...noAutofillTextField}
               value={answers[prompt.id]?.other ?? ""}
               onChange={(event) =>
-                setAnswers((current) => ({
+                updateAnswers((current) => ({
                   ...current,
                   [prompt.id]: {
                     ...(current[prompt.id] ?? emptyQuestionAnswerDraft()),
@@ -3555,11 +3652,6 @@ function QuestionBanner({
       </div>
     </form>
   );
-}
-
-interface QuestionAnswerDraft {
-  selectedOption: string | null;
-  other: string;
 }
 
 const NONE_OF_THE_ABOVE_ANSWER = "None of the above";
