@@ -7,6 +7,9 @@ const execFileAsync = promisify(execFile);
 const SEP = "\t";
 const MIN_INPUT_SUBMIT_DELAY_MS = 80;
 const MAX_INPUT_SUBMIT_DELAY_MS = 2500;
+const INPUT_PASTE_VERIFY_MIN_MS = 500;
+const INPUT_SUBMIT_VERIFY_MS = 500;
+const INPUT_VERIFY_POLL_MS = 50;
 const CODEX_STARTUP_POLL_INTERVAL_MS = 50;
 const CODEX_STARTUP_TIMEOUT_MS = 60_000;
 const CODEX_STARTUP_CAPTURE_FAILURE_LIMIT = 20;
@@ -51,8 +54,33 @@ export class CodexStartupError extends Error {
   }
 }
 
+export interface InputTransportResult {
+  pasteReplayCount: number;
+  submitKeyRetryCount: number;
+}
+
+export interface InputVerificationOptions {
+  pasteVerifyTimeoutMs?: number;
+  submitVerifyMs?: number;
+  pollMs?: number;
+}
+
+export class InputTransportError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "paste_not_observed" | "composer_changed" | "tmux_failed",
+    readonly result: InputTransportResult
+  ) {
+    super(message);
+    this.name = "InputTransportError";
+  }
+}
+
 export class TmuxAdapter {
-  constructor(private readonly inputSubmitKeys: string[] = ["Enter"]) {}
+  constructor(
+    private readonly inputSubmitKeys: string[] = ["Enter"],
+    private readonly inputVerification: InputVerificationOptions = {}
+  ) {}
 
   async listPanes(): Promise<TmuxPane[]> {
     const { stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]);
@@ -209,10 +237,38 @@ export class TmuxAdapter {
     return stdout;
   }
 
-  async sendInput(paneId: string, text: string): Promise<void> {
-    await this.pasteText(paneId, text);
-    await delay(inputSubmitDelayMs(text));
-    await this.sendKeys(paneId, this.inputSubmitKeys);
+  async sendInput(paneId: string, text: string): Promise<InputTransportResult | void> {
+    const result: InputTransportResult = { pasteReplayCount: 0, submitKeyRetryCount: 0 };
+    try {
+      const initialCapture = await this.capturePane(paneId, 100, true);
+      if (composerHasInput(initialCapture)) {
+        throw new InputTransportError("The Codex composer already contains input", "composer_changed", result);
+      }
+      await this.pasteText(paneId, text);
+      if (!await this.waitForComposerInput(paneId, text)) {
+        result.pasteReplayCount = 1;
+        await this.pasteText(paneId, text);
+        if (!await this.waitForComposerInput(paneId, text)) {
+          throw new InputTransportError("Codex did not display the pasted input", "paste_not_observed", result);
+        }
+      }
+
+      await this.submitInput(paneId);
+      await delay(this.inputVerification.submitVerifyMs ?? INPUT_SUBMIT_VERIFY_MS);
+      const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
+      if (composerContainsInput(capture, text) && !captureShowsActiveTurn(capture)) {
+        result.submitKeyRetryCount = 1;
+        await this.submitInput(paneId);
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof InputTransportError) throw error;
+      throw new InputTransportError(
+        error instanceof Error ? error.message : String(error),
+        "tmux_failed",
+        result
+      );
+    }
   }
 
   async pasteText(paneId: string, text: string): Promise<void> {
@@ -228,6 +284,10 @@ export class TmuxAdapter {
   async sendKeys(paneId: string, keys: string[]): Promise<void> {
     if (keys.length === 0) throw new Error("At least one tmux key is required");
     await execFileAsync("tmux", ["send-keys", "-t", paneId, ...keys]);
+  }
+
+  async submitInput(paneId: string): Promise<void> {
+    await this.sendKeys(paneId, this.inputSubmitKeys);
   }
 
   async interrupt(paneId: string): Promise<void> {
@@ -253,10 +313,98 @@ export class TmuxAdapter {
       child.stdin.end(text);
     });
   }
+
+  private async waitForComposerInput(paneId: string, text: string): Promise<boolean> {
+    const timeoutMs = this.inputVerification.pasteVerifyTimeoutMs ?? Math.max(INPUT_PASTE_VERIFY_MIN_MS, inputSubmitDelayMs(text));
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
+      if (composerContainsInput(capture, text)) return true;
+      await delay(this.inputVerification.pollMs ?? INPUT_VERIFY_POLL_MS);
+    } while (Date.now() < deadline);
+    return false;
+  }
 }
 
 export function inputSubmitDelayMs(text: string): number {
   return Math.min(MAX_INPUT_SUBMIT_DELAY_MS, MIN_INPUT_SUBMIT_DELAY_MS + Math.floor(text.length / 8));
+}
+
+export function inputVerificationCaptureLines(text: string, paneWidth = 120): number {
+  const contentWidth = Math.max(20, paneWidth - 4);
+  return Math.min(4000, Math.max(100, Math.ceil(text.length / contentWidth) + 30));
+}
+
+export function composerContainsInput(capture: string, text: string): boolean {
+  const lines = capture.trimEnd().split("\n");
+  const composerIndex = lines.findLastIndex(isComposerLine);
+  if (composerIndex < 0) return false;
+  if (composerUsesDimPlaceholder(lines[composerIndex]!)) return false;
+  const firstLine = normalizeComposerText(visibleComposerLine(lines[composerIndex]!));
+  const composer = normalizeComposerText([
+    firstLine,
+    ...lines.slice(composerIndex + 1)
+  ].join("\n"));
+  const expected = normalizeComposerText(text);
+  if (!expected) return false;
+  if (!text.includes("\n") && expected.length <= 64) return firstLine === expected;
+  const expectedFirstLine = normalizeComposerText(text.split("\n", 1)[0] ?? "");
+  const prefix = (expectedFirstLine || expected).slice(0, 64);
+  if (!firstLine.startsWith(prefix)) return false;
+  if (expected.length <= 256) return composer.includes(expected);
+  const suffix = expected.slice(-128);
+  const prefixIndex = composer.indexOf(prefix);
+  return prefixIndex >= 0 && composer.indexOf(suffix, prefixIndex + prefix.length) >= 0;
+}
+
+export function composerHasInput(capture: string): boolean {
+  const lines = capture.trimEnd().split("\n");
+  const composer = lines.findLast(isComposerLine);
+  if (!composer) return false;
+  const visible = visibleComposerLine(composer).trim();
+  if (!visible) return false;
+  if (composer.includes("\u001b[")) return !composerUsesDimPlaceholder(composer);
+  return !isKnownComposerPlaceholder(visible);
+}
+
+function normalizeComposerText(text: string): string {
+  return stripTerminalFormatting(text).replace(/\s+/g, " ").trim();
+}
+
+function captureShowsActiveTurn(capture: string): boolean {
+  const lines = capture.trimEnd().split("\n");
+  const composerIndex = lines.findLastIndex(isComposerLine);
+  const activeIndex = lines.findLastIndex((line) => {
+    const normalized = stripTerminalFormatting(line).toLowerCase();
+    return normalized.includes("working (") || normalized.includes("esc to interrupt");
+  });
+  return activeIndex > composerIndex;
+}
+
+function isComposerLine(line: string): boolean {
+  return /^\s*›(?!\s*\d+\.)/.test(stripTerminalFormatting(line));
+}
+
+function visibleComposerLine(line: string): string {
+  return stripTerminalFormatting(line).replace(/^\s*›\s?/, "");
+}
+
+function composerUsesDimPlaceholder(line: string): boolean {
+  const composerMarker = line.indexOf("›");
+  return composerMarker >= 0 && line.indexOf("\u001b[2m", composerMarker) >= 0;
+}
+
+function isKnownComposerPlaceholder(text: string): boolean {
+  return text === "Ask Codex to do anything" ||
+    text === "Explain this codebase" ||
+    text === "Plan {feature}" ||
+    text === "Implement {feature}";
+}
+
+function stripTerminalFormatting(text: string): string {
+  return text
+    .replace(/\u001b\][^\u0007]*?(?:\u0007|\u001b\\)/g, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
 export function tmuxPasteBufferArgs(bufferName: string, paneId: string): string[] {

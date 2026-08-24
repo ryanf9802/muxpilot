@@ -1071,7 +1071,16 @@ export class SyncAppDatabase {
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
     const reconciledPayload = muxpilotSubmission
-      ? { ...message.payload, muxpilotSubmission: { ...muxpilotSubmission, state: "acknowledged", failureReason: null } }
+      ? {
+          ...message.payload,
+          muxpilotSubmission: {
+            ...muxpilotSubmission,
+            state: "acknowledged",
+            deliveryPhase: "acknowledged",
+            acknowledgedBy: "user_echo",
+            failureReason: null
+          }
+        }
       : message.payload;
 
     const result = this.db

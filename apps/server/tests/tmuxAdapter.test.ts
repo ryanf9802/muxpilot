@@ -3,9 +3,12 @@ import {
   codexCommandArgs,
   codexStartupActionFromCapture,
   codexStartupErrorFromCapture,
+  composerContainsInput,
+  composerHasInput,
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
   parsePaneLine,
+  TmuxAdapter,
   tmuxNewCodexForkWindowArgs,
   tmuxNewCodexResumeWindowArgs,
   tmuxNewCodexWindowArgs,
@@ -139,6 +142,83 @@ describe("inputSubmitDelayMs", () => {
 
   it("caps the delay for very large pasted input", () => {
     expect(inputSubmitDelayMs("a".repeat(200_000))).toBe(2500);
+  });
+});
+
+describe("verified input transport", () => {
+  it("recognizes wrapped composer input without mistaking an empty composer for input", () => {
+    expect(composerContainsInput("› first line\n  second line", "first line\nsecond line")).toBe(true);
+    expect(composerHasInput("› \n\n  gpt-5.6-sol · Context 100% left")).toBe(false);
+    expect(composerContainsInput("› \n\n  Type yes to continue", "yes")).toBe(false);
+    expect(composerHasInput("\u001b[1m›\u001b[0m \u001b[2mAsk Codex to do anything\u001b[0m")).toBe(false);
+    expect(composerContainsInput("\u001b[1m›\u001b[0m actual input", "actual input")).toBe(true);
+    expect(composerContainsInput("› open \u001b]8;;https://example.com\u001b\\https://example.com\u001b]8;;\u001b\\", "open https://example.com")).toBe(true);
+  });
+
+  it("replays a paste once when Codex does not display the first paste", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let pasteCount = 0;
+    let composer = "";
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => {
+      pasteCount += 1;
+      if (pasteCount > 1) composer = text;
+    };
+    adapter.capturePane = async () => `› ${composer}`;
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.sendInput("%1", "recover this prompt")).resolves.toEqual({
+      pasteReplayCount: 1,
+      submitKeyRetryCount: 0
+    });
+    expect(pasteCount).toBe(2);
+    expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("refuses to append input to an existing composer draft", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let pasted = false;
+    adapter.capturePane = async () => "› existing draft";
+    adapter.pasteText = async () => { pasted = true; };
+
+    await expect(adapter.sendInput("%1", "new prompt")).rejects.toMatchObject({ reason: "composer_changed" });
+    expect(pasted).toBe(false);
+  });
+
+  it("retries Enter when the submitted prompt remains composed", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let composer = "";
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => { composer = text; };
+    adapter.capturePane = async () => `› ${composer}`;
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      if (submits.length > 1) composer = "";
+    };
+
+    await expect(adapter.sendInput("%1", "submit this prompt")).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 1
+    });
+    expect(submits).toEqual([["Enter"], ["Enter"]]);
+  });
+
+  it("does not retry Enter after Codex visibly starts the turn", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let composer = "";
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => { composer = text; };
+    adapter.capturePane = async () => `› ${composer}\nWorking (esc to interrupt)`;
+    adapter.sendKeys = async (_paneId, keys) => { submits.push(keys); };
+
+    await expect(adapter.sendInput("%1", "already accepted")).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(submits).toEqual([["Enter"]]);
   });
 });
 

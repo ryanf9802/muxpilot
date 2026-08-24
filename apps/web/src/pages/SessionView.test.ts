@@ -40,6 +40,7 @@ import {
   isPlanModeMessage,
   inputModeAction,
   InputDeliveryFailureBanner,
+  inputDeliveryFailureDetail,
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
@@ -118,15 +119,17 @@ import {
 } from "./SessionView.js";
 
 describe("InputDeliveryFailureBanner", () => {
-  it("offers retry and dismissal while explaining that the preserved prompt was not executed", () => {
+  it("offers retry and dismissal with the persisted delivery failure detail", () => {
     const html = renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
       busyAction: null,
+      detail: "Codex did not display the pasted input.",
       error: "",
       onRetry: () => undefined,
       onDismiss: () => undefined
     }));
 
-    expect(html).toContain("Codex did not acknowledge the last input");
+    expect(html).toContain("Input delivery could not be verified");
+    expect(html).toContain("Codex did not display the pasted input");
     expect(html).toContain("Retry input");
     expect(html).toContain("Dismiss");
   });
@@ -134,6 +137,7 @@ describe("InputDeliveryFailureBanner", () => {
   it("disables both actions and shows retry progress and errors", () => {
     const html = renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
       busyAction: "retryInputDelivery",
+      detail: "",
       error: "Retry failed",
       onRetry: () => undefined,
       onDismiss: () => undefined
@@ -142,6 +146,21 @@ describe("InputDeliveryFailureBanner", () => {
     expect(html).toContain("Retrying…");
     expect(html).toContain("Retry failed");
     expect(html.match(/disabled/g)).toHaveLength(2);
+  });
+});
+
+describe("inputDeliveryFailureDetail", () => {
+  it("reads the latest persisted delivery failure without exposing unrelated payload text", () => {
+    expect(inputDeliveryFailureDetail([{
+      id: "failed",
+      sessionId: "session",
+      sequence: 1,
+      type: "user",
+      role: "user",
+      timestamp: "2026-08-24T00:00:00.000Z",
+      text: "prompt",
+      payload: { muxpilotSubmission: { failureReason: "The composer changed." } }
+    }])).toBe("The composer changed.");
   });
 });
 

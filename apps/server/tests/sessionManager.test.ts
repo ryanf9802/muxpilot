@@ -2251,7 +2251,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("does not persist an optimistic prompt when tmux submission fails", async () => {
+  it("persists a failed delivery transaction when tmux submission fails", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -2266,8 +2266,11 @@ describe("SessionManager transcript isolation", () => {
 
     await expect(harness.manager.sendInput(session.id, "do not persist")).rejects.toThrow("tmux send failed");
 
-    expect(await harness.db.listMessages(session.id, 0)).toEqual([]);
-    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "waiting", preview: "" });
+    expect(await harness.db.listMessages(session.id, 0)).toMatchObject([{
+      text: "do not persist",
+      payload: { muxpilotSubmission: { state: "failed", deliveryPhase: "failed", failureCode: "tmux_failed" } }
+    }]);
+    expect(harness.manager.getSession(session.id)).toMatchObject({ status: "input_failed", preview: "do not persist" });
     harness.db.close();
   });
 
@@ -2404,6 +2407,181 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
+  it("automatically replays one verified submission when Codex remains ready with an empty composer", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    harness.tmux.sendKeys = async (_paneId, keys) => { sentKeys.push(keys); };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const submitted: ChatMessage = {
+      id: "automatic-replay",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Replay this prompt",
+      payload: {
+        collaborationMode: "plan",
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "awaiting_ack",
+          attemptCount: 1,
+          replayCount: 0,
+          enterRetryCount: 0,
+          lastAttemptAt: "2026-07-07T00:00:00.000Z"
+        }
+      }
+    };
+    await harness.db.appendMessage(submitted);
+
+    await harness.manager.discover();
+
+    expect(sentInputs).toEqual(["Replay this prompt "]);
+    expect(sentKeys).toEqual([["BTab"]]);
+    expect(harness.manager.getSession(session.id)?.status).toBe("planning");
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: {
+        state: "pending",
+        deliveryPhase: "awaiting_ack",
+        attemptCount: 2,
+        replayCount: 1
+      }
+    });
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+    await harness.db.close();
+  });
+
+  it("retries only Enter when the original prompt remains in the composer", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const submitPanes: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› Submit this prompt";
+    harness.tmux.submitInput = async (paneId) => { submitPanes.push(paneId); };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const submitted: ChatMessage = {
+      id: "enter-retry",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Submit this prompt",
+      payload: {
+        collaborationMode: "default",
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "awaiting_ack",
+          attemptCount: 1,
+          replayCount: 0,
+          enterRetryCount: 0,
+          lastAttemptAt: "2026-07-07T00:00:00.000Z"
+        }
+      }
+    };
+    await harness.db.appendMessage(submitted);
+
+    await harness.manager.discover();
+
+    expect(submitPanes).toEqual(["%1"]);
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: { state: "pending", replayCount: 0, enterRetryCount: 1 }
+    });
+    await harness.db.close();
+  });
+
+  it("fails instead of replaying when the composer contains different input", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› A different draft";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.appendMessage({
+      id: "changed-composer",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Original prompt",
+      payload: {
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "awaiting_ack",
+          replayCount: 0,
+          enterRetryCount: 0,
+          lastAttemptAt: "2026-07-07T00:00:00.000Z"
+        }
+      }
+    });
+
+    await harness.manager.discover();
+
+    expect(sentInputs).toEqual([]);
+    expect(harness.manager.getSession(session.id)?.status).toBe("input_failed");
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: { state: "failed", failureCode: "composer_changed" }
+    });
+    await harness.db.close();
+  });
+
+  it("does not perform a second automatic complete replay", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.appendMessage({
+      id: "replay-exhausted",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Do not duplicate",
+      payload: {
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "awaiting_ack",
+          attemptCount: 2,
+          replayCount: 1,
+          enterRetryCount: 0,
+          lastAttemptAt: "2026-07-07T00:00:00.000Z"
+        }
+      }
+    });
+
+    await harness.manager.discover();
+
+    expect(sentInputs).toEqual([]);
+    expect(harness.manager.getSession(session.id)?.status).toBe("input_failed");
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: { state: "failed", replayCount: 1, failureCode: "no_codex_acknowledgement" }
+    });
+    await harness.db.close();
+  });
+
   it("retries the preserved failed submission without appending a duplicate", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -2470,7 +2648,7 @@ describe("SessionManager transcript isolation", () => {
 
     await expect(harness.manager.act(session.id, { type: "retryInputDelivery" })).rejects.toThrow("tmux unavailable");
     expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
-      muxpilotSubmission: { state: "failed", attemptCount: 2, failureReason: "Muxpilot could not deliver the input to Codex." }
+      muxpilotSubmission: { state: "failed", attemptCount: 2, failureReason: "Muxpilot could not deliver the input through tmux." }
     });
     await harness.db.close();
   });
@@ -2565,6 +2743,41 @@ describe("SessionManager transcript isolation", () => {
 
     expect(await harness.manager.listQueuedInputs(session.id)).toEqual([]);
     harness.db.close();
+  });
+
+  it("does not resend a failed queued delivery before its preserved submission is retried", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let capture = "Working (esc to interrupt)";
+    let shouldFail = true;
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendInput = async (_paneId, text) => {
+      if (shouldFail) throw new Error("tmux unavailable");
+      sentInputs.push(text);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.sendInput(session.id, "queued recovery prompt");
+    capture = "› ";
+
+    await harness.manager.discover();
+    expect(harness.manager.getSession(session.id)?.status).toBe("input_failed");
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ status: "failed" }]);
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+
+    shouldFail = false;
+    await harness.manager.discover();
+    expect(sentInputs).toEqual([]);
+
+    await harness.manager.act(session.id, { type: "retryInputDelivery" });
+    expect(sentInputs).toEqual(["queued recovery prompt "]);
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ status: "sent" }]);
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+    await harness.db.close();
   });
 
   it("keeps user input queued while an otherwise-ready session owns a deferred heavyweight command", async () => {

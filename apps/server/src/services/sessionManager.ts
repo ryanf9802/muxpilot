@@ -41,7 +41,15 @@ import {
   parseInteractiveApprovalPrompt,
   type InteractiveApprovalPrompt
 } from "../codex/approvalPrompt.js";
-import { isCodexStartupFailureCapture, TmuxAdapter } from "../tmux/tmuxAdapter.js";
+import {
+  composerContainsInput,
+  composerHasInput,
+  inputVerificationCaptureLines,
+  InputTransportError,
+  type InputTransportResult,
+  isCodexStartupFailureCapture,
+  TmuxAdapter
+} from "../tmux/tmuxAdapter.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -90,6 +98,14 @@ interface IngestSessionResult {
 const MAX_LIVE_INGEST_PASSES_PER_TICK = 8;
 const PLAN_ACTION_START_GRACE_MS = 15_000;
 const INPUT_DELIVERY_ACK_TIMEOUT_MS = 30_000;
+type InputDeliveryFailureCode =
+  | "paste_not_observed"
+  | "submit_not_accepted"
+  | "no_codex_acknowledgement"
+  | "composer_changed"
+  | "unverified_legacy_submission"
+  | "session_unavailable"
+  | "tmux_failed";
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -100,6 +116,7 @@ export class SessionManager {
   private readonly answeredQuestionMessageIds = new Set<string>();
   private readonly pendingPlanActionStatuses = new Map<string, { status: SessionStatus; expiresAtMs: number }>();
   private readonly processingQueuedSessionIds = new Set<string>();
+  private readonly deliveringInputSessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
   private readonly readySessionDiscoveryGeneration = new Map<string, number>();
@@ -362,7 +379,7 @@ export class SessionManager {
       const transcriptSyncing = nextCodexJsonlPath
         ? sourceChanged || !existing || existing.transcriptSyncing === true
         : false;
-      const inputMode =
+      let inputMode =
         (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
         existing?.inputMode ??
         "default";
@@ -381,10 +398,16 @@ export class SessionManager {
       let latestUserMessage = await this.db.latestUserMessage(lookupId);
       const latestTurnLifecycleMessage = await this.db.latestTurnLifecycleMessage(lookupId);
       latestUserMessage = await this.reconcileInputDeliveryState(
+        lookupId,
+        pane,
         latestUserMessage,
         latestTurnLifecycleMessage,
-        inferredStatus
+        inferredStatus,
+        inputMode
       );
+      if (isPendingMuxpilotSubmission(latestUserMessage, latestTurnLifecycleMessage)) {
+        inputMode = latestUserMessage ? collaborationModeFromMessage(latestUserMessage) ?? inputMode : inputMode;
+      }
       const latestQuestionMessage = await this.db.latestQuestionMessage(lookupId);
       const status = resolveSessionStatus(
         inferredStatus,
@@ -1081,14 +1104,14 @@ export class SessionManager {
       return { queuedInput: await this.enqueueInput(sessionId, text, mode) };
     }
     const targetMode = mode ?? session.inputMode;
-    const liveSession = await this.ensureInputMode(session, targetMode);
-    await this.sendRawInput(liveSession, text);
+    const now = nowIso();
+    let message = await this.recordSubmittedInput(session, text, targetMode, now);
+    this.publish("message.appended", sessionId, message);
+    message = await this.deliverSubmittedInput(session, message, targetMode);
     const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
     if (latestPlanMessage && isPlanActionInput(text)) {
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
     }
-    const now = nowIso();
-    const message = await this.recordSubmittedInput(session, text, targetMode, now);
     await this.db.setSessionInputMode(sessionId, targetMode, now);
     const status = activeInputStatus(targetMode);
     await this.db.setSessionStatus(sessionId, status, now);
@@ -1101,6 +1124,7 @@ export class SessionManager {
   }
 
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
+    if (this.deliveringInputSessionIds.has(session.id)) return true;
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return true;
     if (isPlanActionInput(text)) return false;
     const queuedInputs = await this.db.listQueuedInputs(session.id);
@@ -1108,16 +1132,17 @@ export class SessionManager {
     return !isInputReadyStatus(session.status);
   }
 
-  private async sendRawInput(session: ManagedSession, text: string): Promise<void> {
+  private async sendRawInput(session: ManagedSession, text: string): Promise<InputTransportResult | void> {
     const pane = await this.livePane(session);
-    await this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
+    return this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
   }
 
   private async recordSubmittedInput(
     session: ManagedSession,
     text: string,
     mode: CollaborationMode,
-    timestamp: string
+    timestamp: string,
+    queuedInputId: string | null = null
   ): Promise<ChatMessage> {
     const message: ChatMessage = {
       id: eventId(),
@@ -1133,14 +1158,74 @@ export class SessionManager {
           codexSessionId: session.codexSessionId,
           codexJsonlPath: session.codexJsonlPath,
           state: "pending",
+          deliveryPhase: "persisted",
           attemptCount: 1,
+          replayCount: 0,
+          enterRetryCount: 0,
           lastAttemptAt: timestamp,
+          promptHash: inputPromptHash(session.id, text),
+          promptLength: text.length,
+          queuedInputId,
           failureReason: null
         }
       }
     };
     if (!await this.db.appendMessage(message)) throw new Error("Could not persist submitted input");
     return message;
+  }
+
+  private async deliverSubmittedInput(
+    session: ManagedSession,
+    message: ChatMessage,
+    mode: CollaborationMode
+  ): Promise<ChatMessage> {
+    if (this.deliveringInputSessionIds.has(session.id)) {
+      throw new InputDeliveryError("Another input delivery is already in progress for this session");
+    }
+    this.deliveringInputSessionIds.add(session.id);
+    let current = message;
+    try {
+      current = await this.updateInputDelivery(current, { deliveryPhase: "delivering" });
+      const liveSession = await this.ensureInputMode(session, mode);
+      const result = await this.sendRawInput(liveSession, message.text);
+      current = await this.updateInputDelivery(current, {
+        deliveryPhase: "awaiting_ack",
+        transportPasteRetryCount: result?.pasteReplayCount ?? 0,
+        enterRetryCount: result?.submitKeyRetryCount ?? 0,
+        failureReason: null
+      });
+      await this.db.addAudit("local", "input_delivery_transport", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, message.text),
+        promptLength: message.text.length,
+        transportPasteRetryCount: result?.pasteReplayCount ?? 0,
+        enterRetryCount: result?.submitKeyRetryCount ?? 0
+      }), nowIso());
+      return current;
+    } catch (error) {
+      const reason = error instanceof InputTransportError ? error.reason : "tmux_failed";
+      const failureReason = inputDeliveryFailureMessage(reason);
+      current = await this.updateInputDelivery(current, {
+        state: "failed",
+        deliveryPhase: "failed",
+        failureCode: reason,
+        transportPasteRetryCount: error instanceof InputTransportError ? error.result.pasteReplayCount : 0,
+        enterRetryCount: error instanceof InputTransportError ? error.result.submitKeyRetryCount : 0,
+        failureReason
+      });
+      const failedAt = nowIso();
+      await this.db.setSessionStatus(session.id, "input_failed", failedAt);
+      await this.db.addAudit("local", "input_delivery_failed", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, message.text),
+        promptLength: message.text.length,
+        reason
+      }), failedAt);
+      this.publish("message.appended", session.id, current);
+      this.publish("status.changed", session.id, { status: "input_failed" });
+      this.publish("session.updated", session.id, await this.db.getSession(session.id));
+      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.deliveringInputSessionIds.delete(session.id);
+    }
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
@@ -1515,9 +1600,12 @@ export class SessionManager {
   }
 
   private async reconcileInputDeliveryState(
+    sessionId: string,
+    pane: TmuxPane,
     message: ChatMessage | null,
     lifecycle: ChatMessage | null,
-    inferredStatus: SessionStatus
+    inferredStatus: SessionStatus,
+    inputMode: CollaborationMode
   ): Promise<ChatMessage | null> {
     if (!message) return null;
     const submission = muxpilotSubmission(message);
@@ -1526,19 +1614,122 @@ export class SessionManager {
     const acknowledged = Boolean(
       lifecycle && lifecycle.sequence > message.sequence && lifecycle.text === "task_started"
     ) || isDeliveryAcknowledgingStatus(inferredStatus);
-    if (acknowledged) return this.updateInputDelivery(message, { state: "acknowledged", failureReason: null });
+    if (acknowledged) {
+      const updated = await this.updateInputDelivery(message, {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: lifecycle && lifecycle.sequence > message.sequence && lifecycle.text === "task_started" ? "task_started" : "active_status",
+        failureReason: null
+      });
+      await this.db.addAudit("local", "input_delivery_acknowledged", sessionId, JSON.stringify({
+        promptHash: inputPromptHash(sessionId, message.text),
+        source: recordValue(updated.payload.muxpilotSubmission)?.acknowledgedBy ?? "unknown"
+      }), nowIso());
+      return updated;
+    }
 
     const attemptedAt = typeof submission.lastAttemptAt === "string" ? submission.lastAttemptAt : message.timestamp;
     const attemptedAtMs = Date.parse(attemptedAt);
     if (!Number.isFinite(attemptedAtMs) || Date.now() - attemptedAtMs < INPUT_DELIVERY_ACK_TIMEOUT_MS) return message;
     if (submission.state === "failed") return message;
-    return this.updateInputDelivery(message, {
-      state: "failed",
-      failureReason: "Codex remained ready and did not acknowledge the submitted input."
+    if (typeof submission.deliveryPhase !== "string") return this.failInputDelivery(message, "unverified_legacy_submission");
+    if (this.deliveringInputSessionIds.has(sessionId)) return message;
+    if (!isInputReadyStatus(inferredStatus)) return this.failInputDelivery(message, "no_codex_acknowledgement");
+
+    let capture: string;
+    try {
+      capture = await this.tmux.capturePane(
+        pane.paneId,
+        inputVerificationCaptureLines(codexTerminalUserText(message.text), paneWidth(pane)),
+        true
+      );
+    } catch {
+      return this.failInputDelivery(message, "tmux_failed");
+    }
+    const terminalText = codexTerminalUserText(message.text);
+    const enterRetryCount = numericSubmissionField(submission, "enterRetryCount");
+    if (composerContainsInput(capture, terminalText)) {
+      if (enterRetryCount >= 1) return this.failInputDelivery(message, "submit_not_accepted");
+      this.deliveringInputSessionIds.add(sessionId);
+      try {
+        await this.tmux.submitInput(pane.paneId);
+        const attemptedAt = nowIso();
+        const updated = await this.updateInputDelivery(message, {
+          deliveryPhase: "awaiting_ack",
+          enterRetryCount: enterRetryCount + 1,
+          lastAttemptAt: attemptedAt,
+          failureReason: null
+        });
+        await this.db.addAudit("local", "input_delivery_enter_retry", sessionId, JSON.stringify({
+          promptHash: inputPromptHash(sessionId, message.text),
+          enterRetryCount: enterRetryCount + 1
+        }), attemptedAt);
+        return updated;
+      } catch {
+        return this.failInputDelivery(message, "tmux_failed");
+      } finally {
+        this.deliveringInputSessionIds.delete(sessionId);
+      }
+    }
+
+    if (composerHasInput(capture)) return this.failInputDelivery(message, "composer_changed");
+    const replayCount = numericSubmissionField(submission, "replayCount");
+    if (replayCount >= 1) return this.failInputDelivery(message, "no_codex_acknowledgement");
+
+    const session = await this.db.getSession(sessionId);
+    if (!session) return this.failInputDelivery(message, "session_unavailable");
+    this.deliveringInputSessionIds.add(sessionId);
+    let current = await this.updateInputDelivery(message, {
+      deliveryPhase: "replaying",
+      replayCount: replayCount + 1,
+      attemptCount: numericSubmissionField(submission, "attemptCount") + 1,
+      lastAttemptAt: nowIso(),
+      failureReason: null
     });
+    try {
+      const mode = collaborationModeFromMessage(message) ?? inputMode;
+      const liveSession = await this.ensureInputMode(session, mode);
+      const result = await this.sendRawInput(liveSession, message.text);
+      const replayedAt = nowIso();
+      current = await this.updateInputDelivery(current, {
+        deliveryPhase: "awaiting_ack",
+        transportPasteRetryCount: numericSubmissionField(submission, "transportPasteRetryCount") + (result?.pasteReplayCount ?? 0),
+        enterRetryCount: enterRetryCount + (result?.submitKeyRetryCount ?? 0),
+        lastAttemptAt: replayedAt
+      });
+      await this.db.addAudit("local", "input_delivery_replayed", sessionId, JSON.stringify({
+        promptHash: inputPromptHash(sessionId, message.text),
+        replayCount: replayCount + 1
+      }), replayedAt);
+      return current;
+    } catch (error) {
+      return this.failInputDelivery(current, error instanceof InputTransportError ? error.reason : "tmux_failed");
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
+    }
+  }
+
+  private async failInputDelivery(message: ChatMessage, reason: InputDeliveryFailureCode): Promise<ChatMessage> {
+    const failed = await this.updateInputDelivery(message, {
+      state: "failed",
+      deliveryPhase: "failed",
+      failureCode: reason,
+      failureReason: inputDeliveryFailureMessage(reason)
+    });
+    const failedAt = nowIso();
+    await this.db.addAudit("local", "input_delivery_failed", message.sessionId, JSON.stringify({
+      promptHash: inputPromptHash(message.sessionId, message.text),
+      promptLength: message.text.length,
+      reason
+    }), failedAt);
+    this.publish("message.appended", message.sessionId, failed);
+    return failed;
   }
 
   private async retryInputDelivery(session: ManagedSession): Promise<void> {
+    if (this.deliveringInputSessionIds.has(session.id)) {
+      throw new InputDeliveryError("Another input delivery is already in progress for this session");
+    }
     const message = await this.db.latestUserMessage(session.id);
     const submission = message ? muxpilotSubmission(message) : null;
     if (!message || !submission || submission.state !== "failed") {
@@ -1550,16 +1741,28 @@ export class SessionManager {
 
     const attemptedAt = nowIso();
     const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
-    const pending = await this.updateInputDelivery(message, { state: "pending", attemptCount, lastAttemptAt: attemptedAt, failureReason: null });
-    try {
-      const mode = collaborationModeFromMessage(message) ?? session.inputMode;
-      const liveSession = await this.ensureInputMode(session, mode);
-      await this.sendRawInput(liveSession, message.text);
-    } catch (error) {
-      await this.updateInputDelivery(message, { state: "failed", attemptCount, lastAttemptAt: attemptedAt, failureReason: "Muxpilot could not deliver the input to Codex." });
-      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    let pending = await this.updateInputDelivery(message, {
+      state: "pending",
+      deliveryPhase: "persisted",
+      attemptCount,
+      replayCount: 0,
+      enterRetryCount: 0,
+      lastAttemptAt: attemptedAt,
+      failureCode: null,
+      failureReason: null
+    });
+    const mode = collaborationModeFromMessage(message) ?? session.inputMode;
+    pending = await this.deliverSubmittedInput(session, pending, mode);
+    const queuedInputId = typeof submission.queuedInputId === "string" ? submission.queuedInputId : null;
+    if (queuedInputId) {
+      const queued = await this.db.getQueuedInput(session.id, queuedInputId);
+      if (queued) {
+        const sentAt = nowIso();
+        await this.db.updateQueuedInput({ ...queued, status: "sent", error: null, updatedAt: sentAt, sentAt });
+        this.publish("queue.updated", session.id, { queuedInputs: await this.db.listQueuedInputs(session.id) });
+      }
     }
-    const status = activeInputStatus(collaborationModeFromMessage(message) ?? session.inputMode);
+    const status = activeInputStatus(mode);
     await this.db.setSessionStatus(session.id, status, attemptedAt);
     this.publish("message.appended", session.id, pending);
     this.publish("status.changed", session.id, { status });
@@ -1642,6 +1845,7 @@ export class SessionManager {
       if (!input) return;
 
       const session = requireSession(await this.db.getSession(sessionId));
+      if (session.status === "input_failed") return;
       if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return;
       if (!queuedInputMatchesSession(input, session)) {
         await this.markQueuedInputFailed(input, "Session source changed before this input was sent");
@@ -1656,11 +1860,11 @@ export class SessionManager {
       this.publish("queue.updated", sessionId, { queuedInputs: await this.db.listQueuedInputs(sessionId) });
 
       try {
-        const liveSession = await this.ensureInputMode(readySession, sending.mode);
-        await this.sendRawInput(liveSession, sending.text);
         const now = nowIso();
+        let message = await this.recordSubmittedInput(session, sending.text, sending.mode, now, sending.id);
+        this.publish("message.appended", sessionId, message);
+        message = await this.deliverSubmittedInput(readySession, message, sending.mode);
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });
-        const message = await this.recordSubmittedInput(session, sending.text, sending.mode, now);
         await this.db.setSessionInputMode(sessionId, sending.mode, now);
         const status = activeInputStatus(sending.mode);
         await this.db.setSessionStatus(sessionId, status, now);
@@ -2070,6 +2274,30 @@ function inputDeliveryState(message: ChatMessage | null): string | null {
   if (!message) return null;
   const submission = muxpilotSubmission(message);
   return typeof submission?.state === "string" ? submission.state : submission ? "pending" : null;
+}
+
+function numericSubmissionField(submission: Record<string, unknown>, field: string): number {
+  const value = submission[field];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function inputPromptHash(sessionId: string, text: string): string {
+  return stableId(`${sessionId}:${text}`);
+}
+
+function inputDeliveryFailureMessage(reason: InputDeliveryFailureCode): string {
+  if (reason === "paste_not_observed") return "Codex did not display the pasted input.";
+  if (reason === "submit_not_accepted") return "Codex kept the input in the composer after the submit key was retried.";
+  if (reason === "composer_changed") return "The Codex composer changed before the input could be safely replayed.";
+  if (reason === "unverified_legacy_submission") return "Codex remained ready and did not acknowledge the submitted input.";
+  if (reason === "session_unavailable") return "The session became unavailable before the input could be replayed.";
+  if (reason === "tmux_failed") return "Muxpilot could not deliver the input through tmux.";
+  return "Codex remained ready and did not acknowledge the submitted input after one safe replay.";
+}
+
+function paneWidth(pane: TmuxPane): number {
+  const width = Number.parseInt(pane.size.split("x", 1)[0] ?? "", 10);
+  return Number.isFinite(width) && width > 0 ? width : 120;
 }
 
 function isTurnCompletionMessage(message: ChatMessage): boolean {

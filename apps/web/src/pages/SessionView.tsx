@@ -406,6 +406,14 @@ export function transcriptFindMatches(entries: TranscriptFindEntry[], query: str
   return entries.flatMap((entry, index) => (entry.text.toLowerCase().includes(normalizedQuery) ? [index] : []));
 }
 
+export function inputDeliveryFailureDetail(messages: ChatMessage[]): string {
+  const latestUser = messages.findLast((message) => message.role === "user");
+  const submission = latestUser?.payload.muxpilotSubmission;
+  if (!submission || typeof submission !== "object" || Array.isArray(submission)) return "";
+  const detail = (submission as Record<string, unknown>).failureReason;
+  return typeof detail === "string" ? detail : "";
+}
+
 function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
   if (item.type === "range") return { id: item.id, text: item.label };
   const queueEvent = heavyCommandQueueEventFromPayload(item.message.payload);
@@ -834,6 +842,7 @@ export function SessionView() {
   }, []);
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
+  const inputDeliveryFailure = useMemo(() => inputDeliveryFailureDetail(loadedMessages), [loadedMessages]);
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
   const firstSequence = useMemo(() => transcriptItems[0]?.firstSequence ?? 0, [transcriptItems]);
   lastSequenceRef.current = lastSequence;
@@ -1939,6 +1948,7 @@ export function SessionView() {
       {readySession.status === "input_failed" ? (
         <InputDeliveryFailureBanner
           busyAction={actionBusy}
+          detail={inputDeliveryFailure}
           error={inputDeliveryError}
           onRetry={() => void resolveInputDelivery({ type: "retryInputDelivery" })}
           onDismiss={() => void resolveInputDelivery({ type: "dismissInputDeliveryFailure" })}
@@ -2214,11 +2224,13 @@ export function SessionView() {
 
 export function InputDeliveryFailureBanner({
   busyAction,
+  detail,
   error,
   onRetry,
   onDismiss
 }: {
   busyAction: SessionAction["type"] | null;
+  detail: string;
   error: string;
   onRetry: () => void;
   onDismiss: () => void;
@@ -2226,8 +2238,8 @@ export function InputDeliveryFailureBanner({
   return (
     <section className="session-input-failed-banner" role="alert">
       <div>
-        <strong>Codex did not acknowledge the last input.</strong>
-        <p>The preserved message was not executed. Retry it unchanged or dismiss it before editing a replacement.</p>
+        <strong>Input delivery could not be verified.</strong>
+        <p>{detail || "Codex did not acknowledge the last input."} The message remains preserved for retry or dismissal.</p>
         {error ? <p className="session-input-failed-error">{error}</p> : null}
       </div>
       <div className="session-input-failed-actions">

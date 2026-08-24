@@ -132,7 +132,13 @@ describe("AppDatabase activity summaries", () => {
       sequence: 1,
       payload: {
         ...echoed.payload,
-        muxpilotSubmission: { ...submitted.payload.muxpilotSubmission, state: "acknowledged", failureReason: null }
+        muxpilotSubmission: {
+          ...submitted.payload.muxpilotSubmission,
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          acknowledgedBy: "user_echo",
+          failureReason: null
+        }
       }
     });
     expect((await db.getSession(session.id))?.unreadCount).toBe(1);
