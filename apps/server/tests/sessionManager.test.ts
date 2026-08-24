@@ -2407,6 +2407,54 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
+  it("acknowledges a restored legacy submission when its turn already completed", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const submitted: ChatMessage = {
+      id: "restored-completed-submission",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Already completed prompt",
+      payload: {
+        collaborationMode: "default",
+        muxpilotSubmission: { codexSessionId: "codex-1", codexJsonlPath: "/tmp/codex-1.jsonl" }
+      }
+    };
+    await harness.db.appendMessage(submitted);
+    await harness.db.appendMessage({
+      id: "restored-task-complete",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "status",
+      role: "system",
+      timestamp: "2026-07-07T00:01:00.000Z",
+      text: "task_complete",
+      payload: {}
+    });
+
+    await harness.manager.discover();
+
+    expect(harness.manager.getSession(session.id)?.status).toBe("waiting");
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: "task_complete",
+        failureReason: null
+      }
+    });
+    await harness.db.close();
+  });
+
   it("automatically replays one verified submission when Codex remains ready with an empty composer", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

@@ -1612,14 +1612,13 @@ export class SessionManager {
     const submission = muxpilotSubmission(message);
     if (!submission || submission.state === "dismissed" || submission.state === "acknowledged") return message;
 
-    const acknowledged = Boolean(
-      lifecycle && lifecycle.sequence > message.sequence && lifecycle.text === "task_started"
-    ) || isDeliveryAcknowledgingStatus(inferredStatus);
+    const acknowledgingLifecycle = lifecycle && lifecycle.sequence > message.sequence ? lifecycle.text : null;
+    const acknowledged = acknowledgingLifecycle !== null || isDeliveryAcknowledgingStatus(inferredStatus);
     if (acknowledged) {
       const updated = await this.updateInputDelivery(message, {
         state: "acknowledged",
         deliveryPhase: "acknowledged",
-        acknowledgedBy: lifecycle && lifecycle.sequence > message.sequence && lifecycle.text === "task_started" ? "task_started" : "active_status",
+        acknowledgedBy: acknowledgingLifecycle ?? "active_status",
         failureReason: null
       });
       await this.db.addAudit("local", "input_delivery_acknowledged", sessionId, JSON.stringify({
