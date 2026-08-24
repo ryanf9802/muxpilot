@@ -30,6 +30,7 @@ describe("DASHBOARD_STATUSES", () => {
   it("includes plan-specific filter options", () => {
     expect(DASHBOARD_STATUSES).toContain("planning");
     expect(DASHBOARD_STATUSES).toContain("plan_ready");
+    expect(DASHBOARD_STATUSES).toContain("input_failed");
   });
 });
 

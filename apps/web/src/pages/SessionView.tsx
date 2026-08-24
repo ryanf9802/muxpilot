@@ -761,6 +761,7 @@ export function SessionView() {
   const [planActionError, setPlanActionError] = useState("");
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
+  const [inputDeliveryError, setInputDeliveryError] = useState("");
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
@@ -852,7 +853,9 @@ export function SessionView() {
     () => latestUserPromptTimestamp(pendingUserChatMessage ? [...loadedMessages, pendingUserChatMessage] : loadedMessages),
     [loadedMessages, pendingUserChatMessage]
   );
-  const composerLock = composerLockReason(Boolean(question), Boolean(pendingPlan), session?.startupError);
+  const composerLock = session?.status === "input_failed"
+    ? "Resolve the failed input delivery before sending another message."
+    : composerLockReason(Boolean(question), Boolean(pendingPlan), session?.startupError);
   const composerLocked = Boolean(composerLock);
   const effectiveVimEnabled = vimAvailable && vimEnabled;
   const currentTranscriptFindMatch = transcriptFindMatches[transcriptFindMatchIndex] ?? null;
@@ -1718,6 +1721,24 @@ export function SessionView() {
     }
   }
 
+  async function resolveInputDelivery(action: Extract<SessionAction, { type: "retryInputDelivery" | "dismissInputDeliveryFailure" }>) {
+    if (actionBusy) return;
+    const targetId = id;
+    const token = requestTokenRef.current;
+    setActionBusy(action.type);
+    setInputDeliveryError("");
+    try {
+      const response = await api.action(targetId, action);
+      if (!isCurrentRequest(targetId, token)) return;
+      if (response.session) setSession(response.session);
+      void refreshSessionStoplight().catch(() => undefined);
+    } catch (error) {
+      if (isCurrentRequest(targetId, token)) setInputDeliveryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (isCurrentRequest(targetId, token)) setActionBusy(null);
+    }
+  }
+
   function killSession() {
     if (actionBusy || !confirm("Kill this tmux pane?")) return;
     const targetId = id;
@@ -1913,6 +1934,15 @@ export function SessionView() {
 
       {readySession.startupError ? (
         <p className="session-startup-error-banner" role="alert">{readySession.startupError}</p>
+      ) : null}
+
+      {readySession.status === "input_failed" ? (
+        <InputDeliveryFailureBanner
+          busyAction={actionBusy}
+          error={inputDeliveryError}
+          onRetry={() => void resolveInputDelivery({ type: "retryInputDelivery" })}
+          onDismiss={() => void resolveInputDelivery({ type: "dismissInputDeliveryFailure" })}
+        />
       ) : null}
 
       <HeavyCommandsModal
@@ -2178,6 +2208,34 @@ export function SessionView() {
           onClose={closeGitPanel}
         />
       ) : null}
+    </section>
+  );
+}
+
+export function InputDeliveryFailureBanner({
+  busyAction,
+  error,
+  onRetry,
+  onDismiss
+}: {
+  busyAction: SessionAction["type"] | null;
+  error: string;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <section className="session-input-failed-banner" role="alert">
+      <div>
+        <strong>Codex did not acknowledge the last input.</strong>
+        <p>The preserved message was not executed. Retry it unchanged or dismiss it before editing a replacement.</p>
+        {error ? <p className="session-input-failed-error">{error}</p> : null}
+      </div>
+      <div className="session-input-failed-actions">
+        <button type="button" disabled={Boolean(busyAction)} onClick={onRetry}>
+          {busyAction === "retryInputDelivery" ? "Retrying…" : "Retry input"}
+        </button>
+        <button type="button" disabled={Boolean(busyAction)} onClick={onDismiss}>Dismiss</button>
+      </div>
     </section>
   );
 }

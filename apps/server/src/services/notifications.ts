@@ -225,7 +225,7 @@ function notificationSeverity(rules: NotificationRuleType[], status: SessionStat
 }
 
 function statusSeverity(status: SessionStatus): NotificationSeverity {
-  if (status === "approval" || status === "question" || status === "plan_ready" || status === "blocked" || status === "startup_failed" || status === "missing") return "red";
+  if (status === "approval" || status === "question" || status === "plan_ready" || status === "blocked" || status === "input_failed" || status === "startup_failed" || status === "missing") return "red";
   if (status === "waiting" || status === "idle") return "green";
   return "yellow";
 }
@@ -261,6 +261,7 @@ function isSessionStatus(value: unknown): value is SessionStatus {
     value === "plan_ready" ||
     value === "blocked" ||
     value === "startup_failed" ||
+    value === "input_failed" ||
     value === "missing" ||
     value === "unknown"
   );

@@ -45,7 +45,7 @@ const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
-export const DASHBOARD_STATUSES = ["", "working", "planning", "queued", "waiting", "question", "plan_ready", "approval", "startup_failed", "unknown", "missing"];
+export const DASHBOARD_STATUSES = ["", "working", "planning", "queued", "waiting", "question", "plan_ready", "approval", "input_failed", "startup_failed", "unknown", "missing"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
 export type DashboardStatusFilter =

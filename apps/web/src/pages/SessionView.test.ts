@@ -39,6 +39,7 @@ import {
   isLiveManagedSession,
   isPlanModeMessage,
   inputModeAction,
+  InputDeliveryFailureBanner,
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
@@ -115,6 +116,34 @@ import {
   UserAction,
   UserText
 } from "./SessionView.js";
+
+describe("InputDeliveryFailureBanner", () => {
+  it("offers retry and dismissal while explaining that the preserved prompt was not executed", () => {
+    const html = renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
+      busyAction: null,
+      error: "",
+      onRetry: () => undefined,
+      onDismiss: () => undefined
+    }));
+
+    expect(html).toContain("Codex did not acknowledge the last input");
+    expect(html).toContain("Retry input");
+    expect(html).toContain("Dismiss");
+  });
+
+  it("disables both actions and shows retry progress and errors", () => {
+    const html = renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
+      busyAction: "retryInputDelivery",
+      error: "Retry failed",
+      onRetry: () => undefined,
+      onDismiss: () => undefined
+    }));
+
+    expect(html).toContain("Retrying…");
+    expect(html).toContain("Retry failed");
+    expect(html.match(/disabled/g)).toHaveLength(2);
+  });
+});
 
 describe("pendingActionRefreshForStatus", () => {
   it("retries loading an approval when the authoritative status event arrives", () => {

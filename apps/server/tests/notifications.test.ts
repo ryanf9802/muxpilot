@@ -21,6 +21,7 @@ describe("matchingNotificationRules", () => {
 
     expect(matchingNotificationRules(settings, "a", "working", "approval")).toEqual(["approval_gate"]);
     expect(matchingNotificationRules(settings, "a", "working", "question")).toEqual(["approval_gate"]);
+    expect(matchingNotificationRules(settings, "a", "planning", "input_failed")).toEqual(["approval_gate"]);
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual([]);
   });
 

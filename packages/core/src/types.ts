@@ -10,6 +10,7 @@ export type SessionStatus =
   | "question"
   | "plan_ready"
   | "blocked"
+  | "input_failed"
   | "startup_failed"
   | "missing"
   | "unknown";
@@ -718,6 +719,8 @@ export type SessionAction =
   | { type: "setInputMode"; mode: CollaborationMode }
   | { type: "setFastMode"; enabled: boolean }
   | { type: "choosePlanAction"; action: PlanActionChoice }
+  | { type: "retryInputDelivery" }
+  | { type: "dismissInputDeliveryFailure" }
   | { type: "rename"; name: string }
   | { type: "pin" }
   | { type: "unpin" }

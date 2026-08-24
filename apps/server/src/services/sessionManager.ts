@@ -89,6 +89,7 @@ interface IngestSessionResult {
 
 const MAX_LIVE_INGEST_PASSES_PER_TICK = 8;
 const PLAN_ACTION_START_GRACE_MS = 15_000;
+const INPUT_DELIVERY_ACK_TIMEOUT_MS = 30_000;
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -377,7 +378,13 @@ export class SessionManager {
         rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
           ? rejectedApprovalFallbackStatus(pane, existing?.status)
           : rawInferredStatus;
-      const latestUserMessage = await this.db.latestUserMessage(lookupId);
+      let latestUserMessage = await this.db.latestUserMessage(lookupId);
+      const latestTurnLifecycleMessage = await this.db.latestTurnLifecycleMessage(lookupId);
+      latestUserMessage = await this.reconcileInputDeliveryState(
+        latestUserMessage,
+        latestTurnLifecycleMessage,
+        inferredStatus
+      );
       const latestQuestionMessage = await this.db.latestQuestionMessage(lookupId);
       const status = resolveSessionStatus(
         inferredStatus,
@@ -386,7 +393,7 @@ export class SessionManager {
         await this.latestQuestionAnswerMessage(lookupId, latestQuestionMessage),
         await this.db.latestPlanReadyMessage(lookupId),
         latestUserMessage,
-        await this.db.latestTurnLifecycleMessage(lookupId),
+        latestTurnLifecycleMessage,
         this.pendingPlanActionStatus(lookupId),
         this.answeredPlanMessageIds,
         this.answeredQuestionMessageIds
@@ -917,6 +924,9 @@ export class SessionManager {
 
   async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
     const session = requireSession(await this.db.getSession(sessionId));
+    if (session.status === "input_failed") {
+      throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
+    }
     const now = nowIso();
     const input: QueuedInput = {
       id: eventId(),
@@ -1064,6 +1074,9 @@ export class SessionManager {
     mode?: CollaborationMode
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const session = requireSession(await this.db.getSession(sessionId));
+    if (session.status === "input_failed") {
+      throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
+    }
     if (await this.shouldQueueInput(session, text)) {
       return { queuedInput: await this.enqueueInput(sessionId, text, mode) };
     }
@@ -1118,7 +1131,11 @@ export class SessionManager {
         collaborationMode: mode,
         muxpilotSubmission: {
           codexSessionId: session.codexSessionId,
-          codexJsonlPath: session.codexJsonlPath
+          codexJsonlPath: session.codexJsonlPath,
+          state: "pending",
+          attemptCount: 1,
+          lastAttemptAt: timestamp,
+          failureReason: null
         }
       }
     };
@@ -1481,6 +1498,12 @@ export class SessionManager {
     if (action.type === "setFastMode") {
       await this.setFastMode(session, action.enabled);
     }
+    if (action.type === "retryInputDelivery") {
+      await this.retryInputDelivery(session);
+    }
+    if (action.type === "dismissInputDeliveryFailure") {
+      await this.dismissInputDeliveryFailure(session);
+    }
     if (action.type === "detach") {
       this.publish("notification.created", sessionId, { title: "Detach requested", body: "Detach is managed by tmux clients." });
     }
@@ -1489,6 +1512,78 @@ export class SessionManager {
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
     return updatedSession;
+  }
+
+  private async reconcileInputDeliveryState(
+    message: ChatMessage | null,
+    lifecycle: ChatMessage | null,
+    inferredStatus: SessionStatus
+  ): Promise<ChatMessage | null> {
+    if (!message) return null;
+    const submission = muxpilotSubmission(message);
+    if (!submission || submission.state === "dismissed" || submission.state === "acknowledged") return message;
+
+    const acknowledged = Boolean(
+      lifecycle && lifecycle.sequence > message.sequence && lifecycle.text === "task_started"
+    ) || isDeliveryAcknowledgingStatus(inferredStatus);
+    if (acknowledged) return this.updateInputDelivery(message, { state: "acknowledged", failureReason: null });
+
+    const attemptedAt = typeof submission.lastAttemptAt === "string" ? submission.lastAttemptAt : message.timestamp;
+    const attemptedAtMs = Date.parse(attemptedAt);
+    if (!Number.isFinite(attemptedAtMs) || Date.now() - attemptedAtMs < INPUT_DELIVERY_ACK_TIMEOUT_MS) return message;
+    if (submission.state === "failed") return message;
+    return this.updateInputDelivery(message, {
+      state: "failed",
+      failureReason: "Codex remained ready and did not acknowledge the submitted input."
+    });
+  }
+
+  private async retryInputDelivery(session: ManagedSession): Promise<void> {
+    const message = await this.db.latestUserMessage(session.id);
+    const submission = message ? muxpilotSubmission(message) : null;
+    if (!message || !submission || submission.state !== "failed") {
+      throw new InputDeliveryError("There is no failed input delivery to retry");
+    }
+    const pane = await this.livePane(session);
+    const inferred = await inferStatus(pane, session.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
+    if (!isInputReadyStatus(inferred)) throw new InputDeliveryError("Codex is not ready to retry this input");
+
+    const attemptedAt = nowIso();
+    const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
+    const pending = await this.updateInputDelivery(message, { state: "pending", attemptCount, lastAttemptAt: attemptedAt, failureReason: null });
+    try {
+      await this.sendRawInput(session, message.text);
+    } catch (error) {
+      await this.updateInputDelivery(message, { state: "failed", attemptCount, lastAttemptAt: attemptedAt, failureReason: "Muxpilot could not deliver the input to Codex." });
+      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    }
+    const status = activeInputStatus(collaborationModeFromMessage(message) ?? session.inputMode);
+    await this.db.setSessionStatus(session.id, status, attemptedAt);
+    this.publish("message.appended", session.id, pending);
+    this.publish("status.changed", session.id, { status });
+  }
+
+  private async dismissInputDeliveryFailure(session: ManagedSession): Promise<void> {
+    const message = await this.db.latestUserMessage(session.id);
+    const submission = message ? muxpilotSubmission(message) : null;
+    if (!message || !submission || submission.state !== "failed") {
+      throw new InputDeliveryError("There is no failed input delivery to dismiss");
+    }
+    const updated = await this.updateInputDelivery(message, { state: "dismissed", failureReason: null });
+    const now = nowIso();
+    await this.db.setSessionStatus(session.id, "waiting", now);
+    this.publish("message.appended", session.id, updated);
+    this.publish("status.changed", session.id, { status: "waiting" });
+  }
+
+  private async updateInputDelivery(message: ChatMessage, changes: Record<string, unknown>): Promise<ChatMessage> {
+    const current = muxpilotSubmission(message) ?? {};
+    const updated = await this.db.updateMessagePayload(message, {
+      ...message.payload,
+      muxpilotSubmission: { ...current, ...changes }
+    });
+    if (!updated) throw new Error("Could not persist input delivery state");
+    return updated;
   }
 
   private pendingPlanActionStatus(sessionId: string): SessionStatus | null {
@@ -1887,6 +1982,10 @@ export class FastModeSwitchError extends Error {
   readonly statusCode = 409;
 }
 
+export class InputDeliveryError extends Error {
+  readonly statusCode = 409;
+}
+
 export class SessionNameError extends Error {
   readonly statusCode = 400;
 }
@@ -1935,6 +2034,7 @@ function resolveSessionStatus(
     answeredPlanMessageIds,
     answeredQuestionMessageIds
   );
+  if (pendingStatus === "waiting" && inputDeliveryState(latestUserMessage) === "failed") return "input_failed";
   if (
     pendingStatus === "waiting" &&
     (pendingPlanActionStatus || isPendingMuxpilotSubmission(latestUserMessage, latestTurnLifecycleMessage))
@@ -1954,8 +2054,20 @@ function isPendingMuxpilotSubmission(
   latestTurnLifecycleMessage: ChatMessage | null
 ): boolean {
   if (!latestUserMessage || !recordValue(latestUserMessage.payload.muxpilotSubmission)) return false;
+  const state = inputDeliveryState(latestUserMessage);
+  if (state === "failed" || state === "dismissed") return false;
   if (!latestTurnLifecycleMessage || latestTurnLifecycleMessage.sequence < latestUserMessage.sequence) return true;
   return latestTurnLifecycleMessage.text === "task_started";
+}
+
+function muxpilotSubmission(message: ChatMessage): Record<string, unknown> | null {
+  return recordValue(message.payload.muxpilotSubmission);
+}
+
+function inputDeliveryState(message: ChatMessage | null): string | null {
+  if (!message) return null;
+  const submission = muxpilotSubmission(message);
+  return typeof submission?.state === "string" ? submission.state : submission ? "pending" : null;
 }
 
 function isTurnCompletionMessage(message: ChatMessage): boolean {
@@ -2182,6 +2294,11 @@ function isWorkingStatus(status: SessionStatus): boolean {
 
 function isInputReadyStatus(status: SessionStatus): boolean {
   return status === "waiting" || status === "idle";
+}
+
+function isDeliveryAcknowledgingStatus(status: SessionStatus): boolean {
+  return status === "working" || status === "generating" || status === "executing" ||
+    status === "approval" || status === "question" || status === "plan_ready";
 }
 
 function queuedInputMatchesSession(input: QueuedInput, session: ManagedSession): boolean {

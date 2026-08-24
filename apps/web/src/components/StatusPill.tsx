@@ -21,6 +21,7 @@ export function LoadingStatusPill() {
 function statusLabel(status: SessionStatus): string {
   if (status === "executing" || status === "generating") return "working";
   if (status === "plan_ready") return "plan ready";
+  if (status === "input_failed") return "input failed";
   if (status === "startup_failed") return "startup failed";
   return status;
 }

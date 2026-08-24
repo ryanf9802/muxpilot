@@ -108,7 +108,14 @@ describe("AppDatabase activity summaries", () => {
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     const submitted = {
       ...testMessage(session.id, 1, "user", "Implement the change"),
-      payload: { collaborationMode: "plan", muxpilotSubmission: { codexSessionId: "codex-session" } }
+      payload: {
+        collaborationMode: "plan",
+        muxpilotSubmission: {
+          codexSessionId: "codex-session",
+          state: "pending",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z"
+        }
+      }
     };
     const echoed = {
       ...testMessage(session.id, 2, "user", "Implement the change"),
@@ -123,9 +130,41 @@ describe("AppDatabase activity summaries", () => {
     expect(messages[0]).toMatchObject({
       id: submitted.id,
       sequence: 1,
-      payload: { ...echoed.payload, muxpilotSubmission: submitted.payload.muxpilotSubmission }
+      payload: {
+        ...echoed.payload,
+        muxpilotSubmission: { ...submitted.payload.muxpilotSubmission, state: "acknowledged", failureReason: null }
+      }
     });
     expect((await db.getSession(session.id))?.unreadCount).toBe(1);
+    await db.close();
+  });
+
+  it("reconciles a delayed retry echo against the latest delivery attempt without duplicating the prompt", async () => {
+    const db = await tempDb();
+    const session = testSession("session-retried-input");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Retry this", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        collaborationMode: "plan",
+        muxpilotSubmission: {
+          state: "pending",
+          attemptCount: 2,
+          lastAttemptAt: "2026-07-07T00:10:00.000Z"
+        }
+      }
+    };
+    const echoed = {
+      ...testMessage(session.id, 2, "user", "Retry this", "2026-07-07T00:10:01.000Z"),
+      payload: { type: "event_msg", payload: { type: "user_message", message: "Retry this" } }
+    };
+
+    await db.appendMessage(submitted);
+    expect(await db.appendMessage(echoed)).toBe(false);
+    expect(await db.listMessages(session.id, 0)).toMatchObject([{
+      id: submitted.id,
+      payload: { muxpilotSubmission: { state: "acknowledged", attemptCount: 2 } }
+    }]);
     await db.close();
   });
 
