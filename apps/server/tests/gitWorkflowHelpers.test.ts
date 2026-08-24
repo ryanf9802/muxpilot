@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,94 @@ afterEach(async () => {
 });
 
 describe("standalone local Git workflow helpers", () => {
+  it("initializes an approved direct-tmux workflow and completes it with standalone proof", async () => {
+    const root = await repository();
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "standalone-test", private: true }));
+    await git(root, ["add", "package.json"]);
+    await git(root, ["commit", "-m", "add package"]);
+    const dependencies = join(root, "node_modules");
+    await mkdir(dependencies);
+    const environment = standaloneEnvironment(root);
+
+    await expect(node("muxpilot-git-init.mjs", environment, [root, "main"]))
+      .rejects.toThrow("--confirm-target");
+    const initialized = await node("muxpilot-git-init.mjs", environment, [root, "main", "--confirm-target"]);
+    expect(initialized).toContain("STANDALONE_READY");
+    expect(initialized).toContain("reused=false");
+    expect(initialized).toContain('"kind":"workflow_initialized"');
+    expect(initialized).toContain('"operation":"initialize"');
+    expect(initialized).toContain('"executionMode":"standalone"');
+    expect(await node("muxpilot-git-init.mjs", environment, [root, "main", "--confirm-target"]))
+      .toContain("reused=true");
+    expect((await stat(environment.MUXPILOT_GIT_STANDALONE_ROOT)).mode & 0o777).toBe(0o700);
+    const controlRoot = join(environment.MUXPILOT_GIT_STANDALONE_ROOT, (await readdir(environment.MUXPILOT_GIT_STANDALONE_ROOT))[0]!);
+    expect((await stat(controlRoot)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(controlRoot, "configuration.json"))).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(await node("muxpilot-git-status.mjs", environment))).toMatchObject({
+      executionMode: "standalone",
+      repoRoot: root,
+      targetBranch: "main",
+      state: "idle"
+    });
+
+    const leaseRoot = join(root, "session", "standalone-leases");
+    const heavy = await node("muxpilot-git-run.mjs", {
+      ...environment,
+      MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+      MUXPILOT_HEAVY_VALIDATION_DIR: leaseRoot
+    }, ["--heavy", "--", process.execPath, "-e", "process.stdout.write('standalone-heavy')"]);
+    expect(heavy).toContain("standalone-heavy");
+    expect(heavy).not.toContain("QUEUED_NOT_RUN");
+    const runId = (await readdir(join(leaseRoot, "runs")))[0]!;
+    expect(JSON.parse(await readFile(join(leaseRoot, "runs", runId, "owner.json"), "utf8"))).toMatchObject({
+      state: "completed",
+      workspaceId: expect.stringMatching(/^standalone-/)
+    });
+
+    const begin = await node("muxpilot-git-begin.mjs", environment);
+    const worktree = begin.match(/WORKTREE_READY (\S+)/)?.[1];
+    expect(worktree).toBeTruthy();
+    expect((await lstat(join(worktree!, "node_modules"))).isSymbolicLink()).toBe(true);
+    await writeFile(join(worktree!, "standalone.txt"), "integrated\n");
+    await git(worktree!, ["add", "standalone.txt"]);
+    await git(worktree!, ["commit", "-m", "standalone task"]);
+
+    const finish = await node("muxpilot-git-finish.mjs", environment);
+    expect(finish).toContain("INTEGRATED target=refs/heads/main");
+    expect(finish).toContain("mode=standalone broker=none");
+    expect(await git(root, ["show", "main:standalone.txt"])).toBe("integrated");
+    await expect(stat(worktree!)).rejects.toThrow();
+  });
+
+  it("keeps one approved target per pane until the fixed-target retarget workflow is used", async () => {
+    const root = await repository();
+    await git(root, ["branch", "feature"]);
+    const environment = standaloneEnvironment(root);
+
+    await expect(node("muxpilot-git-status.mjs", environment))
+      .rejects.toThrow("Standalone Git workflow is not initialized");
+    await node("muxpilot-git-init.mjs", environment, [root, "main", "--confirm-target"]);
+    await expect(node("muxpilot-git-init.mjs", environment, [root, "feature", "--confirm-target"]))
+      .rejects.toThrow("already targets 'main'");
+    await expect(node("muxpilot-git-target.mjs", environment, ["feature"]))
+      .rejects.toThrow("--bypass=fixed-target");
+    await node("muxpilot-git-target.mjs", environment, ["feature", "--bypass=fixed-target"]);
+    expect(JSON.parse(await node("muxpilot-git-status.mjs", environment))).toMatchObject({
+      executionMode: "standalone",
+      targetBranch: "feature"
+    });
+  });
+
+  it("fails closed for partial managed configuration instead of initializing standalone mode", async () => {
+    const root = await repository();
+    const environment = { ...standaloneEnvironment(root), MUXPILOT_GIT_WORKSPACE_ID: "partial" };
+
+    await expect(node("muxpilot-git-status.mjs", environment))
+      .rejects.toThrow("Incomplete managed muxpilot Git configuration");
+    await expect(node("muxpilot-git-init.mjs", environment, [root, "main", "--confirm-target"]))
+      .rejects.toThrow("already has muxpilot Git configuration");
+  });
+
   it("creates a linked isolated worktree, integrates locally, and cleans it up", async () => {
     const root = await repository();
     const dependencies = join(root, "node_modules");
@@ -241,6 +329,24 @@ function helperEnvironment(root: string, dependencies: unknown[]): NodeJS.Proces
     MUXPILOT_GIT_WORKTREE_ROOT: join(root, "task-worktrees"),
     MUXPILOT_GIT_STATUS_FILE: join(root, "session", "git-workflow-status.json"),
     MUXPILOT_GIT_DEPENDENCIES: JSON.stringify(dependencies)
+  } as NodeJS.ProcessEnv & Record<string, string>;
+}
+
+function standaloneEnvironment(root: string): NodeJS.ProcessEnv & Record<string, string> {
+  const environment: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of [
+    "MUXPILOT_GIT_WORKSPACE_ID",
+    "MUXPILOT_GIT_REPO_ROOT",
+    "MUXPILOT_GIT_ENTRY_PATH",
+    "MUXPILOT_GIT_TARGET_BRANCH",
+    "MUXPILOT_GIT_WORKTREE_ROOT",
+    "MUXPILOT_GIT_STATUS_FILE",
+    "MUXPILOT_GIT_DEPENDENCIES"
+  ]) delete environment[key];
+  return {
+    ...environment,
+    MUXPILOT_GIT_STANDALONE_ROOT: join(root, "session", "standalone-state"),
+    MUXPILOT_GIT_STANDALONE_ID: "test-pane"
   } as NodeJS.ProcessEnv & Record<string, string>;
 }
 

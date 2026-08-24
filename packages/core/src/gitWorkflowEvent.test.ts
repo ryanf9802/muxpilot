@@ -21,6 +21,20 @@ const created = {
 };
 
 describe("Git workflow transcript events", () => {
+  it("parses a standalone initialization event", () => {
+    const initialized = {
+      ...created,
+      kind: "workflow_initialized" as const,
+      operation: "initialize" as const,
+      executionMode: "standalone" as const,
+      targetSha: "0123456789abcdef"
+    };
+
+    expect(normalizeGitWorkflowEvent(serializeGitWorkflowEvent(initialized))?.event).toEqual(initialized);
+    expect(gitWorkflowEventSummary(initialized)).toBe("Standalone Git workflow initialized");
+    expect(gitWorkflowEventContext(initialized)).toBe("main @ 01234567");
+  });
+
   it("round-trips a structured event", () => {
     const raw = serializeGitWorkflowEvent(created);
     expect(normalizeGitWorkflowEvent(raw)).toEqual({ event: created, rawText: raw });

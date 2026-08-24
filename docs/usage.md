@@ -62,7 +62,7 @@ The target branch must already exist locally. Selecting or creating a different 
 
 Heavy validation—such as repository-wide checks, production builds, scanners, Docker workloads, or multi-worker tests—uses a shared resource lease. That scheduler controls concurrency but does not authorize broader validation than the user requested.
 
-Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into a managed workspace. Non-Git directories keep the direct-directory session flow.
+Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into a managed workspace. For change tasks, a direct Codex session running in tmux can initialize the bundled Git workflow's standalone mode after the user explicitly approves an existing local target branch. Standalone mode provides short-lived worktrees, dependency reuse, target locking, rebase/re-review gates, local integration, and cleanup, but it does not retrofit muxpilot workspace controls, sandbox roots, developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Non-Git directories keep the direct-directory session flow.
 
 ## Restoring sessions
 

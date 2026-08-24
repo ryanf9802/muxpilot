@@ -33,6 +33,7 @@ describe("production bundled skill startup", () => {
       expect(installedSkill).toContain("When uncertain, use the heavyweight wrapper");
       expect(installedSkill).toContain("does not authorize repository-wide validation");
       await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"))).resolves.toBeUndefined();
+      await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-init.mjs"))).resolves.toBeUndefined();
       const installedQueueSkill = await readFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "utf8");
       expect(installedQueueSkill).toContain("QUEUED_NOT_RUN");
       expect(installedQueueSkill).toContain("treat its delivery as proof that muxpilot ended the deferred phase");

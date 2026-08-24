@@ -23,8 +23,8 @@ if (positional.length !== 1) {
 let releaseWorkspace = null;
 let config = null;
 try {
-  releaseWorkspace = await acquireWorkspaceLock();
   config = await configuration();
+  releaseWorkspace = await acquireWorkspaceLock(config.statusFile);
   const status = await readStatus(config);
   if (status?.state === "integrating") throw new Error("Cannot change the target branch during integration");
 

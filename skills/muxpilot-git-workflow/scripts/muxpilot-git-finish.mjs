@@ -17,8 +17,8 @@ let releaseWorkspace = null;
 let config = null;
 let status = null;
 try {
-  releaseWorkspace = await acquireWorkspaceLock();
   config = await configuration();
+  releaseWorkspace = await acquireWorkspaceLock(config.statusFile);
   status = await readStatus(config);
   if (!["worktree", "blocked", "failed"].includes(status?.state) || !(await worktreeExists(status.worktreePath)) || !status.sessionBranch) {
     throw new Error("No active task worktree to integrate");
@@ -53,7 +53,7 @@ try {
       lastError: null
     });
     await releaseOperationLock();
-    process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${targetSha} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+    process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${targetSha} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}${standaloneSuffix(config)}\n`);
     writeGitWorkflowEvent("integration_completed", "finish", config, {
       targetSha,
       sessionBranch: status.sessionBranch,
@@ -188,7 +188,7 @@ try {
     lastError: null
   });
   await releaseOperationLock();
-  process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${finalHead} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}\n`);
+  process.stdout.write(`INTEGRATED target=refs/heads/${config.targetBranch} sha=${finalHead} worktree=${bypasses.includes("automatic-cleanup") ? "retained" : "removed"}${standaloneSuffix(config)}\n`);
   writeGitWorkflowEvent("integration_completed", "finish", config, {
     targetSha: finalHead,
     sessionBranch: status.sessionBranch,
@@ -219,6 +219,10 @@ async function releaseOperationLock() {
   if (!releaseWorkspace) return;
   await releaseWorkspace().catch(() => undefined);
   releaseWorkspace = null;
+}
+
+function standaloneSuffix(config) {
+  return config.executionMode === "standalone" ? " mode=standalone broker=none" : "";
 }
 
 async function isAncestor(cwd, ancestor, descendant) {

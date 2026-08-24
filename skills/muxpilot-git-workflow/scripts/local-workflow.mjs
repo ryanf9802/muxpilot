@@ -1,15 +1,34 @@
 import { execFile } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
+import { access, chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { createConnection } from "node:net";
 
 const execFileAsync = promisify(execFile);
+const MANAGED_CONFIG_KEYS = [
+  "MUXPILOT_GIT_WORKSPACE_ID",
+  "MUXPILOT_GIT_REPO_ROOT",
+  "MUXPILOT_GIT_TARGET_BRANCH",
+  "MUXPILOT_GIT_WORKTREE_ROOT",
+  "MUXPILOT_GIT_STATUS_FILE"
+];
 
 export async function configuration() {
+  const managedValues = MANAGED_CONFIG_KEYS.map((key) => process.env[key]);
+  const managedCount = managedValues.filter(Boolean).length;
+  if (managedCount > 0 && managedCount < MANAGED_CONFIG_KEYS.length) {
+    const missing = MANAGED_CONFIG_KEYS.filter((key) => !process.env[key]);
+    throw new Error(`Incomplete managed muxpilot Git configuration; missing ${missing.join(", ")}`);
+  }
+  if (managedCount === 0) return standaloneConfiguration();
+
   const config = {
+    executionMode: "managed",
     workspaceId: process.env.MUXPILOT_GIT_WORKSPACE_ID,
+    entryPath: process.env.MUXPILOT_GIT_ENTRY_PATH ?? process.env.MUXPILOT_GIT_REPO_ROOT,
     repoRoot: process.env.MUXPILOT_GIT_REPO_ROOT,
     targetBranch: await currentTargetBranch(
       process.env.MUXPILOT_GIT_STATUS_FILE,
@@ -23,6 +42,69 @@ export async function configuration() {
     if (key !== "dependencies" && !value) throw new Error(`Missing muxpilot Git configuration: ${key}`);
   }
   return config;
+}
+
+export async function initializeStandalone(entryPath, targetBranch) {
+  const managedKeys = MANAGED_CONFIG_KEYS.filter((key) => process.env[key]);
+  if (managedKeys.length > 0) throw new Error("This Codex process already has muxpilot Git configuration; standalone initialization is not allowed");
+  const paths = await standalonePaths();
+  const existing = await readStandaloneConfig(paths.configFile);
+  const requestedEntry = await realpath(resolve(entryPath));
+  const repoRoot = await realpath(await git(requestedEntry, ["rev-parse", "--show-toplevel"]));
+  if (await git(repoRoot, ["rev-parse", "--is-bare-repository"]) === "true") throw new Error("Bare repositories are unsupported");
+  await git(repoRoot, ["check-ref-format", "--branch", targetBranch]);
+  await git(repoRoot, ["show-ref", "--verify", `refs/heads/${targetBranch}`]);
+  const targetSha = await git(repoRoot, ["rev-parse", `refs/heads/${targetBranch}^{commit}`]);
+
+  if (existing) {
+    if (existing.workspaceId !== `standalone-${paths.identity}` || existing.statusFile !== paths.statusFile || existing.worktreeRoot !== paths.worktreeRoot) {
+      throw new Error("Standalone Git workflow configuration does not belong to the current tmux pane");
+    }
+    const currentTarget = await currentTargetBranch(existing.statusFile, existing.targetBranch);
+    if (existing.repoRoot !== repoRoot || existing.entryPath !== requestedEntry) {
+      throw new Error(`This tmux pane is already initialized for ${existing.entryPath}; use a new Codex session for another repository`);
+    }
+    if (currentTarget !== targetBranch) {
+      throw new Error(`This standalone workflow already targets '${currentTarget}'; use muxpilot-git-target after fixed-target confirmation`);
+    }
+    return { ...existing, targetBranch: currentTarget, targetSha, reused: true };
+  }
+
+  const config = {
+    version: 1,
+    executionMode: "standalone",
+    workspaceId: `standalone-${paths.identity}`,
+    entryPath: requestedEntry,
+    repoRoot,
+    targetBranch,
+    worktreeRoot: paths.worktreeRoot,
+    statusFile: paths.statusFile,
+    dependencies: await discoverDependencies(repoRoot)
+  };
+  await mkdir(paths.stateRoot, { recursive: true, mode: 0o700 });
+  await chmod(paths.stateRoot, 0o700);
+  await mkdir(paths.controlRoot, { mode: 0o700 });
+  await chmod(paths.controlRoot, 0o700);
+  await mkdir(paths.worktreeRoot, { recursive: true, mode: 0o700 });
+  const temporary = `${paths.configFile}.${process.pid}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  await rename(temporary, paths.configFile);
+  await chmod(paths.configFile, 0o600);
+  await writeStatus(config, { state: "idle", targetSha, sessionBranch: null, worktreePath: null, lastError: null });
+  return { ...config, targetSha, reused: false };
+}
+
+export async function standaloneConfiguration() {
+  const paths = await standalonePaths();
+  const stored = await readStandaloneConfig(paths.configFile);
+  if (!stored) {
+    throw new Error("Standalone Git workflow is not initialized for this tmux pane. Obtain user approval for an explicit local target, then run muxpilot-git-init.mjs <entry-path> <target-branch> --confirm-target");
+  }
+  if (stored.workspaceId !== `standalone-${paths.identity}` || stored.statusFile !== paths.statusFile || stored.worktreeRoot !== paths.worktreeRoot) {
+    throw new Error("Standalone Git workflow configuration does not belong to the current tmux pane");
+  }
+  const targetBranch = await currentTargetBranch(stored.statusFile, stored.targetBranch);
+  return { ...stored, targetBranch, executionMode: "standalone" };
 }
 
 export async function git(cwd, args, options = {}) {
@@ -51,6 +133,7 @@ export async function readStatus(config) {
 export async function writeStatus(config, value) {
   const status = {
     version: 1,
+    executionMode: config.executionMode ?? "managed",
     state: value.state,
     targetBranch: config.targetBranch,
     targetSha: value.targetSha,
@@ -77,6 +160,7 @@ export function writeGitWorkflowEvent(kind, operation, config, details = {}) {
     workspaceId: config.workspaceId,
     targetBranch: config.targetBranch,
     skill: "$muxpilot-git-workflow",
+    executionMode: config.executionMode ?? "managed",
     ...details
   };
   process.stdout.write(`<muxpilot_git_workflow>\n${JSON.stringify(event)}\n</muxpilot_git_workflow>\n`);
@@ -148,6 +232,84 @@ export async function acquireBranchLock(config) {
 export async function acquireWorkspaceLock(statusFile = process.env.MUXPILOT_GIT_STATUS_FILE) {
   if (!statusFile) throw new Error("Missing muxpilot Git configuration: statusFile");
   return acquireDirectoryLock(join(dirname(statusFile), "git-workflow-operation.lock"), "Timed out waiting for another workflow operation in this session");
+}
+
+async function standalonePaths() {
+  const identitySource = process.env.MUXPILOT_GIT_STANDALONE_ID ?? await tmuxIdentity();
+  const identity = createHash("sha256").update(identitySource).digest("hex").slice(0, 16);
+  const root = process.env.MUXPILOT_GIT_STANDALONE_ROOT ?? join(tmpdir(), `muxpilot-git-standalone-${process.getuid?.() ?? "user"}`);
+  const controlRoot = join(root, identity);
+  return {
+    identity,
+    stateRoot: root,
+    controlRoot,
+    configFile: join(controlRoot, "configuration.json"),
+    statusFile: join(controlRoot, "git-workflow-status.json"),
+    worktreeRoot: join(controlRoot, "worktrees")
+  };
+}
+
+async function tmuxIdentity() {
+  const paneId = process.env.TMUX_PANE;
+  if (!paneId) throw new Error("Standalone Git workflow requires a tmux pane (TMUX_PANE is not set)");
+  const value = await gitLikeExec("tmux", ["display-message", "-p", "-t", paneId, "#{pid}\t#{session_created}\t#{pane_id}"]);
+  if (!value.trim()) throw new Error("Unable to identify the current tmux pane for standalone Git workflow state");
+  return value.trim();
+}
+
+async function readStandaloneConfig(path) {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8"));
+    if (value?.version !== 1 || value.executionMode !== "standalone") return null;
+    const required = ["workspaceId", "entryPath", "repoRoot", "targetBranch", "worktreeRoot", "statusFile"];
+    if (required.some((key) => typeof value[key] !== "string" || value[key] === "")) return null;
+    return { ...value, dependencies: parseDependencies(JSON.stringify(value.dependencies ?? [])) };
+  } catch {
+    return null;
+  }
+}
+
+async function discoverDependencies(repoRoot) {
+  const manifests = lines(await git(repoRoot, [
+    "ls-files", "--", "package.json", "**/package.json", "pyproject.toml", "**/pyproject.toml",
+    "setup.py", "**/setup.py", "requirements*.txt", "**/requirements*.txt", "Pipfile", "**/Pipfile",
+    "composer.json", "**/composer.json", "Gemfile", "**/Gemfile"
+  ]));
+  const candidates = new Map();
+  for (const manifest of manifests) {
+    const directory = dirname(manifest) === "." ? "" : dirname(manifest);
+    const name = basename(manifest);
+    if (name === "package.json") candidates.set(join(directory, "node_modules"), "node");
+    else if (name === "composer.json") candidates.set(join(directory, "vendor"), "composer");
+    else if (name === "Gemfile") candidates.set(join(directory, "vendor", "bundle"), "bundler");
+    else {
+      candidates.set(join(directory, ".venv"), "python");
+      candidates.set(join(directory, "venv"), "python");
+    }
+  }
+  const dependencies = [];
+  for (const [relativePath, kind] of candidates) {
+    const sourcePath = join(repoRoot, relativePath);
+    const info = await stat(sourcePath).catch(() => null);
+    if (!info?.isDirectory()) continue;
+    if (!await access(sourcePath, constants.W_OK).then(() => true).catch(() => false)) continue;
+    if (await git(repoRoot, ["ls-files", "--", relativePath])) continue;
+    dependencies.push({ kind, relativePath, sourcePath: await realpath(sourcePath), linked: true });
+  }
+  return dependencies;
+}
+
+async function gitLikeExec(command, args) {
+  try {
+    const { stdout } = await execFileAsync(command, args, { maxBuffer: 1024 * 1024 });
+    return stdout;
+  } catch (error) {
+    throw new Error(error?.stderr?.trim() || error?.message || `${command} failed`);
+  }
+}
+
+function lines(value) {
+  return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 async function acquireDirectoryLock(lock, timeoutMessage) {

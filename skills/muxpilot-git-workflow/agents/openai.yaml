@@ -1,4 +1,4 @@
 interface:
   display_name: "Muxpilot Git Workflow"
   short_description: "Complete isolated muxpilot Git changes"
-  default_prompt: "Use $muxpilot-git-workflow to implement, review, and integrate this managed Git task."
+  default_prompt: "Use $muxpilot-git-workflow to implement, review, and integrate this Git task, initializing standalone mode when the tmux session is not managed by muxpilot."

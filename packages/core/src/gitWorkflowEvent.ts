@@ -2,6 +2,7 @@ export const GIT_WORKFLOW_EVENT_TAG = "muxpilot_git_workflow";
 export const GIT_WORKFLOW_PAYLOAD_KEY = "muxpilotGitWorkflow";
 
 export type GitWorkflowEventKind =
+  | "workflow_initialized"
   | "worktree_created"
   | "worktree_adopted"
   | "target_changed"
@@ -10,7 +11,7 @@ export type GitWorkflowEventKind =
   | "workflow_blocked"
   | "workflow_failed";
 
-export type GitWorkflowOperation = "begin" | "target" | "finish";
+export type GitWorkflowOperation = "initialize" | "begin" | "target" | "finish";
 
 export interface GitWorkflowEvent {
   version: 1;
@@ -20,6 +21,7 @@ export interface GitWorkflowEvent {
   workspaceId: string;
   targetBranch: string;
   skill: "$muxpilot-git-workflow";
+  executionMode?: "managed" | "standalone";
   targetSha?: string;
   previousTargetBranch?: string;
   sessionBranch?: string;
@@ -39,6 +41,7 @@ export interface NormalizedGitWorkflowEvent {
 const EVENT_ID = /^mwf-[a-f0-9]{12}$/;
 const EVENT_PATTERN = /<muxpilot_git_workflow>\s*([\s\S]*?)\s*<\/muxpilot_git_workflow>/gi;
 const EVENT_KINDS: readonly GitWorkflowEventKind[] = [
+  "workflow_initialized",
   "worktree_created",
   "worktree_adopted",
   "target_changed",
@@ -47,7 +50,7 @@ const EVENT_KINDS: readonly GitWorkflowEventKind[] = [
   "workflow_blocked",
   "workflow_failed"
 ];
-const OPERATIONS: readonly GitWorkflowOperation[] = ["begin", "target", "finish"];
+const OPERATIONS: readonly GitWorkflowOperation[] = ["initialize", "begin", "target", "finish"];
 
 export function serializeGitWorkflowEvent(event: GitWorkflowEvent): string {
   return `<${GIT_WORKFLOW_EVENT_TAG}>\n${JSON.stringify(event)}\n</${GIT_WORKFLOW_EVENT_TAG}>`;
@@ -77,6 +80,7 @@ export function extractGitWorkflowEvents(text: string): NormalizedGitWorkflowEve
 
 export function gitWorkflowEventSummary(event: GitWorkflowEvent): string {
   switch (event.kind) {
+    case "workflow_initialized": return "Standalone Git workflow initialized";
     case "worktree_created": return "Implementation worktree created";
     case "worktree_adopted": return "Existing implementation worktree adopted";
     case "target_changed": return "Git target branch changed";
@@ -96,6 +100,9 @@ export function gitWorkflowEventDirection(event: GitWorkflowEvent): string {
 export function gitWorkflowEventContext(event: GitWorkflowEvent, maxLength = 96): string {
   let value: string;
   switch (event.kind) {
+    case "workflow_initialized":
+      value = `${event.targetBranch}${event.targetSha ? ` @ ${event.targetSha.slice(0, 8)}` : ""}`;
+      break;
     case "worktree_created":
     case "worktree_adopted":
       value = `${event.sessionBranch ?? "worktree"} → ${event.targetBranch}`;
@@ -162,10 +169,12 @@ function parseEvent(value: unknown): GitWorkflowEvent | null {
   copyString(value, event, "worktreePath");
   copyString(value, event, "reason");
   copyString(value, event, "error");
+  if (value.executionMode === "managed" || value.executionMode === "standalone") event.executionMode = value.executionMode;
   if (typeof value.reviewRequired === "boolean") event.reviewRequired = value.reviewRequired;
   if (value.cleanup === "removed" || value.cleanup === "retained") event.cleanup = value.cleanup;
   if (value.broker === "authenticated") event.broker = value.broker;
 
+  if (event.kind === "workflow_initialized" && (event.operation !== "initialize" || !event.targetSha || event.executionMode !== "standalone")) return null;
   if ((event.kind === "worktree_created" || event.kind === "worktree_adopted") && (!event.sessionBranch || !event.worktreePath)) return null;
   if (event.kind === "target_changed" && (!event.previousTargetBranch || !event.targetSha)) return null;
   if (event.kind === "review_required" && !event.reason) return null;

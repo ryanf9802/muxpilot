@@ -11,8 +11,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 let releaseWorkspace = null;
 let config = null;
 try {
-  releaseWorkspace = await acquireWorkspaceLock();
   config = await configuration();
+  releaseWorkspace = await acquireWorkspaceLock(config.statusFile);
   const existing = await readStatus(config);
   if (["worktree", "blocked", "failed"].includes(existing?.state) && await worktreeExists(existing.worktreePath)) {
     await releaseWorkspace();

@@ -6,6 +6,7 @@ import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "no
 import { createServer, createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { standaloneConfiguration } from "./local-workflow.mjs";
 
 class DeferredError extends Error {}
 
@@ -21,9 +22,21 @@ const inactivityWarnMs = duration(parsed.inactivityWarn, process.env.MUXPILOT_HE
 const inactivityTimeoutMs = duration(parsed.inactivityTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS, 10 * 60_000);
 const runtimeTimeoutMs = duration(parsed.runtimeTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS, 30 * 60_000);
 const terminationGraceMs = duration(parsed.terminationGrace, process.env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS, 30_000);
-const queueEnabled = process.env.MUXPILOT_HEAVY_QUEUE_ENABLED === "1";
 const runId = parsed.resumeRunId ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
-const workspaceId = process.env.MUXPILOT_GIT_WORKSPACE_ID ?? null;
+const partialManagedConfig = !process.env.MUXPILOT_GIT_WORKSPACE_ID && [
+  "MUXPILOT_GIT_REPO_ROOT",
+  "MUXPILOT_GIT_TARGET_BRANCH",
+  "MUXPILOT_GIT_WORKTREE_ROOT",
+  "MUXPILOT_GIT_STATUS_FILE"
+].some((key) => process.env[key]);
+if (partialManagedConfig) {
+  process.stderr.write("Incomplete managed muxpilot Git configuration\n");
+  process.exit(1);
+}
+const standaloneConfig = process.env.MUXPILOT_GIT_WORKSPACE_ID ? null : await standaloneConfiguration().catch(() => null);
+const queueEnabled = standaloneConfig ? false : process.env.MUXPILOT_HEAVY_QUEUE_ENABLED === "1";
+const workspaceId = process.env.MUXPILOT_GIT_WORKSPACE_ID ?? standaloneConfig?.workspaceId ?? null;
+const workflowStatusFile = process.env.MUXPILOT_GIT_STATUS_FILE ?? standaloneConfig?.statusFile ?? null;
 const runDir = join(leaseRoot, "runs", runId);
 const controlSocket = join(runDir, "control.sock");
 let startedWaitingAt = Date.now();
@@ -481,8 +494,7 @@ async function writeOwner() {
 }
 
 async function createRunLog() {
-  const statusFile = process.env.MUXPILOT_GIT_STATUS_FILE;
-  const root = statusFile ? join(dirname(statusFile), "heavy-commands") : join(runDir, "logs");
+  const root = workflowStatusFile ? join(dirname(workflowStatusFile), "heavy-commands") : join(runDir, "logs");
   await mkdir(root, { recursive: true, mode: 0o700 });
   await chmod(root, 0o700);
   await pruneLogs(root);
