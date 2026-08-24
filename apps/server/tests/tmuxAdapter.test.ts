@@ -168,6 +168,16 @@ describe("verified input transport", () => {
     expect(composerContainsInput("› open \u001b]8;;https://example.com\u001b\\https://example.com\u001b]8;;\u001b\\", "open https://example.com")).toBe(true);
   });
 
+  it("recognizes a long prompt across terminal hard-wrap boundaries", () => {
+    const prefix = "Use the new teamweave database skill. ";
+    const filler = "attributes and filters ".repeat(20);
+    const suffix = "before we $generate-custom-integration-requirements";
+    const prompt = `${prefix}${filler}${suffix}`;
+    const capture = `› ${prefix}${filler}\n  before we $generate-\n  custom-integration-requirements`;
+
+    expect(composerContainsInput(capture, prompt)).toBe(true);
+  });
+
   it("replays a paste once when Codex does not display the first paste", async () => {
     const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let pasteCount = 0;
@@ -189,6 +199,17 @@ describe("verified input transport", () => {
     });
     expect(pasteCount).toBe(2);
     expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("does not replay a paste when an unverified draft is visible", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let pasteCount = 0;
+    let captureCount = 0;
+    adapter.pasteText = async () => { pasteCount += 1; };
+    adapter.capturePane = async () => captureCount++ === 0 ? "› " : "› unexpected visible draft";
+
+    await expect(adapter.sendInput("%1", "expected prompt")).rejects.toMatchObject({ reason: "composer_changed" });
+    expect(pasteCount).toBe(1);
   });
 
   it("refuses to append input to an existing composer draft", async () => {

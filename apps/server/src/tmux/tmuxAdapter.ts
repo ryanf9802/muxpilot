@@ -246,6 +246,10 @@ export class TmuxAdapter {
       }
       await this.pasteText(paneId, text);
       if (!await this.waitForComposerInput(paneId, text)) {
+        const unverifiedCapture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
+        if (composerHasInput(unverifiedCapture)) {
+          throw new InputTransportError("Codex displayed input that did not match the submitted text", "composer_changed", result);
+        }
         result.pasteReplayCount = 1;
         await this.pasteText(paneId, text);
         if (!await this.waitForComposerInput(paneId, text)) {
@@ -350,11 +354,13 @@ export function composerContainsInput(capture: string, text: string): boolean {
   if (!text.includes("\n") && expected.length <= 64) return firstLine === expected;
   const expectedFirstLine = normalizeComposerText(text.split("\n", 1)[0] ?? "");
   const prefix = (expectedFirstLine || expected).slice(0, 64);
-  if (!firstLine.startsWith(prefix)) return false;
-  if (expected.length <= 256) return composer.includes(expected);
-  const suffix = expected.slice(-128);
-  const prefixIndex = composer.indexOf(prefix);
-  return prefixIndex >= 0 && composer.indexOf(suffix, prefixIndex + prefix.length) >= 0;
+  if (expected.length <= 256) return firstLine.startsWith(prefix) && composer.includes(expected);
+  const compactComposer = compactComposerText(composer);
+  const compactExpected = compactComposerText(expected);
+  const compactPrefix = compactExpected.slice(0, 64);
+  const compactSuffix = compactExpected.slice(-128);
+  const prefixIndex = compactComposer.indexOf(compactPrefix);
+  return prefixIndex >= 0 && compactComposer.indexOf(compactSuffix, prefixIndex + compactPrefix.length) >= 0;
 }
 
 export function composerHasInput(capture: string): boolean {
@@ -369,6 +375,10 @@ export function composerHasInput(capture: string): boolean {
 
 function normalizeComposerText(text: string): string {
   return stripTerminalFormatting(text).replace(/\s+/g, " ").trim();
+}
+
+function compactComposerText(text: string): string {
+  return stripTerminalFormatting(text).replace(/\s+/g, "");
 }
 
 function captureShowsActiveTurn(capture: string): boolean {
