@@ -2409,9 +2409,11 @@ describe("SessionManager transcript isolation", () => {
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => "› ";
     harness.tmux.sendInput = async (_paneId, text) => sentInputs.push(text);
+    harness.tmux.sendKeys = async (_paneId, keys) => { sentKeys.push(keys); };
 
     await harness.manager.discover();
     const session = harness.manager.listSessions(true)[0]!;
@@ -2434,6 +2436,7 @@ describe("SessionManager transcript isolation", () => {
     const retried = await harness.manager.act(session.id, { type: "retryInputDelivery" });
 
     expect(sentInputs).toEqual(["Retry this exact prompt "]);
+    expect(sentKeys).toEqual([["BTab"]]);
     expect(retried?.status).toBe("planning");
     expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
     expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({

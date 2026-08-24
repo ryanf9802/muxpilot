@@ -1552,7 +1552,9 @@ export class SessionManager {
     const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
     const pending = await this.updateInputDelivery(message, { state: "pending", attemptCount, lastAttemptAt: attemptedAt, failureReason: null });
     try {
-      await this.sendRawInput(session, message.text);
+      const mode = collaborationModeFromMessage(message) ?? session.inputMode;
+      const liveSession = await this.ensureInputMode(session, mode);
+      await this.sendRawInput(liveSession, message.text);
     } catch (error) {
       await this.updateInputDelivery(message, { state: "failed", attemptCount, lastAttemptAt: attemptedAt, failureReason: "Muxpilot could not deliver the input to Codex." });
       throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
