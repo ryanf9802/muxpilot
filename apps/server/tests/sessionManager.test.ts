@@ -4732,6 +4732,47 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("queues input until Codex startup readiness completes", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let resolveReady: (() => void) | null = null;
+    const ready = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
+    const pane = testPane({
+      cwd: repo,
+      paneId: "%2",
+      windowId: "@2",
+      windowName: "new-work",
+      title: "new-work",
+      pid: 456,
+      sessionName: "muxpilot",
+      currentCommand: "codex"
+    });
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => {
+      sentInputs.push(text);
+    };
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => ({ pane, ready });
+
+    const created = await harness.manager.createSessionInDirectory(repo, "new-work");
+    const result = await harness.manager.sendInput(created.id, "startup prompt");
+    await harness.manager.discoverNow();
+
+    expect("queuedInput" in result).toBe(true);
+    expect(sentInputs).toEqual([]);
+    expect(await harness.manager.listQueuedInputs(created.id)).toMatchObject([{ text: "startup prompt", status: "queued" }]);
+
+    resolveReady?.();
+    await expect.poll(() => sentInputs).toEqual(["startup prompt "]);
+    expect((await harness.manager.getSession(created.id))?.initializing).toBe(false);
+    expect(await harness.manager.listQueuedInputs(created.id)).toMatchObject([{ status: "sent" }]);
+    harness.db.close();
+  });
+
   it("keeps an exact initializing pane discoverable before process metadata settles", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");

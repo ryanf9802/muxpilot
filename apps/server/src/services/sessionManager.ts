@@ -1125,6 +1125,7 @@ export class SessionManager {
 
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
     if (this.deliveringInputSessionIds.has(session.id)) return true;
+    if (session.initializing) return true;
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return true;
     if (isPlanActionInput(text)) return false;
     const queuedInputs = await this.db.listQueuedInputs(session.id);
@@ -1882,6 +1883,7 @@ export class SessionManager {
   }
 
   private async readyLiveSession(session: ManagedSession): Promise<ManagedSession | null> {
+    if (session.initializing) return null;
     let liveSession: ManagedSession;
     try {
       liveSession = await this.liveSession(session);
@@ -1889,6 +1891,7 @@ export class SessionManager {
       return null;
     }
 
+    if (liveSession.initializing) return null;
     const status = await inferStatus(liveSession.tmux, liveSession.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
     if (!isInputReadyStatus(status)) return null;
     return { ...liveSession, status };
