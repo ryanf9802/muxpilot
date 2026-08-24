@@ -112,6 +112,19 @@ describe("codexStartupActionFromCapture", () => {
   it("accepts a current trust gate below stale ready-screen history", () => {
     expect(codexStartupActionFromCapture([">_ OpenAI Codex", trustPrompt].join("\n"))).toBe("accept_trust");
   });
+
+  it("waits through the transient Codex header shown before the trust gate", () => {
+    const capture = [
+      "╭─────────────────────╮",
+      "│ >_ OpenAI Codex (v0.149.1) │",
+      "│ model: loading              │",
+      "╰─────────────────────╯",
+      "› Ask Codex to do anything",
+      "  ? for shortcuts"
+    ].join("\n");
+
+    expect(codexStartupActionFromCapture(capture)).toBe("wait");
+  });
 });
 
 describe("codexStartupErrorFromCapture", () => {

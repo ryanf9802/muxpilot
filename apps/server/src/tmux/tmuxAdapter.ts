@@ -506,12 +506,9 @@ export function codexStartupActionFromCapture(text: string): "accept_trust" | "r
 
 function codexReadyScreenIndex(text: string): number {
   const normalized = text.toLowerCase();
-  return Math.max(
-    normalized.lastIndexOf("openai codex"),
-    normalized.lastIndexOf("use /skills to list available skills"),
-    normalized.lastIndexOf("context left"),
-    normalized.lastIndexOf("gpt-")
-  );
+  let contextIndex = -1;
+  for (const match of text.matchAll(/\bcontext\s+\d+%\s+left\b/gi)) contextIndex = match.index;
+  return Math.max(normalized.lastIndexOf("use /skills to list available skills"), contextIndex);
 }
 
 function delay(ms: number): Promise<void> {
