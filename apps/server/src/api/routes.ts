@@ -569,9 +569,6 @@ export function registerRoutes(
       if (error instanceof InputDeliveryError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
-      if (error instanceof FastModeSwitchError) {
-        return reply.code(error.statusCode).send({ error: error.message });
-      }
       throw error;
     }
   });

@@ -226,6 +226,19 @@ describe("verified input transport", () => {
     expect(composerContainsInput("› preserved prompt with appended text", "preserved prompt")).toBe(false);
   });
 
+  it("ignores autocomplete suggestions below a standalone slash command", () => {
+    const capture = [
+      "• Working (esc to interrupt)",
+      "",
+      "› /fast",
+      "",
+      "  /fast  1.5x speed, increased usage"
+    ].join("\n");
+
+    expect(composerContainsInput(capture, "/fast")).toBe(true);
+    expect(composerContainsInput(capture, "/slow")).toBe(false);
+  });
+
   it("ignores status content below the composer separator", () => {
     const prompt = "preserved prompt that wraps across a terminal line";
     const capture = `› preserved prompt that wraps\n  across a terminal line\n\n  gpt-5.6-sol · Context 100% left`;
@@ -294,6 +307,26 @@ describe("verified input transport", () => {
       submitKeyRetryCount: 1
     });
     expect(submits).toEqual([["Enter"], ["Enter"]]);
+  });
+
+  it("submits a slash command while its autocomplete suggestion is visible", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let composer = "";
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => { composer = text; };
+    adapter.capturePane = async () => composer
+      ? `• Working (esc to interrupt)\n\n› ${composer}\n\n  /fast  1.5x speed, increased usage`
+      : "› ";
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.sendInput("%1", "/fast")).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(submits).toEqual([["Enter"]]);
   });
 
   it("does not retry Enter after Codex visibly starts the turn", async () => {

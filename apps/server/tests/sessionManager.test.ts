@@ -17,10 +17,11 @@ import {
   normalizeRepositoryApprovalPrefix,
   sessionChanged,
   SessionManager,
+  FastModeSwitchError,
   transcriptOverlapScore,
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
-import { TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
+import { InputTransportError, TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
 
 describe("Codex pane model settings", () => {
   it("reads the persistent status line", () => {
@@ -2257,6 +2258,49 @@ describe("SessionManager transcript isolation", () => {
     expect(sentInputs).toEqual([]);
     expect(submittedComposers).toEqual(["/fast "]);
     expect(updated?.fastMode).toBe(false);
+    harness.db.close();
+  });
+
+  it("translates Fast mode transport failures into switch conflicts", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const mtime = new Date("2026-07-07T00:00:00.000Z");
+    const sessionPath = join(harness.codexHome, "sessions", "session.jsonl");
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime
+    });
+    await appendFile(
+      sessionPath,
+      `${JSON.stringify({
+        timestamp: "2026-07-07T00:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", thread_settings: { service_tier: "default" } }
+      })}\n`
+    );
+    await utimes(sessionPath, mtime, mtime);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1", title: "⠙ repo" })];
+    harness.tmux.sendInput = async () => {
+      throw new InputTransportError(
+        "Codex displayed input that did not match the submitted text",
+        "composer_changed",
+        { pasteReplayCount: 0, submitKeyRetryCount: 0 }
+      );
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+
+    await expect(harness.manager.act(session.id, { type: "setFastMode", enabled: true }))
+      .rejects.toEqual(expect.objectContaining({
+        constructor: FastModeSwitchError,
+        message: "Codex displayed input that did not match the submitted text",
+        statusCode: 409
+      }));
     harness.db.close();
   });
 
