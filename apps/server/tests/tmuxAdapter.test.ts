@@ -193,6 +193,28 @@ describe("verified input transport", () => {
     expect(composerContainsInput(capture, prompt)).toBe(true);
   });
 
+  it("preserves blank lines inside multiline composer input", () => {
+    const prompt = [
+      "create new branch off up-to-date origin/dev `tw-1228-gantt-bar-weights-edges` to implement this",
+      "",
+      "teamweave/ui gantt chart with show weight active, non-full edges of the assignment bars do not receive the editable weight unless they fill a full cell. We need to make it so that we can see and edit the weight for these incomplete edges "
+    ].join("\n");
+    const capture = [
+      "› create new branch off up-to-date origin/dev `tw-1228-gantt-bar-weights-edges`",
+      "  to implement this",
+      " ",
+      "  teamweave/ui gantt chart with show weight active, non-full edges of the",
+      "  assignment bars do not receive the editable weight unless they fill a full",
+      "  cell. We need to make it so that we can see and edit the weight for these",
+      "  incomplete edges",
+      " ",
+      "  gpt-5.6-sol high fast · Context 100% left · Plan mode"
+    ].join("\n");
+
+    expect(prompt.length).toBeGreaterThan(256);
+    expect(composerContainsInput(capture, prompt)).toBe(true);
+  });
+
   it("does not treat a longer composer draft as the expected prompt", () => {
     expect(composerContainsInput("› preserved prompt with appended text", "preserved prompt")).toBe(false);
   });

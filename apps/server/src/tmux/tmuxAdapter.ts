@@ -434,8 +434,7 @@ function isComposerLine(line: string): boolean {
 
 function isComposerContinuationBoundary(line: string): boolean {
   const normalized = stripTerminalFormatting(line).trim().toLowerCase();
-  return !normalized ||
-    normalized.includes("working (") ||
+  return normalized.includes("working (") ||
     normalized.includes("esc to interrupt") ||
     /context \d+% left/.test(normalized) ||
     normalized === "type yes to continue";
