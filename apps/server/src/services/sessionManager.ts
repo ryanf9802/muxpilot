@@ -1748,6 +1748,71 @@ export class SessionManager {
 
     const attemptedAt = nowIso();
     const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
+    const terminalText = codexTerminalUserText(message.text);
+    let capture: string;
+    try {
+      capture = await this.tmux.capturePane(
+        pane.paneId,
+        inputVerificationCaptureLines(terminalText, paneWidth(pane)),
+        true
+      );
+    } catch (error) {
+      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    }
+    if (composerContainsInput(capture, terminalText)) {
+      let pending = await this.updateInputDelivery(message, {
+        state: "pending",
+        deliveryPhase: "delivering",
+        attemptCount,
+        replayCount: 0,
+        enterRetryCount: 0,
+        lastAttemptAt: attemptedAt,
+        failureCode: null,
+        failureReason: null
+      });
+      this.deliveringInputSessionIds.add(session.id);
+      try {
+        const result = await this.tmux.submitComposedInput(pane.paneId, terminalText);
+        pending = await this.updateInputDelivery(pending, {
+          deliveryPhase: "awaiting_ack",
+          enterRetryCount: result.submitKeyRetryCount,
+          lastAttemptAt: nowIso()
+        });
+      } catch (error) {
+        const reason = error instanceof InputTransportError ? error.reason : "tmux_failed";
+        const failed = await this.updateInputDelivery(pending, {
+          state: "failed",
+          deliveryPhase: "failed",
+          failureCode: reason,
+          failureReason: inputDeliveryFailureMessage(reason)
+        });
+        const failedAt = nowIso();
+        await this.db.setSessionStatus(session.id, "input_failed", failedAt);
+        await this.db.addAudit("local", "input_delivery_failed", session.id, JSON.stringify({
+          promptHash: inputPromptHash(session.id, message.text),
+          promptLength: message.text.length,
+          reason
+        }), failedAt);
+        this.publish("message.appended", session.id, failed);
+        this.publish("status.changed", session.id, { status: "input_failed" });
+        throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+      } finally {
+        this.deliveringInputSessionIds.delete(session.id);
+      }
+      const mode = collaborationModeFromMessage(message) ?? session.inputMode;
+      const status = activeInputStatus(mode);
+      await this.db.setSessionStatus(session.id, status, attemptedAt);
+      await this.db.addAudit("local", "input_delivery_existing_composer_submitted", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, message.text),
+        enterRetryCount: recordValue(pending.payload.muxpilotSubmission)?.enterRetryCount ?? 0
+      }), nowIso());
+      this.publish("message.appended", session.id, pending);
+      this.publish("status.changed", session.id, { status });
+      return;
+    }
+    if (composerHasInput(capture)) {
+      throw new InputDeliveryError("The Codex composer contains different input; it was not overwritten");
+    }
     let pending = await this.updateInputDelivery(message, {
       state: "pending",
       deliveryPhase: "persisted",

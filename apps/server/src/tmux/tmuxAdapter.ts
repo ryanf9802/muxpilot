@@ -61,6 +61,7 @@ export interface InputTransportResult {
 
 export interface InputVerificationOptions {
   pasteVerifyTimeoutMs?: number;
+  pasteSettleMs?: number;
   submitVerifyMs?: number;
   pollMs?: number;
 }
@@ -257,13 +258,8 @@ export class TmuxAdapter {
         }
       }
 
-      await this.submitInput(paneId);
-      await delay(this.inputVerification.submitVerifyMs ?? INPUT_SUBMIT_VERIFY_MS);
-      const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
-      if (composerContainsInput(capture, text) && !captureShowsActiveTurn(capture)) {
-        result.submitKeyRetryCount = 1;
-        await this.submitInput(paneId);
-      }
+      await delay(this.inputVerification.pasteSettleMs ?? inputSubmitDelayMs(text));
+      result.submitKeyRetryCount = await this.submitVerifiedComposerInput(paneId, text);
       return result;
     } catch (error) {
       if (error instanceof InputTransportError) throw error;
@@ -292,6 +288,31 @@ export class TmuxAdapter {
 
   async submitInput(paneId: string): Promise<void> {
     await this.sendKeys(paneId, this.inputSubmitKeys);
+  }
+
+  async submitComposedInput(paneId: string, text: string): Promise<InputTransportResult> {
+    const result: InputTransportResult = { pasteReplayCount: 0, submitKeyRetryCount: 0 };
+    try {
+      const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
+      if (!composerContainsInput(capture, text)) {
+        throw new InputTransportError(
+          composerHasInput(capture)
+            ? "The Codex composer contains different input"
+            : "The Codex composer no longer contains the submitted input",
+          "composer_changed",
+          result
+        );
+      }
+      result.submitKeyRetryCount = await this.submitVerifiedComposerInput(paneId, text);
+      return result;
+    } catch (error) {
+      if (error instanceof InputTransportError) throw error;
+      throw new InputTransportError(
+        error instanceof Error ? error.message : String(error),
+        "tmux_failed",
+        result
+      );
+    }
   }
 
   async interrupt(paneId: string): Promise<void> {
@@ -328,6 +349,15 @@ export class TmuxAdapter {
     } while (Date.now() < deadline);
     return false;
   }
+
+  private async submitVerifiedComposerInput(paneId: string, text: string): Promise<number> {
+    await this.submitInput(paneId);
+    await delay(this.inputVerification.submitVerifyMs ?? INPUT_SUBMIT_VERIFY_MS);
+    const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
+    if (!composerContainsInput(capture, text) || captureShowsActiveTurn(capture)) return 0;
+    await this.submitInput(paneId);
+    return 1;
+  }
 }
 
 export function inputSubmitDelayMs(text: string): number {
@@ -345,18 +375,17 @@ export function composerContainsInput(capture: string, text: string): boolean {
   if (composerIndex < 0) return false;
   if (composerUsesDimPlaceholder(lines[composerIndex]!)) return false;
   const firstLine = normalizeComposerText(visibleComposerLine(lines[composerIndex]!));
+  const continuationLines = lines.slice(composerIndex + 1);
+  const composerBoundary = continuationLines.findIndex(isComposerContinuationBoundary);
   const composer = normalizeComposerText([
     firstLine,
-    ...lines.slice(composerIndex + 1)
+    ...(composerBoundary >= 0 ? continuationLines.slice(0, composerBoundary) : continuationLines)
   ].join("\n"));
   const expected = normalizeComposerText(text);
   if (!expected) return false;
-  if (!text.includes("\n") && expected.length <= 64) return firstLine === expected;
-  const expectedFirstLine = normalizeComposerText(text.split("\n", 1)[0] ?? "");
-  const prefix = (expectedFirstLine || expected).slice(0, 64);
-  if (expected.length <= 256) return firstLine.startsWith(prefix) && composer.includes(expected);
   const compactComposer = compactComposerText(composer);
   const compactExpected = compactComposerText(expected);
+  if (expected.length <= 256) return compactComposer === compactExpected;
   const compactPrefix = compactExpected.slice(0, 64);
   const compactSuffix = compactExpected.slice(-128);
   const prefixIndex = compactComposer.indexOf(compactPrefix);
@@ -393,6 +422,15 @@ function captureShowsActiveTurn(capture: string): boolean {
 
 function isComposerLine(line: string): boolean {
   return /^\s*›(?!\s*\d+\.)/.test(stripTerminalFormatting(line));
+}
+
+function isComposerContinuationBoundary(line: string): boolean {
+  const normalized = stripTerminalFormatting(line).trim().toLowerCase();
+  return !normalized ||
+    normalized.includes("working (") ||
+    normalized.includes("esc to interrupt") ||
+    /context \d+% left/.test(normalized) ||
+    normalized === "type yes to continue";
 }
 
 function visibleComposerLine(line: string): string {

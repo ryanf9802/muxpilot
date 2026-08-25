@@ -178,8 +178,28 @@ describe("verified input transport", () => {
     expect(composerContainsInput(capture, prompt)).toBe(true);
   });
 
+  it("recognizes a medium prompt when terminal wrapping splits a token", () => {
+    const prompt = `${"review this change carefully ".repeat(7)}$muxpilot-git-workflow`;
+    expect(prompt.length).toBeLessThanOrEqual(256);
+    const capture = `› ${prompt.slice(0, 74)}\n  ${prompt.slice(74, 149)}\n  ${prompt.slice(149)}`;
+
+    expect(composerContainsInput(capture, prompt)).toBe(true);
+  });
+
+  it("does not treat a longer composer draft as the expected prompt", () => {
+    expect(composerContainsInput("› preserved prompt with appended text", "preserved prompt")).toBe(false);
+  });
+
+  it("ignores status content below the composer separator", () => {
+    const prompt = "preserved prompt that wraps across a terminal line";
+    const capture = `› preserved prompt that wraps\n  across a terminal line\n\n  gpt-5.6-sol · Context 100% left`;
+
+    expect(composerContainsInput(capture, prompt)).toBe(true);
+    expect(composerContainsInput(`› ${prompt}\n  gpt-5.6-sol · Context 100% left`, prompt)).toBe(true);
+  });
+
   it("replays a paste once when Codex does not display the first paste", async () => {
-    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let pasteCount = 0;
     let composer = "";
     const submits: string[][] = [];
@@ -202,7 +222,7 @@ describe("verified input transport", () => {
   });
 
   it("does not replay a paste when an unverified draft is visible", async () => {
-    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let pasteCount = 0;
     let captureCount = 0;
     adapter.pasteText = async () => { pasteCount += 1; };
@@ -213,7 +233,7 @@ describe("verified input transport", () => {
   });
 
   it("refuses to append input to an existing composer draft", async () => {
-    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let pasted = false;
     adapter.capturePane = async () => "› existing draft";
     adapter.pasteText = async () => { pasted = true; };
@@ -223,7 +243,7 @@ describe("verified input transport", () => {
   });
 
   it("retries Enter when the submitted prompt remains composed", async () => {
-    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let composer = "";
     const submits: string[][] = [];
     adapter.pasteText = async (_paneId, text) => { composer = text; };
@@ -241,7 +261,7 @@ describe("verified input transport", () => {
   });
 
   it("does not retry Enter after Codex visibly starts the turn", async () => {
-    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let composer = "";
     const submits: string[][] = [];
     adapter.pasteText = async (_paneId, text) => { composer = text; };
@@ -253,6 +273,38 @@ describe("verified input transport", () => {
       submitKeyRetryCount: 0
     });
     expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("submits matching text already preserved in the composer without pasting", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteSettleMs: 0, submitVerifyMs: 0 });
+    let composer = "preserved prompt";
+    let pasted = false;
+    const submits: string[][] = [];
+    adapter.capturePane = async () => `› ${composer}`;
+    adapter.pasteText = async () => { pasted = true; };
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.submitComposedInput("%1", "preserved prompt")).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(pasted).toBe(false);
+    expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("refuses to submit different preserved composer text", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteSettleMs: 0, submitVerifyMs: 0 });
+    const submits: string[][] = [];
+    adapter.capturePane = async () => "› another draft";
+    adapter.sendKeys = async (_paneId, keys) => { submits.push(keys); };
+
+    await expect(adapter.submitComposedInput("%1", "preserved prompt")).rejects.toMatchObject({
+      reason: "composer_changed"
+    });
+    expect(submits).toEqual([]);
   });
 });
 

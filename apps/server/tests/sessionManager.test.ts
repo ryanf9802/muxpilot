@@ -2726,6 +2726,55 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
+  it("submits a matching preserved composer on manual retry without repasting", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const submittedComposers: string[] = [];
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› Retry this exact prompt";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    harness.tmux.submitComposedInput = async (_paneId, text) => {
+      submittedComposers.push(text);
+      return { pasteReplayCount: 0, submitKeyRetryCount: 0 };
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const submitted: ChatMessage = {
+      id: "retry-preserved-composer",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:00.000Z",
+      text: "Retry this exact prompt",
+      payload: {
+        collaborationMode: "default",
+        muxpilotSubmission: { state: "failed", attemptCount: 1, lastAttemptAt: "2026-07-07T00:00:00.000Z" }
+      }
+    };
+    await harness.db.appendMessage(submitted);
+    await harness.db.setSessionStatus(session.id, "input_failed", submitted.timestamp);
+
+    const retried = await harness.manager.act(session.id, { type: "retryInputDelivery" });
+
+    expect(submittedComposers).toEqual(["Retry this exact prompt "]);
+    expect(sentInputs).toEqual([]);
+    expect(retried?.status).toBe("working");
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: {
+        state: "pending",
+        deliveryPhase: "awaiting_ack",
+        attemptCount: 2,
+        replayCount: 0
+      }
+    });
+    await harness.db.close();
+  });
+
   it("keeps a failed submission retryable when tmux delivery fails", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
