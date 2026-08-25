@@ -588,7 +588,13 @@ function codexReadyScreenIndex(text: string): number {
   const normalized = text.toLowerCase();
   let contextIndex = -1;
   for (const match of text.matchAll(/\bcontext\s+\d+%\s+left\b/gi)) contextIndex = match.index;
-  return Math.max(normalized.lastIndexOf("use /skills to list available skills"), contextIndex);
+  let readyFooterIndex = -1;
+  for (const match of text.matchAll(/^[^\S\n]*[^\n]*·[^\n]*·[^\S\n]*ready[^\S\n]*$/gim)) readyFooterIndex = match.index;
+  return Math.max(
+    normalized.lastIndexOf("use /skills to list available skills"),
+    contextIndex,
+    readyFooterIndex
+  );
 }
 
 function delay(ms: number): Promise<void> {

@@ -142,8 +142,27 @@ describe("codexStartupActionFromCapture", () => {
     expect(codexStartupActionFromCapture(capture)).toBe("ready");
   });
 
+  it("recognizes the current Codex ready footer", () => {
+    const capture = [
+      "› Ask Codex to do anything",
+      "  gpt-5.6-sol medium · ~/.muxpilot/sessions/example · Ready"
+    ].join("\n");
+
+    expect(codexStartupActionFromCapture(capture)).toBe("ready");
+  });
+
   it("accepts a current trust gate below stale ready-screen history", () => {
-    expect(codexStartupActionFromCapture([">_ OpenAI Codex", trustPrompt].join("\n"))).toBe("accept_trust");
+    const staleReadyScreen = [
+      ">_ OpenAI Codex",
+      "› Ask Codex to do anything",
+      "  gpt-5.6-sol medium · ~/.muxpilot/sessions/old · Ready"
+    ].join("\n");
+
+    expect(codexStartupActionFromCapture([staleReadyScreen, trustPrompt].join("\n"))).toBe("accept_trust");
+  });
+
+  it("does not treat ordinary ready text as the Codex ready footer", () => {
+    expect(codexStartupActionFromCapture("The task is ready for review.\nStatus · Ready")).toBe("wait");
   });
 
   it("waits through the transient Codex header shown before the trust gate", () => {
