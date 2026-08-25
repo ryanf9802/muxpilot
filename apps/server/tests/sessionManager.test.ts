@@ -2726,14 +2726,20 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
-  it("submits a matching preserved composer on manual retry without repasting", async () => {
+  it("restores the requested mode before submitting a matching preserved composer", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     const submittedComposers: string[] = [];
     const sentInputs: string[] = [];
+    const sentKeys: string[][] = [];
+    let capture = "› Retry this exact prompt\n\n  gpt-5.6-sol high fast · Context 100% left · Plan mode";
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
-    harness.tmux.capturePane = async () => "› Retry this exact prompt";
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      capture = "› Retry this exact prompt\n\n  gpt-5.6-sol medium fast · Context 100% left";
+    };
     harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
     harness.tmux.submitComposedInput = async (_paneId, text) => {
       submittedComposers.push(text);
@@ -2762,6 +2768,7 @@ describe("SessionManager transcript isolation", () => {
 
     expect(submittedComposers).toEqual(["Retry this exact prompt "]);
     expect(sentInputs).toEqual([]);
+    expect(sentKeys).toEqual([["BTab"]]);
     expect(retried?.status).toBe("working");
     expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
     expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({

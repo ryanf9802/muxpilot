@@ -1749,6 +1749,7 @@ export class SessionManager {
 
     const attemptedAt = nowIso();
     const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
+    const mode = collaborationModeFromMessage(message) ?? session.inputMode;
     const terminalText = codexTerminalUserText(message.text);
     let capture: string;
     try {
@@ -1761,6 +1762,8 @@ export class SessionManager {
       throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
     }
     if (composerContainsInput(capture, terminalText)) {
+      const modeSession = await this.ensureInputMode(session, mode);
+      const retryPane = await this.livePane(modeSession);
       let pending = await this.updateInputDelivery(message, {
         state: "pending",
         deliveryPhase: "delivering",
@@ -1773,7 +1776,7 @@ export class SessionManager {
       });
       this.deliveringInputSessionIds.add(session.id);
       try {
-        const result = await this.tmux.submitComposedInput(pane.paneId, terminalText);
+        const result = await this.tmux.submitComposedInput(retryPane.paneId, terminalText);
         pending = await this.updateInputDelivery(pending, {
           deliveryPhase: "awaiting_ack",
           enterRetryCount: result.submitKeyRetryCount,
@@ -1800,7 +1803,6 @@ export class SessionManager {
       } finally {
         this.deliveringInputSessionIds.delete(session.id);
       }
-      const mode = collaborationModeFromMessage(message) ?? session.inputMode;
       const status = activeInputStatus(mode);
       await this.db.setSessionStatus(session.id, status, attemptedAt);
       await this.db.addAudit("local", "input_delivery_existing_composer_submitted", session.id, JSON.stringify({
@@ -1824,7 +1826,6 @@ export class SessionManager {
       failureCode: null,
       failureReason: null
     });
-    const mode = collaborationModeFromMessage(message) ?? session.inputMode;
     pending = await this.deliverSubmittedInput(session, pending, mode);
     const queuedInputId = typeof submission.queuedInputId === "string" ? submission.queuedInputId : null;
     if (queuedInputId) {
@@ -2029,7 +2030,10 @@ export class SessionManager {
 
   private async ensureInputMode(session: ManagedSession, mode: CollaborationMode): Promise<ManagedSession> {
     let liveSession = await this.liveSession(session);
-    const currentMode = detectCollaborationModeFromPane(liveSession.tmux);
+    const currentMode = await detectLiveCollaborationMode(
+      liveSession.tmux,
+      (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
+    );
     if (currentMode === mode || (currentMode === null && session.inputMode === mode)) return liveSession;
 
     await this.tmux.sendKeys(liveSession.tmux.paneId, this.inputModeCycleKeys);
@@ -3304,7 +3308,12 @@ function detectCollaborationModeFromText(text: string): CollaborationMode | null
     .split("\n")
     .map((line) => line.toLowerCase().replace(/[_-]+/g, " ").trim())
     .filter(Boolean);
-  if (lines.some((line) => /^›\s*plan\b/.test(line) || line === "plan mode" || line.startsWith("plan mode prompt:"))) return "plan";
+  if (lines.some((line) =>
+    /^›\s*plan\b/.test(line) ||
+    line === "plan mode" ||
+    line.startsWith("plan mode prompt:") ||
+    (/context \d+% left/.test(line) && line.endsWith("plan mode"))
+  )) return "plan";
   if (lines.some((line) => line === "normal mode" || line === "default mode")) return "default";
   return null;
 }
