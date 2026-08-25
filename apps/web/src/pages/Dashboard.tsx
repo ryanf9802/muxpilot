@@ -39,7 +39,7 @@ import {
 } from "../utils/sessionStatus.js";
 
 const ACTION_MENU_WIDTH = 220;
-const ACTION_MENU_HEIGHT = 268;
+const ACTION_MENU_HEIGHT = 312;
 const NOTIFICATION_MENU_WIDTH = 220;
 const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
@@ -70,7 +70,9 @@ export function Dashboard() {
   const [notificationRings, setNotificationRings] = useState<Record<string, NotificationTriggeredPayload["severity"]>>({});
   const [renameSession, setRenameSession] = useState<ManagedSession | null>(null);
   const [renameName, setRenameName] = useState("");
-  const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" } | null>(null);
+  const [agentParentSession, setAgentParentSession] = useState<ManagedSession | null>(null);
+  const [agentParentId, setAgentParentId] = useState("");
+  const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" | "agentParent" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [activitySummaryToggleBusy, setActivitySummaryToggleBusy] = useState(false);
   const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
@@ -90,7 +92,10 @@ export function Dashboard() {
   );
 
   const sessions = useMemo(
-    () => removeSessionsFromDashboard(filterSessionsByDashboardQuery(filterSessionsByDashboardStatus(shellSessions, statusFilter), q), optimisticallyRemovedSessionIds),
+    () => includeAgentAncestors(
+      removeSessionsFromDashboard(filterSessionsByDashboardQuery(filterSessionsByDashboardStatus(shellSessions, statusFilter), q), optimisticallyRemovedSessionIds),
+      shellSessions
+    ),
     [optimisticallyRemovedSessionIds, q, shellSessions, statusFilter]
   );
 
@@ -192,6 +197,39 @@ export function Dashboard() {
     if (busyAction) return;
     setRenameSession(null);
     setActionError(null);
+  }
+
+  function openAgentParent(session: ManagedSession) {
+    setMenu(null);
+    setActionError(null);
+    setAgentParentSession(session);
+    setAgentParentId(session.agentOwnership?.parentSessionId ?? "");
+  }
+
+  function closeAgentParent() {
+    if (busyAction) return;
+    setAgentParentSession(null);
+    setActionError(null);
+  }
+
+  async function submitAgentParent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!agentParentSession || busyAction) return;
+    setBusyAction({ sessionId: agentParentSession.id, type: "agentParent" });
+    setActionError(null);
+    try {
+      const response = await api.action(agentParentSession.id, {
+        type: "setAgentParent",
+        parentSessionId: agentParentId || null
+      });
+      if (response.session) syncSessionStoplight(response.session);
+      setAgentParentSession(null);
+      await refreshSessionStoplight();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Could not update the agent-session parent.");
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function updateRenameName(value: string) {
@@ -319,7 +357,7 @@ export function Dashboard() {
         </button>
       </div>
 
-      {actionError && !renameSession ? (
+      {actionError && !renameSession && !agentParentSession ? (
         <p className="dashboard-action-error" role="alert">
           {actionError}
         </p>
@@ -352,7 +390,9 @@ export function Dashboard() {
                         previewLines={previewLines}
                         notificationRules={sessionNotificationRules(notificationSettings, session.id)}
                         notificationRing={notificationRings[session.id] ?? null}
+                        children={agentSessionDescendants(session.id, sessions)}
                         onOpen={() => navigate(`/sessions/${session.id}`)}
+                        onOpenChild={(childId) => navigate(`/sessions/${childId}`)}
                         onOpenMenu={openMenu}
                         onOpenMenuFromButton={openMenuFromButton}
                       />
@@ -393,6 +433,13 @@ export function Dashboard() {
             disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.codexSessionId}
           >
             Fork session
+          </ContextMenuItem>
+          <ContextMenuItem
+            icon={<GitFork size={16} />}
+            onClick={() => openAgentParent(menu.session)}
+            disabled={Boolean(busyAction) || menu.session.initializing === true}
+          >
+            Manage agent parent
           </ContextMenuItem>
           <ContextMenuItem
             icon={<Bell size={16} />}
@@ -478,6 +525,49 @@ export function Dashboard() {
                 {busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? "Renaming" : "Rename"}
               </button>
             </div>
+        </Modal>
+      ) : null}
+
+      {agentParentSession ? (
+        <Modal
+          open
+          onClose={closeAgentParent}
+          title="Manage agent parent"
+          panelClassName="session-name-dialog"
+          as="form"
+          onSubmit={submitAgentParent}
+          dismissible={!busyAction}
+        >
+          <label className="rename-field">
+            <span>Parent session</span>
+            <select
+              autoFocus
+              value={agentParentId}
+              onChange={(event) => {
+                setAgentParentId(event.currentTarget.value);
+                setActionError(null);
+              }}
+              disabled={Boolean(busyAction)}
+            >
+              <option value="">Top level (no agent parent)</option>
+              {agentParentCandidates(agentParentSession, shellSessions).map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>{sessionDisplayName(candidate, shellSessions)}</option>
+              ))}
+            </select>
+          </label>
+          <p className="dialog-help">Agent-managed sessions remain fully visible under their selected parent.</p>
+          {actionError ? <p className="dialog-error" role="alert">{actionError}</p> : null}
+          <div className="dialog-actions">
+            <button type="button" onClick={closeAgentParent} disabled={Boolean(busyAction)}>Cancel</button>
+            <button
+              className="primary"
+              type="submit"
+              disabled={Boolean(busyAction)}
+              aria-busy={busyAction?.sessionId === agentParentSession.id && busyAction.type === "agentParent"}
+            >
+              {busyAction?.sessionId === agentParentSession.id && busyAction.type === "agentParent" ? "Saving" : "Save"}
+            </button>
+          </div>
         </Modal>
       ) : null}
 
@@ -598,7 +688,9 @@ export function SessionCard({
   previewLines,
   notificationRules,
   notificationRing,
+  children = [],
   onOpen,
+  onOpenChild = () => undefined,
   onOpenMenu,
   onOpenMenuFromButton
 }: {
@@ -607,7 +699,9 @@ export function SessionCard({
   previewLines: string[];
   notificationRules: NotificationRuleType[];
   notificationRing: NotificationTriggeredPayload["severity"] | null;
+  children?: ManagedSession[];
   onOpen: () => void;
+  onOpenChild?: (sessionId: string) => void;
   onOpenMenu: (session: ManagedSession, x: number, y: number) => void;
   onOpenMenuFromButton: (session: ManagedSession, event: ReactMouseEvent<HTMLButtonElement>) => void;
 }) {
@@ -694,6 +788,19 @@ export function SessionCard({
           </span>
         </div>
       </button>
+      {children.length > 0 ? (
+        <details className="agent-session-tree">
+          <summary>
+            <span>{formatSessionCount(children.length, "agent")}</span>
+            <span>{agentTreeStatusLabel(children)}</span>
+          </summary>
+          <div className="agent-session-children">
+            {agentSessionChildren(session.id, children).map((child) => (
+              <AgentSessionRow key={child.id} session={child} allSessions={children} depth={0} onOpen={onOpenChild} />
+            ))}
+          </div>
+        </details>
+      ) : null}
       <button
         className="session-card-menu-button"
         type="button"
@@ -821,6 +928,7 @@ export function groupSessionsByRepo(sessions: ManagedSession[]): RepoSessionGrou
   const groupByKey = new Map<string, RepoSessionGroup>();
 
   for (const session of sessions) {
+    if (session.agentOwnership && sessions.some((candidate) => candidate.id === session.agentOwnership?.parentSessionId)) continue;
     const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
     const repoRoot = workspace?.repoRoot || session.repo.root;
     const key = repoRoot ?? `name:${session.repo.name}`;
@@ -874,8 +982,75 @@ function repoSessionGridId(repoKey: string): string {
   return `repo-session-grid-${repoKey.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-function formatSessionCount(count: number): string {
-  return `${count} session${count === 1 ? "" : "s"}`;
+function formatSessionCount(count: number, label = "session"): string {
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
+}
+
+function agentSessionChildren(parentSessionId: string, sessions: ManagedSession[]): ManagedSession[] {
+  return sessions.filter((session) => session.agentOwnership?.parentSessionId === parentSessionId);
+}
+
+function agentSessionDescendants(parentSessionId: string, sessions: ManagedSession[]): ManagedSession[] {
+  const descendants: ManagedSession[] = [];
+  const pending = [parentSessionId];
+  while (pending.length > 0) {
+    const parent = pending.shift()!;
+    for (const child of agentSessionChildren(parent, sessions)) {
+      if (descendants.some((candidate) => candidate.id === child.id)) continue;
+      descendants.push(child);
+      pending.push(child.id);
+    }
+  }
+  return descendants;
+}
+
+function agentParentCandidates(session: ManagedSession, sessions: ManagedSession[]): ManagedSession[] {
+  const excluded = new Set([session.id, ...agentSessionDescendants(session.id, sessions).map((candidate) => candidate.id)]);
+  return sessions.filter((candidate) => !excluded.has(candidate.id) && !candidate.archived && candidate.status !== "missing");
+}
+
+function includeAgentAncestors(filtered: ManagedSession[], all: ManagedSession[]): ManagedSession[] {
+  const included = new Map(filtered.map((session) => [session.id, session]));
+  for (const session of filtered) {
+    let current = session;
+    const seen = new Set<string>();
+    while (current.agentOwnership && !seen.has(current.id)) {
+      seen.add(current.id);
+      const parent = all.find((candidate) => candidate.id === current.agentOwnership?.parentSessionId);
+      if (!parent) break;
+      included.set(parent.id, parent);
+      current = parent;
+    }
+  }
+  return all.filter((session) => included.has(session.id));
+}
+
+function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void }) {
+  const children = agentSessionChildren(session.id, allSessions);
+  const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
+  const contextPressure = (session.contextUsage?.contextPercent ?? 0) >= 85
+    ? "high"
+    : (session.contextUsage?.contextPercent ?? 0) >= 70 ? "warning" : undefined;
+  const ownership = session.agentOwnership;
+  const workUsed = ownership && session.contextUsage ? Math.max(0, session.contextUsage.lifetimeWorkTokens - ownership.workTokenBaseline) : null;
+  const budget = ownership && workUsed !== null ? `${Math.max(0, Math.round((ownership.workTokenBudget - workUsed) / 1000))}k budget` : "";
+  return (
+    <div className="agent-session-branch" style={{ "--agent-depth": depth } as CSSProperties}>
+      <button className="agent-session-row" type="button" onClick={() => onOpen(session.id)}>
+        <span className="agent-session-row-name">{sessionDisplayName(session)}</span>
+        <span className="agent-session-row-meta" data-context-pressure={contextPressure}>{context}{budget ? ` · ${budget}` : ""}</span>
+        {session.initializing ? <LoadingStatusPill /> : <StatusPill status={session.status} />}
+      </button>
+      {children.map((child) => <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} />)}
+    </div>
+  );
+}
+
+function agentTreeStatusLabel(children: ManagedSession[]): string {
+  const urgent = children.filter((session) => ["approval", "question", "input_failed", "startup_failed", "blocked"].includes(session.status)).length;
+  if (urgent > 0) return `${urgent} need attention`;
+  const working = children.filter((session) => ["working", "planning", "executing", "generating"].includes(session.status)).length;
+  return working > 0 ? `${working} working` : "quiet";
 }
 
 function formatTranscriptSize(count: number): string {

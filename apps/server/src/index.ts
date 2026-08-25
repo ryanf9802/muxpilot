@@ -25,6 +25,7 @@ import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
 import { HeavyCommandService } from "./services/heavyCommands.js";
 import { join } from "node:path";
 import { GitWorkflowBroker } from "./services/gitWorkflowBroker.js";
+import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroker.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -73,6 +74,7 @@ const activitySummarizer = new ActivitySummarizer({
 });
 let dockerProxy: DockerResourceProxy | null = null;
 const managedEnvironment: Record<string, string> = {
+  MUXPILOT_RESOURCE_GOVERNOR_ENABLED: config.resourceGovernor !== "off" ? "1" : "0",
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
@@ -115,6 +117,15 @@ const manager = new SessionManager(
   managedEnvironment,
   codexModels
 );
+const sessionOrchestrationBroker = new SessionOrchestrationBroker(
+  db,
+  manager,
+  join(config.dataDir, "runtime", "session-orchestration.sock"),
+  join(config.dataDir, "runtime", "session-capabilities"),
+  app.log
+);
+await sessionOrchestrationBroker.start();
+manager.setOrchestrationProvider(sessionOrchestrationBroker);
 const heavyCommands = new HeavyCommandService(
   config.heavyValidationDir,
   config.gitSessionRoot,
@@ -200,6 +211,7 @@ const close = async () => {
   await pwaTrustServer.close();
   await dockerProxy?.close();
   await gitWorkflowBroker.close();
+  await sessionOrchestrationBroker.close();
   await manager.markCleanShutdown();
   await db.close();
   await app.close();

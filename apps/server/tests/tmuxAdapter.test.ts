@@ -33,6 +33,39 @@ describe("parsePaneLine", () => {
 });
 
 describe("codexCommandArgs", () => {
+  it("launches session tooling inside its own resource scope", () => {
+    expect(codexCommandArgs("/tmp/control", {
+      resourceScopeName: "muxpilot-session-child.scope",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      fastMode: true,
+      mcpServers: [{ name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/app/mcp.mjs", "/run/capability.json"] }]
+    })).toEqual([
+      "systemd-run",
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
+      "--unit=muxpilot-session-child.scope",
+      "bash",
+      expect.stringMatching(/scripts\/codex-launcher\.sh$/),
+      "--",
+      "codex",
+      "-c",
+      "check_for_update_on_startup=false",
+      "-m",
+      "gpt-5.6-sol",
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'service_tier="priority"',
+      "-c",
+      'mcp_servers.muxpilot_sessions.command="/usr/bin/node"',
+      "-c",
+      'mcp_servers.muxpilot_sessions.args=["/app/mcp.mjs","/run/capability.json"]'
+    ]);
+  });
+
   it("launches managed sessions in a neutral root with scoped writable directories", () => {
     expect(codexCommandArgs("/tmp/control", {
       isolatedWorkspace: true,

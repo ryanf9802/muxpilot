@@ -59,7 +59,7 @@ describe("parseSystemdMetrics", () => {
 });
 
 describe("ResourceGovernor", () => {
-  it("sets the tmux scope and restores it on shutdown", async () => {
+  it("sets a session's dedicated scope and restores it on shutdown", async () => {
     const properties: string[][] = [];
     let metrics = { memoryCurrentBytes: 2 * 1024 ** 3, cpuUsageNsec: 1_000_000_000 };
     const controller: SystemdController = {
@@ -68,7 +68,8 @@ describe("ResourceGovernor", () => {
       setProperties: vi.fn(async (_scope, next) => { properties.push(next); })
     };
     const logger = { info: vi.fn(), warn: vi.fn() };
-    const governor = new ResourceGovernor(config, async () => [session("one", "working")], logger, controller);
+    const managedSession = { ...session("one", "working"), resourceScope: "muxpilot-session-one.scope" };
+    const governor = new ResourceGovernor(config, async () => [managedSession], logger, controller);
     const now = vi.spyOn(Date, "now").mockReturnValue(1000);
 
     await governor.reconcile();
@@ -93,6 +94,8 @@ describe("ResourceGovernor", () => {
     await governor.stop();
     now.mockRestore();
 
+    expect(controller.scopeForPid).not.toHaveBeenCalled();
+    expect(controller.setProperties).toHaveBeenCalledWith("muxpilot-session-one.scope", expect.any(Array));
     expect(properties[0]).toEqual(expect.arrayContaining([
       `CPUQuota=${Math.max(1, Math.round(75 * cpus().length * 100) / 100)}%`,
       "TasksMax=768"

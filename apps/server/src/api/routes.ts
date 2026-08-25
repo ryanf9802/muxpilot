@@ -136,6 +136,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
+  z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
   z.object({ type: z.literal("retryInputDelivery") }),
   z.object({ type: z.literal("dismissInputDeliveryFailure") }),

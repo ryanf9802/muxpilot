@@ -179,6 +179,38 @@ export interface SessionResourceUsage {
   sampledAt: string;
 }
 
+export interface SessionContextUsage {
+  activeTokens: number;
+  contextWindowTokens: number;
+  contextPercent: number;
+  lifetimeInputTokens: number;
+  lifetimeCachedInputTokens: number;
+  lifetimeOutputTokens: number;
+  lifetimeReasoningTokens: number;
+  lifetimeTotalTokens: number;
+  lifetimeWorkTokens: number;
+  sampledAt: string;
+}
+
+export interface AgentSessionOwnership {
+  parentSessionId: string;
+  rootSessionId: string;
+  origin: "created" | "claimed";
+  createdAt: string;
+  workTokenBaseline: number;
+  workTokenBudget: number;
+  completedAt: string | null;
+  budgetExhaustedAt?: string | null;
+  highContextApprovedAt?: string | null;
+  contextPausedAt?: string | null;
+}
+
+export interface AgentSessionSummary {
+  liveDescendantCount: number;
+  totalDescendantCount: number;
+  worstStatus: SessionStatus | null;
+}
+
 export type HeavyCommandState = "waiting" | "reserved" | "running" | "stalled" | "terminating";
 
 export interface HeavyCommandPackageDiagnostics {
@@ -270,6 +302,11 @@ export interface ManagedSession {
   forkedFrom?: SessionForkOrigin | null;
   gitWorkspace?: GitWorkspaceSummary | null;
   resourceUsage?: SessionResourceUsage | null;
+  resourceScope?: string | null;
+  contextUsage?: SessionContextUsage | null;
+  agentOwnership?: AgentSessionOwnership | null;
+  agentSummary?: AgentSessionSummary | null;
+  orchestrationAvailable?: boolean;
 }
 
 export interface ChatMessage {
@@ -377,6 +414,7 @@ export interface QueuedInput {
   error: string | null;
   codexSessionId: string | null;
   codexJsonlPath: string | null;
+  actorSessionId: string | null;
   createdAt: string;
   updatedAt: string;
   sentAt: string | null;
@@ -718,6 +756,7 @@ export type SessionAction =
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
   | { type: "setFastMode"; enabled: boolean }
+  | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }
   | { type: "retryInputDelivery" }
   | { type: "dismissInputDeliveryFailure" }

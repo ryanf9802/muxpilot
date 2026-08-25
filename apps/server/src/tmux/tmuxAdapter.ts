@@ -38,6 +38,11 @@ export interface CodexLaunchOptions {
   writableRoots?: string[];
   developerInstructions?: string;
   environment?: Record<string, string>;
+  mcpServers?: Array<{ name: string; command: string; args: string[] }>;
+  resourceScopeName?: string;
+  model?: string | null;
+  reasoningEffort?: string | null;
+  fastMode?: boolean | null;
 }
 
 export interface CodexPaneLaunch {
@@ -525,13 +530,27 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
     ? ["env", ...Object.entries(options.environment ?? {}).map(([key, value]) => `${key}=${value}`), "codex"]
     : ["codex"];
   codexArgs.push("-c", "check_for_update_on_startup=false");
+  if (options.model) codexArgs.push("-m", options.model);
+  if (options.reasoningEffort) codexArgs.push("-c", `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`);
+  if (options.fastMode !== null && options.fastMode !== undefined) {
+    codexArgs.push("-c", `service_tier=${JSON.stringify(options.fastMode ? "priority" : "default")}`);
+  }
   if (options.isolatedWorkspace) {
     codexArgs.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
     for (const root of options.writableRoots ?? []) codexArgs.push("--add-dir", root);
   }
   if (options.developerInstructions) codexArgs.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
+  for (const server of options.mcpServers ?? []) {
+    codexArgs.push(
+      "-c", `mcp_servers.${server.name}.command=${JSON.stringify(server.command)}`,
+      "-c", `mcp_servers.${server.name}.args=${JSON.stringify(server.args)}`
+    );
+  }
   if (continuation) codexArgs.push(continuation.mode, continuation.sessionId);
-  return ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];
+  const command = ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];
+  return options.resourceScopeName
+    ? ["systemd-run", "--user", "--scope", "--quiet", "--collect", `--unit=${options.resourceScopeName}`, ...command]
+    : command;
 }
 
 export function codexStartupErrorFromCapture(text: string): CodexStartupError | null {

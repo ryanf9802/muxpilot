@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type {
+  AgentSessionOwnership,
   ApprovalDecision,
   ApprovalRequest,
   ChatMessage,
@@ -46,6 +47,7 @@ import {
   composerHasInput,
   inputVerificationCaptureLines,
   InputTransportError,
+  type CodexLaunchOptions,
   type InputTransportResult,
   isCodexStartupFailureCapture,
   TmuxAdapter
@@ -90,6 +92,11 @@ interface HeavyCommandQueueLookup {
   cancelWorkspace(workspaceId: string, reason: string): Promise<void>;
 }
 
+interface SessionOrchestrationProvider {
+  prepareLaunch(): Promise<{ capabilityId: string; server: { name: string; command: string; args: string[] } }>;
+  bindCapability(capabilityId: string, sessionId: string): Promise<void>;
+}
+
 interface IngestSessionResult {
   incomplete: boolean;
   progressed: boolean;
@@ -98,6 +105,8 @@ interface IngestSessionResult {
 const MAX_LIVE_INGEST_PASSES_PER_TICK = 8;
 const PLAN_ACTION_START_GRACE_MS = 15_000;
 const INPUT_DELIVERY_ACK_TIMEOUT_MS = 30_000;
+const AGENT_DESCENDANT_LIMIT = 2;
+const DEFAULT_AGENT_WORK_TOKEN_BUDGET = 1_000_000;
 type InputDeliveryFailureCode =
   | "paste_not_observed"
   | "submit_not_accepted"
@@ -125,9 +134,11 @@ export class SessionManager {
   private missingIngestCursor = 0;
   private resourceUsageLookup: SessionResourceUsageLookup | null = null;
   private heavyCommandQueue: HeavyCommandQueueLookup | null = null;
+  private orchestrationProvider: SessionOrchestrationProvider | null = null;
   private recoveryRunId: string | null = null;
   private startupRecoveryCandidates: SessionRecoveryCandidate[] = [];
   private readonly restoreLocks = new Map<string, Promise<unknown>>();
+  private agentMutationQueue = Promise.resolve();
 
   constructor(
     private readonly db: AppDatabase,
@@ -173,6 +184,36 @@ export class SessionManager {
 
   setHeavyCommandQueue(lookup: HeavyCommandQueueLookup | null): void {
     this.heavyCommandQueue = lookup;
+  }
+
+  setOrchestrationProvider(provider: SessionOrchestrationProvider | null): void {
+    this.orchestrationProvider = provider;
+  }
+
+  private async prepareOrchestratedLaunch(options: CodexLaunchOptions): Promise<{ options: CodexLaunchOptions; capabilityId: string | null }> {
+    if (!this.orchestrationProvider) return { options, capabilityId: null };
+    const capability = await this.orchestrationProvider.prepareLaunch();
+    const instruction = "Use the muxpilot_sessions tools to coordinate with other muxpilot sessions. Agent-created children must use fresh context. Never poll a child: arm wait_for_sessions, then end the turn immediately. Security approvals remain operator-only.";
+    return {
+      capabilityId: capability.capabilityId,
+      options: {
+        ...options,
+        resourceScopeName: this.managedEnvironment.MUXPILOT_RESOURCE_GOVERNOR_ENABLED === "1"
+          ? `muxpilot-session-${capability.capabilityId}.scope`
+          : options.resourceScopeName,
+        mcpServers: [...(options.mcpServers ?? []), capability.server],
+        developerInstructions: [options.developerInstructions, instruction].filter(Boolean).join(" ")
+      }
+    };
+  }
+
+  private async bindOrchestratedLaunch(capabilityId: string | null, sessionId: string): Promise<void> {
+    if (!capabilityId || !this.orchestrationProvider) return;
+    await this.orchestrationProvider.bindCapability(capabilityId, sessionId);
+    await this.db.setSessionOrchestrationAvailable(sessionId, true, nowIso());
+    if (this.managedEnvironment.MUXPILOT_RESOURCE_GOVERNOR_ENABLED === "1") {
+      await this.db.setSessionResourceScope(sessionId, `muxpilot-session-${capabilityId}.scope`, nowIso());
+    }
   }
 
   async sessionIdForWorkspace(workspaceId: string): Promise<string | null> {
@@ -618,6 +659,13 @@ export class SessionManager {
       }
       const offset = await this.db.getParserOffset(offsetKey);
       const result = await parseCodexJsonl(source, offset);
+      if (result.contextUsage) {
+        const updated = await this.db.setSessionContextUsage(session.id, result.contextUsage, nowIso());
+        if (updated) {
+          await this.enforceAgentUsageGuardrails(updated);
+          this.publish("session.updated", session.id, await this.db.getSession(session.id));
+        }
+      }
       for (const notice of result.notices) {
         const message: ChatMessage = {
           id: stableId(`${session.id}:parser-notice:${source}:${offset}:${notice}`),
@@ -650,6 +698,7 @@ export class SessionManager {
         });
         const appended = await this.db.appendMessage(message);
         if (isTurnCompletionMessage(message)) this.pendingPlanActionStatuses.delete(session.id);
+        if (isTurnCompletionMessage(message)) await this.clearAgentHighContextApproval(session.id);
         if (appended) {
           this.publish("message.appended", session.id, message);
           if (message.role === "user") this.activitySummarizer?.schedule(session.id);
@@ -745,7 +794,6 @@ export class SessionManager {
     const result = this.db.getSession(sessionId) as Promise<ManagedSession | null> | ManagedSession | null;
     const decorate = (session: ManagedSession | null): Promise<ManagedSession | null> | ManagedSession | null => {
       if (!session) return null;
-      if (!session.forkedFrom) return this.decorateSession(session, [session]);
       const allSessions = this.db.listSessions(true) as Promise<ManagedSession[]> | ManagedSession[];
       return Array.isArray(allSessions)
         ? this.decorateSession(session, allSessions)
@@ -778,7 +826,19 @@ export class SessionManager {
           }
         }
       : session;
-    return this.withResourceUsage(withOrigin);
+    const descendants = agentDescendants(allSessions, session.id);
+    const liveDescendants = descendants.filter(isLiveAgentSession);
+    return this.withResourceUsage({
+      ...withOrigin,
+      status: withOrigin.agentOwnership?.budgetExhaustedAt || withOrigin.agentOwnership?.contextPausedAt
+        ? "blocked"
+        : withOrigin.status,
+      agentSummary: descendants.length > 0 ? {
+        liveDescendantCount: liveDescendants.length,
+        totalDescendantCount: descendants.length,
+        worstStatus: worstAgentStatus(liveDescendants)
+      } : null
+    });
   }
 
   async listSessionHistory(query: string, limit: number): Promise<SessionHistoryResult[]> {
@@ -825,15 +885,19 @@ export class SessionManager {
       ? await this.gitWorkspaces!.get(storedGitWorkspace.id) ?? storedGitWorkspace
       : null;
     const name = restoreSessionName(source);
-    const launch = await this.tmux.createCodexResumeWindowInMuxpilotSession(
-      cwd,
-      name,
-      source.codexSessionId,
+    const prepared = await this.prepareOrchestratedLaunch(
       launchWorkspace
         ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
         : { environment: this.managedEnvironment }
     );
+    const launch = await this.tmux.createCodexResumeWindowInMuxpilotSession(
+      cwd,
+      name,
+      source.codexSessionId,
+      prepared.options
+    );
     const session = await this.rebindRestoredSession(source, launch.pane);
+    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
@@ -945,7 +1009,12 @@ export class SessionManager {
     if (!probe.localBranches.includes(targetBranch)) throw new SessionRestoreError(`Local target branch '${targetBranch}' does not exist for '${portable.sessionName}'`);
   }
 
-  async enqueueInput(sessionId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
+  async enqueueInput(
+    sessionId: string,
+    text: string,
+    mode?: CollaborationMode,
+    actorSessionId: string | null = null
+  ): Promise<QueuedInput> {
     const session = requireSession(await this.db.getSession(sessionId));
     if (session.status === "input_failed") {
       throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
@@ -960,6 +1029,7 @@ export class SessionManager {
       error: null,
       codexSessionId: session.codexSessionId,
       codexJsonlPath: session.codexJsonlPath,
+      actorSessionId,
       createdAt: now,
       updatedAt: now,
       sentAt: null
@@ -1094,18 +1164,19 @@ export class SessionManager {
   async sendInput(
     sessionId: string,
     text: string,
-    mode?: CollaborationMode
+    mode?: CollaborationMode,
+    actorSessionId: string | null = null
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const session = requireSession(await this.db.getSession(sessionId));
     if (session.status === "input_failed") {
       throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
     }
     if (await this.shouldQueueInput(session, text)) {
-      return { queuedInput: await this.enqueueInput(sessionId, text, mode) };
+      return { queuedInput: await this.enqueueInput(sessionId, text, mode, actorSessionId) };
     }
     const targetMode = mode ?? session.inputMode;
     const now = nowIso();
-    let message = await this.recordSubmittedInput(session, text, targetMode, now);
+    let message = await this.recordSubmittedInput(session, text, targetMode, now, null, actorSessionId);
     this.publish("message.appended", sessionId, message);
     message = await this.deliverSubmittedInput(session, message, targetMode);
     const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
@@ -1143,7 +1214,8 @@ export class SessionManager {
     text: string,
     mode: CollaborationMode,
     timestamp: string,
-    queuedInputId: string | null = null
+    queuedInputId: string | null = null,
+    actorSessionId: string | null = null
   ): Promise<ChatMessage> {
     const message: ChatMessage = {
       id: eventId(),
@@ -1167,12 +1239,333 @@ export class SessionManager {
           promptHash: inputPromptHash(session.id, text),
           promptLength: text.length,
           queuedInputId,
+          actor: actorSessionId ? { kind: "session", sessionId: actorSessionId } : { kind: "operator" },
           failureReason: null
         }
       }
     };
     if (!await this.db.appendMessage(message)) throw new Error("Could not persist submitted input");
     return message;
+  }
+
+  async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode, allowHighContext = false, reason = ""): Promise<ManagedSession> {
+    requireSession(await this.db.getSession(actorSessionId));
+    const target = requireSession(await this.db.getSession(targetSessionId));
+    if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
+    const usage = target.contextUsage;
+    const ownership = target.agentOwnership;
+    const used = ownership && usage ? Math.max(0, usage.lifetimeWorkTokens - ownership.workTokenBaseline) : 0;
+    if (ownership && used >= ownership.workTokenBudget) {
+      throw new AgentSessionError(`Work-token budget exhausted (${used} of ${ownership.workTokenBudget}); extend it before sending more work`);
+    }
+    if (usage && usage.contextPercent >= 85 && !allowHighContext) {
+      throw new AgentSessionError(`Active context is ${usage.contextPercent.toFixed(1)}%; compact or explicitly acknowledge high context before sending more work`);
+    }
+    if (usage && usage.contextPercent >= 85 && !reason.trim()) throw new AgentSessionError("High-context acknowledgement requires a reason");
+    if (usage && usage.contextPercent >= 85) {
+      const approvedAt = nowIso();
+      await this.db.addAudit(`session:${actorSessionId}`, "high_context_override", targetSessionId, reason.trim(), approvedAt);
+      if (ownership) {
+        await this.db.setSessionAgentOwnership(target.id, {
+          ...ownership,
+          highContextApprovedAt: approvedAt,
+          contextPausedAt: null
+        }, approvedAt);
+      }
+    }
+    const result = await this.sendInput(targetSessionId, text, mode, actorSessionId);
+    return result && "session" in result ? result.session : target;
+  }
+
+  private async enforceAgentUsageGuardrails(session: ManagedSession): Promise<void> {
+    let ownership = session.agentOwnership;
+    const usage = session.contextUsage;
+    if (!ownership || !usage || ownership.completedAt) return;
+    if (usage.contextPercent < 85 && ownership.contextPausedAt) {
+      ownership = { ...ownership, contextPausedAt: null };
+      await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
+    }
+    if (usage.contextPercent >= 85 && !ownership.highContextApprovedAt && !ownership.contextPausedAt) {
+      const pausedAt = nowIso();
+      try {
+        await this.tmux.interrupt(session.tmux.paneId);
+      } catch (error) {
+        await this.db.addAudit(
+          "muxpilot",
+          "agent_context_interrupt_failed",
+          session.id,
+          error instanceof Error ? error.message : String(error),
+          pausedAt
+        );
+        return;
+      }
+      await this.db.setSessionAgentOwnership(session.id, { ...ownership, contextPausedAt: pausedAt }, pausedAt);
+      await this.db.setSessionStatus(session.id, "blocked", pausedAt);
+      await this.db.addAudit("muxpilot", "agent_context_paused", session.id, usage.contextPercent.toFixed(1), pausedAt);
+      this.publish("status.changed", session.id, { status: "blocked" });
+      return;
+    }
+    if (ownership.budgetExhaustedAt) return;
+    const used = Math.max(0, usage.lifetimeWorkTokens - ownership.workTokenBaseline);
+    if (used < ownership.workTokenBudget) return;
+    const exhaustedAt = nowIso();
+    try {
+      await this.tmux.interrupt(session.tmux.paneId);
+    } catch (error) {
+      await this.db.addAudit(
+        "muxpilot",
+        "agent_budget_interrupt_failed",
+        session.id,
+        error instanceof Error ? error.message : String(error),
+        exhaustedAt
+      );
+      return;
+    }
+    await this.db.setSessionAgentOwnership(session.id, { ...ownership, budgetExhaustedAt: exhaustedAt }, exhaustedAt);
+    await this.db.setSessionStatus(session.id, "blocked", exhaustedAt);
+    await this.db.addAudit("muxpilot", "agent_budget_exhausted", session.id, `${used}:${ownership.workTokenBudget}`, exhaustedAt);
+    this.publish("status.changed", session.id, { status: "blocked" });
+  }
+
+  private async clearAgentHighContextApproval(sessionId: string): Promise<void> {
+    const session = await this.db.getSession(sessionId);
+    if (!session?.agentOwnership?.highContextApprovedAt) return;
+    await this.db.setSessionAgentOwnership(sessionId, {
+      ...session.agentOwnership,
+      highContextApprovedAt: null
+    }, nowIso());
+  }
+
+  async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const actor = requireSession(await this.db.getSession(actorSessionId));
+      const all = await this.db.listSessions(true);
+      const rootSessionId = actor.agentOwnership?.rootSessionId ?? actor.id;
+      if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
+        throw new AgentSessionError(`This root already has ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
+      }
+      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.tmux.cwd;
+      const request: CreateSessionRequest = actor.gitWorkspace
+        ? { cwd, name, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
+        : { cwd, name, workspace: { mode: "directory" } };
+      const childMode = mode ?? "default";
+      const inheritedSettings = { ...actor.models[childMode], fastMode: actor.fastMode };
+      const child = await this.createSession(request, inheritedSettings);
+      const ownership: AgentSessionOwnership = {
+        parentSessionId: actor.id,
+        rootSessionId,
+        origin: "created",
+        createdAt: nowIso(),
+        workTokenBaseline: child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
+        completedAt: null,
+        budgetExhaustedAt: null,
+        highContextApprovedAt: null,
+        contextPausedAt: null
+      };
+      await this.db.setSessionAgentOwnership(child.id, ownership, nowIso());
+      for (const selection of ["default", "plan"] as const) {
+        const settings = actor.models[selection];
+        if (settings.model) await this.db.setSessionModelSettings(child.id, selection, settings.model, settings.reasoningEffort, nowIso());
+      }
+      await this.waitForAgentChildReady(child.id);
+      await this.sendInput(child.id, task, childMode, actor.id);
+      const updated = requireSession(await this.db.getSession(child.id));
+      this.publish("session.updated", child.id, updated);
+      return updated;
+    });
+  }
+
+  async agentClaim(actorSessionId: string, childSessionId: string): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const actor = requireSession(await this.db.getSession(actorSessionId));
+      const child = requireSession(await this.db.getSession(childSessionId));
+      if (child.id === actor.id) throw new AgentSessionError("A session cannot claim itself");
+      if (child.agentOwnership) throw new AgentSessionError("Session already has an agent manager");
+      if (child.status === "missing" || child.archived) throw new AgentSessionError("Only live sessions can be claimed");
+      const all = await this.db.listSessions(true);
+      const claimedSubtree = [child, ...agentDescendants(all, child.id)];
+      if (claimedSubtree.some((session) => session.id === actor.id)) {
+        throw new AgentSessionError("Claiming this session would create an agent-session cycle");
+      }
+      const rootSessionId = actor.agentOwnership?.rootSessionId ?? actor.id;
+      const addedLiveCount = claimedSubtree.filter(isLiveManagedSession).length;
+      if (liveAgentDescendants(all, rootSessionId).length + addedLiveCount > AGENT_DESCENDANT_LIMIT) {
+        throw new AgentSessionError("Agent-managed session limit reached");
+      }
+      const ownership: AgentSessionOwnership = {
+        parentSessionId: actor.id,
+        rootSessionId,
+        origin: "claimed",
+        createdAt: nowIso(),
+        workTokenBaseline: child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
+        completedAt: null,
+        budgetExhaustedAt: null,
+        highContextApprovedAt: null,
+        contextPausedAt: null
+      };
+      const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
+      for (const descendant of claimedSubtree.slice(1)) {
+        if (!descendant.agentOwnership) continue;
+        await this.db.setSessionAgentOwnership(descendant.id, { ...descendant.agentOwnership, rootSessionId }, nowIso());
+      }
+      await this.db.addAudit(`session:${actor.id}`, "claim_session", child.id, "ok", nowIso());
+      this.publish("session.updated", child.id, updated);
+      return updated;
+    });
+  }
+
+  async agentRelease(actorSessionId: string, childSessionId: string): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const child = await this.requireAgentControl(actorSessionId, childSessionId);
+      const descendants = agentDescendants(await this.db.listSessions(true), child.id);
+      if (descendants.some(isLiveAgentSession)) {
+        throw new AgentSessionError("Release live descendants before releasing their parent session");
+      }
+      const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, null, nowIso()));
+      for (const descendant of descendants) {
+        if (!descendant.agentOwnership) continue;
+        await this.db.setSessionAgentOwnership(descendant.id, {
+          ...descendant.agentOwnership,
+          rootSessionId: child.id
+        }, nowIso());
+      }
+      await this.db.addAudit(`session:${actorSessionId}`, "release_session", child.id, "ok", nowIso());
+      this.publish("session.updated", child.id, updated);
+      return updated;
+    });
+  }
+
+  async operatorSetAgentParent(childSessionId: string, parentSessionId: string | null): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const child = requireSession(await this.db.getSession(childSessionId));
+      const all = await this.db.listSessions(true);
+      const subtreeIds = new Set([child.id, ...agentDescendants(all, child.id).map((session) => session.id)]);
+      if (parentSessionId === null) {
+        const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, null, nowIso()));
+        for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
+          if (!descendant.agentOwnership) continue;
+          await this.db.setSessionAgentOwnership(descendant.id, {
+            ...descendant.agentOwnership,
+            rootSessionId: child.id
+          }, nowIso());
+        }
+        await this.db.addAudit("local", "detach_agent_session", child.id, "ok", nowIso());
+        this.publish("session.updated", child.id, updated);
+        return updated;
+      }
+
+      const parent = requireSession(await this.db.getSession(parentSessionId));
+      if (child.status === "missing" || child.archived) throw new AgentSessionError("Only live sessions can be attached");
+      if (subtreeIds.has(parent.id)) throw new AgentSessionError("An agent-session hierarchy cannot contain a cycle");
+      if (parent.status === "missing" || parent.archived) throw new AgentSessionError("The new parent must be a live session");
+      const rootSessionId = parent.agentOwnership?.rootSessionId ?? parent.id;
+      const existingTreeIds = new Set([rootSessionId, ...agentDescendants(all, rootSessionId).map((session) => session.id)]);
+      const addedLiveCount = all.filter((session) => subtreeIds.has(session.id) && isLiveManagedSession(session) && !existingTreeIds.has(session.id)).length;
+      if (liveAgentDescendants(all, rootSessionId).length + addedLiveCount > AGENT_DESCENDANT_LIMIT) {
+        throw new AgentSessionError(`This root cannot exceed ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
+      }
+      const ownership: AgentSessionOwnership = {
+        parentSessionId: parent.id,
+        rootSessionId,
+        origin: child.agentOwnership?.origin ?? "claimed",
+        createdAt: child.agentOwnership?.createdAt ?? nowIso(),
+        workTokenBaseline: child.agentOwnership?.workTokenBaseline ?? child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokenBudget: child.agentOwnership?.workTokenBudget ?? DEFAULT_AGENT_WORK_TOKEN_BUDGET,
+        completedAt: child.agentOwnership?.completedAt ?? null,
+        budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null,
+        highContextApprovedAt: child.agentOwnership?.highContextApprovedAt ?? null,
+        contextPausedAt: child.agentOwnership?.contextPausedAt ?? null
+      };
+      const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
+      for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
+        if (!descendant.agentOwnership) continue;
+        await this.db.setSessionAgentOwnership(descendant.id, {
+          ...descendant.agentOwnership,
+          rootSessionId
+        }, nowIso());
+      }
+      await this.db.addAudit("local", "reparent_agent_session", child.id, parent.id, nowIso());
+      this.publish("session.updated", child.id, updated);
+      return updated;
+    });
+  }
+
+  async agentExtendBudget(actorSessionId: string, childSessionId: string, additionalTokens: number, reason: string): Promise<ManagedSession> {
+    const child = await this.requireAgentControl(actorSessionId, childSessionId);
+    const ownership = child.agentOwnership!;
+    if (!Number.isSafeInteger(additionalTokens) || additionalTokens < 1 || additionalTokens > 2_000_000) {
+      throw new AgentSessionError("Budget extension must be between 1 and 2,000,000 work tokens");
+    }
+    if (!reason.trim()) throw new AgentSessionError("Budget extensions require a reason");
+    const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
+      ...ownership,
+      workTokenBudget: ownership.workTokenBudget + additionalTokens,
+      budgetExhaustedAt: null
+    }, nowIso()));
+    await this.db.addAudit(`session:${actorSessionId}`, "extend_agent_budget", child.id, `${additionalTokens}:${reason.trim()}`, nowIso());
+    this.publish("session.updated", child.id, updated);
+    return updated;
+  }
+
+  async requireAgentControl(actorSessionId: string, targetSessionId: string): Promise<ManagedSession> {
+    const target = requireSession(await this.db.getSession(targetSessionId));
+    const all = await this.db.listSessions(true);
+    let current = target;
+    const seen = new Set<string>();
+    while (current.agentOwnership && !seen.has(current.id)) {
+      if (current.agentOwnership.parentSessionId === actorSessionId) return target;
+      seen.add(current.id);
+      const parent = all.find((session) => session.id === current.agentOwnership?.parentSessionId);
+      if (!parent) break;
+      current = parent;
+    }
+    throw new AgentSessionError("This action is limited to descendants managed by the calling session");
+  }
+
+  async agentFinish(actorSessionId: string, targetSessionId: string): Promise<void> {
+    const target = await this.requireAgentControl(actorSessionId, targetSessionId);
+    const descendants = agentDescendants(await this.db.listSessions(true), target.id).reverse();
+    for (const session of [...descendants, target]) {
+      if (session.status !== "missing") await this.act(session.id, { type: "kill" });
+      const current = await this.db.getSession(session.id);
+      if (current?.agentOwnership) {
+        await this.db.setSessionAgentOwnership(session.id, { ...current.agentOwnership, completedAt: nowIso() }, nowIso());
+      }
+    }
+  }
+
+  async resumeAgentWait(sessionId: string, message: string): Promise<boolean> {
+    const session = await this.db.getSession(sessionId);
+    if (!session || session.status === "missing") return false;
+    const ready = await this.readyLiveSession(session);
+    if (!ready) return false;
+    await this.sendRawInput(ready, message);
+    const now = nowIso();
+    const status = activeInputStatus(ready.inputMode);
+    await this.db.setSessionStatus(sessionId, status, now);
+    await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
+    this.publish("status.changed", sessionId, { status });
+    return true;
+  }
+
+  private withAgentMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.agentMutationQueue.catch(() => undefined).then(operation);
+    this.agentMutationQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async waitForAgentChildReady(sessionId: string): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      const session = await this.db.getSession(sessionId);
+      if (!session) throw new AgentSessionError("Created child session disappeared during startup");
+      if (session.startupError) throw new AgentSessionError(session.startupError);
+      if (!session.initializing) return;
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    }
+    throw new AgentSessionError("Created child session did not become ready within 60 seconds");
   }
 
   private async deliverSubmittedInput(
@@ -1370,27 +1763,37 @@ export class SessionManager {
     }));
   }
 
-  async createSessionInDirectory(cwd: string, name: string): Promise<ManagedSession> {
+  async createSessionInDirectory(
+    cwd: string,
+    name: string,
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
+  ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, {
-      environment: this.managedEnvironment
+    const prepared = await this.prepareOrchestratedLaunch({
+      environment: this.managedEnvironment,
+      ...launchSettings
     });
+    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, prepared.options);
     const session = await this.persistInitializingSession(launch.pane, directory);
+    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
     return session;
   }
 
-  async createSession(request: CreateSessionRequest): Promise<ManagedSession> {
+  async createSession(
+    request: CreateSessionRequest,
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
+  ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
-    if (request.workspace?.mode !== "git") return this.createSessionInDirectory(directory, sessionName);
+    if (request.workspace?.mode !== "git") return this.createSessionInDirectory(directory, sessionName, launchSettings);
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
     const workspace = await this.gitWorkspaces.provision({
@@ -1399,14 +1802,18 @@ export class SessionManager {
       targetBranch: request.workspace.targetBranch
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
+    const prepared = await this.prepareOrchestratedLaunch(
+      { ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment), ...launchSettings }
+    );
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
-      managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+      prepared.options
     );
     const sessionId = tmuxPaneSessionId(launch.pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
     const session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary);
+    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
     this.publish("session.updated", session.id, session);
@@ -1425,6 +1832,7 @@ export class SessionManager {
     };
 
     let launch;
+    let orchestrationCapabilityId: string | null = null;
     let gitWorkspace: GitWorkspaceSummary | null = null;
     let repoPath: string;
     if (source.gitWorkspace) {
@@ -1435,24 +1843,31 @@ export class SessionManager {
         targetBranch: source.gitWorkspace.targetBranch
       });
       const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
+      const prepared = await this.prepareOrchestratedLaunch(
+        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+      );
       launch = await this.tmux.createCodexForkWindowInMuxpilotSession(
         controlPath,
         sessionNameValue,
         source.codexSessionId,
-        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+        prepared.options
       );
       const forkSessionId = tmuxPaneSessionId(launch.pane);
+      orchestrationCapabilityId = prepared.capabilityId;
       await this.gitWorkspaces.bind(workspace.id, forkSessionId);
       gitWorkspace = workspace.summary;
       repoPath = workspace.summary.entryPath;
     } else {
       repoPath = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
-      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, source.codexSessionId, {
+      const prepared = await this.prepareOrchestratedLaunch({
         environment: this.managedEnvironment
       });
+      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, source.codexSessionId, prepared.options);
+      orchestrationCapabilityId = prepared.capabilityId;
     }
 
     const session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source);
+    await this.bindOrchestratedLaunch(orchestrationCapabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
     this.publish("session.updated", session.id, session);
@@ -1590,6 +2005,9 @@ export class SessionManager {
     }
     if (action.type === "setFastMode") {
       await this.setFastMode(session, action.enabled);
+    }
+    if (action.type === "setAgentParent") {
+      await this.operatorSetAgentParent(sessionId, action.parentSessionId);
     }
     if (action.type === "retryInputDelivery") {
       await this.retryInputDelivery(session);
@@ -1941,7 +2359,14 @@ export class SessionManager {
 
       try {
         const now = nowIso();
-        let message = await this.recordSubmittedInput(session, sending.text, sending.mode, now, sending.id);
+        let message = await this.recordSubmittedInput(
+          session,
+          sending.text,
+          sending.mode,
+          now,
+          sending.id,
+          sending.actorSessionId
+        );
         this.publish("message.appended", sessionId, message);
         message = await this.deliverSubmittedInput(readySession, message, sending.mode);
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });
@@ -2318,6 +2743,43 @@ export class QueuedInputError extends Error {
 
 export class SessionNotFoundError extends Error {
   readonly statusCode = 404;
+}
+
+export class AgentSessionError extends Error {
+  readonly statusCode = 409;
+}
+
+function isLiveAgentSession(session: ManagedSession): boolean {
+  return Boolean(session.agentOwnership && !session.agentOwnership.completedAt && !session.archived && session.status !== "missing");
+}
+
+function isLiveManagedSession(session: ManagedSession): boolean {
+  return !session.agentOwnership?.completedAt && !session.archived && session.status !== "missing";
+}
+
+function liveAgentDescendants(sessions: ManagedSession[], rootSessionId: string): ManagedSession[] {
+  return sessions.filter((session) => session.agentOwnership?.rootSessionId === rootSessionId && isLiveAgentSession(session));
+}
+
+function agentDescendants(sessions: ManagedSession[], parentSessionId: string): ManagedSession[] {
+  const result: ManagedSession[] = [];
+  const pending = [parentSessionId];
+  const seen = new Set(pending);
+  while (pending.length > 0) {
+    const parent = pending.shift()!;
+    for (const session of sessions) {
+      if (session.agentOwnership?.parentSessionId !== parent || seen.has(session.id)) continue;
+      seen.add(session.id);
+      result.push(session);
+      pending.push(session.id);
+    }
+  }
+  return result;
+}
+
+function worstAgentStatus(sessions: ManagedSession[]): SessionStatus | null {
+  const priority: SessionStatus[] = ["approval", "question", "input_failed", "startup_failed", "blocked", "plan_ready", "working", "planning", "executing", "generating", "queued", "waiting", "idle", "unknown", "missing"];
+  return priority.find((status) => sessions.some((session) => session.status === status)) ?? null;
 }
 
 function resolveSessionStatus(

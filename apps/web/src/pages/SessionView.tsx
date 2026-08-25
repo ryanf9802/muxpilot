@@ -1917,7 +1917,8 @@ export function SessionView() {
     const token = requestTokenRef.current;
     setActionBusy(action.type);
     try {
-      await api.action(targetId, action);
+      const response = await api.action(targetId, action);
+      if (response.session && isCurrentRequest(targetId, token)) setSession(response.session);
       void refreshSessionStoplight().catch(() => undefined);
     } finally {
       if (isCurrentRequest(targetId, token)) setActionBusy(null);
@@ -2211,6 +2212,19 @@ export function SessionView() {
             status={readySession.status}
             onChange={setFastMode}
           />
+          {readySession.agentOwnership ? (
+            <button
+              disabled={Boolean(actionBusy)}
+              aria-busy={actionBusy === "setAgentParent"}
+              onClick={() => void runAction({ type: "setAgentParent", parentSessionId: null })}
+              title="Return this session to the top level"
+            >
+              <GitFork size={16} />
+              <span className="session-action-label">
+                {actionBusy === "setAgentParent" ? "Detaching" : "Detach child"}
+              </span>
+            </button>
+          ) : null}
           <button
             disabled={readySession.initializing === true || Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}
@@ -3227,7 +3241,7 @@ export function SessionTitleHeading({
   );
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom"> }) {
+export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership" | "contextUsage"> }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
   const title = `${session.repo.name}${dirty ? " · dirty" : ""}`;
@@ -3251,6 +3265,20 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
           ) : (
             <span>Forked from {session.forkedFrom.sessionName}</span>
           )}
+        </>
+      ) : null}
+      {session.agentOwnership ? (
+        <>
+          <span className="session-header-meta-separator" aria-hidden="true">·</span>
+          <Link to={`/sessions/${session.agentOwnership.parentSessionId}`}>Agent-managed child</Link>
+        </>
+      ) : null}
+      {session.contextUsage ? (
+        <>
+          <span className="session-header-meta-separator" aria-hidden="true">·</span>
+          <span title={`${session.contextUsage.activeTokens.toLocaleString()} of ${session.contextUsage.contextWindowTokens.toLocaleString()} active context tokens`}>
+            {Math.round(session.contextUsage.contextPercent)}% context
+          </span>
         </>
       ) : null}
     </p>
@@ -4090,9 +4118,10 @@ export function MessageBubble({
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
+  const delegated = delegatedSessionId(message);
   return (
     <article
-      className={`message message-${message.role} message-type-${message.type}${pending ? " message-pending" : ""}${onOpenMenu ? " message-copyable" : ""}`}
+      className={`message message-${message.role} message-type-${message.type}${delegated ? " message-agent-delegated" : ""}${pending ? " message-pending" : ""}${onOpenMenu ? " message-copyable" : ""}`}
       data-transcript-item-id={itemId}
       aria-busy={pending || undefined}
       {...menuTrigger.triggerProps}
@@ -4242,7 +4271,18 @@ function label(message: ChatMessage): string {
   if (message.type === "tool_call") return "Tool";
   if (message.type === "command_output") return "Command";
   if (message.type === "parser_notice") return "Parser";
+  const delegated = delegatedSessionId(message);
+  if (delegated) return `Delegated by ${delegated.slice(0, 8)}`;
   return message.role;
+}
+
+function delegatedSessionId(message: ChatMessage): string | null {
+  const submission = message.payload.muxpilotSubmission;
+  if (!submission || typeof submission !== "object" || Array.isArray(submission)) return null;
+  const actor = (submission as Record<string, unknown>).actor;
+  if (!actor || typeof actor !== "object" || Array.isArray(actor)) return null;
+  const record = actor as Record<string, unknown>;
+  return record.kind === "session" && typeof record.sessionId === "string" ? record.sessionId : null;
 }
 
 function MessageContent({ message, planAction = null }: { message: ChatMessage; planAction?: ReactNode }) {

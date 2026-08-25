@@ -6,6 +6,34 @@ import type { ChatMessage, ManagedSession, QueuedInput, SessionHistoryResult, Tr
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
+  it("persists event-driven agent waits across database restarts", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const session = testSession("waiting-parent");
+    const db = new AppDatabase(path);
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    await db.upsertAgentWait({
+      actorSessionId: session.id,
+      sessionIds: ["child-a", "child-b"],
+      mode: "all",
+      expiresAt: 123456,
+      readyAt: null
+    }, "2026-08-25T00:00:01.000Z");
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listAgentWaits()).toEqual([{
+      actorSessionId: session.id,
+      sessionIds: ["child-a", "child-b"],
+      mode: "all",
+      expiresAt: 123456,
+      readyAt: null
+    }]);
+    await restarted.deleteAgentWait(session.id);
+    expect(await restarted.listAgentWaits()).toEqual([]);
+    await restarted.close();
+  });
+
   it("persists runtime and pending crash-recovery state", async () => {
     const db = await tempDb();
     const updatedAt = "2026-08-17T20:00:00.000Z";
@@ -1176,6 +1204,23 @@ describe("AppDatabase remote access settings", () => {
 });
 
 describe("AppDatabase queued inputs", () => {
+  it("preserves the delegating agent while an input waits in the queue", async () => {
+    const db = await tempDb();
+    const session = testSession("session-agent-queue");
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    const input = testQueuedInput(session.id, {
+      id: "agent-queued-1",
+      text: "Delegated follow-up",
+      status: "queued",
+      actorSessionId: "parent-session"
+    });
+
+    await db.appendQueuedInput(input);
+
+    expect(await db.getQueuedInput(session.id, input.id)).toEqual(input);
+    await db.close();
+  });
+
   it("clears sent queued inputs after a normalized transcript echo", async () => {
     const db = await tempDb();
     const session = testSession("session-queue-normalized");
@@ -1557,6 +1602,7 @@ function testQueuedInput(sessionId: string, input: Partial<QueuedInput> & Pick<Q
     error: null,
     codexSessionId: "codex-session",
     codexJsonlPath: "/tmp/codex.jsonl",
+    actorSessionId: null,
     createdAt: "2026-07-07T00:00:01.000Z",
     updatedAt: "2026-07-07T00:00:01.000Z",
     sentAt: null,

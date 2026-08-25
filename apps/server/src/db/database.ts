@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import type {
+  AgentSessionOwnership,
   ChatMessage,
   CollaborationMode,
   GitWorkspaceSummary,
@@ -21,6 +22,7 @@ import type {
   SessionModelSelections,
   SessionDirectorySuggestion,
   SessionStatus,
+  SessionContextUsage,
   TranscriptItem,
   TranscriptPageResponse,
   TranscriptSearchResponse
@@ -49,6 +51,14 @@ export interface SessionRecoveryRuntimeState {
   cleanShutdown: boolean;
   updatedAt: string;
   sessionIds: string[];
+}
+
+export interface PersistedAgentWait {
+  actorSessionId: string;
+  sessionIds: string[];
+  mode: "any" | "all";
+  expiresAt: number;
+  readyAt: number | null;
 }
 
 interface SessionRow {
@@ -122,6 +132,7 @@ interface QueuedInputRow {
   error: string | null;
   codex_session_id: string | null;
   codex_jsonl_path: string | null;
+  actor_session_id: string | null;
   created_at: string;
   updated_at: string;
   sent_at: string | null;
@@ -320,6 +331,34 @@ export class AppDatabase {
     updatedAt: string
   ): Promise<ManagedSession | null> {
     return this.call("setSessionModelSettings", sessionId, mode, model, reasoningEffort, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionContextUsage(sessionId: string, contextUsage: SessionContextUsage, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionContextUsage", sessionId, contextUsage, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionAgentOwnership(sessionId: string, ownership: AgentSessionOwnership | null, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionAgentOwnership", sessionId, ownership, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionOrchestrationAvailable(sessionId: string, available: boolean, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionOrchestrationAvailable", sessionId, available, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionResourceScope(sessionId: string, resourceScope: string | null, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionResourceScope", sessionId, resourceScope, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  listAgentWaits(): Promise<PersistedAgentWait[]> {
+    return this.call("listAgentWaits") as Promise<PersistedAgentWait[]>;
+  }
+
+  upsertAgentWait(wait: PersistedAgentWait, updatedAt: string): Promise<void> {
+    return this.call("upsertAgentWait", wait, updatedAt) as Promise<void>;
+  }
+
+  deleteAgentWait(actorSessionId: string): Promise<void> {
+    return this.call("deleteAgentWait", actorSessionId) as Promise<void>;
   }
 
   listSessions(includeArchived = false, includeMissing = true): Promise<ManagedSession[]> {
@@ -663,7 +702,11 @@ export class SyncAppDatabase {
     const nextSession = {
       ...session,
       initializing: existing ? existing.initializing === true : session.initializing === true,
-      pinned: existing?.pinned ?? session.pinned ?? false
+      pinned: existing?.pinned ?? session.pinned ?? false,
+      contextUsage: existing?.contextUsage ?? session.contextUsage ?? null,
+      agentOwnership: existing?.agentOwnership ?? session.agentOwnership ?? null,
+      orchestrationAvailable: existing?.orchestrationAvailable ?? session.orchestrationAvailable ?? false,
+      resourceScope: session.resourceScope ?? existing?.resourceScope ?? null
     };
     this.db
       .prepare(
@@ -704,7 +747,11 @@ export class SyncAppDatabase {
     const nextSession = {
       ...session,
       pinned: existing.pinned,
-      archived: session.archived
+      archived: session.archived,
+      contextUsage: existing.contextUsage ?? session.contextUsage ?? null,
+      agentOwnership: existing.agentOwnership ?? session.agentOwnership ?? null,
+      orchestrationAvailable: session.orchestrationAvailable ?? existing.orchestrationAvailable ?? false,
+      resourceScope: session.resourceScope ?? existing.resourceScope ?? null
     };
     const archived = nextSession.archived ? 1 : 0;
 
@@ -750,6 +797,7 @@ export class SyncAppDatabase {
             updatedAt
           );
         this.rekeySessionReferences(oldSessionId, nextSession.id);
+        this.rekeyAgentRelationships(oldSessionId, nextSession.id);
         this.db.prepare("DELETE FROM managed_sessions WHERE id = ?").run(oldSessionId);
       }
 
@@ -778,10 +826,41 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE session_prompt_index SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
+    const waitRows = this.db.prepare("SELECT actor_session_id, wait_json FROM agent_session_waits")
+      .all() as unknown as Array<{ actor_session_id: string; wait_json: string }>;
+    for (const row of waitRows) {
+      const wait = JSON.parse(row.wait_json) as PersistedAgentWait;
+      const updated = {
+        ...wait,
+        actorSessionId: wait.actorSessionId === oldSessionId ? newSessionId : wait.actorSessionId,
+        sessionIds: wait.sessionIds.map((id) => id === oldSessionId ? newSessionId : id)
+      };
+      if (JSON.stringify(updated) !== JSON.stringify(wait)) {
+        this.db.prepare("UPDATE agent_session_waits SET wait_json = ? WHERE actor_session_id = ?")
+          .run(JSON.stringify(updated), row.actor_session_id);
+      }
+    }
     this.db.prepare("UPDATE notification_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE notification_device_rules SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE events SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE git_workspaces SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+  }
+
+  private rekeyAgentRelationships(oldSessionId: string, newSessionId: string): void {
+    const rows = this.db.prepare("SELECT id, data_json FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json">>;
+    for (const row of rows) {
+      const session = JSON.parse(row.data_json) as ManagedSession;
+      const ownership = session.agentOwnership;
+      if (!ownership || (ownership.parentSessionId !== oldSessionId && ownership.rootSessionId !== oldSessionId)) continue;
+      session.agentOwnership = {
+        ...ownership,
+        parentSessionId: ownership.parentSessionId === oldSessionId ? newSessionId : ownership.parentSessionId,
+        rootSessionId: ownership.rootSessionId === oldSessionId ? newSessionId : ownership.rootSessionId
+      };
+      this.db.prepare("UPDATE managed_sessions SET data_json = ? WHERE id = ?").run(JSON.stringify(session), row.id);
+    }
   }
 
   setSessionStatus(sessionId: string, status: SessionStatus, updatedAt: string): void {
@@ -870,6 +949,51 @@ export class SyncAppDatabase {
     const next = { ...existing, models: withSessionModelSettings(existing.models, mode, model, reasoningEffort) };
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), updatedAt, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  setSessionContextUsage(sessionId: string, contextUsage: SessionContextUsage, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { contextUsage }, updatedAt);
+  }
+
+  setSessionAgentOwnership(sessionId: string, agentOwnership: AgentSessionOwnership | null, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { agentOwnership }, updatedAt);
+  }
+
+  setSessionOrchestrationAvailable(sessionId: string, orchestrationAvailable: boolean, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { orchestrationAvailable }, updatedAt);
+  }
+
+  setSessionResourceScope(sessionId: string, resourceScope: string | null, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { resourceScope }, updatedAt);
+  }
+
+  listAgentWaits(): PersistedAgentWait[] {
+    const rows = this.db.prepare("SELECT wait_json FROM agent_session_waits ORDER BY actor_session_id")
+      .all() as unknown as Array<{ wait_json: string }>;
+    return rows.flatMap((row) => {
+      try { return [JSON.parse(row.wait_json) as PersistedAgentWait]; } catch { return []; }
+    });
+  }
+
+  upsertAgentWait(wait: PersistedAgentWait, updatedAt: string): void {
+    this.db.prepare(
+      `INSERT INTO agent_session_waits (actor_session_id, wait_json, updated_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(actor_session_id) DO UPDATE SET wait_json=excluded.wait_json, updated_at=excluded.updated_at`
+    ).run(wait.actorSessionId, JSON.stringify(wait), updatedAt);
+  }
+
+  deleteAgentWait(actorSessionId: string): void {
+    this.db.prepare("DELETE FROM agent_session_waits WHERE actor_session_id = ?").run(actorSessionId);
+  }
+
+  private updateSessionData(sessionId: string, changes: Partial<ManagedSession>, updatedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    const next = { ...existing, ...changes };
+    this.db.prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
     return this.getSession(sessionId);
   }
@@ -1616,7 +1740,7 @@ export class SyncAppDatabase {
       .all(sessionId) as unknown as MessageRow[];
 
     return rows
-      .filter((row) => isDisplayableUserPromptText(row.text))
+      .filter((row) => !isAgentAuthoredPayload(row.payload_json) && isDisplayableUserPromptText(row.text))
       .slice(0, limit)
       .reverse()
       .map(hydrateMessage);
@@ -2018,8 +2142,8 @@ export class SyncAppDatabase {
     this.db
       .prepare(
         `INSERT INTO queued_inputs
-          (id, session_id, text, mode, status, error, codex_session_id, codex_jsonl_path, created_at, updated_at, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, session_id, text, mode, status, error, codex_session_id, codex_jsonl_path, actor_session_id, created_at, updated_at, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.id,
@@ -2030,6 +2154,7 @@ export class SyncAppDatabase {
         input.error,
         input.codexSessionId,
         input.codexJsonlPath,
+        input.actorSessionId,
         input.createdAt,
         input.updatedAt,
         input.sentAt
@@ -2046,6 +2171,7 @@ export class SyncAppDatabase {
              error = ?,
              codex_session_id = ?,
              codex_jsonl_path = ?,
+             actor_session_id = ?,
              updated_at = ?,
              sent_at = ?
          WHERE session_id = ? AND id = ?`
@@ -2057,6 +2183,7 @@ export class SyncAppDatabase {
         input.error,
         input.codexSessionId,
         input.codexJsonlPath,
+        input.actorSessionId,
         input.updatedAt,
         input.sentAt,
         input.sessionId,
@@ -2174,7 +2301,7 @@ export class SyncAppDatabase {
   }
 
   private upsertPromptIndexMessage(message: ChatMessage): void {
-    if (message.role !== "user" || !isDisplayableUserPromptText(message.text)) return;
+    if (message.role !== "user" || isAgentAuthoredMessage(message) || !isDisplayableUserPromptText(message.text)) return;
     this.deletePromptIndexMessage(message.id);
     this.db
       .prepare(
@@ -2222,13 +2349,14 @@ export class SyncAppDatabase {
     // session_id is intentionally UNINDEXED in the FTS table; use the message index and stop after two prompts.
     const rows = this.db
       .prepare(
-        `SELECT text FROM messages
+        `SELECT text, payload_json FROM messages
          WHERE session_id = ? AND role = 'user'
          ORDER BY sequence DESC`
       )
-      .iterate(sessionId) as unknown as Iterable<Pick<MessageRow, "text">>;
+      .iterate(sessionId) as unknown as Iterable<Pick<MessageRow, "text" | "payload_json">>;
     const prompts: string[] = [];
     for (const row of rows) {
+      if (isAgentAuthoredPayload(row.payload_json)) continue;
       if (!isDisplayableUserPromptText(row.text)) continue;
       const text = normalizePreviewText(row.text);
       if (text) prompts.push(text);
@@ -2361,10 +2489,18 @@ export class SyncAppDatabase {
         error TEXT,
         codex_session_id TEXT,
         codex_jsonl_path TEXT,
+        actor_session_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         sent_at TEXT,
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_session_waits (
+        actor_session_id TEXT PRIMARY KEY,
+        wait_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(actor_session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS notification_rules (
@@ -2448,6 +2584,7 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_git_workspaces_session ON git_workspaces(session_id);
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
+    this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
   }
@@ -2498,6 +2635,17 @@ export class SyncAppDatabase {
     if (rows.some((row) => row.name === column)) return;
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
+}
+
+function isAgentAuthoredMessage(message: ChatMessage): boolean {
+  const submission = message.payload.muxpilotSubmission;
+  if (!submission || typeof submission !== "object" || Array.isArray(submission)) return false;
+  const actor = (submission as Record<string, unknown>).actor;
+  return Boolean(actor && typeof actor === "object" && !Array.isArray(actor) && (actor as Record<string, unknown>).kind === "session");
+}
+
+function isAgentAuthoredPayload(payloadJson: string): boolean {
+  try { return isAgentAuthoredMessage({ payload: JSON.parse(payloadJson) } as ChatMessage); } catch { return false; }
 }
 
 function hydrateGitWorkspace(row: GitWorkspaceRow): StoredGitWorkspace {
@@ -2785,6 +2933,7 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     error: row.error,
     codexSessionId: row.codex_session_id,
     codexJsonlPath: row.codex_jsonl_path,
+    actorSessionId: row.actor_session_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sentAt: row.sent_at

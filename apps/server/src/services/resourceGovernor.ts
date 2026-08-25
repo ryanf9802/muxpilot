@@ -141,7 +141,7 @@ export class ResourceGovernor {
       const nextResourceUsage = new Map<string, SessionResourceUsage>();
       const sampledScopes = new Set<string>();
       await Promise.all(sessions.map(async (session) => {
-        const scope = await this.controller.scopeForPid(session.tmux.pid);
+        const scope = session.resourceScope ?? await this.controller.scopeForPid(session.tmux.pid);
         if (!scope) return;
         this.managedScopes.add(scope);
         sampledScopes.add(scope);

@@ -6,6 +6,56 @@ import { serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent } from "@mux
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
+  it("reports active context and cache-adjusted lifetime work tokens", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(path, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:00Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          model_context_window: 200_000,
+          last_token_usage: { input_tokens: 149_000, total_tokens: 150_000 },
+          total_token_usage: {
+            input_tokens: 1_000_000,
+            cached_input_tokens: 800_000,
+            output_tokens: 50_000,
+            reasoning_output_tokens: 25_000,
+            total_tokens: 1_050_000
+          }
+        }
+      }
+    })}\n`);
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.contextUsage).toMatchObject({
+      activeTokens: 150_000,
+      contextWindowTokens: 200_000,
+      contextPercent: 75,
+      lifetimeTotalTokens: 1_050_000,
+      lifetimeWorkTokens: 275_000
+    });
+    expect(result.messages).toEqual([]);
+  });
+
+  it("renders an orchestration wake marker as a system status", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const marker = '<muxpilot_session_wait>{"version":1,"kind":"resume_requested","sessions":[]}</muxpilot_session_wait>';
+    await writeFile(path, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:00Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: marker }
+    })}\n`);
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({ type: "status", role: "system", text: "Agent session wait resumed" });
+  });
+
   it("advances across a JSONL record larger than the normal read batch", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");

@@ -3158,6 +3158,7 @@ describe("SessionManager transcript isolation", () => {
       error: null,
       codexSessionId: session.codexSessionId,
       codexJsonlPath: session.codexJsonlPath,
+      actorSessionId: null,
       createdAt: "2026-07-07T00:00:01.000Z",
       updatedAt: "2026-07-07T00:00:01.000Z",
       sentAt: null
@@ -3194,6 +3195,7 @@ describe("SessionManager transcript isolation", () => {
       error: null,
       codexSessionId: session.codexSessionId,
       codexJsonlPath: session.codexJsonlPath,
+      actorSessionId: null,
       createdAt: "2026-07-07T00:00:01.000Z",
       updatedAt: "2026-07-07T00:00:02.000Z",
       sentAt: "2026-07-07T00:00:02.000Z"
@@ -3207,6 +3209,7 @@ describe("SessionManager transcript isolation", () => {
       error: null,
       codexSessionId: session.codexSessionId,
       codexJsonlPath: session.codexJsonlPath,
+      actorSessionId: null,
       createdAt: "2026-07-07T00:00:03.000Z",
       updatedAt: "2026-07-07T00:00:04.000Z",
       sentAt: null
@@ -5665,6 +5668,79 @@ describe("SessionManager transcript isolation", () => {
   });
 });
 
+describe("agent-managed session hierarchy", () => {
+  it("caps a root tree at two live descendants and frees the slot on release", async () => {
+    const harness = await createHarness();
+    const root = agentHierarchySession("agent-root");
+    const first = agentHierarchySession("agent-first");
+    const second = agentHierarchySession("agent-second");
+    const third = agentHierarchySession("agent-third");
+    for (const session of [root, first, second, third]) {
+      await harness.db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    }
+
+    await harness.manager.agentClaim(root.id, first.id);
+    await harness.manager.agentClaim(root.id, second.id);
+    await expect(harness.manager.agentClaim(root.id, third.id)).rejects.toThrow("limit reached");
+
+    await harness.manager.agentRelease(root.id, first.id);
+    const claimedThird = await harness.manager.agentClaim(root.id, third.id);
+
+    expect(claimedThird.agentOwnership).toMatchObject({
+      parentSessionId: root.id,
+      rootSessionId: root.id,
+      workTokenBudget: 1_000_000
+    });
+    expect((await harness.manager.getSession(first.id))?.agentOwnership).toBeNull();
+    await harness.db.close();
+  });
+
+  it("interrupts an owned session when active context reaches 85 percent", async () => {
+    const harness = await createHarness();
+    const transcript = join(harness.codexHome, "sessions", "agent-context.jsonl");
+    const parent = agentHierarchySession("context-parent");
+    const child = {
+      ...agentHierarchySession("context-child"),
+      codexJsonlPath: transcript,
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created" as const,
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    };
+    await writeFile(transcript, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:01.000Z",
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          model_context_window: 100_000,
+          last_token_usage: { total_tokens: 85_000 },
+          total_token_usage: { input_tokens: 90_000, cached_input_tokens: 10_000, output_tokens: 5_000, total_tokens: 95_000 }
+        }
+      }
+    })}\n`);
+    await harness.db.upsertSession(parent, "2026-08-25T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
+    const interrupted: string[] = [];
+    harness.tmux.interrupt = async (paneId) => { interrupted.push(paneId); };
+
+    await harness.manager.catchUpIngest();
+
+    expect(interrupted).toEqual([child.tmux.paneId]);
+    expect(await harness.manager.getSession(child.id)).toMatchObject({
+      status: "blocked",
+      contextUsage: { contextPercent: 85 },
+      agentOwnership: { contextPausedAt: expect.any(String) }
+    });
+    await harness.db.close();
+  });
+});
+
 async function createHarness(): Promise<{
   dir: string;
   codexHome: string;
@@ -5700,6 +5776,50 @@ async function createHarness(): Promise<{
     processLookup
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
+}
+
+function agentHierarchySession(id: string): ManagedSession {
+  return {
+    id,
+    tmux: {
+      sessionId: "muxpilot",
+      sessionName: "muxpilot",
+      windowId: `@${id}`,
+      windowIndex: 1,
+      windowName: id,
+      paneId: `%${id}`,
+      paneIndex: 0,
+      paneActive: false,
+      cwd: "/repo",
+      currentCommand: "codex",
+      title: id,
+      pid: 123,
+      size: "120x40"
+    },
+    repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
+    codexSessionId: `codex-${id}`,
+    codexJsonlPath: null,
+    discoveryConfidence: "high",
+    status: "waiting",
+    initializing: false,
+    startupError: null,
+    lastActivityAt: null,
+    preview: "",
+    recentUserPrompts: [],
+    activitySummary: null,
+    activitySummaryGeneratedAt: null,
+    activitySummarySourceSequence: null,
+    inputMode: "default",
+    models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
+    fastMode: null,
+    fastModeAvailable: null,
+    transcriptSize: 0,
+    unreadCount: 0,
+    pinned: false,
+    archived: false,
+    gitWorkspace: null,
+    resourceUsage: null
+  };
 }
 
 class FakeActivitySummarizer {

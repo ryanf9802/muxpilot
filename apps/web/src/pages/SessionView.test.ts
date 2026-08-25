@@ -2304,6 +2304,7 @@ function queuedInput(overrides: Partial<QueuedInput> = {}): QueuedInput {
     error: null,
     codexSessionId: "codex-a",
     codexJsonlPath: "/tmp/codex-a.jsonl",
+    actorSessionId: null,
     createdAt: "2026-07-07T00:00:00.000Z",
     updatedAt: "2026-07-07T00:00:00.000Z",
     sentAt: null,

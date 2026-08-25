@@ -472,6 +472,26 @@ describe("dashboard repo session ordering", () => {
     expect(groups[0]?.sessions.map((session) => session.id)).toEqual(["repo-a-pinned", "repo-a-active"]);
     expect(groups[1]?.sessions.map((session) => session.id)).toEqual(["repo-b-pinned"]);
   });
+
+  it("keeps agent-managed children out of the top-level repo grid", () => {
+    const root = testSession({ id: "root", paneId: "%111", windowName: "root" });
+    const child = testSession({
+      id: "child",
+      paneId: "%112",
+      windowName: "child",
+      agentOwnership: {
+        parentSessionId: root.id,
+        rootSessionId: root.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+
+    expect(groupSessionsByRepo([root, child]).flatMap((group) => group.sessions).map((session) => session.id)).toEqual(["root"]);
+  });
 });
 
 describe("CodexUsagePanel", () => {
@@ -673,7 +693,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode" | "agentOwnership">>
 ): ManagedSession {
   const windowIndex = Number(input.paneId.slice(1));
   return {
@@ -714,6 +734,7 @@ function testSession(
     pinned: input.pinned ?? false,
     archived: false,
     gitWorkspace: input.gitWorkspace ?? null,
-    resourceUsage: input.resourceUsage ?? null
+    resourceUsage: input.resourceUsage ?? null,
+    agentOwnership: input.agentOwnership ?? null
   };
 }

@@ -4,26 +4,42 @@ import { fileURLToPath } from "node:url";
 
 const SKILL_NAME = "muxpilot-git-workflow";
 const QUEUE_SKILL_NAME = "muxpilot-heavy-command-queue";
+const ORCHESTRATION_SKILL_NAME = "muxpilot-session-orchestration";
 
 export async function muxpilotGitWorkflowSkillStatus(codexHome) {
   const workflow = await bundledSkillStatus(codexHome, SKILL_NAME);
   if (workflow.status !== "current") return workflow;
   const queue = await bundledSkillStatus(codexHome, QUEUE_SKILL_NAME);
-  return queue.status === "current" ? workflow : queue;
+  if (queue.status !== "current") return { ...workflow, status: queue.status };
+  const orchestration = await bundledSkillStatus(codexHome, ORCHESTRATION_SKILL_NAME);
+  return orchestration.status === "current" ? workflow : { ...workflow, status: orchestration.status };
 }
 
 export async function syncMuxpilotGitWorkflowSkill(codexHome) {
   const existing = await bundledSkillStatus(codexHome, SKILL_NAME);
   const queueExisting = await bundledSkillStatus(codexHome, QUEUE_SKILL_NAME);
-  if (existing.status === "current" && queueExisting.status === "current") return { ...existing, action: "unchanged" };
+  const orchestrationExisting = await bundledSkillStatus(codexHome, ORCHESTRATION_SKILL_NAME);
+  if (
+    existing.status === "current"
+    && queueExisting.status === "current"
+    && orchestrationExisting.status === "current"
+  ) return { ...existing, action: "unchanged" };
 
   await syncBundledSkill(codexHome, SKILL_NAME, existing);
   await syncBundledSkill(codexHome, QUEUE_SKILL_NAME, queueExisting);
+  await syncBundledSkill(codexHome, ORCHESTRATION_SKILL_NAME, orchestrationExisting);
   const installed = await muxpilotGitWorkflowSkillStatus(codexHome);
   if (installed.status !== "current") {
     throw new Error(`Bundled muxpilot skills remained ${installed.status} after synchronization`);
   }
-  return { ...installed, action: existing.status === "missing" || queueExisting.status === "missing" ? "installed" : "updated" };
+  return {
+    ...installed,
+    action: existing.status === "missing"
+      || queueExisting.status === "missing"
+      || orchestrationExisting.status === "missing"
+      ? "installed"
+      : "updated"
+  };
 }
 
 async function syncBundledSkill(codexHome, skillName, existing) {

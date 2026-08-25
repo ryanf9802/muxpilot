@@ -13,7 +13,7 @@ import {
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
 } from "@muxpilot/core";
-import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest } from "@muxpilot/core";
+import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest, SessionContextUsage } from "@muxpilot/core";
 
 export const PARSER_VERSION = "codex-jsonl-v1";
 const DEFAULT_BATCH_BYTES = 1024 * 1024;
@@ -50,6 +50,7 @@ export interface ParseResult {
   pendingSkillNames: string[];
   notices: string[];
   complete: boolean;
+  contextUsage: SessionContextUsage | null;
 }
 
 export async function parseCodexJsonl(path: string, offset: number, options: ParseCodexJsonlOptions = {}): Promise<ParseResult> {
@@ -58,7 +59,7 @@ export async function parseCodexJsonl(path: string, offset: number, options: Par
     const stat = await file.stat();
     if (offset > stat.size) offset = 0;
     const length = Math.max(0, stat.size - offset);
-    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: true };
+    if (length === 0) return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: true, contextUsage: null };
     const batch = await readCompleteJsonlBatch(file, offset, stat.size, options);
     if (batch.skippedBytes > 0) {
       const nextOffset = offset + batch.skippedBytes;
@@ -67,11 +68,12 @@ export async function parseCodexJsonl(path: string, offset: number, options: Par
         nextOffset,
         pendingSkillNames: [],
         notices: [`Skipped an oversized Codex transcript record (${batch.skippedBytes} bytes).`],
-        complete: nextOffset >= stat.size
+        complete: nextOffset >= stat.size,
+        contextUsage: null
       };
     }
     if (batch.bytes.length === 0) {
-      return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: false };
+      return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: false, contextUsage: null };
     }
     const parsed = parseCodexJsonlChunk(batch.bytes.toString("utf8"), offset);
     return { ...parsed, notices: [], complete: parsed.nextOffset >= stat.size };
@@ -125,11 +127,13 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
   const messages: Omit<ChatMessage, "sessionId" | "sequence">[] = [];
   const pendingSkillNames: string[] = [];
   let collaborationMode: CollaborationMode | null = null;
+  let contextUsage: SessionContextUsage | null = null;
 
   for (const line of completeLines) {
     consumed += Buffer.byteLength(line, "utf8") + 1;
     if (!line.trim()) continue;
     collaborationMode = collaborationModeFromLine(line) ?? collaborationMode;
+    contextUsage = contextUsageFromLine(line) ?? contextUsage;
     const standaloneSkillNames = standaloneSkillContextNames(line);
     if (standaloneSkillNames.length > 0) {
       if (!mergeSkillNamesIntoPreviousUserMessage(messages, standaloneSkillNames)) {
@@ -144,7 +148,35 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
     if (mapped && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
   }
 
-  return { messages, nextOffset: consumed, pendingSkillNames };
+  return { messages, nextOffset: consumed, pendingSkillNames, contextUsage };
+}
+
+function contextUsageFromLine(line: string): SessionContextUsage | null {
+  let event: RawEvent;
+  try { event = JSON.parse(line) as RawEvent; } catch { return null; }
+  if (event.type !== "event_msg" || event.payload?.type !== "token_count") return null;
+  const info = recordValue(event.payload.info);
+  const lifetime = recordValue(info?.total_token_usage);
+  const active = recordValue(info?.last_token_usage);
+  const contextWindowTokens = nonnegativeNumberValue(info?.model_context_window);
+  const activeTokens = nonnegativeNumberValue(active?.total_tokens) ?? nonnegativeNumberValue(active?.input_tokens);
+  if (contextWindowTokens === null || contextWindowTokens <= 0 || activeTokens === null) return null;
+  const input = nonnegativeNumberValue(lifetime?.input_tokens) ?? 0;
+  const cached = nonnegativeNumberValue(lifetime?.cached_input_tokens) ?? 0;
+  const output = nonnegativeNumberValue(lifetime?.output_tokens) ?? 0;
+  const reasoning = nonnegativeNumberValue(lifetime?.reasoning_output_tokens) ?? 0;
+  return {
+    activeTokens,
+    contextWindowTokens,
+    contextPercent: Math.max(0, activeTokens / contextWindowTokens * 100),
+    lifetimeInputTokens: input,
+    lifetimeCachedInputTokens: cached,
+    lifetimeOutputTokens: output,
+    lifetimeReasoningTokens: reasoning,
+    lifetimeTotalTokens: nonnegativeNumberValue(lifetime?.total_tokens) ?? input + output,
+    lifetimeWorkTokens: Math.max(0, input - cached) + output + reasoning,
+    sampledAt: event.timestamp ?? new Date().toISOString()
+  };
 }
 
 function gitWorkflowMessages(
@@ -202,6 +234,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
 
   if (topType === "event_msg" && payloadType === "user_message") {
     const rawMessage = String(event.payload?.message ?? "");
+    const sessionWaitMessage = muxpilotSessionWaitMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (sessionWaitMessage) return sessionWaitMessage;
     const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
     if (queueMessage) return queueMessage;
     const subagentNotification = normalizeSubagentNotificationText(rawMessage);
@@ -220,6 +254,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
 
   if (topType === "event_msg" && payloadType === "agent_message") {
     const rawMessage = String(event.payload?.message ?? "");
+    const sessionWaitMessage = muxpilotSessionWaitMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (sessionWaitMessage) return sessionWaitMessage;
     const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
     if (queueMessage) return queueMessage;
     return message(
@@ -268,6 +304,20 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
   }
 
   return null;
+}
+
+function muxpilotSessionWaitMessage(
+  text: string,
+  timestamp: string,
+  payload: Record<string, unknown>,
+  collaborationMode: CollaborationMode | null
+): Omit<ChatMessage, "sessionId" | "sequence"> | null {
+  const match = text.match(/<muxpilot_session_wait>([\s\S]*?)<\/muxpilot_session_wait>/);
+  if (!match) return null;
+  try {
+    const event = JSON.parse(match[1]!) as Record<string, unknown>;
+    return message("status", "system", timestamp, event.kind === "timeout" ? "Agent session wait timed out" : "Agent session wait resumed", { ...payload, agentSessionWait: event }, collaborationMode);
+  } catch { return null; }
 }
 
 function heavyCommandQueueMessage(
@@ -660,6 +710,10 @@ function stringArray(value: unknown): string[] | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function nonnegativeNumberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function timestampPlusMs(timestamp: string, ms: number): string | null {

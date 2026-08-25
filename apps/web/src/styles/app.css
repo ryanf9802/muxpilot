@@ -1378,6 +1378,58 @@ select:focus-visible {
   min-width: 0;
 }
 
+.agent-session-tree {
+  margin: 0 0.7rem 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
+  border-top: 0;
+  border-radius: 0 0 0.55rem 0.55rem;
+  background: color-mix(in srgb, var(--color-surface) 76%, transparent);
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+}
+
+.agent-session-tree > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.28rem 0.55rem;
+  cursor: pointer;
+  list-style: none;
+  opacity: 0.78;
+}
+
+.agent-session-tree > summary::-webkit-details-marker { display: none; }
+.agent-session-tree[open] > summary { border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent); }
+.agent-session-children { padding: 0.25rem; }
+.agent-session-branch { margin-left: calc(var(--agent-depth, 0) * 0.65rem); }
+
+.agent-session-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 1.8rem;
+  padding: 0.2rem 0.35rem;
+  border: 0;
+  border-radius: 0.35rem;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
+.agent-session-row:hover { background: color-mix(in srgb, var(--color-action) 8%, transparent); }
+.agent-session-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text); }
+.agent-session-row-meta { white-space: nowrap; opacity: 0.72; }
+.agent-session-row-meta[data-context-pressure="warning"] { color: var(--color-warning); opacity: 1; }
+.agent-session-row-meta[data-context-pressure="high"] { color: var(--color-error); opacity: 1; }
+
+.dialog-help {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.82rem;
+}
+
 .session-card {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -3632,6 +3684,11 @@ select:focus-visible {
   margin-left: auto;
   background: var(--color-success-soft);
   border-color: color-mix(in srgb, var(--color-success) 42%, var(--color-border));
+}
+
+.message-agent-delegated.message-user {
+  background: color-mix(in srgb, var(--color-tertiary-soft) 72%, var(--color-surface));
+  border-color: color-mix(in srgb, var(--color-tertiary) 38%, var(--color-border));
 }
 
 .message-pending.message-user {
