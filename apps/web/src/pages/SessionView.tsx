@@ -380,11 +380,11 @@ export function sessionWithPendingFastMode(session: ManagedSession, pendingFastM
 }
 
 export function shouldQueueComposerInput(
-  session: Pick<ManagedSession, "status"> | null,
+  session: Pick<ManagedSession, "status" | "initializing"> | null,
   queuedInputs: Pick<QueuedInput, "status">[]
 ): boolean {
   if (queuedInputs.length > 0) return true;
-  return !session || (session.status !== "waiting" && session.status !== "idle");
+  return !session || session.initializing === true || (session.status !== "waiting" && session.status !== "idle");
 }
 
 export function isNearMessageListBottom(
@@ -652,7 +652,7 @@ export function shouldShowSessionLoading(
   routeSessionId: string,
   initialTranscriptSessionId: string | null
 ): boolean {
-  return !session || session.initializing === true || session.id !== routeSessionId || initialTranscriptSessionId !== routeSessionId;
+  return !session || session.id !== routeSessionId || initialTranscriptSessionId !== routeSessionId;
 }
 
 export function loadingSessionFromLocationState(state: unknown, routeSessionId: string): ManagedSession | null {
@@ -1205,12 +1205,24 @@ export function SessionView() {
           onOpenMenu={openMessageMenu}
           planAction={
             pendingPlan?.id === item.message.id ? (
-              <PlanActionBanner busy={planActionBusy} error={planActionError} onAction={submitPlanAction} />
+              <PlanActionBanner
+                busy={planActionBusy}
+                disabled={session?.initializing === true}
+                error={planActionError}
+                onAction={submitPlanAction}
+              />
             ) : null
           }
           questionAction={
             question?.messageId === item.message.id ? (
-              <QuestionBanner key={question.id} question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
+              <QuestionBanner
+                key={question.id}
+                question={question}
+                busy={questionBusy}
+                submitDisabled={session?.initializing === true}
+                error={questionError}
+                onAnswer={answerQuestion}
+              />
             ) : null
           }
         />
@@ -2129,10 +2141,14 @@ export function SessionView() {
         </div>
         <div className="session-header-state">
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
-          <StatusPill status={readySession.status} />
+          {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={readySession.status} />}
         </div>
         <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
-        <ModeToggle mode={readySession.inputMode} busy={actionBusy === "setInputMode" || Boolean(readySession.startupError)} onChange={setInputMode} />
+        <ModeToggle
+          mode={readySession.inputMode}
+          busy={readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
+          onChange={setInputMode}
+        />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
         {fastModeError ? <p className="mode-toggle-error">{fastModeError}</p> : null}
       </div>
@@ -2191,12 +2207,12 @@ export function SessionView() {
           <FastModeToggle
             enabled={readySession.fastMode === true}
             available={readySession.fastModeAvailable ?? null}
-            busy={actionBusy === "setFastMode"}
+            busy={readySession.initializing === true || actionBusy === "setFastMode"}
             status={readySession.status}
             onChange={setFastMode}
           />
           <button
-            disabled={Boolean(actionBusy)}
+            disabled={readySession.initializing === true || Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}
             aria-label={actionBusy === "interrupt" ? "Interrupting session" : "Interrupt session"}
             data-busy={actionBusy === "interrupt" || undefined}
@@ -2208,7 +2224,7 @@ export function SessionView() {
           </button>
           <button
             className="danger"
-            disabled={Boolean(actionBusy)}
+            disabled={readySession.initializing === true || Boolean(actionBusy)}
             aria-busy={actionBusy === "kill"}
             aria-label={actionBusy === "kill" ? "Killing session" : "Kill session"}
             data-busy={actionBusy === "kill" || undefined}
@@ -2331,7 +2347,14 @@ export function SessionView() {
           {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
           {showQueuedIndicator ? <QueuedIndicator /> : null}
           {question && !questionRenderedInline ? (
-            <QuestionBanner key={question.id} question={question} busy={questionBusy} error={questionError} onAnswer={answerQuestion} />
+            <QuestionBanner
+              key={question.id}
+              question={question}
+              busy={questionBusy}
+              submitDisabled={readySession.initializing === true}
+              error={questionError}
+              onAnswer={answerQuestion}
+            />
           ) : null}
           {hasMoreAfter ? (
             <button
@@ -2352,6 +2375,7 @@ export function SessionView() {
         <ApprovalBanner
           approval={approval}
           busy={approvalBusy}
+          disabled={readySession.initializing === true}
           error={approvalError}
           onDecision={resolveApproval}
         />
@@ -3456,11 +3480,13 @@ export function shellQuote(value: string): string {
 export function ApprovalBanner({
   approval,
   busy,
+  disabled = false,
   error,
   onDecision
 }: {
   approval: ApprovalRequest;
   busy: ApprovalDecision | null;
+  disabled?: boolean;
   error: string;
   onDecision: (decision: ApprovalDecision) => void;
 }) {
@@ -3500,7 +3526,7 @@ export function ApprovalBanner({
           <button
             key={option.decision}
             className={option.decision === "deny" ? "danger" : undefined}
-            disabled={Boolean(busy)}
+            disabled={disabled || Boolean(busy)}
             aria-busy={busy === option.decision}
             data-busy={busy === option.decision || undefined}
             title={option.description || undefined}
@@ -3663,11 +3689,13 @@ export function queuedInputRemovable(input: Pick<QueuedInput, "status">): boolea
 function QuestionBanner({
   question,
   busy,
+  submitDisabled = false,
   error,
   onAnswer
 }: {
   question: QuestionRequest;
   busy: boolean;
+  submitDisabled?: boolean;
   error: string;
   onAnswer: (request: QuestionAnswerRequest) => void;
 }) {
@@ -3689,7 +3717,7 @@ function QuestionBanner({
 
   function submitQuestion(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (busy || !complete) return;
+    if (busy || submitDisabled || !complete) return;
     onAnswer(buildQuestionAnswerRequest(question, answers));
   }
 
@@ -3766,7 +3794,7 @@ function QuestionBanner({
       <div className="question-actions">
         <button
           type="submit"
-          disabled={busy || !complete}
+          disabled={busy || submitDisabled || !complete}
           aria-busy={busy}
           data-busy={busy || undefined}
         >
@@ -3789,10 +3817,12 @@ function questionAnswerDraftComplete(draft: QuestionAnswerDraft | undefined): bo
 
 function PlanActionBanner({
   busy,
+  disabled = false,
   error,
   onAction
 }: {
   busy: PlanAction | null;
+  disabled?: boolean;
   error: string;
   onAction: (action: PlanAction) => void;
 }) {
@@ -3811,7 +3841,7 @@ function PlanActionBanner({
           <button
             key={action}
             type="button"
-            disabled={Boolean(busy)}
+            disabled={disabled || Boolean(busy)}
             aria-busy={busy === action}
             data-busy={busy === action || undefined}
             onClick={() => onAction(action)}

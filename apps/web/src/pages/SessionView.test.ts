@@ -386,6 +386,32 @@ describe("ApprovalBanner", () => {
     expect(html).toContain("Always allow prefix");
     expect(html).toContain("Deny");
   });
+
+  it("disables approval actions while the session is initializing", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-initializing",
+      sessionId: "session-a",
+      messageId: "message-initializing",
+      kind: "command",
+      title: "Run a command?",
+      command: "git status",
+      toolName: null,
+      cwd: null,
+      reason: null,
+      prefixRule: null,
+      options: [
+        { decision: "approve_once", label: "Approve once", description: "Run the command." },
+        { decision: "deny", label: "Deny", description: "Do not run the command." }
+      ],
+      createdAt: "2026-08-25T00:00:00.000Z"
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(ApprovalBanner, { approval, busy: null, disabled: true, error: "", onDecision: () => undefined })
+    );
+
+    expect(html.match(/disabled=""/g)).toHaveLength(2);
+  });
 });
 
 describe("shouldSubmitComposer", () => {
@@ -863,6 +889,11 @@ describe("shouldQueueComposerInput", () => {
     expect(shouldQueueComposerInput({ status: "working" }, [])).toBe(true);
     expect(shouldQueueComposerInput({ status: "queued" }, [])).toBe(true);
     expect(shouldQueueComposerInput({ status: "waiting" }, [{ status: "queued" }])).toBe(true);
+  });
+
+  it("queues while Codex is initializing even when the provisional status is ready", () => {
+    expect(shouldQueueComposerInput({ status: "waiting", initializing: true }, [])).toBe(true);
+    expect(shouldQueueComposerInput({ status: "idle", initializing: true }, [])).toBe(true);
   });
 
   it("sends directly when the session is ready and the queue is empty", () => {
@@ -1359,8 +1390,8 @@ describe("session scroll behavior", () => {
     expect(shouldShowSessionLoading({ id: "session-a" }, "session-a", "session-a")).toBe(false);
   });
 
-  it("keeps initializing sessions loading after the initial transcript is ready", () => {
-    expect(shouldShowSessionLoading({ id: "session-a", initializing: true }, "session-a", "session-a")).toBe(true);
+  it("shows an initializing session after the initial transcript is ready", () => {
+    expect(shouldShowSessionLoading({ id: "session-a", initializing: true }, "session-a", "session-a")).toBe(false);
     expect(shouldShowSessionLoading({ id: "session-a", initializing: false }, "session-a", "session-a")).toBe(false);
   });
 
