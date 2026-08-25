@@ -64,6 +64,25 @@ describe("api client request headers", () => {
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
+  it("uses the API error field instead of exposing raw JSON response text", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "The Codex composer already contains input" }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+
+    await expect(api.action("session-1", { type: "retryInputDelivery" })).rejects.toEqual(
+      new ApiError("The Codex composer already contains input", 409)
+    );
+  });
+
+  it("preserves plain-text API errors", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("Gateway unavailable", { status: 502 }));
+
+    await expect(api.sessions()).rejects.toEqual(new ApiError("Gateway unavailable", 502));
+  });
+
   it("does not dispatch auth-expired for network failures", async () => {
     const authEvents = new EventTarget();
     const listener = vi.fn();

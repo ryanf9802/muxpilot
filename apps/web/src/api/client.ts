@@ -76,7 +76,7 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     if (response.status === 401) dispatchAuthExpired();
-    throw new ApiError((await response.text()) || response.statusText, response.status);
+    throw new ApiError(await responseError(response), response.status);
   }
   return (await response.json()) as T;
 }
