@@ -168,6 +168,13 @@ describe("verified input transport", () => {
     expect(composerContainsInput("› open \u001b]8;;https://example.com\u001b\\https://example.com\u001b]8;;\u001b\\", "open https://example.com")).toBe(true);
   });
 
+  it("recognizes collapsed Codex paste placeholders only when their character counts match", () => {
+    expect(composerContainsInput("› [Pasted Content 1028 chars]", `${"a".repeat(1027)} `)).toBe(true);
+    expect(composerContainsInput("› [Pasted Content 4086 chars][Pasted Content 1022 chars]", "a".repeat(5108))).toBe(true);
+    expect(composerContainsInput("› [Pasted Content 1027 chars]", "a".repeat(1028))).toBe(false);
+    expect(composerContainsInput("› before [Pasted Content 1021 chars]", "a".repeat(1028))).toBe(false);
+  });
+
   it("recognizes a long prompt across terminal hard-wrap boundaries", () => {
     const prefix = "Use the new teamweave database skill. ";
     const filler = "attributes and filters ".repeat(20);
@@ -305,6 +312,62 @@ describe("verified input transport", () => {
       reason: "composer_changed"
     });
     expect(submits).toEqual([]);
+  });
+
+  it("submits a collapsed paste placeholder without replaying the paste", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteSettleMs: 0, pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const prompt = "a".repeat(1028);
+    let composer = "";
+    let pasteCount = 0;
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => {
+      pasteCount += 1;
+      composer = `[Pasted Content ${text.length} chars]`;
+    };
+    adapter.capturePane = async () => `› ${composer}`;
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.sendInput("%1", prompt)).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(pasteCount).toBe(1);
+    expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("submits an already composed matching placeholder without pasting again", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteSettleMs: 0, pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const prompt = "a".repeat(1028);
+    let composer = `[Pasted Content ${prompt.length} chars]`;
+    let pasteCount = 0;
+    const submits: string[][] = [];
+    adapter.capturePane = async () => `› ${composer}`;
+    adapter.pasteText = async () => { pasteCount += 1; };
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.submitComposedInput("%1", prompt)).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(pasteCount).toBe(0);
+    expect(submits).toEqual([["Enter"]]);
+  });
+
+  it("does not submit an existing matching placeholder outside a retry", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteSettleMs: 0, pasteVerifyTimeoutMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    const prompt = "a".repeat(1028);
+    let pasted = false;
+    adapter.capturePane = async () => `› [Pasted Content ${prompt.length} chars]`;
+    adapter.pasteText = async () => { pasted = true; };
+
+    await expect(adapter.sendInput("%1", prompt)).rejects.toMatchObject({ reason: "composer_changed" });
+    expect(pasted).toBe(false);
   });
 });
 

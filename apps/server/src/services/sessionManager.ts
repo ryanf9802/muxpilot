@@ -1739,7 +1739,8 @@ export class SessionManager {
     }
     const message = await this.db.latestUserMessage(session.id);
     const submission = message ? muxpilotSubmission(message) : null;
-    if (!message || !submission || submission.state !== "failed") {
+    const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
+    if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) {
       throw new InputDeliveryError("There is no failed input delivery to retry");
     }
     const pane = await this.livePane(session);

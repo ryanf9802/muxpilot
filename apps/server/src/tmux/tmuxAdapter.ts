@@ -383,6 +383,8 @@ export function composerContainsInput(capture: string, text: string): boolean {
   ].join("\n"));
   const expected = normalizeComposerText(text);
   if (!expected) return false;
+  const pastedContentLength = codexPastedContentLength(firstLine);
+  if (pastedContentLength !== null) return pastedContentLength === text.length;
   const compactComposer = compactComposerText(composer);
   const compactExpected = compactComposerText(expected);
   if (expected.length <= 256) return compactComposer === compactExpected;
@@ -408,6 +410,12 @@ function normalizeComposerText(text: string): string {
 
 function compactComposerText(text: string): string {
   return stripTerminalFormatting(text).replace(/\s+/g, "");
+}
+
+function codexPastedContentLength(text: string): number | null {
+  const matches = [...text.matchAll(/\[Pasted Content (\d+) chars\]/g)];
+  if (matches.length === 0 || matches.map((match) => match[0]).join("") !== text) return null;
+  return matches.reduce((total, match) => total + Number(match[1]), 0);
 }
 
 function captureShowsActiveTurn(capture: string): boolean {

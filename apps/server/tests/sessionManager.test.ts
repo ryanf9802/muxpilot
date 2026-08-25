@@ -2805,7 +2805,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
-  it("acknowledges a pending submission when Codex visibly starts and allows dismissal after failure", async () => {
+  it("acknowledges a pending submission and retries it after a dismissed delivery failure", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -2836,7 +2836,12 @@ describe("SessionManager transcript isolation", () => {
     pane.title = "codex";
     await harness.db.updateMessagePayload(submitted, {
       ...submitted.payload,
-      muxpilotSubmission: { state: "failed", attemptCount: 1, lastAttemptAt: submitted.timestamp }
+      muxpilotSubmission: {
+        state: "failed",
+        deliveryPhase: "failed",
+        attemptCount: 1,
+        lastAttemptAt: submitted.timestamp
+      }
     });
     await harness.manager.discover();
     expect(harness.manager.getSession(session.id)?.status).toBe("input_failed");
@@ -2844,6 +2849,17 @@ describe("SessionManager transcript isolation", () => {
     const dismissed = await harness.manager.act(session.id, { type: "dismissInputDeliveryFailure" });
     expect(dismissed?.status).toBe("waiting");
     expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({ muxpilotSubmission: { state: "dismissed" } });
+
+    const sentInputs: string[] = [];
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    const retried = await harness.manager.act(session.id, { type: "retryInputDelivery" });
+
+    expect(sentInputs).toEqual(["Start this prompt "]);
+    expect(retried?.status).toBe("working");
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: { state: "pending", deliveryPhase: "awaiting_ack", attemptCount: 2 }
+    });
     await harness.db.close();
   });
 
