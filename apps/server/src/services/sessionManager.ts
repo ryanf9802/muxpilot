@@ -2070,7 +2070,24 @@ export class SessionManager {
     }
 
     const pane = await this.livePane(session);
-    await this.tmux.sendInput(pane.paneId, "/fast");
+    const terminalText = codexTerminalUserText("/fast");
+    try {
+      const capture = await this.tmux.capturePane(
+        pane.paneId,
+        inputVerificationCaptureLines(terminalText, paneWidth(pane)),
+        true
+      );
+      if (composerContainsInput(capture, terminalText)) {
+        await this.tmux.submitComposedInput(pane.paneId, terminalText);
+      } else if (composerHasInput(capture)) {
+        throw new FastModeSwitchError("The Codex composer contains different input; it was not overwritten");
+      } else {
+        await this.tmux.sendInput(pane.paneId, "/fast");
+      }
+    } catch (error) {
+      if (error instanceof FastModeSwitchError) throw error;
+      throw new FastModeSwitchError(error instanceof Error ? error.message : String(error));
+    }
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await delay(100);
       if (await readLatestCodexFastMode(session.codexJsonlPath) !== enabled) continue;

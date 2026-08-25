@@ -376,7 +376,7 @@ export function composerContainsInput(capture: string, text: string): boolean {
   if (composerUsesDimPlaceholder(lines[composerIndex]!)) return false;
   const firstLine = normalizeComposerText(visibleComposerLine(lines[composerIndex]!));
   const continuationLines = lines.slice(composerIndex + 1);
-  const composerBoundary = continuationLines.findIndex(isComposerContinuationBoundary);
+  const composerBoundary = continuationLines.findIndex((line) => isComposerContinuationBoundary(line, firstLine));
   const composer = normalizeComposerText([
     firstLine,
     ...(composerBoundary >= 0 ? continuationLines.slice(0, composerBoundary) : continuationLines)
@@ -432,12 +432,18 @@ function isComposerLine(line: string): boolean {
   return /^\s*›(?!\s*\d+\.)/.test(stripTerminalFormatting(line));
 }
 
-function isComposerContinuationBoundary(line: string): boolean {
+function isComposerContinuationBoundary(line: string, composerFirstLine: string): boolean {
   const normalized = stripTerminalFormatting(line).trim().toLowerCase();
   return normalized.includes("working (") ||
     normalized.includes("esc to interrupt") ||
     /context \d+% left/.test(normalized) ||
-    normalized === "type yes to continue";
+    normalized === "type yes to continue" ||
+    isSlashCommandSuggestion(normalized, composerFirstLine);
+}
+
+function isSlashCommandSuggestion(line: string, composerFirstLine: string): boolean {
+  const command = normalizeComposerText(composerFirstLine);
+  return command.startsWith("/") && line.startsWith(`${command.toLowerCase()}  `);
 }
 
 function visibleComposerLine(line: string): string {

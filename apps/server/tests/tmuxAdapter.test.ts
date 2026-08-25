@@ -175,6 +175,13 @@ describe("verified input transport", () => {
     expect(composerContainsInput("› before [Pasted Content 1021 chars]", "a".repeat(1028))).toBe(false);
   });
 
+  it("ignores the matching slash-command suggestion below the composer", () => {
+    const capture = "› /fast\n \n  /fast  1.5x speed, increased usage\n \n  gpt-5.6-sol medium · Context 80% left";
+
+    expect(composerContainsInput(capture, "/fast ")).toBe(true);
+    expect(composerContainsInput(capture, "/slow ")).toBe(false);
+  });
+
   it("recognizes a long prompt across terminal hard-wrap boundaries", () => {
     const prefix = "Use the new teamweave database skill. ";
     const filler = "attributes and filters ".repeat(20);

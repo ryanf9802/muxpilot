@@ -2209,6 +2209,57 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("submits an exact stranded Fast mode command without repasting", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const mtime = new Date("2026-07-07T00:00:00.000Z");
+    const sessionPath = join(harness.codexHome, "sessions", "session.jsonl");
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "first prompt",
+      assistant: "first answer",
+      mtime
+    });
+    await appendFile(
+      sessionPath,
+      `${JSON.stringify({
+        timestamp: "2026-07-07T00:00:03.000Z",
+        type: "event_msg",
+        payload: { type: "thread_settings_applied", thread_settings: { service_tier: "priority" } }
+      })}\n`
+    );
+    await utimes(sessionPath, mtime, mtime);
+    const pane = testPane({ cwd: repo, paneId: "%1", title: "codex" });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› /fast\n \n  /fast  1.5x speed, increased usage";
+    const sentInputs: string[] = [];
+    const submittedComposers: string[] = [];
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    harness.tmux.submitComposedInput = async (_paneId, text) => {
+      submittedComposers.push(text);
+      await appendFile(
+        sessionPath,
+        `${JSON.stringify({
+          timestamp: "2026-07-07T00:00:04.000Z",
+          type: "event_msg",
+          payload: { type: "thread_settings_applied", thread_settings: { service_tier: "default" } }
+        })}\n`
+      );
+      return { pasteReplayCount: 0, submitKeyRetryCount: 0 };
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const updated = await harness.manager.act(session.id, { type: "setFastMode", enabled: false });
+
+    expect(sentInputs).toEqual([]);
+    expect(submittedComposers).toEqual(["/fast "]);
+    expect(updated?.fastMode).toBe(false);
+    harness.db.close();
+  });
+
   it("detects an explicit Standard tier beyond the previous JSONL tail window", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
