@@ -59,6 +59,7 @@ import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
 import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
 import type { PortableSession } from "./sessionTransfer.js";
+import { isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -107,6 +108,7 @@ const PLAN_ACTION_START_GRACE_MS = 15_000;
 const INPUT_DELIVERY_ACK_TIMEOUT_MS = 30_000;
 const AGENT_DESCENDANT_LIMIT = 2;
 const DEFAULT_AGENT_WORK_TOKEN_BUDGET = 1_000_000;
+const AGENT_SCOPE_UNAVAILABLE_MESSAGE = "Independent agent-session resource scopes are unavailable. Run sudo loginctl enable-linger $USER, restart muxpilot, and restore the session before retrying.";
 type InputDeliveryFailureCode =
   | "paste_not_observed"
   | "submit_not_accepted"
@@ -198,22 +200,26 @@ export class SessionManager {
       capabilityId: capability.capabilityId,
       options: {
         ...options,
-        resourceScopeName: this.managedEnvironment.MUXPILOT_RESOURCE_GOVERNOR_ENABLED === "1"
-          ? `muxpilot-session-${capability.capabilityId}.scope`
+        resourceScopeName: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
+          ? sessionScopeName(capability.capabilityId)
           : options.resourceScopeName,
+        resourceScopeEnvironment: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
+          ? userSystemdLaunchEnvironment(this.managedEnvironment)
+          : options.resourceScopeEnvironment,
         mcpServers: [...(options.mcpServers ?? []), capability.server],
         developerInstructions: [options.developerInstructions, instruction].filter(Boolean).join(" ")
       }
     };
   }
 
-  private async bindOrchestratedLaunch(capabilityId: string | null, sessionId: string): Promise<void> {
-    if (!capabilityId || !this.orchestrationProvider) return;
+  private async bindOrchestratedLaunch(capabilityId: string | null, sessionId: string): Promise<ManagedSession> {
+    if (!capabilityId || !this.orchestrationProvider) return requireSession(await this.db.getSession(sessionId));
     await this.orchestrationProvider.bindCapability(capabilityId, sessionId);
     await this.db.setSessionOrchestrationAvailable(sessionId, true, nowIso());
-    if (this.managedEnvironment.MUXPILOT_RESOURCE_GOVERNOR_ENABLED === "1") {
-      await this.db.setSessionResourceScope(sessionId, `muxpilot-session-${capabilityId}.scope`, nowIso());
+    if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1") {
+      await this.db.setSessionResourceScope(sessionId, sessionScopeName(capabilityId), nowIso());
     }
+    return requireSession(await this.db.getSession(sessionId));
   }
 
   async sessionIdForWorkspace(workspaceId: string): Promise<string | null> {
@@ -896,8 +902,8 @@ export class SessionManager {
       source.codexSessionId,
       prepared.options
     );
-    const session = await this.rebindRestoredSession(source, launch.pane);
-    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
+    let session = await this.rebindRestoredSession(source, launch.pane);
+    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
@@ -1339,6 +1345,9 @@ export class SessionManager {
   async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
     return this.withAgentMutation(async () => {
       const actor = requireSession(await this.db.getSession(actorSessionId));
+      if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
+        throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
+      }
       const all = await this.db.listSessions(true);
       const rootSessionId = actor.agentOwnership?.rootSessionId ?? actor.id;
       if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
@@ -1379,12 +1388,18 @@ export class SessionManager {
   async agentClaim(actorSessionId: string, childSessionId: string): Promise<ManagedSession> {
     return this.withAgentMutation(async () => {
       const actor = requireSession(await this.db.getSession(actorSessionId));
+      if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
+        throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
+      }
       const child = requireSession(await this.db.getSession(childSessionId));
       if (child.id === actor.id) throw new AgentSessionError("A session cannot claim itself");
       if (child.agentOwnership) throw new AgentSessionError("Session already has an agent manager");
       if (child.status === "missing" || child.archived) throw new AgentSessionError("Only live sessions can be claimed");
       const all = await this.db.listSessions(true);
       const claimedSubtree = [child, ...agentDescendants(all, child.id)];
+      if (claimedSubtree.some((session) => isLiveManagedSession(session) && !isMuxpilotSessionScope(session.resourceScope))) {
+        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be claimed. Restore this session after enabling user systemd scopes, then retry.");
+      }
       if (claimedSubtree.some((session) => session.id === actor.id)) {
         throw new AgentSessionError("Claiming this session would create an agent-session cycle");
       }
@@ -1454,6 +1469,13 @@ export class SessionManager {
         await this.db.addAudit("local", "detach_agent_session", child.id, "ok", nowIso());
         this.publish("session.updated", child.id, updated);
         return updated;
+      }
+
+      if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
+        throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
+      }
+      if (all.some((session) => subtreeIds.has(session.id) && isLiveManagedSession(session) && !isMuxpilotSessionScope(session.resourceScope))) {
+        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be attached. Restore this session after enabling user systemd scopes, then retry.");
       }
 
       const parent = requireSession(await this.db.getSession(parentSessionId));
@@ -1775,8 +1797,8 @@ export class SessionManager {
       ...launchSettings
     });
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, prepared.options);
-    const session = await this.persistInitializingSession(launch.pane, directory);
-    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
+    let session = await this.persistInitializingSession(launch.pane, directory);
+    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
     this.publish("session.updated", session.id, session);
@@ -1812,8 +1834,8 @@ export class SessionManager {
     );
     const sessionId = tmuxPaneSessionId(launch.pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
-    const session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary);
-    await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
+    let session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary);
+    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
     this.publish("session.updated", session.id, session);
@@ -1866,8 +1888,8 @@ export class SessionManager {
       orchestrationCapabilityId = prepared.capabilityId;
     }
 
-    const session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source);
-    await this.bindOrchestratedLaunch(orchestrationCapabilityId, session.id);
+    let session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source);
+    session = await this.bindOrchestratedLaunch(orchestrationCapabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
     this.publish("session.updated", session.id, session);
@@ -2747,6 +2769,14 @@ export class SessionNotFoundError extends Error {
 
 export class AgentSessionError extends Error {
   readonly statusCode = 409;
+}
+
+function userSystemdLaunchEnvironment(environment: Record<string, string>): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const key of ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
+    if (environment[key]) result[key] = environment[key];
+  }
+  return result;
 }
 
 function isLiveAgentSession(session: ManagedSession): boolean {

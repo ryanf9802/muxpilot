@@ -1,7 +1,7 @@
 import { appendFile, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ManagedSession, TmuxPane } from "@muxpilot/core";
 import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore, type CodexSessionFile } from "../src/codex/codexSessionStore.js";
@@ -21,7 +21,7 @@ import {
   transcriptOverlapScore,
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
-import { InputTransportError, TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
+import { InputTransportError, TmuxAdapter, type CodexLaunchOptions } from "../src/tmux/tmuxAdapter.js";
 
 describe("Codex pane model settings", () => {
   it("reads the persistent status line", () => {
@@ -4927,10 +4927,18 @@ describe("SessionManager transcript isolation", () => {
     const otherRepo = join(harness.dir, "other-repo");
     await mkdir(otherRepo);
     let panes = [testPane({ cwd: otherRepo, paneId: "%1", windowId: "@1" })];
-    const createCalls: Array<{ cwd: string; name: string }> = [];
+    const createCalls: Array<{ cwd: string; name: string; options: CodexLaunchOptions }> = [];
+    const bindCapability = vi.fn(async () => undefined);
+    harness.manager.setOrchestrationProvider({
+      prepareLaunch: async () => ({
+        capabilityId: "0123456789abcdef01234567",
+        server: { name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/tmp/mcp.mjs"] }
+      }),
+      bindCapability
+    });
     harness.tmux.listPanes = async () => panes;
-    harness.tmux.createCodexWindowInMuxpilotSession = async (cwd, name) => {
-      createCalls.push({ cwd, name });
+    harness.tmux.createCodexWindowInMuxpilotSession = async (cwd, name, options) => {
+      createCalls.push({ cwd, name, options });
       const pane = testPane({ cwd, paneId: "%2", windowId: "@2", windowName: name, title: name, pid: 456, sessionName: "muxpilot" });
       panes = [...panes, pane];
       return { pane, ready: pendingReadiness() };
@@ -4939,7 +4947,14 @@ describe("SessionManager transcript isolation", () => {
 
     const created = await harness.manager.createSessionInDirectory(repo, "new-work");
 
-    expect(createCalls).toEqual([{ cwd: repo, name: "new-work" }]);
+    expect(createCalls).toEqual([{ cwd: repo, name: "new-work", options: expect.objectContaining({
+      resourceScopeName: "muxpilot-session-0123456789abcdef01234567.scope"
+    }) }]);
+    expect(bindCapability).toHaveBeenCalledWith("0123456789abcdef01234567", created.id);
+    expect(created).toMatchObject({
+      orchestrationAvailable: true,
+      resourceScope: "muxpilot-session-0123456789abcdef01234567.scope"
+    });
     expect(created.tmux.sessionName).toBe("muxpilot");
     expect(created.tmux.paneId).toBe("%2");
     expect(created.tmux.windowName).toBe("new-work");
@@ -5739,9 +5754,38 @@ describe("agent-managed session hierarchy", () => {
     });
     await harness.db.close();
   });
+
+  it("refuses agent creation and claims when session scopes are unavailable", async () => {
+    const harness = await createHarness({ sessionScopesAvailable: false });
+    const root = agentHierarchySession("scope-root");
+    const child = agentHierarchySession("scope-child");
+    await harness.db.upsertSession(root, "2026-08-25T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
+
+    await expect(harness.manager.agentCreateChild(root.id, "new-child", "Do work"))
+      .rejects.toThrow("loginctl enable-linger");
+    await expect(harness.manager.agentClaim(root.id, child.id))
+      .rejects.toThrow("loginctl enable-linger");
+    expect(await harness.db.getSession(child.id)).toMatchObject({ agentOwnership: null });
+    await harness.db.close();
+  });
+
+  it("refuses to claim a live session that was not relaunched into a dedicated scope", async () => {
+    const harness = await createHarness();
+    const root = agentHierarchySession("claim-root");
+    const child = { ...agentHierarchySession("claim-child"), resourceScope: null };
+    await harness.db.upsertSession(root, "2026-08-25T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
+
+    await expect(harness.manager.agentClaim(root.id, child.id))
+      .rejects.toThrow("dedicated muxpilot resource scopes");
+    await expect(harness.manager.operatorSetAgentParent(child.id, root.id))
+      .rejects.toThrow("dedicated muxpilot resource scopes");
+    await harness.db.close();
+  });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(options: { sessionScopesAvailable?: boolean } = {}): Promise<{
   dir: string;
   codexHome: string;
   db: AppDatabase;
@@ -5773,7 +5817,11 @@ async function createHarness(): Promise<{
     { approveOnce: [], approveForPrefix: [], deny: [] },
     ["BTab"],
     activitySummarizer,
-    processLookup
+    processLookup,
+    null,
+    codexHome,
+    null,
+    { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" }
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
 }
@@ -5818,7 +5866,8 @@ function agentHierarchySession(id: string): ManagedSession {
     pinned: false,
     archived: false,
     gitWorkspace: null,
-    resourceUsage: null
+    resourceUsage: null,
+    resourceScope: "muxpilot-session-0123456789abcdef01234567.scope"
   };
 }
 

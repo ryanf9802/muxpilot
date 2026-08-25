@@ -103,6 +103,19 @@ The built-in pricing table covers `gpt-4.1`, `gpt-4.1-mini`, and `gpt-4.1-nano` 
 
 On systemd-based Linux and WSL 2, muxpilot divides the configured agent pools across sessions whose status is initializing, working, generating, executing, planning, or unknown. Sessions that remain idle for five seconds fall back to a 512 MiB soft limit, 1 GiB hard limit, and 25% CPU quota. Hard memory limits are lowered only after current use fits, unless Linux reports less than 8% memory available. Muxpilot restores the scopes it changed to unlimited during a clean shutdown.
 
+Session isolation requires a persistent user systemd manager. Enable it once, verify the user bus, and restart muxpilot:
+
+```bash
+sudo loginctl enable-linger "$USER"
+test -S "/run/user/$(id -u)/bus"
+XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" systemctl --user show init.scope --property=Id --value
+pnpm app restart prod
+```
+
+When the user manager is unavailable, ordinary operator-created sessions continue without a dedicated scope and Docker guarding remains independent. Agent-created sessions are refused rather than silently sharing a parent pool, and an existing unscoped session cannot be claimed as an agent child. After enabling scopes, kill and restore any existing session that needs orchestration or agent ownership so it relaunches with the MCP tools and its own scope.
+
+The governor only changes scopes named `muxpilot-session-<capability>.scope`; it never applies limits to `init.scope` or another ambient user scope.
+
 Managed sessions receive a muxpilot-owned `DOCKER_HOST` Unix socket. Containers created through that socket are labeled, constrained to the shared Docker pool, capped at 512 processes, and rebalanced as managed containers start and stop. Explicit caller limits are preserved when they are stricter. Existing unrelated containers are not changed. If the Docker daemon is unavailable, Docker commands return a clear proxy error while non-Docker work remains available.
 
 Use `pnpm app status` to see the effective pool settings and whether the Docker proxy socket is active. Resource settings are environment-only; changing them requires restarting muxpilot.

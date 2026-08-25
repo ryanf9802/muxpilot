@@ -36,11 +36,18 @@ describe("codexCommandArgs", () => {
   it("launches session tooling inside its own resource scope", () => {
     expect(codexCommandArgs("/tmp/control", {
       resourceScopeName: "muxpilot-session-child.scope",
+      resourceScopeEnvironment: {
+        XDG_RUNTIME_DIR: "/run/user/1000",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"
+      },
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       fastMode: true,
       mcpServers: [{ name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/app/mcp.mjs", "/run/capability.json"] }]
     })).toEqual([
+      "env",
+      "XDG_RUNTIME_DIR=/run/user/1000",
+      "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
       "systemd-run",
       "--user",
       "--scope",

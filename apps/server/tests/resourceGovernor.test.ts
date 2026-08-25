@@ -9,7 +9,9 @@ import {
 } from "../src/services/resourceGovernor.js";
 
 const config = {
+  configured: true,
   enabled: true,
+  unavailableReason: null,
   agentMemorySoftPercent: 50,
   agentMemoryHardPercent: 60,
   agentCpuPercent: 75,
@@ -63,18 +65,19 @@ describe("ResourceGovernor", () => {
     const properties: string[][] = [];
     let metrics = { memoryCurrentBytes: 2 * 1024 ** 3, cpuUsageNsec: 1_000_000_000 };
     const controller: SystemdController = {
-      scopeForPid: vi.fn(async () => "tmux-spawn-test.scope"),
       metrics: vi.fn(async () => metrics),
       setProperties: vi.fn(async (_scope, next) => { properties.push(next); })
     };
     const logger = { info: vi.fn(), warn: vi.fn() };
-    const managedSession = { ...session("one", "working"), resourceScope: "muxpilot-session-one.scope" };
+    const managedSession = { ...session("one", "working"), resourceScope: "muxpilot-session-0123456789abcdef01234567.scope" };
     const governor = new ResourceGovernor(config, async () => [managedSession], logger, controller);
     const now = vi.spyOn(Date, "now").mockReturnValue(1000);
 
     await governor.reconcile();
     expect(governor.snapshot()).toMatchObject({
       enabled: true,
+      managedSessions: 1,
+      unmanagedSessions: 0,
       busySessions: 1,
       idleSessions: 0,
       tasksMax: 768
@@ -94,8 +97,7 @@ describe("ResourceGovernor", () => {
     await governor.stop();
     now.mockRestore();
 
-    expect(controller.scopeForPid).not.toHaveBeenCalled();
-    expect(controller.setProperties).toHaveBeenCalledWith("muxpilot-session-one.scope", expect.any(Array));
+    expect(controller.setProperties).toHaveBeenCalledWith("muxpilot-session-0123456789abcdef01234567.scope", expect.any(Array));
     expect(properties[0]).toEqual(expect.arrayContaining([
       `CPUQuota=${Math.max(1, Math.round(75 * cpus().length * 100) / 100)}%`,
       "TasksMax=768"
@@ -107,6 +109,49 @@ describe("ResourceGovernor", () => {
       "MemoryMax=infinity",
       "TasksMax=infinity"
     ]);
+  });
+
+  it("never manages ambient or malformed scopes", async () => {
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => undefined)
+    };
+    const sessions = [
+      { ...session("init", "working"), resourceScope: "init.scope" },
+      { ...session("legacy", "waiting"), resourceScope: null },
+      { ...session("other", "planning"), resourceScope: "other.scope" }
+    ];
+    const governor = new ResourceGovernor(config, async () => sessions, { info: vi.fn(), warn: vi.fn() }, controller);
+
+    await governor.reconcile();
+
+    expect(controller.metrics).not.toHaveBeenCalled();
+    expect(controller.setProperties).not.toHaveBeenCalled();
+    expect(governor.snapshot()).toMatchObject({ managedSessions: 0, unmanagedSessions: 3 });
+  });
+
+  it("reports unavailable scopes without invoking systemd", async () => {
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => undefined)
+    };
+    const governor = new ResourceGovernor({
+      ...config,
+      enabled: false,
+      unavailableReason: "user_systemd_unavailable"
+    }, async () => [session("legacy", "working")], { info: vi.fn(), warn: vi.fn() }, controller);
+
+    await governor.reconcile();
+
+    expect(governor.snapshot()).toMatchObject({
+      configured: true,
+      enabled: false,
+      unavailableReason: "user_systemd_unavailable",
+      managedSessions: 0,
+      unmanagedSessions: 1
+    });
+    expect(controller.metrics).not.toHaveBeenCalled();
+    expect(controller.setProperties).not.toHaveBeenCalled();
   });
 });
 

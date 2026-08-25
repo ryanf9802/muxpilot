@@ -20,12 +20,13 @@ import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 import { SessionTransferService } from "./services/sessionTransfer.js";
-import { ResourceGovernor } from "./services/resourceGovernor.js";
+import { ResourceGovernor, UserSystemdController } from "./services/resourceGovernor.js";
 import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
 import { HeavyCommandService } from "./services/heavyCommands.js";
 import { join } from "node:path";
 import { GitWorkflowBroker } from "./services/gitWorkflowBroker.js";
 import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroker.js";
+import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -73,8 +74,16 @@ const activitySummarizer = new ActivitySummarizer({
   logger: app.log
 });
 let dockerProxy: DockerResourceProxy | null = null;
+const sessionScopes = await detectSessionScopeCapability(config.resourceGovernor !== "off");
+if (sessionScopes.configured && !sessionScopes.available) {
+  app.log.warn(
+    { reason: sessionScopes.unavailableReason },
+    "user systemd session scopes are unavailable; ordinary sessions remain available but agent-managed creation is disabled"
+  );
+}
 const managedEnvironment: Record<string, string> = {
-  MUXPILOT_RESOURCE_GOVERNOR_ENABLED: config.resourceGovernor !== "off" ? "1" : "0",
+  MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
+  ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
@@ -135,12 +144,14 @@ const heavyCommands = new HeavyCommandService(
 manager.setHeavyCommandQueue(heavyCommands);
 heavyCommands.start(manager);
 const resourceGovernor = new ResourceGovernor({
-  enabled: config.resourceGovernor !== "off",
+  configured: sessionScopes.configured,
+  enabled: sessionScopes.available,
+  unavailableReason: sessionScopes.unavailableReason,
   agentMemorySoftPercent: config.agentMemorySoftPercent,
   agentMemoryHardPercent: config.agentMemoryHardPercent,
   agentCpuPercent: config.agentCpuPercent,
   sessionTasksMax: config.sessionTasksMax
-}, () => db.listSessions(), app.log);
+}, () => db.listSessions(), app.log, new UserSystemdController(sessionScopes.environment));
 manager.setResourceUsageLookup(resourceGovernor);
 const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
 await sessionTransfers.initialize();

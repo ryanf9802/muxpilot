@@ -7,6 +7,7 @@ import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
 import type { ManagedSession, QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
+import { isMuxpilotSessionScope } from "./sessionScopes.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TERMINAL_OR_ATTENTION = new Set(["idle", "waiting", "question", "approval", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);
@@ -288,7 +289,11 @@ function summarizeSession(session: ManagedSession) {
     budget: ownership ? { used, limit: ownership.workTokenBudget, remaining: Math.max(0, ownership.workTokenBudget - (used ?? 0)) } : null,
     lastActivityAt: session.lastActivityAt,
     preview: session.preview.slice(0, 500),
-    orchestrationAvailable: session.orchestrationAvailable === true
+    orchestrationAvailable: session.orchestrationAvailable === true,
+    resourceIsolation: {
+      isolated: isMuxpilotSessionScope(session.resourceScope),
+      scope: isMuxpilotSessionScope(session.resourceScope) ? session.resourceScope : null
+    }
   };
 }
 

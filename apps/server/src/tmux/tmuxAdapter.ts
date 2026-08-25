@@ -40,6 +40,7 @@ export interface CodexLaunchOptions {
   environment?: Record<string, string>;
   mcpServers?: Array<{ name: string; command: string; args: string[] }>;
   resourceScopeName?: string;
+  resourceScopeEnvironment?: Record<string, string>;
   model?: string | null;
   reasoningEffort?: string | null;
   fastMode?: boolean | null;
@@ -549,7 +550,12 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   if (continuation) codexArgs.push(continuation.mode, continuation.sessionId);
   const command = ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];
   return options.resourceScopeName
-    ? ["systemd-run", "--user", "--scope", "--quiet", "--collect", `--unit=${options.resourceScopeName}`, ...command]
+    ? [
+        "env",
+        ...Object.entries(options.resourceScopeEnvironment ?? {}).map(([key, value]) => `${key}=${value}`),
+        "systemd-run", "--user", "--scope", "--quiet", "--collect", `--unit=${options.resourceScopeName}`,
+        ...command
+      ]
     : command;
 }
 

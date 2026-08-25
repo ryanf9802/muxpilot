@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
-import { basename } from "node:path";
 import { promisify } from "node:util";
 import type { ManagedSession, SessionResourceUsage, SessionStatus } from "@muxpilot/core";
+import { isMuxpilotSessionScope, type SessionScopeUnavailableReason } from "./sessionScopes.js";
 
 const execFileAsync = promisify(execFile);
 const BUSY_STATUSES = new Set<SessionStatus>([
@@ -19,7 +19,9 @@ const IDLE_CPU_PERCENT = 25;
 const IDLE_HYSTERESIS_MS = 5000;
 
 export interface ResourceGovernorConfig {
+  configured: boolean;
   enabled: boolean;
+  unavailableReason: SessionScopeUnavailableReason | null;
   agentMemorySoftPercent: number;
   agentMemoryHardPercent: number;
   agentCpuPercent: number;
@@ -36,7 +38,11 @@ export interface SessionResourceAllocation {
 }
 
 export interface ResourceGovernorSnapshot {
+  configured: boolean;
   enabled: boolean;
+  unavailableReason: SessionScopeUnavailableReason | null;
+  managedSessions: number;
+  unmanagedSessions: number;
   busySessions: number;
   idleSessions: number;
   busyMemoryHighBytes: number | null;
@@ -51,7 +57,6 @@ interface Logger {
 }
 
 export interface SystemdController {
-  scopeForPid(pid: number): Promise<string | null>;
   metrics(scope: string): Promise<ScopeResourceMetrics>;
   setProperties(scope: string, properties: string[]): Promise<void>;
 }
@@ -77,7 +82,11 @@ export class ResourceGovernor {
     private readonly controller: SystemdController = new UserSystemdController()
   ) {
     this.currentSnapshot = {
+      configured: config.configured,
       enabled: config.enabled,
+      unavailableReason: config.unavailableReason,
+      managedSessions: 0,
+      unmanagedSessions: 0,
       busySessions: 0,
       idleSessions: 0,
       busyMemoryHighBytes: null,
@@ -96,7 +105,7 @@ export class ResourceGovernor {
   }
 
   start(): void {
-    if (!this.config.enabled || this.timer) return;
+    if (!this.config.configured || this.timer) return;
     void this.reconcile();
     this.timer = setInterval(() => void this.reconcile(), this.config.reconcileIntervalMs ?? 2000);
     this.timer.unref();
@@ -119,17 +128,24 @@ export class ResourceGovernor {
   }
 
   async reconcile(): Promise<void> {
-    if (!this.config.enabled || this.running) return;
+    if (!this.config.configured || this.running) return;
     this.running = true;
     try {
-      const sessions = (await this.listSessions()).filter((session) =>
+      const liveSessions = (await this.listSessions()).filter((session) =>
         !session.archived && session.status !== "missing" && session.tmux.pid > 0
       );
+      const sessions = this.config.enabled
+        ? liveSessions.filter((session) => isMuxpilotSessionScope(session.resourceScope))
+        : [];
       const allocations = allocateSessionResources(sessions, this.config, this.idleSince);
       const values = [...allocations.values()];
       const busyAllocation = values.find((allocation) => allocation.busy) ?? null;
       this.currentSnapshot = {
-        enabled: true,
+        configured: this.config.configured,
+        enabled: this.config.enabled,
+        unavailableReason: this.config.unavailableReason,
+        managedSessions: sessions.length,
+        unmanagedSessions: liveSessions.length - sessions.length,
         busySessions: values.filter((allocation) => allocation.busy).length,
         idleSessions: values.filter((allocation) => !allocation.busy).length,
         busyMemoryHighBytes: busyAllocation?.memoryHighBytes ?? null,
@@ -137,12 +153,15 @@ export class ResourceGovernor {
         busyCpuPercent: busyAllocation?.cpuPercent ?? null,
         tasksMax: this.config.sessionTasksMax
       };
+      if (!this.config.enabled) {
+        this.resourceUsage = new Map();
+        return;
+      }
       const emergency = await memoryAvailablePercent().then((value) => value !== null && value < 8);
       const nextResourceUsage = new Map<string, SessionResourceUsage>();
       const sampledScopes = new Set<string>();
       await Promise.all(sessions.map(async (session) => {
-        const scope = session.resourceScope ?? await this.controller.scopeForPid(session.tmux.pid);
-        if (!scope) return;
+        const scope = session.resourceScope!;
         this.managedScopes.add(scope);
         sampledScopes.add(scope);
         const allocation = allocations.get(session.id)!;
@@ -235,22 +254,24 @@ export function allocateSessionResources(
 }
 
 export class UserSystemdController implements SystemdController {
-  async scopeForPid(pid: number): Promise<string | null> {
-    const cgroup = await readFile(`/proc/${pid}/cgroup`, "utf8").catch(() => "");
-    const unified = cgroup.split(/\r?\n/).find((line) => line.startsWith("0::"))?.slice(3);
-    const unit = unified ? basename(unified) : "";
-    return unit.endsWith(".scope") ? unit : null;
+  private readonly environment: NodeJS.ProcessEnv;
+
+  constructor(environment: Record<string, string> = {}) {
+    this.environment = { ...process.env, ...environment };
   }
 
   async metrics(scope: string): Promise<ScopeResourceMetrics> {
     const { stdout } = await execFileAsync("systemctl", [
       "--user", "show", scope, "--property=MemoryCurrent", "--property=CPUUsageNSec"
-    ], { timeout: 2000 });
+    ], { timeout: 2000, env: this.environment });
     return parseSystemdMetrics(stdout);
   }
 
   async setProperties(scope: string, properties: string[]): Promise<void> {
-    await execFileAsync("systemctl", ["--user", "set-property", "--runtime", scope, ...properties], { timeout: 2000 });
+    await execFileAsync("systemctl", ["--user", "set-property", "--runtime", scope, ...properties], {
+      timeout: 2000,
+      env: this.environment
+    });
   }
 }
 

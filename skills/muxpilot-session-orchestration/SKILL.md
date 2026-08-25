@@ -13,6 +13,7 @@ Use the tools exposed by `muxpilot_sessions` when a task benefits from another m
 - Use `read_session` for a bounded recent transcript. Read only what the current decision needs.
 - You may send a work message to any live managed session by exact ID. The transcript records you as the delegating session.
 - Claim only an unowned session. Release, interrupt, finish, or otherwise control lifecycle only for sessions in your descendant tree.
+- A claimed or created child must report an isolated muxpilot resource scope. If isolation is unavailable, stop and ask the operator to enable the user systemd manager, restart muxpilot, and restore the target session.
 - Never answer or bypass a security approval for another session. Approval decisions remain with the operator.
 
 ## Delegated children

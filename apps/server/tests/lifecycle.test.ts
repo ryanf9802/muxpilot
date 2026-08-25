@@ -2,7 +2,7 @@ import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { syncBundledSkillForMode } from "../../../scripts/lifecycle.mjs";
+import { resourceGovernorSessionScopeLines, syncBundledSkillForMode } from "../../../scripts/lifecycle.mjs";
 
 describe("production bundled skill startup", () => {
   it("does not synchronize the skill in development mode", async () => {
@@ -47,5 +47,19 @@ describe("production bundled skill startup", () => {
     } finally {
       log.mockRestore();
     }
+  });
+});
+
+describe("resource governor lifecycle status", () => {
+  it("reports effective scope availability and the linger remediation", () => {
+    expect(resourceGovernorSessionScopeLines({
+      enabled: true,
+      managedSessions: 2,
+      unmanagedSessions: 3
+    })).toEqual(["session scopes: active, 2 managed, 3 legacy/unscoped"]);
+    expect(resourceGovernorSessionScopeLines({
+      enabled: false,
+      unavailableReason: "user_systemd_unavailable"
+    })).toEqual(["session scopes: unavailable; run sudo loginctl enable-linger \"$USER\", then restart muxpilot"]);
   });
 });

@@ -418,7 +418,8 @@ function printStatus(mode, details, status) {
     console.log(`    heavyweight resume timeout: ${process.env.MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS ?? "120000"}ms`);
     const live = status.backendHealth?.resourceGovernor;
     if (live) {
-      console.log(`    managed sessions: ${live.busySessions} busy, ${live.idleSessions} idle`);
+      for (const line of resourceGovernorSessionScopeLines(live)) console.log(`    ${line}`);
+      console.log(`    scoped sessions: ${live.busySessions} busy, ${live.idleSessions} idle`);
       if (live.busyMemoryHighBytes !== null) {
         console.log(`    current busy-session share: ${formatBytes(live.busyMemoryHighBytes)} soft / ${formatBytes(live.busyMemoryMaxBytes)} hard, cpu ${live.busyCpuPercent}%`);
       }
@@ -622,6 +623,16 @@ function formatBytes(value) {
   if (!Number.isFinite(value)) return "unknown";
   if (value >= 1024 ** 3) return `${Math.round(value / 1024 ** 3 * 10) / 10} GiB`;
   return `${Math.round(value / 1024 ** 2)} MiB`;
+}
+
+export function resourceGovernorSessionScopeLines(snapshot) {
+  if (snapshot.enabled) {
+    return [`session scopes: active, ${snapshot.managedSessions ?? 0} managed, ${snapshot.unmanagedSessions ?? 0} legacy/unscoped`];
+  }
+  if (snapshot.unavailableReason === "user_systemd_unavailable") {
+    return ["session scopes: unavailable; run sudo loginctl enable-linger \"$USER\", then restart muxpilot"];
+  }
+  return ["session scopes: disabled"];
 }
 
 function findListeningPids(port) {

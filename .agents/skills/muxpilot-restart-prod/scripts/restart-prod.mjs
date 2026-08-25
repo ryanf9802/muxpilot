@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { hostScopedHeavyEnvironment } from "./restart-environment.mjs";
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -35,7 +36,10 @@ if (args.includes("--preflight")) {
 
 const restart = spawnSync(process.execPath, [heavyRunner, "--heavy", "--", "pnpm", "app", "restart", "prod"], {
   cwd: repoRoot,
-  env: process.env,
+  // Keep the scheduler wait and the restart attached to this host-scoped verifier.
+  // A deferred continuation would resume inside the requesting Codex session and
+  // skip the commit, health, PID, and cgroup checks below.
+  env: hostScopedHeavyEnvironment(process.env),
   stdio: "inherit"
 });
 if (restart.error) fail(`restart failed: ${restart.error.message}`);
