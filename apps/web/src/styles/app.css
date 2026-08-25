@@ -553,6 +553,43 @@ select:focus-visible {
   align-content: start;
 }
 
+.session-loading-notice {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(520px, calc(100% - 32px));
+  padding: 18px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid color-mix(in srgb, var(--color-warning) 52%, var(--color-border));
+  border-radius: 8px;
+  box-shadow: var(--shadow-elevated);
+}
+
+.session-loading-notice > svg {
+  flex: 0 0 auto;
+  color: var(--color-warning);
+}
+
+.session-loading-notice > div {
+  display: grid;
+  gap: 8px;
+}
+
+.session-loading-notice p {
+  margin: 0;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.session-loading-notice .primary-button {
+  width: fit-content;
+}
+
 .loading-message {
   display: grid;
   gap: 9px;

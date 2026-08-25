@@ -134,12 +134,14 @@ export function SessionLoadingSkeleton({
   announce = true,
   label = "Loading session",
   header,
-  actions
+  actions,
+  notice
 }: {
   announce?: boolean;
   label?: string;
   header?: ReactNode;
   actions?: ReactNode;
+  notice?: ReactNode;
 }) {
   return (
     <section
@@ -172,12 +174,14 @@ export function SessionLoadingSkeleton({
           </div>
         </div>
       )}
-      <div className="transcript-pane" aria-hidden="true">
-        <div className="message-list loading-message-list">
-          <MessageSkeleton className="loading-message-assistant" lines={3} />
-          <MessageSkeleton className="loading-message-user" lines={2} />
-          <MessageSkeleton className="loading-message-assistant loading-message-narrow" lines={2} />
-        </div>
+      <div className="transcript-pane" aria-hidden={notice ? undefined : "true"}>
+        {notice ?? (
+          <div className="message-list loading-message-list">
+            <MessageSkeleton className="loading-message-assistant" lines={3} />
+            <MessageSkeleton className="loading-message-user" lines={2} />
+            <MessageSkeleton className="loading-message-assistant loading-message-narrow" lines={2} />
+          </div>
+        )}
       </div>
       <div className="composer-stack" aria-hidden="true">
         <div className="composer loading-composer">

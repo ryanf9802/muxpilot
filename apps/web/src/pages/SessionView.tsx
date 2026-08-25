@@ -100,7 +100,7 @@ import {
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
 } from "@muxpilot/core";
-import { api } from "../api/client.js";
+import { api, ApiError } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
 import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
 import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
@@ -115,6 +115,9 @@ const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
 const MESSAGE_BOTTOM_LOAD_THRESHOLD_PX = 120;
 export const SESSION_RECONCILE_INTERVAL_MS = 30_000;
 export const ACTIVE_HEAVY_COMMAND_RECONCILE_INTERVAL_MS = 2_000;
+export const SESSION_BOOTSTRAP_TIMEOUT_MS = 10_000;
+export const SESSION_BOOTSTRAP_NOTICE_MS = 5_000;
+export const SESSION_BOOTSTRAP_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
 const SKILL_REFRESH_INTERVAL_MS = 60_000;
 const SKILL_REFRESH_STALE_MS = 10_000;
 // "none" explicitly preserves the viewport; "idle" means there is no pending transcript scroll request.
@@ -347,6 +350,17 @@ export function hasActiveHeavyCommand(commands: readonly Pick<HeavyCommand, "sta
 
 export function isLatestSessionRefresh(requestId: number, latestRequestId: number): boolean {
   return requestId === latestRequestId;
+}
+
+export function sessionBootstrapRetryDelay(attempt: number): number {
+  const index = Math.max(0, Math.min(Math.floor(attempt), SESSION_BOOTSTRAP_RETRY_DELAYS_MS.length - 1));
+  return SESSION_BOOTSTRAP_RETRY_DELAYS_MS[index]!;
+}
+
+export function terminalSessionBootstrapError(error: unknown): string | null {
+  if (!(error instanceof ApiError)) return null;
+  if (error.status === 404) return "This session could not be found.";
+  return null;
 }
 
 export function inputModeAction(mode: CollaborationMode): SessionAction {
@@ -857,6 +871,9 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputDeliveryError, setInputDeliveryError] = useState("");
+  const [sessionLoadError, setSessionLoadError] = useState("");
+  const [sessionLoadRetrying, setSessionLoadRetrying] = useState(false);
+  const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
@@ -1271,15 +1288,84 @@ export function SessionView() {
       scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("initial", true);
       setExpandedStacks(new Set());
     }
-    void loadSnapshot(id, token, true);
+    let cancelled = false;
+    let retryTimer: number | null = null;
+    let noticeTimer: number | null = null;
+    let activeController: AbortController | null = null;
+    let latestRetryableError = "The connection was interrupted while loading this session.";
+    let retryAttempt = 0;
+    let terminalFailure = false;
+
+    const clearRetryTimer = () => {
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+    function scheduleRetry() {
+      if (cancelled || initialTranscriptSessionIdRef.current === id || retryTimer !== null) return;
+      const delayMs = sessionBootstrapRetryDelay(retryAttempt);
+      retryAttempt += 1;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (document.visibilityState === "visible") void bootstrap();
+        else scheduleRetry();
+      }, delayMs);
+    }
+    async function bootstrap() {
+      activeController?.abort();
+      const controller = new AbortController();
+      activeController = controller;
+      const timeout = window.setTimeout(() => controller.abort(), SESSION_BOOTSTRAP_TIMEOUT_MS);
+      try {
+        const applied = await loadSnapshot(id, token, true, controller.signal);
+        if (cancelled || !isCurrentRequest(id, token)) return;
+        if (applied) {
+          clearRetryTimer();
+          setSessionLoadError("");
+          setSessionLoadRetrying(false);
+          return;
+        }
+        scheduleRetry();
+      } catch (error) {
+        if (cancelled || !isCurrentRequest(id, token)) return;
+        const terminalError = terminalSessionBootstrapError(error);
+        if (terminalError) {
+          terminalFailure = true;
+          clearRetryTimer();
+          setSessionLoadError(terminalError);
+          setSessionLoadRetrying(false);
+          return;
+        }
+        latestRetryableError = error instanceof DOMException && error.name === "AbortError"
+          ? "Loading this session timed out."
+          : "The connection was interrupted while loading this session.";
+        scheduleRetry();
+      } finally {
+        window.clearTimeout(timeout);
+        if (activeController === controller) activeController = null;
+      }
+    }
+
+    setSessionLoadError("");
+    setSessionLoadRetrying(false);
+    noticeTimer = window.setTimeout(() => {
+      if (!cancelled && !terminalFailure && initialTranscriptSessionIdRef.current !== id) {
+        setSessionLoadError(latestRetryableError);
+        setSessionLoadRetrying(true);
+      }
+    }, SESSION_BOOTSTRAP_NOTICE_MS);
+    void bootstrap();
     const interval = setInterval(() => {
       if (document.visibilityState !== "visible" || !isLiveManagedSession(sessionRef.current)) return;
-      void loadSnapshot(id, token, false);
+      void loadSnapshot(id, token, false).catch(() => undefined);
     }, SESSION_RECONCILE_INTERVAL_MS);
     return () => {
+      cancelled = true;
+      activeController?.abort();
+      clearRetryTimer();
+      if (noticeTimer !== null) window.clearTimeout(noticeTimer);
       clearInterval(interval);
     };
-  }, [connectionEpoch, id]);
+  }, [connectionEpoch, id, sessionLoadRetryNonce]);
 
   useEffect(() => {
     return subscribeSessionEvents((event) => {
@@ -1415,16 +1501,23 @@ export function SessionView() {
     return request();
   }
 
-  async function loadSnapshot(targetId = id, token = requestTokenRef.current, initial = false) {
+  async function loadSnapshot(
+    targetId = id,
+    token = requestTokenRef.current,
+    initial = false,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    let applied = false;
     await snapshotRefreshGateRef.current.run(token, async () => {
       const refreshRequestId = sessionRefreshRequestRef.current + 1;
       sessionRefreshRequestRef.current = refreshRequestId;
-      const response = await trackRefreshRequest(() => api.sessionSnapshot(targetId, MESSAGE_PAGE_SIZE));
+      const response = await trackRefreshRequest(() => api.sessionSnapshot(targetId, MESSAGE_PAGE_SIZE, signal));
       if (!isCurrentRequest(targetId, token) || !isLatestSessionRefresh(refreshRequestId, sessionRefreshRequestRef.current) || response.messages.sessionId !== targetId) return false;
       const nextSession = sessionWithPendingFastMode(
         sessionWithPendingInputMode(response.session, pendingInputModeRef.current),
         pendingFastModeRef.current
       );
+      sessionRef.current = nextSession;
       clearTranscriptOnSessionSourceChange(nextSession);
       setSession(nextSession);
       syncSessionStoplight(nextSession);
@@ -1444,8 +1537,10 @@ export function SessionView() {
       reconcilePendingUserMessage(response.messages.items);
       setPagination(response.messages.hasMoreBefore, response.messages.hasMoreAfter);
       if (replaceAll) markInitialTranscriptSessionId(targetId);
+      applied = true;
       return isLiveManagedSession(nextSession);
     });
+    return applied || initialTranscriptSessionIdRef.current === targetId;
   }
 
   async function loadSession(targetId = id, token = requestTokenRef.current) {
@@ -1995,6 +2090,9 @@ export function SessionView() {
     return (
       <SessionLoadingView
         session={loadingSession}
+        error={sessionLoadError}
+        retrying={sessionLoadRetrying}
+        onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
         onBack={() => navigate("/")}
         onNewSession={() => openCreateSession(loadingSession ? sessionCreateSessionCwd(loadingSession) : "")}
       />
@@ -2002,7 +2100,16 @@ export function SessionView() {
   }
   const readySession = session;
   if (!readySession) {
-    return <SessionLoadingView session={loadingSession} onBack={() => navigate("/")} onNewSession={() => openCreateSession()} />;
+    return (
+      <SessionLoadingView
+        session={loadingSession}
+        error={sessionLoadError}
+        retrying={sessionLoadRetrying}
+        onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
+        onBack={() => navigate("/")}
+        onNewSession={() => openCreateSession()}
+      />
+    );
   }
   const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
 
@@ -2358,10 +2465,16 @@ export function pendingActionRefreshForEvent(event: Pick<SessionEvent, "type" | 
 
 export function SessionLoadingView({
   session,
+  error,
+  retrying = true,
+  onRetry,
   onBack,
   onNewSession
 }: {
   session: ManagedSession | null;
+  error?: string;
+  retrying?: boolean;
+  onRetry?: () => void;
   onBack: () => void;
   onNewSession: () => void;
 }) {
@@ -2427,6 +2540,16 @@ export function SessionLoadingView({
           </div>
         </div>
       }
+      notice={error ? (
+        <div className="session-loading-notice" role="alert">
+          <AlertTriangle size={24} aria-hidden="true" />
+          <div>
+            <strong>Still loading this session</strong>
+            <p>{error}{retrying ? " Muxpilot will keep trying automatically." : " Retry when the session becomes available."}</p>
+            {onRetry ? <button type="button" className="primary-button" onClick={onRetry}>Retry now</button> : null}
+          </div>
+        </div>
+      ) : undefined}
     />
   );
 }

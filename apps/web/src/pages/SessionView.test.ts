@@ -96,6 +96,8 @@ import {
   shouldShowQueuedIndicator,
   shouldShowWorkingIndicator,
   isLatestSessionRefresh,
+  sessionBootstrapRetryDelay,
+  terminalSessionBootstrapError,
   shouldReplaceTranscriptForSource,
   shouldSubmitComposer,
   sessionModelDisplay,
@@ -121,6 +123,7 @@ import {
   UserAction,
   UserText
 } from "./SessionView.js";
+import { ApiError } from "../api/client.js";
 
 describe("InputDeliveryFailureBanner", () => {
   it("offers retry and dismissal with the persisted delivery failure detail", () => {
@@ -1087,6 +1090,21 @@ describe("isLatestSessionRefresh", () => {
   });
 });
 
+describe("session bootstrap recovery", () => {
+  it("uses bounded retry backoff", () => {
+    expect(sessionBootstrapRetryDelay(0)).toBe(1_000);
+    expect(sessionBootstrapRetryDelay(1)).toBe(2_000);
+    expect(sessionBootstrapRetryDelay(2)).toBe(5_000);
+    expect(sessionBootstrapRetryDelay(20)).toBe(5_000);
+  });
+
+  it("stops automatic retry only when the session is not found", () => {
+    expect(terminalSessionBootstrapError(new ApiError("missing", 404))).toBe("This session could not be found.");
+    expect(terminalSessionBootstrapError(new ApiError("server error", 500))).toBeNull();
+    expect(terminalSessionBootstrapError(new TypeError("network failed"))).toBeNull();
+  });
+});
+
 describe("LatestGenerationRefreshGate", () => {
   it("lets a new generation refresh while an obsolete request is still in flight", async () => {
     const gate = new LatestGenerationRefreshGate();
@@ -1376,6 +1394,24 @@ describe("session scroll behavior", () => {
     expect(html).toContain('aria-label="Kill session unavailable while loading"');
     expect(html).toContain("loading-message-list");
     expect(html).toContain("loading-composer");
+  });
+
+  it("shows a recoverable loading notice and retry action", () => {
+    const html = renderToStaticMarkup(
+      createElement(SessionLoadingView, {
+        session: managedSession(),
+        error: "Loading this session timed out.",
+        retrying: true,
+        onRetry: () => undefined,
+        onBack: () => undefined,
+        onNewSession: () => undefined
+      })
+    );
+
+    expect(html).toContain('role="alert"');
+    expect(html).toContain("Loading this session timed out.");
+    expect(html).toContain("Muxpilot will keep trying automatically.");
+    expect(html).toContain("Retry now");
   });
 
   it("hides the initial message list until the bottom scroll has been applied", () => {
