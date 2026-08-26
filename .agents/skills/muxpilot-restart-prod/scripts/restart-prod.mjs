@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { hostScopedHeavyEnvironment } from "./restart-environment.mjs";
+import { fileURLToPath } from "node:url";
+import {
+  hostScopedHeavyEnvironment,
+  isMuxpilotSessionCgroup,
+  isRestartExecutionCgroup,
+  restartScopeUnitName
+} from "./restart-environment.mjs";
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -20,8 +27,11 @@ if (head !== expectedCommit) fail(`expected commit ${expectedCommit}, but checko
 if (git(["status", "--porcelain"])) fail("target checkout is dirty");
 
 const ownCgroup = readCgroup("self");
-if (ownCgroup !== "/init.scope") {
-  fail(`restart helper must run in host /init.scope, not ${ownCgroup}; use host/elevated execution`);
+if (!isRestartExecutionCgroup(ownCgroup)) {
+  if (args.includes("--scoped-relaunch")) {
+    fail(`systemd relaunch remained in ${ownCgroup}; a non-session user scope is required`);
+  }
+  relaunchInHostScope();
 }
 
 const helperDir = process.env.MUXPILOT_GIT_HELPER_DIR
@@ -53,14 +63,28 @@ const verified = Object.fromEntries(["supervisor", "server", "web"].map((role) =
   const pid = readPid(join(runtimeDir, `${role}.pid`), role);
   process.kill(pid, 0);
   const cgroup = readCgroup(pid);
-  if (cgroup !== "/init.scope") fail(`${role} PID ${pid} is in ${cgroup}, not /init.scope`);
+  if (isMuxpilotSessionCgroup(cgroup)) fail(`${role} PID ${pid} remained in muxpilot session cgroup ${cgroup}`);
+  if (cgroup !== ownCgroup) fail(`${role} PID ${pid} is in ${cgroup}, not restart cgroup ${ownCgroup}`);
   return [role, pid];
 }));
 
 if (git(["rev-parse", "HEAD"]) !== expectedCommit) fail("checkout commit changed during restart");
 console.log(
-  `MUXPILOT_PROD_RESTARTED_OUTSIDE_SESSION_SCOPE commit=${expectedCommit} supervisor=${verified.supervisor} server=${verified.server} web=${verified.web} cgroup=/init.scope`
+  `MUXPILOT_PROD_RESTARTED_OUTSIDE_SESSION_SCOPE commit=${expectedCommit} supervisor=${verified.supervisor} server=${verified.server} web=${verified.web} cgroup=${ownCgroup}`
 );
+
+function relaunchInHostScope() {
+  const unit = restartScopeUnitName(process.pid, randomBytes(4).toString("hex"));
+  const childArgs = args.filter((arg) => arg !== "--scoped-relaunch");
+  childArgs.push("--scoped-relaunch");
+  const relaunched = spawnSync("systemd-run", [
+    "--user", "--scope", "--quiet", "--collect", `--unit=${unit}`,
+    process.execPath, fileURLToPath(import.meta.url), ...childArgs
+  ], { cwd: repoRoot, env: process.env, stdio: "inherit" });
+  if (relaunched.error) fail(`could not enter host restart scope: ${relaunched.error.message}; use host/elevated execution`);
+  if (relaunched.status !== 0) fail(`host restart scope exited with status ${relaunched.status ?? "unknown"}`);
+  process.exit(0);
+}
 
 function optionValue(values, name) {
   const index = values.indexOf(name);
