@@ -15,6 +15,10 @@ The dashboard groups sessions by repository and makes their attention state visi
 
 Search matches repository names, branches, working directories, tmux metadata, session previews, summaries, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or terminate its pane.
 
+Repository groups can be collapsed and remember that choice in the browser. Pinned sessions sort ahead of other sessions in their repository. The three-color stoplight in the top bar shows the current attention totals; selecting a color filters the dashboard to that severity while preserving any parent rows needed to explain matching agent children.
+
+When systemd resource metrics are available, a card shows current memory and CPU pressure. Fast-mode, notification, fork, managed-Git, transcript-size, and pin indicators expose other session state without opening the card. Agent-managed descendants render as a tree beneath the owning session with their own status, context percentage, and remaining work-token budget. Completed branches collapse into a separate disclosure.
+
 ## Session view
 
 Opening a session shows its structured Codex transcript. muxpilot keeps user prompts, assistant responses, approvals, questions, proposed plans, aborts, and other important events visible while collapsing noisier tool activity and command output.
@@ -26,9 +30,13 @@ The session view also provides:
 - Queue-aware input with editable pending messages
 - Inline approval, question, and proposed-plan controls
 - Prompt skill suggestions and optional Vim composer mode
+- Normal/Plan collaboration controls and model-dependent Fast mode
 - Transcript search, paging, and jump controls
+- Context-window use, managed Git state, documents, BTW side questions, and active heavyweight-command details
 - Raw terminal capture and a copyable local tmux attach command
 - Interrupt, fork, new-session, and kill actions
+
+User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.
 
 ## Creating sessions
 
@@ -63,6 +71,16 @@ The target branch must already exist locally. Selecting or creating a different 
 Heavy validation—such as repository-wide checks, production builds, scanners, Docker workloads, or multi-worker tests—uses a shared resource lease. That scheduler controls concurrency but does not authorize broader validation than the user requested.
 
 Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into a managed workspace. For change tasks, a direct Codex session running in tmux can initialize the bundled Git workflow's standalone mode after the user explicitly approves an existing local target branch. Standalone mode provides short-lived worktrees, dependency reuse, target locking, rebase/re-review gates, local integration, and cleanup, but it does not retrofit muxpilot workspace controls, sandbox roots, developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Non-Git directories keep the direct-directory session flow.
+
+See [Local Git Workflow](git-workflow.md) for the helper lifecycle, target guard, dependency localization, event schema, heavyweight classification, and recovery boundaries.
+
+## BTW side questions
+
+Open **BTW** in a session header to ask a separate question without interrupting the main Codex turn. Each request uses a fresh snapshot of the main conversation, runs independently, and keeps its own question, streamed answer, completion state, and copy controls in the drawer. Closing the drawer does not cancel it; a completed answer adds an unread indicator until the drawer is opened.
+
+BTW cannot pause for interactive input or security approval. A running request can be cancelled. Its saved history is a list of independent side questions, not extra turns injected into the main transcript.
+
+A BTW request can also create or edit session documents. Those changes are staged and validated away from the canonical files, then applied at a safe main-session boundary. The drawer shows whether a document update is waiting, retrying, applied, or conflicted and links to affected documents. See [Agent Orchestration](agent-orchestration.md#btw-side-questions) for isolation and conflict behavior.
 
 ## Session documents
 
@@ -100,6 +118,10 @@ Routine bounded delegation, including standard code-review passes, uses Codex's 
 
 Nested muxpilot sessions are reserved for work the operator explicitly requests as a separate session or durable delegated work that benefits from independent monitoring and its own resource scope. Those sessions remain visible in muxpilot and use the session-orchestration lifecycle and resource guardrails.
 
+An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
+
+Created children inherit the source repository/target, model settings, and Fast setting but start with fresh context, their own tmux pane, resource scope, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context/work-token guardrails, waits, and raw evidence.
+
 ## Moving sessions between hosts
 
 The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, and portable session preferences, then resumes the imported sessions in tmux.
@@ -121,7 +143,13 @@ muxpilot sends text through a tmux paste buffer, followed by the configured subm
 - Queued input is bound to the current Codex transcript source so it cannot leak into a different run after a pane or source change.
 - The next queued item is sent automatically when the pane becomes ready.
 
+Every submitted message is persisted before delivery and bound to the current Codex transcript source. muxpilot verifies the pasted text, submit transition, and Codex acknowledgement. It can retry the submit key and perform one safe replay only when the composer is empty. It never overwrites different composer text.
+
+If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** rechecks the live pane before submitting an exact matching draft or restoring the preserved text; **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
+
 The Normal/Plan toggle changes Codex collaboration mode through the configured tmux key sequence. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
+
+When supported by the active model, **Fast** sends Codex's Fast-mode command and also updates the default for future Codex sessions. Fast mode uses more credits. The control is disabled while the session is in a state where Codex cannot accept the change, and dashboard cards show when it is active.
 
 ## Interactive gates
 
@@ -184,11 +212,21 @@ Notification rules can be enabled globally or per session for:
 
 A matching rule can ring the session card, show a toast, play a sound, or send a Web Push notification. Browser subscriptions and VAPID keys are stored locally in SQLite. Notifications remain quiet during initial transcript catch-up so old activity does not trigger new alerts.
 
+Nested-session events roll up to the owning root so the operator sees meaningful child attention without duplicate alerts for every ancestor. The dashboard still exposes each child's exact state.
+
+## Heavyweight commands
+
+When a managed session runs a scheduled heavyweight command, an indicator in the session header shows whether commands are queued, reserved, running, stalled, or terminating. Open it for the command and working directory, queue position or slot/PID, live bounded output, process and Docker activity, package-manager diagnostics, cache paths, deadlines, and retained log path.
+
+The operator can terminate a command and its process group from this view. A terminated or never-started command is not a passing validation result. Queue release and automatic resume appear as structured transcript events. See [Runtime Reliability](runtime-reliability.md#heavyweight-command-scheduler).
+
 ## Phone and PWA behavior
 
 When LAN mode is enabled, the host-only **Connect device** dialog provides detected phone URLs, the current access key, QR codes, a revoke action, and an optional unrestricted-LAN toggle. Use unrestricted access only on a trusted LAN. If HTTPS certificates are configured, the dialog also provides the public root certificate needed by the phone.
 
 Camera-based QR login and installable PWA behavior generally require HTTPS with a trusted certificate. See the [setup guide](setup.md#phone-access-on-the-same-network) for the connection flow and platform-specific LAN documentation for firewall configuration.
+
+An installed PWA checks for a newer web build at startup and when it returns to the foreground. A waiting build shows an update notice and reloads only after the operator accepts it. After sleep, backgrounding, or a backend restart, the app shows connecting/reconnecting state, retries automatically, and refreshes session snapshots when the connection returns.
 
 ## Session discovery
 
@@ -217,11 +255,14 @@ Common status labels include:
 | --- | --- |
 | `working`, `generating`, `executing` | Codex appears busy |
 | `planning` | Codex is working in Plan mode |
+| `queued` | Submitted or scheduled work has not started yet |
 | `waiting`, `idle` | Input is likely safe to send |
 | `approval` | An approval gate is open |
 | `question` | A structured question is waiting |
 | `plan_ready` | A proposed plan needs a choice |
 | `blocked` | Codex reported a blocker |
+| `input_failed` | The last submitted message is preserved but delivery needs retry or dismissal |
 | `startup_failed` | A managed session could not start |
+| `completed` | An agent-managed session was explicitly finished |
 | `missing` | The tmux pane is no longer discoverable |
 | `unknown` | muxpilot cannot confidently infer the state |

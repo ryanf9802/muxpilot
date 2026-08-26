@@ -24,7 +24,7 @@ Open:
 http://127.0.0.1:12778
 ```
 
-`pnpm app start` installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
+`pnpm app start` installs or updates muxpilot's bundled Git, heavyweight-queue, session-orchestration, and documents skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
 
 Useful production commands:
 
@@ -62,7 +62,9 @@ pnpm app stop dev
 pnpm app restart dev
 ```
 
-The dashboard shows discovered Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, and usage data when available. Opening a session shows the structured transcript, raw terminal view, pending approvals/questions, queued input, skill suggestions, and session actions.
+The dashboard shows discovered Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, resource/context indicators, nested agent sessions, and usage data when available. Opening a session shows the structured transcript, verified/queued input, interactive gates, documents, BTW, heavyweight and Git state, skill suggestions, and raw terminal view. See the [Usage Guide](usage.md).
+
+Nested agent sessions require a persistent user-systemd manager so each child receives an independent resource scope. Ordinary operator sessions do not require it. Follow [Resource Controls](configuration.md#resource-controls) before using session orchestration.
 
 ## Phone Access On The Same Network
 
@@ -128,6 +130,8 @@ pnpm app restart
 
 `pnpm app restart` restarts production. Use `pnpm app restart all` to restart only the modes that are already running.
 
+If you move sessions between hosts, set the same `MUXPILOT_SESSION_FILE_KEY` on both hosts before exporting to encrypt the `.mpsession` archive. The key must contain at least 16 characters. See [Moving sessions between hosts](usage.md#moving-sessions-between-hosts).
+
 ## Troubleshooting
 
 - QR scan button missing on phone: confirm the phone opened an `https://` URL and trusts the muxpilot root CA.
@@ -139,5 +143,10 @@ pnpm app restart
 - Input not reaching Codex: confirm the tmux pane still exists and the backend user owns or can access that tmux socket.
 - Skill suggestions missing: confirm `MUXPILOT_CODEX_HOME` points at the Codex home that contains your skills/plugins.
 - Stale PID or port conflict: run `pnpm app status`, inspect `data/runtime/<mode>/`, and stop the conflicting process before starting again.
+- Submitted input is preserved but blocked: open the session's `input_failed` banner and retry only after checking the live composer, or dismiss it without assuming Codex received it.
+- Heavy command appears stuck: open the heavyweight-command indicator for queue/run state, recent output, process/container activity, deadlines, and terminate control.
+- Sessions missing after an unclean host shutdown: use the startup recovery dialog or restore the conversation from the New session History tab.
 
 Production mode is for manual operator checks. Automated agent work should use `pnpm app start dev`.
+
+For deeper operational diagnosis, see [Runtime Reliability](runtime-reliability.md).

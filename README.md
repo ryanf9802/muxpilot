@@ -27,10 +27,13 @@ muxpilot adds an operator layer without replacing the tools already doing the wo
 
 - **One dashboard for every session.** Group Codex/tmux sessions by repository and see their branch, worktree, activity, and attention state.
 - **Structured conversations.** Read Codex JSONL as a focused transcript instead of a raw terminal dump.
-- **Interactive control.** Send or queue prompts, answer questions and approvals, act on proposed plans, interrupt work, and start or fork sessions.
+- **Interactive control.** Send or queue prompts with verified delivery, answer questions and approvals, act on proposed plans, switch Normal, Plan, Fast, and Vim controls, interrupt work, and start or fork sessions.
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
+- **Visible delegated work.** Run durable agent-managed child sessions with independent context and resources, bounded budgets, parent/child status rollups, and event-driven wake-ups.
+- **Non-interrupting side questions.** Use BTW for an independent answer or safe document update while the main Codex turn keeps working.
 - **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with optional encryption.
 - **Agent-managed documents.** Let long-running agents maintain persistent Markdown plans, checklists, reminders, and acceptance criteria outside the conversation context.
+- **Recovery and resource controls.** Restore conversations after an unclean shutdown, inspect failed input and heavyweight commands, and keep sessions and managed Docker work inside shared limits.
 - **Notifications that matter.** Get browser, sound, or Web Push alerts when work finishes or a session needs attention.
 - **A real phone workflow.** Connect over the LAN with an access key or QR code and install the interface as a PWA with local HTTPS.
 
@@ -117,15 +120,16 @@ Read [Architecture](docs/architecture.md) and [Deployment](docs/deployment.md) b
 
 ## Using muxpilot
 
-The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, inspect the raw terminal, and manage the session.
+The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, ask a BTW side question, inspect documents or the raw terminal, monitor heavyweight work, and manage the session. Agent-created sessions remain visible in a nested tree with context, budget, and rolled-up status.
 
 The [usage guide](docs/usage.md) covers:
 
 - Creating, forking, resuming, and transferring sessions
-- Managed Git worktrees and target branches
+- Managed and standalone Git worktrees and target branches
+- Nested agent sessions, BTW side questions, and persistent documents
 - Queued input, approvals, questions, and proposed plans
-- Prompt history, skill suggestions, and keyboard controls
-- Notifications, phone/PWA behavior, discovery, and statuses
+- Verified input recovery, Fast mode, prompt history, skill suggestions, and keyboard controls
+- Notifications, phone/PWA behavior, crash recovery, discovery, and statuses
 
 ## Development
 
@@ -153,10 +157,14 @@ The workspace contains a React/Vite web app, a Fastify server, and a shared Type
 | --- | --- |
 | [Setup](docs/setup.md) | Installation, runtime commands, phone access, updates, and troubleshooting |
 | [Usage](docs/usage.md) | Session workflows, interactive controls, shortcuts, notifications, and statuses |
+| [Local Git workflow](docs/git-workflow.md) | Managed and standalone worktrees, targets, guards, validation, and local integration |
+| [Agent orchestration](docs/agent-orchestration.md) | Nested sessions, ownership, tool contracts, budgets, waits, evidence, documents, and BTW |
+| [Runtime reliability](docs/runtime-reliability.md) | Supervision, reconciliation, input delivery, recovery, heavyweight work, and resource controls |
 | [Configuration](docs/configuration.md) | Environment variables and defaults |
 | [Development](docs/development.md) | Workspace layout, commands, and code boundaries |
 | [Architecture](docs/architecture.md) | Components, data flow, persistence, and trust model |
 | [Deployment](docs/deployment.md) | Production runtime and operational notes |
+| [Style guide](docs/style-guide.md) | Visual tokens and UI usage rules |
 | [Linux LAN access](docs/linux-lan.md) | Native Linux firewall and reachability setup |
 | [Windows/WSL LAN access](docs/windows-wsl-lan.md) | Windows 11 and WSL2 network setup |
 

@@ -16,7 +16,7 @@ cp .env.example .env
 pnpm app start
 ```
 
-`pnpm app start` runs the production path. It installs or updates the bundled `muxpilot-git-workflow` skill in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits until both endpoints are healthy. Skill synchronization also runs when production is already active.
+`pnpm app start` runs the production path. It installs or updates all bundled muxpilot skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits until both endpoints are healthy. Skill synchronization also runs when production is already active.
 
 Production defaults:
 
@@ -45,6 +45,8 @@ pnpm app stop
 
 To remove unused transient event history and compact SQLite, stop production and run `pnpm db:compact:prod`. The command verifies the compacted copy before installing it and retains the original database as a timestamped backup.
 
+The SQLite database is not the only durable state. Session documents and managed-session control state live beneath `MUXPILOT_GIT_SESSION_ROOT`; keep that root with the database when backing up an installation. Runtime PID/log directories and transient task worktrees can be recreated.
+
 ## Updating
 
 ```bash
@@ -55,6 +57,8 @@ pnpm app restart
 
 Run `pnpm app status` after the restart and inspect `pnpm app logs prod --process all --lines 80` if either endpoint is unhealthy.
 
+For an automated Codex change, local integration and production restart are separate operations. After the Git workflow reports `INTEGRATED`, use the repo-owned `$muxpilot-restart-prod` helper with the exact integrated commit. It moves outside the requesting session's resource scope, refuses a dirty or mismatched target checkout, restarts production, and verifies health, commit identity, and non-session cgroup placement. Human operators can continue to use `pnpm app restart prod` directly.
+
 ## LAN Run
 
 Recommended defaults:
@@ -64,6 +68,7 @@ Recommended defaults:
 - Keep the configured SQLite database backed up if transcripts, queued inputs, usage/cost records, summaries, or audit history matter.
 - Keep `MUXPILOT_DB_PATH` outside build output such as `dist/`.
 - Set `MUXPILOT_SESSION_SECRET` only if browser access sessions should survive backend restarts.
+- Set `MUXPILOT_SESSION_FILE_KEY` on export/import hosts when transfer archives must be encrypted.
 
 Start bound to the LAN:
 
@@ -112,3 +117,5 @@ scripts/linux-lan.sh install --port 12880
 This production flow is for manual operator use only. Codex and other automated agents should use development mode with `pnpm app start dev`.
 
 Cross-network access through VPNs, tunnels, reverse proxies, or static-hosted frontends is future work.
+
+See [Runtime Reliability](runtime-reliability.md) for supervisor, reconciliation, input recovery, crash recovery, heavyweight scheduling, and resource-control behavior.

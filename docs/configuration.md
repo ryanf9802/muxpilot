@@ -6,6 +6,7 @@ muxpilot is a single-operator developer console. The Web UI runs in a browser, a
 
 - `MUXPILOT_LAN_ENABLED`: set to `1`, `true`, `yes`, or `on` to expose the backend and Web UI on the local network for phone access. Defaults to loopback-only local access.
 - `OPENAI_API_KEY`: optional. Enables prompt-only activity summaries and OpenAI usage/cost tracking for dashboard cards.
+- `MUXPILOT_SESSION_FILE_KEY`: optional encryption key for exported `.mpsession` archives. It must be at least 16 characters; use the same value on the importing host. Plaintext archives remain importable when a key is configured.
 
 The app lifecycle scripts load `.env` first and `.env.local` second. Local setup helpers such as `pnpm pwa:setup` write machine-specific settings to `.env.local`, which is ignored by git.
 
@@ -46,12 +47,13 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_HTTPS_KEY`: optional private key path for Vite dev/preview HTTPS. Must be set with `MUXPILOT_HTTPS_CERT`.
 - `MUXPILOT_PWA_CA_DIR`: optional override for the shared local root CA directory used by `pnpm pwa:setup`. Normal use should put shared CA files in `.certs/pwa-ca/` instead.
 - `MUXPILOT_PWA_TRUST_PORT`: optional port for `pnpm pwa:trust`, default `12880`.
+- `MUXPILOT_PWA_TRUST_DIR`: directory containing the public CA/profile files served by the phone trust server. `pnpm pwa:setup` writes this machine-specific value to `.env.local`; it is normally not set by hand.
 - `MUXPILOT_API_TARGET`: Vite proxy target for `/api`, defaulting to the local backend port selected by the lifecycle script.
 - `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm app start dev`, `./data/prod` under `pnpm app start`, and `./data` when the server is started directly.
 - `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm app start dev`, `./data/prod/muxpilot.db` under `pnpm app start`, and `./data/muxpilot.db` when the server is started directly.
 - `MUXPILOT_CODEX_HOME`: Codex home on the host machine, default `$HOME/.codex`.
-- `MUXPILOT_SESSION_SECRET`: optional HMAC secret for persistent operator cookies across restarts.
-- `MUXPILOT_OPERATOR_TOKEN`: optional override for the generated remote access key. Normal LAN use should leave this unset.
+- `MUXPILOT_SESSION_SECRET`: optional HMAC secret of at least 16 characters for persistent operator cookies across restarts.
+- `MUXPILOT_OPERATOR_TOKEN`: optional override of at least 12 characters for the generated remote access key. Normal LAN use should leave this unset.
 - `MUXPILOT_CORS_ORIGINS`: comma-separated allowlist for credentialed cross-origin API use. Not required for the normal LAN flow.
 - `MUXPILOT_LOG_LEVEL`: Pino log level, default `info`.
 - `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
@@ -84,6 +86,8 @@ Per-run overrides can be placed before `--`, for example `muxpilot-git-run.mjs -
 - `MUXPILOT_SUMMARY_INTERVAL_MS`: minimum per-session summary refresh interval, default `10000`.
 - `MUXPILOT_SUMMARY_DEBOUNCE_MS`: debounce before refreshing after new messages, default `0`.
 - `MUXPILOT_OPENAI_PRICING_JSON`: optional JSON object overriding OpenAI per-1M-token rates by model.
+
+All agent and Docker pool percentages must be greater than zero and no more than 100. A hard-memory percentage must be at least its corresponding soft percentage. The heavyweight inactivity timeout must be greater than its warning threshold.
 
 `MUXPILOT_OPENAI_PRICING_JSON` entries use this shape:
 
@@ -120,6 +124,8 @@ Managed sessions receive a muxpilot-owned `DOCKER_HOST` Unix socket. Containers 
 
 Use `pnpm app status` to see the effective pool settings and whether the Docker proxy socket is active. Resource settings are environment-only; changing them requires restarting muxpilot.
 
+See [Runtime Reliability](runtime-reliability.md#session-resource-controls) for allocation behavior, idle fallbacks, Docker proxy boundaries, and operator diagnostics. See [Agent Orchestration](agent-orchestration.md#ownership-and-isolation) for why nested sessions require dedicated scopes.
+
 ## Git Workspace Storage
 
 Managed Git session worktrees live outside the repository entry checkout by default:
@@ -130,3 +136,24 @@ Managed Git session worktrees live outside the repository entry checkout by defa
 These paths may be overridden when worktrees need to live on a particular filesystem. Do not point them inside a repository working tree.
 
 Git sessions do not create a worktree at launch. The skill creates a uniquely named implementation worktree only for change tasks and removes it immediately after successful local integration. Failed, conflicted, or abandoned worktrees remain available for manual recovery.
+
+See [Local Git Workflow](git-workflow.md) for target selection, dependency localization, validation, integration, and cleanup contracts.
+
+## Internal And Script-Only Environment
+
+The settings above are the supported operator configuration surface. muxpilot also injects environment variables into managed Codex processes and helper commands. They are protocol state, not `.env` settings:
+
+- `MUXPILOT_DOCUMENTS_DIR` identifies the current session's private document scope.
+- `MUXPILOT_GIT_ENTRY_PATH`, `MUXPILOT_GIT_REPO_ROOT`, `MUXPILOT_GIT_TARGET_BRANCH`, `MUXPILOT_GIT_STATUS_FILE`, `MUXPILOT_GIT_WORKSPACE_ID`, `MUXPILOT_GIT_HELPER_DIR`, and dependency metadata bind the installed Git skill to one managed workspace.
+- `MUXPILOT_SESSION_SCOPES_AVAILABLE` tells orchestration whether independent child scopes can be created.
+- `MUXPILOT_HEAVY_QUEUE_ENABLED` and `MUXPILOT_HEAVY_RUN_ID` bind a helper invocation to the managed heavyweight scheduler.
+- Build, startup-retry, and worktree marker variables are generated by lifecycle helpers for one process launch.
+
+Do not copy these values between sessions or persist them in `.env`. Their validation and lifetime are part of the broker/helper protocols.
+
+The following low-level timing variables exist for focused helper diagnostics and tests, but are not normal operator settings or a compatibility contract:
+
+- `MUXPILOT_CODEX_CHILD_OBSERVATION_MS`, `MUXPILOT_CODEX_CHILD_STABLE_MS`, `MUXPILOT_CODEX_CHILD_LEARNING_MS`, and `MUXPILOT_CODEX_CHILD_TERMINATION_GRACE_MS` tune child-process supervision.
+- `MUXPILOT_HEAVY_VALIDATION_POLL_MS`, `MUXPILOT_HEAVY_VALIDATION_STALE_MS`, `MUXPILOT_HEAVY_VALIDATION_CONSOLE_HEARTBEAT_MS`, and `MUXPILOT_HEAVY_VALIDATION_OWNER_HEARTBEAT_MS` tune the heavyweight helper's internal observation cadence.
+
+Prefer per-run heavyweight timeout flags and the supported settings above. Change script-only timing only while diagnosing the corresponding helper with source and tests in view.

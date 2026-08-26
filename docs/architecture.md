@@ -27,15 +27,17 @@ tmux is authoritative for live session existence, pane ids, cwd, window names, p
 
 Codex JSONL files under `~/.codex/sessions` are the preferred transcript source because they contain structured user, assistant, and tool events. Terminal capture is used for raw view and recovery previews.
 
-SQLite stores application state: parsed messages, parser offsets, unread counts, queued inputs, dashboard metadata, restorable-session prompt indexes, OpenAI usage estimates, and audit records. WebSocket events are published live and are not retained.
+SQLite stores application state: managed-session metadata, parsed messages, parser offsets, prompt search, queued inputs and delivery state, BTW exchanges, orchestration waits and ownership, dashboard settings, notifications, summaries and usage estimates, recovery incidents, Git workspace bindings, and audit records. WebSocket events are published live and are not retained as the source of truth.
 
-Managed Git sessions store only the repository entry point, current existing local target branch, dependency link candidates, and path to a skill-owned status file. The launch-time target is an initial fallback; a guard-confirmed agent retarget is persisted through that status file and observed by the backend.
+Session documents, Git worktrees, runtime logs, heavyweight-command logs, and transfer staging are filesystem state with their own bounded roots. They are not stored in SQLite or the web bundle.
+
+Managed Git sessions store the repository entry point, current existing local target branch, dependency link candidates, skill-owned status path, control/worktree roots, and a private broker capability. The launch-time target is an initial fallback; a guard-confirmed agent retarget is persisted through the status file and observed by the backend.
 
 ## Components
 
-- React Web UI: operator access screen, dashboard, session transcript, composer, queued input controls, pending approval/question banners, skill suggestions, raw terminal panel, and LAN connection details.
+- React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, raw terminal panel, transfer/recovery dialogs, and LAN connection details.
 - Fastify Backend/API server: operator access gate, REST API, WebSocket event stream.
-- Session manager: discovery, pane-to-Codex mapping, parser scheduling, event publishing.
+- Session manager: discovery, pane-to-Codex mapping, parser scheduling, verified input delivery, queued input, crash recovery, session create/fork/restore, agent ownership, and event publishing.
 - Tmux adapter: fixed argv wrappers around `list-panes`, `capture-pane`, `send-keys`, `load-buffer`, and management commands.
 - Codex parser: maps JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
 - Database adapter: local SQLite via `node:sqlite`, isolated so libSQL/Turso can be added later.
@@ -43,7 +45,13 @@ Managed Git sessions store only the repository entry point, current existing loc
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
 - Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
-- Local Git workflow skill: creates task worktrees, links dependencies, guides focused validation and iterative self-review, serializes local fast-forward integration, and removes completed worktrees. The backend only reads its status file.
+- BTW service: forks a bounded app-server turn from a conversation snapshot, streams independent answers, coordinates isolated document staging, and hands safe changes back to the main session.
+- Session orchestration broker: binds a capability-scoped MCP server to each managed Codex launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
+- Raw evidence reader: exposes bounded, read-only tmux, `/proc`, and Codex JSONL evidence for independent diagnosis.
+- Heavy command service: observes shared queue metadata, resumes reserved sessions, serves bounded live output, and terminates exact process groups on operator request.
+- Resource governor and Docker proxy: allocate muxpilot-owned systemd scopes and label/constrain containers created through managed sessions.
+- Session transfer service: packages portable transcript prefixes, preferences, documents, and eligible committed Git objects with optional authenticated encryption.
+- Local Git workflow skill and authenticated broker: the skill creates task worktrees, links dependencies, and guides focused validation and iterative self-review. On finish, the broker revalidates workspace ownership, clean state, target identity, and fast-forward ancestry before updating the local target and removing completed task state.
 
 ## Operator Access
 
@@ -53,11 +61,15 @@ The access key is submitted in the request body to `/api/access`. After success,
 
 Cookie signing uses an in-memory random secret by default. Restarting the backend invalidates existing browser access sessions, which is acceptable for this single-operator LAN tool. `MUXPILOT_SESSION_SECRET` is optional for operators who want cookies to survive restarts.
 
+The browser access boundary is separate from session capabilities. A browser action is authorized as the operator; a managed Codex process receives only the Git/orchestration brokers and writable roots injected for that session. Security approvals cannot be delegated through the orchestration broker.
+
 ## Persistence
 
 SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, usage, cost estimates, summaries, and audit events must live outside `dist/`.
 
 Development uses `./data/dev/muxpilot.db` through `pnpm app start dev`. Production uses `./data/prod/muxpilot.db` through `pnpm app start`.
+
+Per-session documents live below the session control root under an opaque scope ID. Managed task worktrees live below the configured worktree root. Supervisor state lives under `data/runtime/<mode>/`; heavyweight queue metadata uses its configured shared temporary directory. Transfer uploads are staged for a bounded time and removed after import, cancellation, or expiry.
 
 ## Future Work
 
@@ -87,6 +99,14 @@ Interactive buttons -> POST /api/sessions/:id/actions or /question -> tmux menu 
 App permission form in terminal -> live approval parser -> GET/POST /approval -> verified relative tmux menu keys
 ```
 
+Verified delivery:
+
+```text
+persist user message + source identity -> paste exact text -> verify composer -> submit
+        -> Codex lifecycle/status acknowledgement -> mark acknowledged
+        -> safe submit retry or one empty-composer replay -> mark input_failed for operator retry/dismiss
+```
+
 Session actions:
 
 ```text
@@ -94,6 +114,21 @@ React action button -> POST /api/sessions/:id/actions -> SessionManager -> TmuxA
 ```
 
 Supported actions include interrupt, input-mode switch, proposed-plan choice, rename, detach notice, kill pane, and archive transcript.
+
+BTW and documents:
+
+```text
+question + main Codex thread snapshot -> independent bounded app-server turn -> streamed BTW history
+document request -> isolated staging copy -> validate diff + safe-boundary check -> atomic apply -> private main-session notice
+```
+
+Agent orchestration:
+
+```text
+capability-bound MCP call -> ownership/scope/context/budget validation -> SessionManager action
+create child -> fresh Codex/tmux session + private scope/documents + inherited repo/target/settings -> initial task
+wait -> durable SQLite record -> out-of-model event watch -> exact parent resume message
+```
 
 Managed Git session creation and integration:
 
@@ -104,6 +139,14 @@ change task -> skill creates private branch/worktree + simple dependency links -
 
 Task implementation is concurrent. A per-session operation lock serializes begin, retarget, and finalize actions, while a repository-local branch lock protects the final local integration step across sessions. If another task lands first, or an active task is retargeted, the task rebases when necessary and repeats focused validation and self-review. Conflicts and unfinished changes remain in their task worktree; dirty target checkouts are never changed. Normal workflow helpers do not pull or push.
 
+Heavyweight command continuation:
+
+```text
+task helper -> shared FIFO lease
+busy -> QUEUED_NOT_RUN + released Codex turn -> muxpilot reservation -> exact automatic resume
+running -> process/output/container observation -> session UI -> completion or operator process-group termination
+```
+
 Restorable session history:
 
 ```text
@@ -112,3 +155,19 @@ History restore -> POST /api/session-history/:id/restore -> tmux new-window "cod
 ```
 
 The history index contains only displayable user prompts from sessions muxpilot has managed. Assistant, tool, command, hidden environment context, and action-only user context are excluded from the index.
+
+Crash recovery:
+
+```text
+open non-archived panes snapshot -> unclean restart -> compare current tmux panes
+missing candidates -> operator recovery dialog -> codex resume -> restore muxpilot metadata/documents/Git binding
+```
+
+Session transfer:
+
+```text
+selected portable sessions -> manifest + transcript prefixes + documents + eligible Git bundle
+    -> optional AES-GCM archive -> destination mapping/branch inspection -> safe import + Codex resume
+```
+
+For deeper contracts, see [Local Git Workflow](git-workflow.md), [Agent Orchestration](agent-orchestration.md), and [Runtime Reliability](runtime-reliability.md).
