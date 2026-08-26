@@ -1026,6 +1026,115 @@ export const PLAN_ACTION_LABELS: Record<PlanAction, string> = {
   stay_in_plan: "No, stay in plan mode"
 };
 
+export function shouldCompactSessionHeaderStatus({
+  headerWidth,
+  backWidth,
+  headerGap,
+  titleRequiredWidth,
+  runtimeNonStatusWidth,
+  runtimeGap,
+  runtimeNonStatusItems,
+  fullStatusWidth
+}: {
+  headerWidth: number;
+  backWidth: number;
+  headerGap: number;
+  titleRequiredWidth: number;
+  runtimeNonStatusWidth: number;
+  runtimeGap: number;
+  runtimeNonStatusItems: number;
+  fullStatusWidth: number;
+}): boolean {
+  const runtimeWidth = runtimeNonStatusWidth + fullStatusWidth + runtimeGap * runtimeNonStatusItems;
+  return backWidth + headerGap * 2 + titleRequiredWidth + runtimeWidth > headerWidth + 0.5;
+}
+
+function useAdaptiveSessionHeaderStatus(measurementKey: string) {
+  const headerRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLDivElement>(null);
+  const runtimeRef = useRef<HTMLDivElement>(null);
+  const statusProbeRef = useRef<HTMLSpanElement>(null);
+  const [compact, setCompact] = useState(false);
+
+  useLayoutEffect(() => {
+    const header = headerRef.current;
+    const title = titleRef.current;
+    const runtime = runtimeRef.current;
+    const statusProbe = statusProbeRef.current;
+    if (!header || !title || !runtime || !statusProbe) return;
+    let frame = 0;
+
+    const update = () => {
+      frame = 0;
+      if (!window.matchMedia("(max-width: 819px)").matches) {
+        setCompact(false);
+        return;
+      }
+      const back = header.querySelector<HTMLElement>(":scope > .icon-button");
+      const fullStatus = statusProbe.querySelector<HTMLElement>(".status");
+      if (!back || !fullStatus) return;
+      const headerStyles = window.getComputedStyle(header);
+      const runtimeStyles = window.getComputedStyle(runtime);
+      const runtimeItems = Array.from(runtime.children).filter((child): child is HTMLElement => {
+        if (!(child instanceof HTMLElement) || child === statusProbe || child.classList.contains("status")) return false;
+        const styles = window.getComputedStyle(child);
+        return styles.display !== "none" && styles.position !== "absolute";
+      });
+      const heading = title.querySelector<HTMLElement>(".session-title-heading");
+      const titleRequiredWidth = Math.max(
+        heading ? intrinsicRowWidth(heading) : intrinsicElementWidth(title.querySelector<HTMLElement>(":scope > h1")),
+        intrinsicRowWidth(title.querySelector<HTMLElement>(".session-header-meta"))
+      );
+      setCompact(shouldCompactSessionHeaderStatus({
+        headerWidth: header.clientWidth,
+        backWidth: back.getBoundingClientRect().width,
+        headerGap: cssPixels(headerStyles.columnGap),
+        titleRequiredWidth,
+        runtimeNonStatusWidth: runtimeItems.reduce((total, item) => total + item.getBoundingClientRect().width, 0),
+        runtimeGap: cssPixels(runtimeStyles.columnGap),
+        runtimeNonStatusItems: runtimeItems.length,
+        fullStatusWidth: fullStatus.getBoundingClientRect().width
+      }));
+    };
+    const schedule = () => {
+      if (frame) cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(update);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(header);
+    observer.observe(title);
+    window.addEventListener("resize", schedule);
+    schedule();
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [measurementKey]);
+
+  return { compact, headerRef, runtimeRef, statusProbeRef, titleRef };
+}
+
+function intrinsicRowWidth(row: HTMLElement | null): number {
+  if (!row) return 0;
+  const visibleChildren = Array.from(row.children).filter((child): child is HTMLElement => {
+    return child instanceof HTMLElement && window.getComputedStyle(child).display !== "none";
+  });
+  if (visibleChildren.length === 0) return row.scrollWidth;
+  const gap = cssPixels(window.getComputedStyle(row).columnGap);
+  return visibleChildren.reduce((total, child) => total + Math.max(child.scrollWidth, child.getBoundingClientRect().width), 0)
+    + gap * Math.max(0, visibleChildren.length - 1);
+}
+
+function intrinsicElementWidth(element: HTMLElement | null): number {
+  return element ? Math.max(element.scrollWidth, element.getBoundingClientRect().width) : 0;
+}
+
+function cssPixels(value: string): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 export function SessionView() {
   const { id = "" } = useParams();
   const location = useLocation();
@@ -1107,6 +1216,14 @@ export function SessionView() {
   const [expandedStacks, setExpandedStacks] = useState<Set<string>>(() => new Set());
   const [expandedRangeItems, setExpandedRangeItems] = useState<Record<string, CoreTranscriptItem[]>>({});
   const [loadingRanges, setLoadingRanges] = useState<Set<string>>(() => new Set());
+  const adaptiveHeaderStatus = useAdaptiveSessionHeaderStatus([
+    id,
+    session?.status ?? "",
+    session?.contextUsage?.contextPercent ?? "",
+    session?.agentOwnership?.parentSessionId ?? "",
+    session?.forkedFrom?.sessionName ?? "",
+    session ? sessionDisplayName(session) : ""
+  ].join("\0"));
   const messageListRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<ManagedSession | null>(null);
   const requestTokenRef = useRef(0);
@@ -2487,11 +2604,14 @@ export function SessionView() {
 
   return (
     <section className={composerFocused ? "session-view session-view-composer-focused" : "session-view"}>
-      <div className="session-header">
+      <div
+        ref={adaptiveHeaderStatus.headerRef}
+        className={adaptiveHeaderStatus.compact ? "session-header session-header-status-compact" : "session-header"}
+      >
         <button className="icon-button" onClick={() => navigate("/")} aria-label="Back">
           <ArrowLeft size={19} />
         </button>
-        <div className="session-title">
+        <div ref={adaptiveHeaderStatus.titleRef} className="session-title">
           <SessionTitleHeading
             name={sessionDisplayName(readySession)}
             onFork={() => openForkSession(readySession)}
@@ -2501,7 +2621,7 @@ export function SessionView() {
             <SessionHeaderMeta session={readySession} />
           </div>
         </div>
-        <div className="session-header-runtime">
+        <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
           <TmuxCommandButton
             compact
             session={readySession}
@@ -2510,6 +2630,9 @@ export function SessionView() {
             onCopy={() => void copyTmuxCommand()}
           />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
+          <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
+            {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
+          </span>
           {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
         </div>
       </div>
@@ -2939,14 +3062,25 @@ export function SessionLoadingView({
   onNewSession: () => void;
 }) {
   const workspace = session ? normalizeGitWorkspaceSummary(session.gitWorkspace) : null;
+  const adaptiveHeaderStatus = useAdaptiveSessionHeaderStatus([
+    session?.id ?? "",
+    session?.status ?? "",
+    session?.contextUsage?.contextPercent ?? "",
+    session?.agentOwnership?.parentSessionId ?? "",
+    session?.forkedFrom?.sessionName ?? "",
+    session ? sessionDisplayName(session) : "Loading session"
+  ].join("\0"));
   return (
     <SessionLoadingSkeleton
       header={
-        <div className="session-header">
+        <div
+          ref={adaptiveHeaderStatus.headerRef}
+          className={adaptiveHeaderStatus.compact ? "session-header session-header-status-compact" : "session-header"}
+        >
           <button className="icon-button" onClick={onBack} aria-label="Back">
             <ArrowLeft size={19} />
           </button>
-          <div className="session-title">
+          <div ref={adaptiveHeaderStatus.titleRef} className="session-title">
             <h1>{session ? sessionDisplayName(session) : "Loading session"}</h1>
             {session ? (
               <div className="session-title-meta">
@@ -2954,8 +3088,11 @@ export function SessionLoadingView({
               </div>
             ) : <p className="session-header-meta">Starting session</p>}
           </div>
-          <div className="session-header-runtime">
+          <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
             {session ? <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
+            <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
+              <LoadingStatusPill />
+            </span>
             <LoadingStatusPill />
           </div>
         </div>

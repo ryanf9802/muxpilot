@@ -96,6 +96,7 @@ import {
   shouldShowSessionLoading,
   shouldShowQueuedIndicator,
   shouldShowWorkingIndicator,
+  shouldCompactSessionHeaderStatus,
   isLatestSessionRefresh,
   sessionBootstrapRetryDelay,
   terminalSessionBootstrapError,
@@ -293,6 +294,26 @@ describe("SessionContextUsage", () => {
     expect(renderToStaticMarkup(createElement(SessionContextUsage, {
       session: { contextUsage: null }
     }))).toBe("");
+  });
+});
+
+describe("shouldCompactSessionHeaderStatus", () => {
+  const layout = {
+    headerWidth: 296,
+    backWidth: 40,
+    headerGap: 7,
+    runtimeNonStatusWidth: 0,
+    runtimeGap: 5,
+    runtimeNonStatusItems: 0,
+    fullStatusWidth: 66
+  };
+
+  it("keeps the full status when the header contents fit", () => {
+    expect(shouldCompactSessionHeaderStatus({ ...layout, titleRequiredWidth: 170 })).toBe(false);
+  });
+
+  it("compacts the status when long left content needs its space", () => {
+    expect(shouldCompactSessionHeaderStatus({ ...layout, titleRequiredWidth: 190 })).toBe(true);
   });
 });
 

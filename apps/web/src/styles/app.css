@@ -3625,11 +3625,18 @@ select:focus-visible {
 }
 
 .session-header-runtime {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 7px;
   min-width: 0;
+}
+
+.session-header-status-probe {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .session-context-usage {
@@ -5639,7 +5646,7 @@ select:focus-visible {
   .git-panel-summary { grid-template-columns: minmax(0, 1fr); }
 
   .session-header-meta {
-    gap: 0;
+    gap: 6px;
   }
 
   .session-header-meta-separator,
@@ -5647,7 +5654,7 @@ select:focus-visible {
     display: none;
   }
 
-  .session-header .status {
+  .session-header-status-compact .session-header-runtime > .status {
     width: 12px;
     height: 12px;
     min-height: 12px;
@@ -5657,7 +5664,7 @@ select:focus-visible {
     color: transparent;
   }
 
-  .session-header .status-text {
+  .session-header-status-compact .session-header-runtime > .status .status-text {
     display: none;
   }
 
