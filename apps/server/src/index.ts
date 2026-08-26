@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { GitWorkflowBroker } from "./services/gitWorkflowBroker.js";
 import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroker.js";
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
+import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -131,7 +132,8 @@ const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   manager,
   join(config.dataDir, "runtime", "session-orchestration.sock"),
   join(config.dataDir, "runtime", "session-capabilities"),
-  app.log
+  app.log,
+  new RawSessionEvidenceReader(config.codexHome)
 );
 await sessionOrchestrationBroker.start();
 manager.setOrchestrationProvider(sessionOrchestrationBroker);

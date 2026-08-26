@@ -11,6 +11,8 @@ Use the tools exposed by `muxpilot_sessions` when a task benefits from another m
 
 - Use `list_sessions` to inspect session IDs, hierarchy, status, context use, and delegated work budgets.
 - Use `read_session` for a bounded recent transcript. Read only what the current decision needs.
+- When muxpilot's normalized state may be wrong, inspect independent evidence with `list_tmux_panes`, `capture_tmux_pane`, `read_tmux_process_tree`, `list_codex_session_files`, and `read_codex_session_file`. Compare the raw sources yourself; the tools do not classify mismatches.
+- Raw evidence tools are diagnostic and read-only. Report factual inconsistencies and wait for separate operator direction before attempting remediation.
 - You may send a work message to any live managed session by exact ID. The transcript records you as the delegating session.
 - Claim only an unowned session. Release, interrupt, finish, or otherwise control lifecycle only for sessions in your descendant tree.
 - A claimed or created child must report an isolated muxpilot resource scope. If isolation is unavailable, stop and ask the operator to enable the user systemd manager, restart muxpilot, and restore the target session.

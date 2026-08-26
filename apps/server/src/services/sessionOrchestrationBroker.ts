@@ -8,6 +8,7 @@ import type { ManagedSession, QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionScope } from "./sessionScopes.js";
+import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TERMINAL_OR_ATTENTION = new Set(["idle", "waiting", "question", "approval", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);
@@ -40,7 +41,8 @@ export class SessionOrchestrationBroker {
     private readonly manager: SessionManager,
     private readonly socketPath: string,
     private readonly capabilityRoot: string,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly rawEvidence: RawSessionEvidence
   ) {}
 
   async start(): Promise<void> {
@@ -111,6 +113,23 @@ export class SessionOrchestrationBroker {
     switch (request.action) {
       case "list_sessions": return this.listSessions(actorId, args.scope === "tree");
       case "read_session": return this.readSession(requiredString(args.sessionId, "sessionId"), boundedInteger(args.limit, 1, 30, 12));
+      case "list_tmux_panes": return this.rawEvidence.listTmuxPanes();
+      case "capture_tmux_pane": return this.rawEvidence.captureTmuxPane(
+        requiredPaneId(args.paneId),
+        boundedInteger(args.lines, 1, 2_000, 200),
+        args.includeAnsi === true,
+        args.joinWrappedLines === true
+      );
+      case "read_tmux_process_tree": return this.rawEvidence.readTmuxProcessTree(requiredPaneId(args.paneId));
+      case "list_codex_session_files": return this.rawEvidence.listCodexSessionFiles(
+        boundedInteger(args.limit, 1, 500, 100),
+        boundedInteger(args.offset, 0, Number.MAX_SAFE_INTEGER, 0)
+      );
+      case "read_codex_session_file": return this.rawEvidence.readCodexSessionFile(
+        requiredString(args.relativePath, "relativePath"),
+        optionalInteger(args.offset, 0, Number.MAX_SAFE_INTEGER),
+        boundedInteger(args.length, 1, 256 * 1024, RAW_CODEX_DEFAULT_READ_BYTES)
+      );
       case "create_session": return summarizeSession(await this.manager.agentCreateChild(actorId, requiredString(args.name, "name"), requiredString(args.task, "task"), collaborationMode(args.mode)));
       case "claim_session": return summarizeSession(await this.manager.agentClaim(actorId, requiredString(args.sessionId, "sessionId")));
       case "release_session": return summarizeSession(await this.manager.agentRelease(actorId, requiredString(args.sessionId, "sessionId")));
@@ -163,7 +182,10 @@ export class SessionOrchestrationBroker {
   private async readSession(sessionId: string, limit: number): Promise<unknown> {
     const session = await this.manager.getSession(sessionId);
     if (!session) throw new Error("Session not found");
-    const page = await this.db.listRecentMessages(sessionId, limit);
+    const [page, queuedInputs] = await Promise.all([
+      this.db.listRecentMessages(sessionId, limit),
+      this.db.listQueuedInputs(sessionId)
+    ]);
     let remainingCharacters = 24_000;
     const messages: Array<Record<string, unknown>> = [];
     for (const item of [...page.items].reverse()) {
@@ -180,12 +202,15 @@ export class SessionOrchestrationBroker {
         sequence: item.message.sequence,
         timestamp: item.message.timestamp,
         delegatedBy: delegatedActorSessionId(item.message.payload),
+        payload: item.message.payload,
         text
       });
     }
     return {
       session: summarizeSession(session),
+      muxpilotRecord: session,
       messages,
+      queuedInputs,
       hasMoreBefore: page.hasMoreBefore
     };
   }
@@ -312,10 +337,21 @@ function requiredString(value: unknown, name: string): string {
   return value.trim();
 }
 
+function requiredPaneId(value: unknown): string {
+  const paneId = requiredString(value, "paneId");
+  if (!/^%\d+$/.test(paneId)) throw new Error("paneId must be an exact tmux pane id");
+  return paneId;
+}
+
 function boundedInteger(value: unknown, min: number, max: number, fallback?: number): number {
   if (value === undefined && fallback !== undefined) return fallback;
   if (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max) throw new Error(`Expected an integer between ${min} and ${max}`);
   return Number(value);
+}
+
+function optionalInteger(value: unknown, min: number, max: number): number | null {
+  if (value === undefined) return null;
+  return boundedInteger(value, min, max);
 }
 
 function collaborationMode(value: unknown): "default" | "plan" | undefined {
