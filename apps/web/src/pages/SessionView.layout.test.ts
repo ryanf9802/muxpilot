@@ -59,13 +59,22 @@ describe("mobile session viewport layout", () => {
     expect(compactButtonRule).toContain("min-height: 40px;");
   });
 
-  it("keeps composer settings and adaptive transcript navigation out of the input width", () => {
+  it("places composer settings in a vertical rail left of the input", () => {
     const settingsRule = cssBlock(styles, ".composer-settings");
     const composerRule = cssBlock(styles, ".composer");
+    const sendRule = cssBlock(styles, ".composer > .send-button");
+    expect(settingsRule).toContain("display: grid;");
+    expect(settingsRule).toContain("grid-auto-flow: row;");
+    expect(settingsRule).toContain("align-content: start;");
+    expect(composerRule).toContain("grid-template-columns: auto minmax(0, 1fr) 48px;");
+    expect(composerRule).toContain("align-items: start;");
+    expect(sendRule).toContain("align-self: start;");
+    expect(sendRule).toContain("height: 52px;");
+  });
+
+  it("keeps adaptive transcript navigation clear of message content", () => {
     const railRule = cssBlock(styles, ".transcript-jump-rail");
     const protectedListRule = cssBlock(styles, ".message-list[data-jump-controls]");
-    expect(settingsRule).toContain("flex: 0 0 auto;");
-    expect(composerRule).toContain("grid-template-columns: minmax(0, 1fr) 48px;");
     expect(railRule).toContain("position: absolute;");
     expect(railRule).toContain("pointer-events: none;");
     expect(protectedListRule).toContain("padding-right: 60px;");

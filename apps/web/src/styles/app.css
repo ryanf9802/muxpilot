@@ -4864,15 +4864,34 @@ select:focus-visible {
 }
 
 .composer-settings {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
+  display: grid;
+  grid-auto-flow: row;
+  align-content: start;
+  justify-items: center;
+  gap: 6px;
   min-width: 0;
 }
 
+.composer-settings .mode-toggle-text,
+.composer-settings .fast-mode-toggle span {
+  display: none;
+}
+
+.composer-settings .mode-toggle button {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+}
+
+.composer-settings .mode-toggle-icon {
+  display: inline-block;
+}
+
 .composer-settings .fast-mode-toggle {
+  width: 36px;
+  min-width: 36px;
   min-height: 34px;
+  padding: 0;
 }
 
 .composer-settings .vim-toggle {
@@ -4888,12 +4907,17 @@ select:focus-visible {
   height: 22px;
 }
 
+.composer > .send-button {
+  align-self: start;
+  height: 52px;
+}
+
 .composer {
   display: grid;
   flex: 0 0 auto;
-  grid-template-columns: minmax(0, 1fr) 48px;
+  grid-template-columns: auto minmax(0, 1fr) 48px;
   gap: 8px;
-  align-items: stretch;
+  align-items: start;
   min-width: 0;
   max-width: 100%;
   padding: 0;
@@ -5560,10 +5584,6 @@ select:focus-visible {
 
   .mode-toggle {
     flex: 0 0 auto;
-  }
-
-  .composer-settings .fast-mode-toggle span {
-    display: none;
   }
 
   .mode-toggle button {

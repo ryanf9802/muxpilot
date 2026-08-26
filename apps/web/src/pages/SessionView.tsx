@@ -2787,24 +2787,24 @@ export function SessionView() {
               onDelete={deleteQueuedInput}
             />
           ) : null}
-          <div className="composer-settings" role="group" aria-label="Composer settings">
-            <ModeToggle
-              mode={readySession.inputMode}
-              busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
-              onChange={setInputMode}
-            />
-            <FastModeToggle
-              enabled={readySession.fastMode === true}
-              available={readySession.fastModeAvailable ?? null}
-              busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
-              status={readySession.status}
-              onChange={setFastMode}
-            />
-            {vimAvailable ? <VimModeToggle enabled={vimEnabled} onChange={updateVimMode} /> : null}
-          </div>
           {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
           {fastModeError ? <p className="mode-toggle-error" role="alert">{fastModeError}</p> : null}
           <form className="composer" ref={composerFormRef} onSubmit={submit}>
+            <div className="composer-settings" role="group" aria-label="Composer settings">
+              <ModeToggle
+                mode={readySession.inputMode}
+                busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
+                onChange={setInputMode}
+              />
+              <FastModeToggle
+                enabled={readySession.fastMode === true}
+                available={readySession.fastModeAvailable ?? null}
+                busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
+                status={readySession.status}
+                onChange={setFastMode}
+              />
+              {vimAvailable ? <VimModeToggle enabled={vimEnabled} onChange={updateVimMode} /> : null}
+            </div>
             <SkillTextArea
               value={text}
               onChange={updateComposerText}
