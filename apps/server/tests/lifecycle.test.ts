@@ -12,6 +12,7 @@ describe("production bundled skill startup", () => {
     await expect(access(join(home, "skills", "muxpilot-git-workflow", "SKILL.md"))).rejects.toThrow();
     await expect(access(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"))).rejects.toThrow();
     await expect(access(join(home, "skills", "muxpilot-session-orchestration", "SKILL.md"))).rejects.toThrow();
+    await expect(access(join(home, "skills", "muxpilot-documents", "SKILL.md"))).rejects.toThrow();
   });
 
   it("installs and updates the skill during production startup", async () => {
@@ -44,8 +45,13 @@ describe("production bundled skill startup", () => {
       expect(installedOrchestrationSkill).toContain("Use built-in Codex subagents for routine bounded delegation");
       expect(installedOrchestrationSkill).toContain("Do not create a nested muxpilot session merely to run a review in parallel");
       expect(installedOrchestrationSkill).toContain("only when the operator explicitly requests a nested muxpilot session");
+      const installedDocumentsSkill = await readFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "utf8");
+      expect(installedDocumentsSkill).toContain("MUXPILOT_DOCUMENTS_DIR");
+      expect(installedDocumentsSkill).toContain("Read `INDEX.md` first");
 
       await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
+      expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
+      await writeFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
     } finally {
       log.mockRestore();

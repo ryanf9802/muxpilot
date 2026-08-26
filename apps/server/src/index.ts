@@ -20,6 +20,7 @@ import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 import { SessionTransferService } from "./services/sessionTransfer.js";
+import { SessionDocumentService } from "./services/sessionDocuments.js";
 import { ResourceGovernor, UserSystemdController } from "./services/resourceGovernor.js";
 import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
 import { HeavyCommandService } from "./services/heavyCommands.js";
@@ -110,6 +111,7 @@ if (config.resourceGovernor !== "off") {
     dockerProxy = null;
   }
 }
+const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const manager = new SessionManager(
   db,
   tmux,
@@ -119,6 +121,7 @@ const manager = new SessionManager(
   config.parserIntervalMs,
   config.approvalKeys,
   config.inputModeCycleKeys,
+  sessionDocuments,
   activitySummarizer,
   codexProcessResolver,
   gitWorkspaces,

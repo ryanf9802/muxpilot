@@ -2808,6 +2808,60 @@ select:focus-visible {
 .heavy-command-indicator span { font-size: 11px; font-weight: 700; }
 
 .heavy-command-modal { width: min(860px, calc(100vw - 28px)); }
+
+.documents-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(960px, calc(100vw - 28px));
+  height: min(720px, calc(100dvh - 36px));
+  overflow: hidden;
+}
+
+.documents-layout {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.documents-list,
+.documents-viewer {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.documents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-right: 3px;
+}
+
+.documents-list button {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 9px;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  text-align: left;
+}
+
+.documents-list button[data-active="true"] {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-action) 12%, var(--color-surface-raised));
+  border-color: color-mix(in srgb, var(--color-action) 65%, var(--color-border));
+}
+
+.documents-list button > span { display: grid; gap: 3px; min-width: 0; }
+.documents-list strong { overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.documents-list small { color: var(--color-text-muted); font-size: 11px; }
+.documents-viewer { padding: 4px 12px 20px; border-left: 1px solid var(--color-border); }
 .heavy-command-list { display: grid; gap: 12px; overflow: auto; }
 .heavy-command-detail {
   display: grid;
@@ -4762,6 +4816,18 @@ select:focus-visible {
 }
 
 @media (max-width: 819px) {
+  .documents-modal {
+    width: calc(100vw - 20px);
+    height: calc(100dvh - 20px);
+  }
+
+  .documents-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .documents-list { max-height: 30dvh; }
+  .documents-viewer { padding: 10px 2px; border-top: 1px solid var(--color-border); border-left: 0; }
   .queue-automation-command {
     display: none;
   }

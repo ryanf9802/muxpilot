@@ -546,8 +546,8 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   }
   if (options.isolatedWorkspace) {
     codexArgs.push("-C", cwd, "-s", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[]", "-c", "sandbox_workspace_write.network_access=true");
-    for (const root of options.writableRoots ?? []) codexArgs.push("--add-dir", root);
   }
+  for (const root of options.writableRoots ?? []) codexArgs.push("--add-dir", root);
   if (options.developerInstructions) codexArgs.push("-c", `developer_instructions=${JSON.stringify(options.developerInstructions)}`);
   for (const server of options.mcpServers ?? []) {
     codexArgs.push(

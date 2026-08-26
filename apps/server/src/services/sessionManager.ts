@@ -23,6 +23,8 @@ import type {
   RestoreSessionRecoveryResponse,
   RestoreSessionRecoveryResult,
   SessionAction,
+  SessionDocumentResponse,
+  SessionDocumentsResponse,
   SessionDirectorySuggestion,
   SessionModelSettings,
   SessionModelSelections,
@@ -62,6 +64,7 @@ import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from ".
 import { accountAgentWorkTokens, agentWorkTokensUsed } from "./agentUsage.js";
 import type { PortableSession } from "./sessionTransfer.js";
 import { isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
+import { SessionDocumentService, type SessionDocumentSnapshot } from "./sessionDocuments.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -153,6 +156,7 @@ export class SessionManager {
     private readonly parserIntervalMs: number,
     private readonly approvalKeys: ApprovalKeyMap,
     private readonly inputModeCycleKeys: string[],
+    private readonly documents: SessionDocumentService,
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
     private readonly codexProcessLookup: CodexProcessLookup | null = null,
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
@@ -192,6 +196,58 @@ export class SessionManager {
 
   setOrchestrationProvider(provider: SessionOrchestrationProvider | null): void {
     this.orchestrationProvider = provider;
+  }
+
+  async listDocuments(sessionId: string): Promise<SessionDocumentsResponse> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    const scopeId = await this.ensureDocumentScope(session);
+    return this.requireDocuments().list(scopeId);
+  }
+
+  async readDocument(sessionId: string, name: string): Promise<SessionDocumentResponse> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    const scopeId = await this.ensureDocumentScope(session);
+    return this.requireDocuments().read(scopeId, name);
+  }
+
+  async snapshotDocuments(sessionId: string): Promise<SessionDocumentSnapshot[]> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    return this.requireDocuments().snapshot(await this.ensureDocumentScope(session));
+  }
+
+  private requireDocuments(): SessionDocumentService {
+    return this.documents;
+  }
+
+  private async ensureDocumentScope(session: ManagedSession): Promise<string> {
+    const documents = this.requireDocuments();
+    const scopeId = session.documentScopeId ?? session.gitWorkspace?.id ?? documents.newScopeId();
+    await documents.ensureScope(scopeId);
+    if (scopeId !== session.documentScopeId) {
+      await this.db.setSessionDocumentScope(session.id, scopeId, nowIso());
+    }
+    return scopeId;
+  }
+
+  private async withDocumentLaunchOptions(options: CodexLaunchOptions, scopeId: string): Promise<CodexLaunchOptions> {
+    const root = await this.requireDocuments().ensureScope(scopeId);
+    const documentsRoot = join(root, "documents");
+    const instruction = [
+      `Muxpilot documents persist in ${JSON.stringify(documentsRoot)} for this session.`,
+      "Use $muxpilot-documents whenever durable plans, checklists, reminders, requirements, decisions, or acceptance criteria would help.",
+      "Before substantive work on each turn, and after resume or context compaction, inspect the existing documents and read INDEX.md first when present.",
+      "Keep relevant documents current after material progress or decisions and before asking a question or giving a final answer.",
+      "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; do not store secrets or raw transcripts."
+    ].join(" ");
+    return {
+      ...options,
+      writableRoots: [...new Set([...(options.writableRoots ?? []), documentsRoot])],
+      environment: { ...(options.environment ?? {}), MUXPILOT_DOCUMENTS_DIR: documentsRoot },
+      developerInstructions: [options.developerInstructions, instruction].filter(Boolean).join(" ")
+    };
   }
 
   private async prepareOrchestratedLaunch(options: CodexLaunchOptions): Promise<{ options: CodexLaunchOptions; capabilityId: string | null }> {
@@ -523,7 +579,8 @@ export class SessionManager {
         pinned: existing?.pinned ?? false,
         archived: existing?.archived ?? false,
         gitWorkspace: activeGitWorkspace,
-        forkedFrom: existing?.forkedFrom ?? null
+        forkedFrom: existing?.forkedFrom ?? null,
+        documentScopeId: existing?.documentScopeId ?? activeGitWorkspace?.id ?? null
       };
 
       if (effectiveStatus === "approval" && liveApprovalPrompt) {
@@ -907,11 +964,14 @@ export class SessionManager {
       ? await this.gitWorkspaces!.get(storedGitWorkspace.id) ?? storedGitWorkspace
       : null;
     const name = restoreSessionName(source);
-    const prepared = await this.prepareOrchestratedLaunch(
+    const documentScopeId = await this.ensureDocumentScope(source);
+    const documentOptions = await this.withDocumentLaunchOptions(
       launchWorkspace
         ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
-        : { environment: this.managedEnvironment }
+        : { environment: this.managedEnvironment },
+      documentScopeId
     );
+    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     const launch = await this.tmux.createCodexResumeWindowInMuxpilotSession(
       cwd,
       name,
@@ -929,11 +989,13 @@ export class SessionManager {
   async importPortableSession(
     portable: PortableSession,
     transcript: Buffer,
-    mapping: SessionTransferImportMapping
+    mapping: SessionTransferImportMapping,
+    importedDocuments: SessionDocumentSnapshot[] | null = null
   ): Promise<SessionTransferImportResult> {
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     const existing = (await this.db.listSessions(true)).find((session) => session.codexSessionId === portable.codexSessionId) ?? null;
     let selectedTranscript = transcript;
+    let selectedDocuments = importedDocuments;
     let keptExisting = false;
     if (existing) {
       const live = await this.findLiveSessionByCodexSessionId(portable.codexSessionId);
@@ -948,6 +1010,9 @@ export class SessionManager {
       if (existingTranscript && compareTranscripts(existingTranscript, transcript) >= 0) {
         selectedTranscript = completeTranscriptPrefix(existingTranscript);
         keptExisting = true;
+      }
+      if (selectedDocuments === null && existing.documentScopeId) {
+        selectedDocuments = await this.requireDocuments().snapshot(existing.documentScopeId);
       }
       await this.db.markSessionArchived(existing.id, true, nowIso());
     }
@@ -972,6 +1037,7 @@ export class SessionManager {
       pid: 0,
       size: "0x0"
     };
+    const documentScopeId = portable.workspaceMode === "directory" ? this.requireDocuments().newScopeId() : null;
     const session: ManagedSession = {
       id: placeholderId,
       tmux: syntheticPane,
@@ -995,7 +1061,8 @@ export class SessionManager {
       pinned: portable.pinned,
       archived: false,
       forkedFrom: portable.forkedFrom ?? null,
-      gitWorkspace: null
+      gitWorkspace: null,
+      documentScopeId
     };
     await this.db.upsertSession(session, nowIso());
 
@@ -1006,8 +1073,14 @@ export class SessionManager {
       const workspace = await this.gitWorkspaces.provision({ sessionName: portable.sessionName, entryPath: destination, targetBranch });
       await this.gitWorkspaces.bind(workspace.id, placeholderId);
       session.gitWorkspace = workspace.summary;
+      session.documentScopeId = workspace.id;
       await this.db.upsertSession(session, nowIso());
     }
+
+    const installedScopeId = session.documentScopeId ?? this.requireDocuments().newScopeId();
+    session.documentScopeId = installedScopeId;
+    await this.requireDocuments().replace(installedScopeId, selectedDocuments ?? []);
+    await this.db.upsertSession(session, nowIso());
 
     await this.ingestSession(session);
     const restored = await this.restoreSession(placeholderId);
@@ -1835,12 +1908,14 @@ export class SessionManager {
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    const prepared = await this.prepareOrchestratedLaunch({
+    const documentScopeId = this.requireDocuments().newScopeId();
+    const documentOptions = await this.withDocumentLaunchOptions({
       environment: this.managedEnvironment,
       ...launchSettings
-    });
+    }, documentScopeId);
+    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, prepared.options);
-    let session = await this.persistInitializingSession(launch.pane, directory);
+    let session = await this.persistInitializingSession(launch.pane, directory, null, null, undefined, documentScopeId);
     session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
@@ -1867,9 +1942,13 @@ export class SessionManager {
       targetBranch: request.workspace.targetBranch
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
-    const prepared = await this.prepareOrchestratedLaunch(
-      { ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment), ...launchSettings }
-    );
+    const documentOptions = await this.withDocumentLaunchOptions({
+      ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
+      model: launchSettings?.model,
+      reasoningEffort: launchSettings?.reasoningEffort,
+      fastMode: launchSettings?.fastMode
+    }, workspace.id);
+    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
@@ -1877,7 +1956,7 @@ export class SessionManager {
     );
     const sessionId = tmuxPaneSessionId(launch.pane);
     await this.gitWorkspaces.bind(workspace.id, sessionId);
-    let session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary);
+    let session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary, null, undefined, workspace.id);
     session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
@@ -1899,6 +1978,7 @@ export class SessionManager {
     let launch;
     let orchestrationCapabilityId: string | null = null;
     let gitWorkspace: GitWorkspaceSummary | null = null;
+    let documentScopeId: string;
     let repoPath: string;
     if (source.gitWorkspace) {
       if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
@@ -1908,8 +1988,14 @@ export class SessionManager {
         targetBranch: source.gitWorkspace.targetBranch
       });
       const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
+      documentScopeId = workspace.id;
+      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
+      const documentOptions = await this.withDocumentLaunchOptions(
+        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
+        documentScopeId
+      );
       const prepared = await this.prepareOrchestratedLaunch(
-        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
+        documentOptions
       );
       launch = await this.tmux.createCodexForkWindowInMuxpilotSession(
         controlPath,
@@ -1924,14 +2010,15 @@ export class SessionManager {
       repoPath = workspace.summary.entryPath;
     } else {
       repoPath = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
-      const prepared = await this.prepareOrchestratedLaunch({
-        environment: this.managedEnvironment
-      });
+      documentScopeId = this.requireDocuments().newScopeId();
+      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
+      const documentOptions = await this.withDocumentLaunchOptions({ environment: this.managedEnvironment }, documentScopeId);
+      const prepared = await this.prepareOrchestratedLaunch(documentOptions);
       launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, source.codexSessionId, prepared.options);
       orchestrationCapabilityId = prepared.capabilityId;
     }
 
-    let session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source);
+    let session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source, documentScopeId);
     session = await this.bindOrchestratedLaunch(orchestrationCapabilityId, session.id);
     this.finishSessionInitialization(session.id, launch.ready);
     await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
@@ -1944,7 +2031,8 @@ export class SessionManager {
     repoPath: string,
     gitWorkspace: GitWorkspaceSummary | null = null,
     forkedFrom: SessionForkOrigin | null = null,
-    preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">
+    preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">,
+    documentScopeId?: string | null
   ): Promise<ManagedSession> {
     const now = nowIso();
     const session: ManagedSession = {
@@ -1973,7 +2061,8 @@ export class SessionManager {
       pinned: false,
       archived: false,
       forkedFrom,
-      gitWorkspace
+      gitWorkspace,
+      documentScopeId: documentScopeId ?? null
     };
     await this.db.upsertSession(session, now);
     const persisted = requireSession(await this.db.setSessionInitializing(session.id, true, now));
@@ -2668,7 +2757,8 @@ export class SessionManager {
       pinned: source.pinned,
       archived: false,
       forkedFrom: source.forkedFrom ?? null,
-      gitWorkspace: source.gitWorkspace ?? null
+      gitWorkspace: source.gitWorkspace ?? null,
+      documentScopeId: source.documentScopeId ?? null
     };
     const rebound = await this.db.rekeySession(source.id, session, parserOffsetMove, now);
     if (!rebound) throw new SessionRestoreError("Session not found");
@@ -3760,7 +3850,8 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     pinned: session.pinned,
     archived: session.archived,
     forkedFrom: session.forkedFrom ?? null,
-    gitWorkspace: session.gitWorkspace
+    gitWorkspace: session.gitWorkspace,
+    documentScopeId: session.documentScopeId ?? null
   };
 }
 

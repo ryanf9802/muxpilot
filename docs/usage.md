@@ -64,6 +64,14 @@ Heavy validation—such as repository-wide checks, production builds, scanners, 
 
 Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into a managed workspace. For change tasks, a direct Codex session running in tmux can initialize the bundled Git workflow's standalone mode after the user explicitly approves an existing local target branch. Standalone mode provides short-lived worktrees, dependency reuse, target locking, rebase/re-review gates, local integration, and cleanup, but it does not retrofit muxpilot workspace controls, sandbox roots, developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Non-Git directories keep the direct-directory session flow.
 
+## Session documents
+
+Every session created or restored by muxpilot has a private documents directory available to its Codex agent through `$MUXPILOT_DOCUMENTS_DIR`. The bundled `muxpilot-documents` skill teaches the agent to use flat Markdown files for durable implementation plans, checklists, reminders, decisions, requirements, and acceptance criteria, and to revisit and update them as work progresses. Agents maintain `INDEX.md` as a concise map when documents exist.
+
+Open **Documents** in the session header to browse the current files and rendered Markdown. The operator view is read-only; document creation and editing remain agent-managed. Documents persist when a session is missing, archived, killed, or restored.
+
+A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 MiB total. The viewer and transfer system reject nested paths, dotfiles, symlinks, non-UTF-8 content, and files outside those limits. Do not use session documents for credentials, tokens, raw transcripts, or other unnecessary sensitive data.
+
 ## Restoring sessions
 
 The History tab in the new-session dialog searches sessions previously managed by muxpilot. Search covers submitted user prompts, not assistant messages or tool output.
@@ -80,7 +88,7 @@ Use **Fork session** from the session header or dashboard action menu to branch 
 
 Forking is allowed while the source is working, but Codex may record its partial turn as interrupted. Queued inputs, composer drafts, pins, notifications, and other transient UI state are not copied.
 
-A fork of a managed Git session inherits the same target branch but receives its own managed workspace. Unintegrated files from the source worktree are not copied; the fork starts from the current target branch.
+A fork receives an independent snapshot of the source session's documents. A fork of a managed Git session inherits the same target branch but receives its own managed workspace. Unintegrated files from the source worktree are not copied; the fork starts from the current target branch.
 
 ## Agent delegation
 
@@ -90,7 +98,7 @@ Nested muxpilot sessions are reserved for work the operator explicitly requests 
 
 ## Moving sessions between hosts
 
-The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts and portable session preferences, then resumes the imported sessions in tmux.
+The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, and portable session preferences, then resumes the imported sessions in tmux.
 
 For managed Git sessions, current exports can include the committed local target branch and objects not available from its upstream. Import may create, reuse, or safely fast-forward the same branch name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting upstream.
 

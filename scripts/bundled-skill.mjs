@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 const SKILL_NAME = "muxpilot-git-workflow";
 const QUEUE_SKILL_NAME = "muxpilot-heavy-command-queue";
 const ORCHESTRATION_SKILL_NAME = "muxpilot-session-orchestration";
+const DOCUMENTS_SKILL_NAME = "muxpilot-documents";
 
 export async function muxpilotGitWorkflowSkillStatus(codexHome) {
   const workflow = await bundledSkillStatus(codexHome, SKILL_NAME);
@@ -19,17 +20,21 @@ export async function syncMuxpilotGitWorkflowSkill(codexHome) {
   const existing = await bundledSkillStatus(codexHome, SKILL_NAME);
   const queueExisting = await bundledSkillStatus(codexHome, QUEUE_SKILL_NAME);
   const orchestrationExisting = await bundledSkillStatus(codexHome, ORCHESTRATION_SKILL_NAME);
+  const documentsExisting = await bundledSkillStatus(codexHome, DOCUMENTS_SKILL_NAME);
   if (
     existing.status === "current"
     && queueExisting.status === "current"
     && orchestrationExisting.status === "current"
+    && documentsExisting.status === "current"
   ) return { ...existing, action: "unchanged" };
 
   await syncBundledSkill(codexHome, SKILL_NAME, existing);
   await syncBundledSkill(codexHome, QUEUE_SKILL_NAME, queueExisting);
   await syncBundledSkill(codexHome, ORCHESTRATION_SKILL_NAME, orchestrationExisting);
+  await syncBundledSkill(codexHome, DOCUMENTS_SKILL_NAME, documentsExisting);
   const installed = await muxpilotGitWorkflowSkillStatus(codexHome);
-  if (installed.status !== "current") {
+  const installedDocuments = await bundledSkillStatus(codexHome, DOCUMENTS_SKILL_NAME);
+  if (installed.status !== "current" || installedDocuments.status !== "current") {
     throw new Error(`Bundled muxpilot skills remained ${installed.status} after synchronization`);
   }
   return {
@@ -37,6 +42,7 @@ export async function syncMuxpilotGitWorkflowSkill(codexHome) {
     action: existing.status === "missing"
       || queueExisting.status === "missing"
       || orchestrationExisting.status === "missing"
+      || documentsExisting.status === "missing"
       ? "installed"
       : "updated"
   };

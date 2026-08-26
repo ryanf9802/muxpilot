@@ -33,6 +33,16 @@ describe("api client request headers", () => {
     );
   });
 
+  it("loads encoded session document endpoints", async () => {
+    const fetchMock = mockJsonResponse({ documents: [], sampledAt: "2026-08-25T00:00:00.000Z" });
+    await api.sessionDocuments("session #1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/documents", expect.objectContaining({ credentials: "include" }));
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ document: { name: "plan #1.md", content: "# Plan", sizeBytes: 6, updatedAt: "2026-08-25T00:00:00.000Z" } }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await api.sessionDocument("session #1", "plan #1.md");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/documents/plan%20%231.md", expect.objectContaining({ credentials: "include" }));
+  });
+
   it("sends access keys to the operator access endpoint", async () => {
     const fetchMock = mockJsonResponse({ ok: true });
 

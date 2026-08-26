@@ -119,6 +119,19 @@ describe("codexCommandArgs", () => {
       'developer_instructions="Use $muxpilot-git-workflow."'
     ]);
   });
+
+  it("adds document directories to ordinary directory sessions", () => {
+    const args = codexCommandArgs("/repo", {
+      writableRoots: ["/sessions/documents-1/documents"],
+      environment: { MUXPILOT_DOCUMENTS_DIR: "/sessions/documents-1/documents" }
+    });
+    expect(args).toEqual(expect.arrayContaining([
+      "MUXPILOT_DOCUMENTS_DIR=/sessions/documents-1/documents",
+      "--add-dir",
+      "/sessions/documents-1/documents"
+    ]));
+    expect(args).not.toContain("-C");
+  });
 });
 
 describe("isCodexDirectoryTrustPrompt", () => {

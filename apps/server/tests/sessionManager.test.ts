@@ -7,6 +7,7 @@ import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore, type CodexSessionFile } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
+import { SessionDocumentService } from "../src/services/sessionDocuments.js";
 import type { GitWorkspaceManager } from "../src/services/gitWorkspaceManager.js";
 import {
   clearCodexTailAnalysisCache,
@@ -4471,8 +4472,13 @@ describe("SessionManager transcript isolation", () => {
       60_000,
       { approveOnce: [], approveForPrefix: [], deny: [] },
       ["BTab"],
+      new SessionDocumentService(join(harness.dir, "sessions")),
       null,
-      harness.processLookup
+      harness.processLookup,
+      null,
+      harness.codexHome,
+      null,
+      {}
     );
     harness.tmux.capturePane = async () => "fresh completed answer\n› ";
 
@@ -5130,11 +5136,15 @@ describe("SessionManager transcript isolation", () => {
     expect(createCalls[0]?.options.developerInstructions).toContain("Do not create a nested muxpilot session merely to perform a review in parallel");
     expect(createCalls[0]?.options.developerInstructions).toContain("if built-in subagents are unavailable, keep the review in the current session");
     expect(createCalls[0]?.options.developerInstructions).toContain("only when the operator explicitly requests a nested muxpilot session or the work is durable");
+    expect(createCalls[0]?.options.developerInstructions).toContain("Use $muxpilot-documents");
+    expect(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR).toMatch(/sessions\/documents-[^/]+\/documents$/);
+    expect(createCalls[0]?.options.writableRoots).toContain(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR);
     expect(bindCapability).toHaveBeenCalledWith("0123456789abcdef01234567", created.id);
     expect(created).toMatchObject({
       orchestrationAvailable: true,
       resourceScope: "muxpilot-session-0123456789abcdef01234567.scope"
     });
+    expect(created.documentScopeId).toMatch(/^documents-/);
     expect(created.tmux.sessionName).toBe("muxpilot");
     expect(created.tmux.paneId).toBe("%2");
     expect(created.tmux.windowName).toBe("new-work");
@@ -6033,6 +6043,7 @@ async function createHarness(options: { sessionScopesAvailable?: boolean } = {})
     60_000,
     { approveOnce: [], approveForPrefix: [], deny: [] },
     ["BTab"],
+    new SessionDocumentService(join(dir, "sessions")),
     activitySummarizer,
     processLookup,
     null,

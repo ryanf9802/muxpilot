@@ -2042,7 +2042,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
     if (requirement.workspaceMode !== "git") return true;
     const mappingProbe = mappingProbes[requirement.sourceCwd];
     if (!(mappingProbe?.path === value.destinationCwd.trim() && mappingProbe.probe?.isGit && !mappingProbe.probe.bare)) return false;
-    return preview?.formatVersion === 3
+    return preview?.formatVersion !== 2
       || targetBranchSuggestions(mappingProbe.probe).some((suggestion) => suggestion.value === value.targetBranch);
   }) ?? false;
   const selectedWithActiveWork = portableSessions.filter((session) =>
@@ -2143,7 +2143,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
                     {mappingProbes[requirement.sourceCwd]?.error ? <p className="session-git-probe-note dialog-error">{mappingProbes[requirement.sourceCwd]!.error}</p> : null}
                     {mappingProbes[requirement.sourceCwd]?.probe && !mappingProbes[requirement.sourceCwd]!.probe!.isGit ? <p className="session-git-probe-note dialog-error">Destination is not a Git repository.</p> : null}
                   </> : null}
-                  {requirement.workspaceMode === "git" && preview.formatVersion === 3 ? <>
+                  {requirement.workspaceMode === "git" && preview.formatVersion !== 2 ? <>
                     {requirement.branches.map((branch) => {
                       const probe = mappingProbes[requirement.sourceCwd]?.probe;
                       const upstreamUnavailable = Boolean(branch.upstreamRemote && probe?.isGit && !probe.remotes.includes(branch.upstreamRemote));

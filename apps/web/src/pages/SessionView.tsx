@@ -6,6 +6,7 @@ import {
   Check,
   Clock3,
   Copy,
+  FileText,
   HelpCircle,
   GitBranch,
   GitFork,
@@ -70,6 +71,7 @@ import type {
   QuestionRequest,
   QueuedInput,
   SessionEvent,
+  SessionDocumentSummary,
   SessionModelSettings,
   SessionAction,
   SessionActionResponse,
@@ -789,6 +791,87 @@ export function HeavyCommandsModal({
   );
 }
 
+export function DocumentsModal({ open, sessionId, onClose }: { open: boolean; sessionId: string; onClose: () => void }) {
+  const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [content, setContent] = useState("");
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState("");
+  const [contentError, setContentError] = useState("");
+
+  useEffect(() => {
+    if (!open) return undefined;
+    let cancelled = false;
+    let first = true;
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      if (first) setListLoading(true);
+      try {
+        const response = await api.sessionDocuments(sessionId);
+        if (cancelled) return;
+        setDocuments(response.documents);
+        setListError("");
+        setSelected((current) => response.documents.some((document) => document.name === current)
+          ? current
+          : response.documents.find((document) => document.name.toLowerCase() === "index.md")?.name ?? response.documents[0]?.name ?? null);
+      } catch (error) {
+        if (!cancelled) setListError(error instanceof Error ? error.message : "Unable to load documents");
+      } finally {
+        if (!cancelled) setListLoading(false);
+        first = false;
+        refreshing = false;
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 2_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [open, sessionId]);
+
+  const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
+  useEffect(() => {
+    if (!open || !selected) {
+      setContent("");
+      setContentError("");
+      return undefined;
+    }
+    let cancelled = false;
+    void api.sessionDocument(sessionId, selected).then(
+      (response) => {
+        if (cancelled) return;
+        setContent(response.document.content);
+        setContentError("");
+      },
+      (error) => {
+        if (!cancelled) setContentError(error instanceof Error ? error.message : "Unable to load document");
+      }
+    );
+    return () => { cancelled = true; };
+  }, [open, selected, selectedVersion, sessionId]);
+
+  return (
+    <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
+      {listError ? <p className="error-text" role="alert">{listError}</p> : null}
+      {listLoading && documents.length === 0 ? <p className="muted">Loading documents…</p> : documents.length === 0 && !listError ? <p className="muted">This session has no documents yet.</p> : (
+        <div className="documents-layout">
+          <nav className="documents-list" aria-label="Session documents">
+            {documents.map((document) => (
+              <button key={document.name} type="button" data-active={selected === document.name || undefined} onClick={() => setSelected(document.name)}>
+                <FileText size={15} aria-hidden="true" />
+                <span><strong>{document.name}</strong><small>{formatDocumentBytes(document.sizeBytes)}</small></span>
+              </button>
+            ))}
+          </nav>
+          <article className="documents-viewer" aria-label={selected ?? "Document viewer"}>
+            {contentError ? <p className="error-text" role="alert">{contentError}</p> : selected ? <MarkdownBlock text={content} /> : null}
+          </article>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function heavyStateLabel(state: HeavyCommand["state"]): string {
   return { waiting: "Waiting for slot", reserved: "Resuming session", running: "Running", stalled: "No observed progress", terminating: "Terminating" }[state];
 }
@@ -799,6 +882,11 @@ function compactDuration(milliseconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return minutes < 60 ? `${minutes}m ${seconds % 60}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+function formatDocumentBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
 }
 
 function formatHeavyCachePaths(command: HeavyCommand): string {
@@ -877,6 +965,7 @@ export function SessionView() {
   const [sessionLoadRetrying, setSessionLoadRetrying] = useState(false);
   const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [documentsOpen, setDocumentsOpen] = useState(false);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
   const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
@@ -1274,6 +1363,8 @@ export function SessionView() {
       setInputModeError("");
       setFastModeError("");
       setCopiedTmuxCommand(false);
+      setGitPanelOpen(false);
+      setDocumentsOpen(false);
       setHeavyCommands([]);
       setHeavyCommandsOpen(false);
       setHeavyOutputs({});
@@ -2188,6 +2279,7 @@ export function SessionView() {
         onClose={() => setHeavyCommandsOpen(false)}
         onTerminate={(runId) => void terminateHeavyCommand(runId)}
       />
+      <DocumentsModal open={documentsOpen} sessionId={readySession.id} onClose={() => setDocumentsOpen(false)} />
 
       <div className="actions">
         <div className="actions-main">
@@ -2200,6 +2292,17 @@ export function SessionView() {
           >
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
+          </button>
+          <button
+            className="session-documents-button"
+            type="button"
+            onClick={() => setDocumentsOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={documentsOpen}
+            title="Documents"
+          >
+            <FileText size={17} />
+            <span className="session-action-label">Documents</span>
           </button>
           {readyWorkspace ? (
             <button

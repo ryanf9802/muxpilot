@@ -51,6 +51,7 @@ import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
 import type { HeavyCommandService } from "../services/heavyCommands.js";
+import { SessionDocumentError } from "../services/sessionDocuments.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const restoreSessionRecoverySchema = z.object({
@@ -416,6 +417,30 @@ export function registerRoutes(
     const session = await manager.getSession(id);
     if (!session) return reply.code(404).send({ error: "Session not found" });
     return { session };
+  });
+
+  app.get("/api/sessions/:id/documents", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    try {
+      return await manager.listDocuments(id);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError || error instanceof SessionDocumentError || error instanceof SessionRestoreError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/sessions/:id/documents/:name", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, name } = request.params as { id: string; name: string };
+    try {
+      return await manager.readDocument(id, name);
+    } catch (error) {
+      if (error instanceof SessionNotFoundError || error instanceof SessionDocumentError || error instanceof SessionRestoreError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      throw error;
+    }
   });
 
   app.get("/api/sessions/:id/snapshot", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionSnapshotResponse | void> => {

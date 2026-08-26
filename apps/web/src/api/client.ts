@@ -31,6 +31,8 @@ import type {
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
+  SessionDocumentResponse,
+  SessionDocumentsResponse,
   SessionHistoryResponse,
   SendInputResponse,
   SessionSnapshotResponse,
@@ -169,6 +171,10 @@ export const api = {
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
   sessionSnapshot: (id: string, limit = 80, signal?: AbortSignal) =>
     json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`, { signal }),
+  sessionDocuments: (id: string) =>
+    json<SessionDocumentsResponse>(`/api/sessions/${encodeURIComponent(id)}/documents`),
+  sessionDocument: (id: string, name: string) =>
+    json<SessionDocumentResponse>(`/api/sessions/${encodeURIComponent(id)}/documents/${encodeURIComponent(name)}`),
   heavyCommands: (id: string) => json<HeavyCommandsResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands`),
   heavyCommandOutput: (id: string, runId: string) => json<HeavyCommandOutputResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/output`),
   terminateHeavyCommand: (id: string, runId: string) => json<{ accepted: true }>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands/${encodeURIComponent(runId)}/terminate`, { method: "POST" }),

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { extract, pack } from "tar-stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { AppDatabase } from "../src/db/database.js";
 import type { SessionManager } from "../src/services/sessionManager.js";
@@ -32,7 +32,7 @@ describe.sequential("SessionTransferService", () => {
     const entries = await tarEntries(gunzipSync(file.subarray(9)));
     expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "sessions/0002.jsonl"]);
     expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({
-      formatVersion: 3,
+      formatVersion: 4,
       gitBranches: [],
       sessions: [expect.objectContaining({ fastMode: true }), expect.objectContaining({ fastMode: false })]
     });
@@ -40,7 +40,8 @@ describe.sequential("SessionTransferService", () => {
 
     const preview = await service.inspect(file);
     expect(preview.encrypted).toBe(false);
-    expect(preview.formatVersion).toBe(3);
+    expect(preview.formatVersion).toBe(4);
+    expect(preview.sessions.every((session) => session.documentCount === 0)).toBe(true);
     expect(preview.sessions).toHaveLength(2);
     expect(preview.mappings).toEqual([{ sourceCwd: fixture.root, repoName: "fixture", workspaceMode: "directory", targetBranch: null, branches: [] }]);
     await service.cancel(preview.token);
@@ -63,6 +64,62 @@ describe.sequential("SessionTransferService", () => {
       sessionId: null,
       sessionName: "parent-session"
     });
+  });
+
+  it("exports validated Markdown documents with opaque entries and hashes", async () => {
+    const fixture = await createFixture(1);
+    const documents = new Map([[fixture.sessions[0]!.id, [{
+      name: "INDEX.md",
+      contents: Buffer.from("# Durable plan\n"),
+      updatedAt: "2026-08-25T00:00:00.000Z"
+    }]]]);
+    const archive = await transferService(fixture.sessions, undefined, documents).export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
+    expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "documents/0001/0001.md"]);
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    expect(manifest.sessions[0].documents).toEqual([expect.objectContaining({
+      name: "INDEX.md",
+      entry: "documents/0001/0001.md",
+      bytes: 15
+    })]);
+    expect((await transferService(fixture.sessions, undefined, documents).inspect(archive.contents)).sessions[0]!.documentCount).toBe(1);
+
+    manifest.sessions[0].documents[0].sha256 = "0".repeat(64);
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const tampered = Buffer.concat([Buffer.from("MPSESSN2", "ascii"), Buffer.from([0]), gzipSync(await tarArchive(entries))]);
+    await expect(transferService(fixture.sessions, undefined, documents).inspect(tampered)).rejects.toBeInstanceOf(SessionTransferError);
+  });
+
+  it("passes validated documents into import before the manager resumes the session", async () => {
+    const fixture = await createFixture(1);
+    const documents = [{ name: "plan.md", contents: Buffer.from("- [ ] ship\n"), updatedAt: "2026-08-25T00:00:00.000Z" }];
+    const importPortableSession = vi.fn(async (
+      session: { codexSessionId: string; sessionName: string },
+      _transcript: Buffer,
+      _mapping: unknown,
+      _documents: unknown
+    ) => ({
+      codexSessionId: session.codexSessionId,
+      sessionName: session.sessionName,
+      status: "resumed" as const,
+      sessionId: "imported-session",
+      error: null
+    }));
+    const manager = {
+      snapshotDocuments: async () => documents,
+      validatePortableMapping: async () => undefined,
+      importPortableSession
+    } as unknown as SessionManager;
+    const db = { getSession: async () => fixture.sessions[0] } as AppDatabase;
+    const service = new SessionTransferService(db, manager);
+    await service.initialize();
+    const archive = await service.export([fixture.sessions[0]!.id]);
+    const preview = await service.inspect(archive.contents);
+
+    await service.import(preview.token, [{ sourceCwd: fixture.root, destinationCwd: fixture.root }]);
+
+    expect(importPortableSession).toHaveBeenCalledTimes(1);
+    expect(importPortableSession.mock.calls[0]?.[3]).toEqual([expect.objectContaining({ name: "plan.md", contents: Buffer.from("- [ ] ship\n") })]);
   });
 
   it("encrypts exports and rejects missing, wrong, and tampered keys", async () => {
@@ -98,7 +155,7 @@ describe.sequential("SessionTransferService", () => {
     expect(sessionTransferFilename(["a".repeat(120)], false, "2026-07-11T12:00:00.000Z")).toBe(`${"a".repeat(80)}.mpsession`);
   });
 
-  it("includes committed managed Git branch state in format v3", async () => {
+  it("includes committed managed Git branch state in format v4", async () => {
     const fixture = await createFixture(1);
     await git(fixture.root, ["init", "-b", "main"]);
     await git(fixture.root, ["config", "user.email", "muxpilot@example.com"]);
@@ -157,6 +214,22 @@ describe.sequential("SessionTransferService", () => {
     expect(preview.formatVersion).toBe(2);
     expect(preview.mappings[0]).toMatchObject({ targetBranch: null, branches: [] });
   });
+
+  it("continues to inspect legacy format-v3 archives", async () => {
+    const fixture = await createFixture(1);
+    const service = transferService(fixture.sessions);
+    const current = await service.export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(current.contents.subarray(9)));
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    manifest.formatVersion = 3;
+    delete manifest.sessions[0].documents;
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const legacy = Buffer.concat([Buffer.from("MPSESSN2", "ascii"), Buffer.from([0]), gzipSync(await tarArchive(entries))]);
+
+    const preview = await service.inspect(legacy);
+    expect(preview.formatVersion).toBe(3);
+    expect(preview.sessions[0]!.documentCount).toBe(0);
+  });
 });
 
 async function createFixture(count = 2): Promise<{ root: string; sessions: ManagedSession[] }> {
@@ -194,9 +267,14 @@ async function createFixture(count = 2): Promise<{ root: string; sessions: Manag
   return { root, sessions };
 }
 
-function transferService(sessions: ManagedSession[], key?: string): SessionTransferService {
+function transferService(
+  sessions: ManagedSession[],
+  key?: string,
+  documents = new Map<string, Array<{ name: string; contents: Buffer; updatedAt: string }>>()
+): SessionTransferService {
   const db = { getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null } as AppDatabase;
-  return new SessionTransferService(db, {} as SessionManager, key);
+  const manager = { snapshotDocuments: async (id: string) => documents.get(id) ?? [] } as unknown as SessionManager;
+  return new SessionTransferService(db, manager, key);
 }
 
 async function tarEntries(archive: Buffer): Promise<Map<string, Buffer>> {

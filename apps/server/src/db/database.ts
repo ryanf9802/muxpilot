@@ -357,6 +357,10 @@ export class AppDatabase {
     return this.call("setSessionResourceScope", sessionId, resourceScope, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  setSessionDocumentScope(sessionId: string, documentScopeId: string, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionDocumentScope", sessionId, documentScopeId, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   listAgentWaits(): Promise<PersistedAgentWait[]> {
     return this.call("listAgentWaits") as Promise<PersistedAgentWait[]>;
   }
@@ -714,7 +718,8 @@ export class SyncAppDatabase {
       contextUsage: existing?.contextUsage ?? session.contextUsage ?? null,
       agentOwnership: existing?.agentOwnership ?? session.agentOwnership ?? null,
       orchestrationAvailable: existing?.orchestrationAvailable ?? session.orchestrationAvailable ?? false,
-      resourceScope: session.resourceScope ?? existing?.resourceScope ?? null
+      resourceScope: session.resourceScope ?? existing?.resourceScope ?? null,
+      documentScopeId: session.documentScopeId ?? existing?.documentScopeId ?? null
     };
     this.db
       .prepare(
@@ -759,7 +764,8 @@ export class SyncAppDatabase {
       contextUsage: existing.contextUsage ?? session.contextUsage ?? null,
       agentOwnership: existing.agentOwnership ?? session.agentOwnership ?? null,
       orchestrationAvailable: session.orchestrationAvailable ?? existing.orchestrationAvailable ?? false,
-      resourceScope: session.resourceScope ?? existing.resourceScope ?? null
+      resourceScope: session.resourceScope ?? existing.resourceScope ?? null,
+      documentScopeId: session.documentScopeId ?? existing.documentScopeId ?? null
     };
     const archived = nextSession.archived ? 1 : 0;
 
@@ -989,6 +995,10 @@ export class SyncAppDatabase {
 
   setSessionResourceScope(sessionId: string, resourceScope: string | null, updatedAt: string): ManagedSession | null {
     return this.updateSessionData(sessionId, { resourceScope }, updatedAt);
+  }
+
+  setSessionDocumentScope(sessionId: string, documentScopeId: string, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { documentScopeId }, updatedAt);
   }
 
   listAgentWaits(): PersistedAgentWait[] {

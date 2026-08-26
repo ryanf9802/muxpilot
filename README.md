@@ -30,6 +30,7 @@ muxpilot adds an operator layer without replacing the tools already doing the wo
 - **Interactive control.** Send or queue prompts, answer questions and approvals, act on proposed plans, interrupt work, and start or fork sessions.
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
 - **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with optional encryption.
+- **Agent-managed documents.** Let long-running agents maintain persistent Markdown plans, checklists, reminders, and acceptance criteria outside the conversation context.
 - **Notifications that matter.** Get browser, sound, or Web Push alerts when work finishes or a session needs attention.
 - **A real phone workflow.** Connect over the LAN with an access key or QR code and install the interface as a PWA with local HTTPS.
 
@@ -73,7 +74,7 @@ pnpm app start
 
 Open [http://127.0.0.1:12778](http://127.0.0.1:12778).
 
-The production command builds the workspace, starts a background supervisor, waits for both services to become healthy, and installs or refreshes the bundled `muxpilot-git-workflow` skill in your Codex home.
+The production command builds the workspace, starts a background supervisor, waits for both services to become healthy, and installs or refreshes muxpilot's bundled Codex skills in your Codex home.
 
 ```bash
 pnpm app status

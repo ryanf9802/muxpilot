@@ -42,6 +42,7 @@ Managed Git sessions store only the repository entry point, current existing loc
 - Activity summarizer: optional OpenAI-backed, prompt-only session summaries and usage/cost recording.
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
+- Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
 - Local Git workflow skill: creates task worktrees, links dependencies, guides focused validation and iterative self-review, serializes local fast-forward integration, and removes completed worktrees. The backend only reads its status file.
 
 ## Operator Access

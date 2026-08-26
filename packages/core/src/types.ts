@@ -313,6 +313,22 @@ export interface ManagedSession {
   agentOwnership?: AgentSessionOwnership | null;
   agentSummary?: AgentSessionSummary | null;
   orchestrationAvailable?: boolean;
+  documentScopeId?: string | null;
+}
+
+export interface SessionDocumentSummary {
+  name: string;
+  sizeBytes: number;
+  updatedAt: string;
+}
+
+export interface SessionDocumentsResponse {
+  documents: SessionDocumentSummary[];
+  sampledAt: string;
+}
+
+export interface SessionDocumentResponse {
+  document: SessionDocumentSummary & { content: string };
 }
 
 export interface ChatMessage {
@@ -680,6 +696,7 @@ export interface SessionTransferPreviewSession {
   targetBranch: string | null;
   transcriptBytes: number;
   lastActivityAt: string | null;
+  documentCount: number;
 }
 
 export interface SessionTransferPreviewBranch {
@@ -704,7 +721,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3;
+  formatVersion: 2 | 3 | 4;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
