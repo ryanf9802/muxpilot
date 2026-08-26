@@ -20,6 +20,7 @@ const FOCUSABLE_SELECTOR = [
 export interface ModalProps {
   open: boolean;
   onClose: () => void | Promise<void>;
+  onEscape?: () => void | Promise<void>;
   title: ReactNode;
   children: ReactNode;
   dismissible?: boolean;
@@ -30,11 +31,13 @@ export interface ModalProps {
   as?: "section" | "form";
   onSubmit?: FormEventHandler<HTMLFormElement>;
   loading?: boolean;
+  placement?: "center" | "end";
 }
 
 export function Modal({
   open,
   onClose,
+  onEscape,
   title,
   children,
   dismissible = true,
@@ -44,12 +47,13 @@ export function Modal({
   initialFocusRef,
   as = "section",
   onSubmit,
-  loading = false
+  loading = false,
+  placement = "center"
 }: ModalProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLElement | null>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  const onEscapeRef = useRef(onEscape ?? onClose);
+  onEscapeRef.current = onEscape ?? onClose;
 
   useEffect(() => {
     if (!open) return undefined;
@@ -98,7 +102,7 @@ export function Modal({
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) return;
       event.preventDefault();
-      void onCloseRef.current();
+      void onEscapeRef.current();
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
@@ -123,6 +127,7 @@ export function Modal({
   return (
     <div
       className={backdropClasses}
+      data-placement={placement}
       role="presentation"
       onPointerDown={(event) => {
         if (dismissible && event.currentTarget === event.target) void onClose();

@@ -19,7 +19,8 @@ describe("Modal", () => {
     const { container, unmount } = renderModal({
       as: "form",
       panelClassName: "custom-panel",
-      backdropClassName: "custom-backdrop"
+      backdropClassName: "custom-backdrop",
+      placement: "end"
     });
 
     const panel = container.querySelector("form[role='dialog']");
@@ -29,6 +30,19 @@ describe("Modal", () => {
     expect(panel?.getAttribute("aria-labelledby")).toBe(title?.id);
     expect(panel?.classList.contains("custom-panel")).toBe(true);
     expect(container.querySelector(".dialog-backdrop")?.classList.contains("custom-backdrop")).toBe(true);
+    expect(container.querySelector(".dialog-backdrop")?.getAttribute("data-placement")).toBe("end");
+
+    unmount();
+  });
+
+  it("can handle Escape separately from other close requests", () => {
+    const onClose = vi.fn();
+    const onEscape = vi.fn();
+    const { unmount } = renderModal({ onClose, onEscape });
+
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+    expect(onEscape).toHaveBeenCalledOnce();
+    expect(onClose).not.toHaveBeenCalled();
 
     unmount();
   });

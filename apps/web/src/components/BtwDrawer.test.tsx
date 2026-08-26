@@ -63,6 +63,8 @@ describe("BtwDrawer", () => {
         onOpenDocument={() => undefined}
       />
     ));
+    expect(container.querySelector(".dialog-backdrop.btw-drawer-backdrop")?.getAttribute("data-placement")).toBe("end");
+    expect(container.querySelector(".modal-panel.btw-drawer")?.getAttribute("role")).toBe("dialog");
     const textarea = container.querySelector("textarea")!;
     act(() => {
       setNativeTextareaValue(textarea, "What is the current branch?");

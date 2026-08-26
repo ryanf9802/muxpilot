@@ -18,14 +18,33 @@ describe("mobile session viewport layout", () => {
   it("sizes the narrow app shell from measured visual viewport variables", () => {
     const mobileStyles = cssBlock(styles, "@media (max-width: 819px)");
     const appRule = cssBlock(mobileStyles, ".app");
-    const btwBackdropRule = cssBlock(mobileStyles, ".btw-drawer-backdrop");
+    const modalBackdropRule = cssBlock(mobileStyles, ".dialog-backdrop");
     const textareaRule = cssBlock(mobileStyles, ".skill-textarea textarea,\n  .skill-textarea-mirror");
     expect(appRule).toContain("position: fixed;");
     expect(appRule).toContain("top: var(--app-viewport-offset-top, 0px);");
     expect(appRule).toContain("height: var(--app-viewport-height, 100dvh);");
-    expect(btwBackdropRule).toContain("top: var(--app-viewport-offset-top, 0px);");
-    expect(btwBackdropRule).toContain("height: var(--app-viewport-height, 100dvh);");
+    expect(modalBackdropRule).toContain("top: var(--app-viewport-offset-top, 0px);");
+    expect(modalBackdropRule).toContain("height: var(--app-viewport-height, 100dvh);");
     expect(textareaRule).toContain("var(--app-viewport-unit, 1dvh)");
+  });
+
+  it("uses one inset and panel contract for centered and side modals", () => {
+    const backdropRule = cssBlock(styles, ".dialog-backdrop");
+    const panelRule = cssBlock(styles, ".modal-panel");
+    const sideRule = cssBlock(styles, ".dialog-backdrop[data-placement=\"end\"]");
+    const mobileStyles = cssBlock(styles, "@media (max-width: 819px)");
+    const mobileBackdropRule = cssBlock(mobileStyles, ".dialog-backdrop");
+    const mobileSideRule = cssBlock(mobileStyles, ".dialog-backdrop[data-placement=\"end\"]");
+    const mobileFullHeightRule = cssBlock(mobileStyles, ".documents-modal,\n  .btw-drawer");
+    expect(backdropRule).toContain("place-items: center;");
+    expect(panelRule).toContain("width: min(100%, var(--modal-max-width, 560px));");
+    expect(panelRule).toContain("max-height: 100%;");
+    expect(panelRule).toContain("background: var(--color-surface);");
+    expect(sideRule).toContain("place-items: stretch end;");
+    expect(mobileBackdropRule).toContain("calc(10px + env(safe-area-inset-top))");
+    expect(mobileSideRule).toContain("place-items: center;");
+    expect(mobileFullHeightRule).toContain("width: 100%;");
+    expect(mobileFullHeightRule).toContain("height: 100%;");
   });
 
   it("keeps the composer at the bottom while queued content shrinks first", () => {

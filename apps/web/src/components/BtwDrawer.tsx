@@ -6,8 +6,7 @@ import {
   FileText,
   LoaderCircle,
   Send,
-  Square,
-  X
+  Square
 } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -23,15 +22,7 @@ import {
   useDismissableContextMenu,
   type ContextMenuPosition
 } from "./ContextMenu.js";
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])"
-].join(",");
+import { Modal } from "./Modal.js";
 
 const BTW_COPY_MENU_WIDTH = 190;
 const BTW_COPY_MENU_HEIGHT = 54;
@@ -100,62 +91,20 @@ export function BtwDrawer({
   const [copyMenu, setCopyMenu] = useState<BtwCopyMenu | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLElement>(null);
   const copyMenuRef = useRef<HTMLDivElement>(null);
   const copyMenuOpenRef = useRef(Boolean(copyMenu));
-  const onCloseRef = useRef(onClose);
   const previousExchangeCountRef = useRef(exchanges.length);
   const active = exchanges.find((exchange) => exchange.status === "running") ?? null;
   const latest = exchanges.at(-1) ?? null;
   copyMenuOpenRef.current = Boolean(copyMenu);
-  onCloseRef.current = onClose;
 
   useDismissableContextMenu(Boolean(copyMenu), copyMenuRef, () => setCopyMenu(null));
 
   useEffect(() => {
     if (!open) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    if (inputRef.current && !inputRef.current.disabled) inputRef.current.focus();
-    else panelRef.current?.focus();
     window.requestAnimationFrame(() => {
       if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
     });
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
-        event.preventDefault();
-        if (copyMenuOpenRef.current) {
-          setCopyMenu(null);
-          return;
-        }
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || event.defaultPrevented || !panelRef.current) return;
-      const focusable = Array.from(panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        panelRef.current.focus();
-        return;
-      }
-      const first = focusable[0]!;
-      const last = focusable.at(-1)!;
-      const activeElement = document.activeElement;
-      if (event.shiftKey && (activeElement === first || !panelRef.current.contains(activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (activeElement === last || !panelRef.current.contains(activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      document.body.style.overflow = previousOverflow;
-      if (opener?.isConnected) opener.focus();
-    };
   }, [open]);
 
   useEffect(() => {
@@ -208,22 +157,26 @@ export function BtwDrawer({
   }
 
   return (
-    <div className="btw-drawer-backdrop" onMouseDown={(event) => {
-      if (event.target === event.currentTarget) onClose();
-    }}>
-      <aside ref={panelRef} className="btw-drawer" role="dialog" aria-modal="true" aria-labelledby="btw-drawer-title" tabIndex={-1}>
-        <header className="btw-drawer-header">
-          <div>
-            <h2 id="btw-drawer-title">BTW side questions</h2>
-            <p>Ask questions or update Documents without interrupting the main task.</p>
-          </div>
-          <button type="button" className="icon-button" onClick={onClose} aria-label="Close BTW drawer">
-            <X size={18} />
-          </button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      onEscape={() => {
+        if (copyMenuOpenRef.current) setCopyMenu(null);
+        else onClose();
+      }}
+      title="BTW side questions"
+      panelClassName="btw-drawer"
+      backdropClassName="btw-drawer-backdrop"
+      closeLabel="Close BTW drawer"
+      initialFocusRef={inputRef}
+      placement="end"
+    >
+        <div className="btw-drawer-intro">
+          <p className="btw-drawer-description">Ask questions or update Documents without interrupting the main task.</p>
           <p className="btw-context-note" role="note">
             <strong>Each request is independent.</strong> It uses a fresh snapshot of the main session. Document changes are isolated until muxpilot can hand them off safely.
           </p>
-        </header>
+        </div>
 
         <div ref={listRef} className="btw-exchange-list" role="region" aria-label="Saved independent question history" aria-live="polite">
           {loading ? (
@@ -342,8 +295,7 @@ export function BtwDrawer({
             </ContextMenuItem>
           </ContextMenu>
         ) : null}
-      </aside>
-    </div>
+    </Modal>
   );
 }
 
