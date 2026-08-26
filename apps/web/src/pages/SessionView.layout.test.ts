@@ -118,6 +118,13 @@ describe("mobile session viewport layout", () => {
     const taskListItemRule = cssBlock(styles, ".markdown .task-list-item");
     expect(taskListItemRule).toContain("list-style: none;");
   });
+
+  it("trims Markdown block margins at user-message edges", () => {
+    const firstBlockRule = cssBlock(styles, ".message-user > .markdown > :first-child");
+    const lastBlockRule = cssBlock(styles, ".message-user > .markdown > :last-child");
+    expect(firstBlockRule).toContain("margin-top: 0;");
+    expect(lastBlockRule).toContain("margin-bottom: 0;");
+  });
 });
 
 function cssBlock(source: string, selector: string): string {

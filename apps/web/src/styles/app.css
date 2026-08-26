@@ -4721,6 +4721,14 @@ select:focus-visible {
   line-height: 1.52;
 }
 
+.message-user > .markdown > :first-child {
+  margin-top: 0;
+}
+
+.message-user > .markdown > :last-child {
+  margin-bottom: 0;
+}
+
 .markdown h1,
 .markdown h2,
 .markdown h3,
