@@ -130,6 +130,36 @@ describe("ResourceGovernor", () => {
     expect(governor.snapshot()).toMatchObject({ managedSessions: 0, unmanagedSessions: 3 });
   });
 
+  it("applies the executor allocation to its transient heavyweight worker unit", async () => {
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 1024, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => undefined)
+    };
+    const managedSession = {
+      ...session("one", "executing"),
+      resourceScope: "muxpilot-session-0123456789abcdef01234567.scope"
+    };
+    const worker = "muxpilot-heavy-mabc-012345abcdef-a1b2c3.service";
+    const governor = new ResourceGovernor(
+      config,
+      async () => [managedSession],
+      { info: vi.fn(), warn: vi.fn() },
+      controller,
+      async () => [
+        { sessionId: "one", scope: worker },
+        { sessionId: "one", scope: "untrusted.service" }
+      ]
+    );
+
+    await governor.reconcile();
+
+    expect(controller.setProperties).toHaveBeenCalledWith(worker, expect.arrayContaining([
+      `CPUQuota=${Math.max(1, Math.round(75 * cpus().length * 100) / 100)}%`,
+      "TasksMax=768"
+    ]));
+    expect(controller.setProperties).not.toHaveBeenCalledWith("untrusted.service", expect.anything());
+  });
+
   it("reports unavailable scopes without invoking systemd", async () => {
     const controller: SystemdController = {
       metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),

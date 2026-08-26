@@ -7,6 +7,7 @@ import { join, resolve, sep } from "node:path";
 const ACTIVE_STATES = new Set(["waiting", "reserved", "running", "stalled", "terminating", "reporting"]);
 const RUNNING_STATES = new Set(["running", "stalled", "terminating"]);
 const RUN_ID = /^[a-z0-9]+-[a-f0-9]{12}$/;
+const RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
 const MAX_OWNER_BYTES = 256 * 1024;
 const MAX_TAIL_BYTES = 128 * 1024;
 const COMPLETION_TAIL_BYTES = 32 * 1024;
@@ -56,11 +57,13 @@ export class HeavyCommandService {
   }
 
   async runningWorkspaceIds(): Promise<Set<string>> {
-    const now = Date.now();
-    return new Set((await this.readPersistentOwners())
-      .filter((owner) => RUNNING_STATES.has(owner.state) &&
-        Number.isFinite(Date.parse(owner.heartbeatAt)) && now - Date.parse(owner.heartbeatAt) <= ACTIVE_OWNER_STALE_MS)
-      .map((owner) => owner.workspaceId));
+    return new Set((await this.runningOwners()).map((owner) => owner.workspaceId));
+  }
+
+  async runningResourceUnits(): Promise<Array<{ workspaceId: string; unit: string }>> {
+    return (await this.runningOwners())
+      .filter((owner): owner is QueueOwner & { resourceUnit: string } => RESOURCE_UNIT.test(owner.resourceUnit ?? ""))
+      .map((owner) => ({ workspaceId: owner.workspaceId, unit: owner.resourceUnit }));
   }
 
   async cancelWorkspace(workspaceId: string, reason: string): Promise<void> {
@@ -314,6 +317,12 @@ export class HeavyCommandService {
     return owners;
   }
 
+  private async runningOwners(): Promise<QueueOwner[]> {
+    const now = Date.now();
+    return (await this.readPersistentOwners()).filter((owner) => RUNNING_STATES.has(owner.state) &&
+      Number.isFinite(Date.parse(owner.heartbeatAt)) && now - Date.parse(owner.heartbeatAt) <= ACTIVE_OWNER_STALE_MS);
+  }
+
   private async readQueueOwner(runId: string): Promise<QueueOwner | null> {
     try {
       const owner = JSON.parse(await readFile(join(this.leaseRoot, "runs", runId, "owner.json"), "utf8")) as QueueOwner;
@@ -371,6 +380,7 @@ export class HeavyCommandService {
       if (owner.slot !== null && (!Number.isInteger(owner.slot) || Number(owner.slot) < 0)) return null;
       if (!validDeadlines(owner.deadlines) || (owner.packageDiagnostics !== null && !validPackageDiagnostics(owner.packageDiagnostics))) return null;
       if (owner.terminationReason !== null && typeof owner.terminationReason !== "string") return null;
+      if (owner.resourceUnit !== null && owner.resourceUnit !== undefined && !RESOURCE_UNIT.test(String(owner.resourceUnit))) return null;
       if (owner.state === "reporting") {
         if (!Number.isInteger(owner.exitCode) && owner.exitCode !== null) return null;
         if (owner.signal !== null && typeof owner.signal !== "string") return null;

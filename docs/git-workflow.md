@@ -73,7 +73,7 @@ Heavyweight work runs through `muxpilot-git-run.mjs --heavy -- <command>`. The w
 
 When capacity is unavailable, the helper prints `QUEUED_NOT_RUN`; the command has not run. The agent releases its turn instead of polling. muxpilot reserves the FIFO ticket and later resumes the session with an exact claim command. Queue and resume transitions appear as structured transcript events. See [Runtime Reliability](runtime-reliability.md#heavyweight-command-scheduler) for the operator view.
 
-After a managed command starts, the helper prints `RUNNING_DEFERRED` and a structured `run_released` event. The agent ends its turn instead of polling. Muxpilot resumes it with one `run_completed` event containing a compact success result or a bounded failure tail plus the retained-log path. Standalone helpers continue to return the child result synchronously.
+After a managed command starts, the helper hands its worker to a transient user-systemd service, prints `RUNNING_DEFERRED`, and emits a structured `run_released` event. The agent ends its turn instead of polling. Muxpilot resumes it with one `run_completed` event containing a compact success result or a bounded failure tail plus the retained-log path. Standalone helpers and managed installations without user-systemd session scopes continue to return the child result synchronously.
 
 The scheduler controls resources only. It does not authorize a broader test or scan than the operator requested.
 

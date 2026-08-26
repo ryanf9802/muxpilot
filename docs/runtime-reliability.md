@@ -67,7 +67,7 @@ Managed Git sessions share a FIFO scheduler for expensive tests, scans, builds, 
 
 When all slots are busy, the wrapper reports `QUEUED_NOT_RUN` and ends the agent turn. muxpilot holds the ticket outside the model, reserves a slot when available, and resumes the session with an exact claim command. Queue time does not consume runtime or inactivity deadlines. An interrupted or expired reservation does not count as a test failure because the original command never ran.
 
-Once a managed command starts, its supervised worker remains in the executor session's resource scope while the model turn ends. Muxpilot watches the persisted run outside the model and resumes the agent when the worker exits. Successful completions contain only the outcome, duration, exit metadata, command, and retained-log path. Failures and terminations also include a bounded diagnostic tail; fuller output stays in the private capped log. Standalone workflow helpers remain synchronous because they have no managed continuation channel.
+Once a managed command starts, its supervised worker moves into a transient user-systemd service that survives the model tool scope. Its launch environment crosses a private Unix socket rather than command-line arguments or a persisted environment file. Muxpilot watches the persisted run outside the model and resumes the agent when the worker exits. Successful completions contain only the outcome, duration, exit metadata, command, and retained-log path. Failures and terminations also include a bounded diagnostic tail; fuller output stays in the private capped log. Standalone workflow helpers, and installations without managed user-systemd scopes, remain synchronous because they have no safe continuation channel.
 
 New operator messages are held while a run is waiting or reserved, and while a resumed command is active. If an operator interrupt ends the deferred phase, the held message is delivered normally and any later resume request for that run is stale; the agent must not replay the abandoned command on its own.
 
@@ -85,9 +85,9 @@ See [Local Git Workflow](git-workflow.md#validation-and-heavyweight-commands) fo
 
 ## Session Resource Controls
 
-With the resource governor enabled, busy sessions share configurable memory and CPU pools. The pool is divided across sessions in initializing, working, generating, executing, planning, or unknown states. An executor remains busy while its detached heavyweight worker owns a process; an orchestration parent waiting outside the model does not. A session that stays idle for five seconds falls back to a 512 MiB soft memory limit, 1 GiB hard limit, and 25 percent CPU quota.
+With the resource governor enabled, busy sessions share configurable memory and CPU pools. The pool is divided across sessions in initializing, working, generating, executing, planning, or unknown states. An executor remains busy while its transient heavyweight worker owns a process; the governor applies the same allocation to that private worker unit, while an orchestration parent waiting outside the model remains idle. A session that stays idle for five seconds falls back to a 512 MiB soft memory limit, 1 GiB hard limit, and 25 percent CPU quota.
 
-Hard memory limits are lowered only when current usage fits unless Linux reports critically low available memory. The governor touches only muxpilot-owned session scopes and restores the properties it changed during a clean shutdown. Dashboard indicators show current memory, soft/hard limits, CPU use, and CPU quota when metrics are available.
+Hard memory limits are lowered only when current usage fits unless Linux reports critically low available memory. The governor touches only muxpilot-owned session scopes and transient heavyweight worker units, and restores live properties it changed during a clean shutdown. Dashboard indicators show current memory, soft/hard limits, CPU use, and CPU quota when metrics are available.
 
 Dedicated scopes require a persistent user-systemd manager. Ordinary operator sessions can continue without one, but agent-created or claimed sessions are refused because they require independent isolation.
 

@@ -17,6 +17,7 @@ const IDLE_MEMORY_HIGH = 512 * 1024 * 1024;
 const IDLE_MEMORY_MAX = 1024 * 1024 * 1024;
 const IDLE_CPU_PERCENT = 25;
 const IDLE_HYSTERESIS_MS = 5000;
+const HEAVY_RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
 
 export interface ResourceGovernorConfig {
   configured: boolean;
@@ -66,6 +67,11 @@ export interface ScopeResourceMetrics {
   cpuUsageNsec: number | null;
 }
 
+export interface SupplementalResourceScope {
+  sessionId: string;
+  scope: string;
+}
+
 export class ResourceGovernor {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -79,7 +85,8 @@ export class ResourceGovernor {
     private readonly config: ResourceGovernorConfig,
     private readonly listSessions: () => Promise<ManagedSession[]>,
     private readonly logger: Logger,
-    private readonly controller: SystemdController = new UserSystemdController()
+    private readonly controller: SystemdController = new UserSystemdController(),
+    private readonly listSupplementalScopes: () => Promise<SupplementalResourceScope[]> = async () => []
   ) {
     this.currentSnapshot = {
       configured: config.configured,
@@ -138,6 +145,10 @@ export class ResourceGovernor {
         ? liveSessions.filter((session) => isMuxpilotSessionScope(session.resourceScope))
         : [];
       const allocations = allocateSessionResources(sessions, this.config, this.idleSince);
+      const supplementalScopes = this.config.enabled
+        ? (await this.listSupplementalScopes()).filter((entry) =>
+            allocations.has(entry.sessionId) && HEAVY_RESOURCE_UNIT.test(entry.scope))
+        : [];
       const values = [...allocations.values()];
       const busyAllocation = values.find((allocation) => allocation.busy) ?? null;
       this.currentSnapshot = {
@@ -178,19 +189,22 @@ export class ResourceGovernor {
             sampledAt: new Date(sampledAtMs).toISOString()
           });
         }
-        const properties = [
-          `CPUQuota=${formatPercent(allocation.cpuPercent)}`,
-          `MemoryHigh=${allocation.memoryHighBytes}`,
-          `TasksMax=${allocation.tasksMax}`
-        ];
-        const current = metrics.memoryCurrentBytes;
-        if (emergency || (current !== null && current <= allocation.memoryMaxBytes)) {
-          properties.push(`MemoryMax=${allocation.memoryMaxBytes}`);
-        }
-        await this.controller.setProperties(scope, properties);
+        await this.controller.setProperties(scope, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
       }).map((operation) => operation.catch((error) => {
         this.logger.warn({ err: error }, "could not apply resource limits to a session scope");
       })));
+      await Promise.all(supplementalScopes.map(async ({ sessionId, scope }) => {
+        const allocation = allocations.get(sessionId)!;
+        this.managedScopes.add(scope);
+        const metrics = await this.controller.metrics(scope);
+        await this.controller.setProperties(scope, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
+      }).map((operation) => operation.catch((error) => {
+        this.logger.warn({ err: error }, "could not apply resource limits to a heavyweight worker scope");
+      })));
+      const activeSupplementalScopes = new Set(supplementalScopes.map((entry) => entry.scope));
+      for (const scope of this.managedScopes) {
+        if (HEAVY_RESOURCE_UNIT.test(scope) && !activeSupplementalScopes.has(scope)) this.managedScopes.delete(scope);
+      }
       for (const scope of this.cpuSamples.keys()) {
         if (!sampledScopes.has(scope)) this.cpuSamples.delete(scope);
       }
@@ -296,6 +310,22 @@ function nonnegativeNumber(value: string | undefined): number | null {
 
 function formatPercent(value: number): string {
   return `${Math.max(1, Math.round(value * 100) / 100)}%`;
+}
+
+function resourceProperties(
+  allocation: SessionResourceAllocation,
+  memoryCurrentBytes: number | null,
+  emergency: boolean
+): string[] {
+  const properties = [
+    `CPUQuota=${formatPercent(allocation.cpuPercent)}`,
+    `MemoryHigh=${allocation.memoryHighBytes}`,
+    `TasksMax=${allocation.tasksMax}`
+  ];
+  if (emergency || (memoryCurrentBytes !== null && memoryCurrentBytes <= allocation.memoryMaxBytes)) {
+    properties.push(`MemoryMax=${allocation.memoryMaxBytes}`);
+  }
+  return properties;
 }
 
 async function memoryAvailablePercent(): Promise<number | null> {

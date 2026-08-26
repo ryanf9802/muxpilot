@@ -88,7 +88,7 @@ const managedEnvironment: Record<string, string> = {
   MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
-  MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
+  MUXPILOT_HEAVY_COMPLETION_ENABLED: sessionScopes.available ? "1" : "0",
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
   MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: String(config.heavyValidationInactivityWarnMs),
@@ -166,7 +166,16 @@ const resourceGovernor = new ResourceGovernor({
       ? { ...session, status: "executing" as const }
       : session
   );
-}, app.log, new UserSystemdController(sessionScopes.environment));
+}, app.log, new UserSystemdController(sessionScopes.environment), async () => {
+  const [units, sessions] = await Promise.all([heavyCommands.runningResourceUnits(), db.listSessions()]);
+  const sessionByWorkspace = new Map(sessions.flatMap((session) =>
+    session.gitWorkspace ? [[session.gitWorkspace.id, session.id] as const] : []
+  ));
+  return units.flatMap(({ workspaceId, unit }) => {
+    const sessionId = sessionByWorkspace.get(workspaceId);
+    return sessionId ? [{ sessionId, scope: unit }] : [];
+  });
+});
 manager.setResourceUsageLookup(resourceGovernor);
 const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
 await sessionTransfers.initialize();

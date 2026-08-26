@@ -210,15 +210,21 @@ describe("HeavyCommandService", () => {
       version: 4,
       runnerPath: "/skills/muxpilot-git-run.mjs",
       runnerOptions: [],
+      resourceUnit: "muxpilot-heavy-mabc123-666666666666-a1b2c3.service",
       lastActivityAt: new Date().toISOString(),
       activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
     }));
     const service = new HeavyCommandService(leases, sessions);
     expect(await service.hasRunning("workspace-a")).toBe(true);
     expect(await service.runningWorkspaceIds()).toEqual(new Set(["workspace-a"]));
+    expect(await service.runningResourceUnits()).toEqual([{
+      workspaceId: "workspace-a",
+      unit: "muxpilot-heavy-mabc123-666666666666-a1b2c3.service"
+    }]);
     const runningOwner = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8"));
     await writeFile(join(runDir, "owner.json"), JSON.stringify({ ...runningOwner, heartbeatAt: "2026-01-01T00:00:00.000Z" }));
     expect(await service.runningWorkspaceIds()).toEqual(new Set());
+    expect(await service.runningResourceUnits()).toEqual([]);
     await writeFile(join(runDir, "owner.json"), JSON.stringify({
       ...owner(runId, "workspace-a", null),
       state: "reporting",

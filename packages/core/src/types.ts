@@ -261,6 +261,7 @@ export interface HeavyCommand {
   exitCode?: number | null;
   signal?: string | null;
   finishedAt?: string | null;
+  resourceUnit?: string | null;
   resumeSentAt?: string | null;
   resumeDeadlineAt?: string | null;
   queuePosition?: number | null;

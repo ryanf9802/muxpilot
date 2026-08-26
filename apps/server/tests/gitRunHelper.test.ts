@@ -293,7 +293,9 @@ describe("heavyweight validation helper", () => {
     const leases = join(root, "leases");
     const session = join(root, "session");
     const statusFile = join(session, "git-workflow.json");
+    const systemdArgs = join(root, "systemd-args.json");
     await mkdir(session);
+    const systemdRun = await writeFakeSystemdRun(root);
     const outcome = execFileAsync(process.execPath, [
       helper, "--heavy", "--", process.execPath, "-e", "process.stdout.write(process.env.NOISY_MARKER + '\\n'); setTimeout(() => {}, 80)"
     ], {
@@ -304,6 +306,9 @@ describe("heavyweight validation helper", () => {
         MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
         MUXPILOT_GIT_STATUS_FILE: statusFile,
         MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_SYSTEMD_RUN: systemdRun,
+        FAKE_SYSTEMD_ARGS: systemdArgs,
+        BOOTSTRAP_SECRET: "private-bootstrap-value",
         NOISY_MARKER: "noisy output"
       }
     });
@@ -320,16 +325,29 @@ describe("heavyweight validation helper", () => {
 
     const runId = await waitForState(leases, "reporting");
     const owner = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
-    expect(owner).toMatchObject({ state: "reporting", exitCode: 0, signal: null, slot: null });
+    expect(owner).toMatchObject({
+      state: "reporting",
+      exitCode: 0,
+      signal: null,
+      slot: null,
+      resourceUnit: expect.stringMatching(/^muxpilot-heavy-.+\.service$/)
+    });
+    expect(JSON.stringify(owner)).not.toContain("private-bootstrap-value");
+    const launchArguments = JSON.parse(await readFile(systemdArgs, "utf8")) as string[];
+    expect(launchArguments).toContain("--property=StandardOutput=null");
+    expect(launchArguments).toContain("--muxpilot-heavy-worker-bootstrap");
+    expect(JSON.stringify(launchArguments)).not.toContain("private-bootstrap-value");
+    expect((await readdir(join(leases, "runs", runId))).some((entry) => entry.startsWith("bootstrap-"))).toBe(false);
     expect(await readFile(owner.logPath, "utf8")).toContain("noisy output");
   });
 
-  it("suppresses a detached worker completion after a durable session cancellation", async () => {
+  it("suppresses a transient worker completion after a durable session cancellation", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);
     const leases = join(root, "leases");
     const session = join(root, "session");
     await mkdir(session);
+    const systemdRun = await writeFakeSystemdRun(root);
     const outcome = execFileAsync(process.execPath, [
       helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 1000)"
     ], {
@@ -339,7 +357,8 @@ describe("heavyweight validation helper", () => {
         MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
         MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
         MUXPILOT_GIT_STATUS_FILE: join(session, "git-workflow.json"),
-        MUXPILOT_HEAVY_VALIDATION_DIR: leases
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_SYSTEMD_RUN: systemdRun
       }
     });
     let event: ReturnType<typeof normalizeHeavyCommandQueueEvent> = null;
@@ -567,6 +586,22 @@ describe("heavyweight validation helper", () => {
     expect(contents).toContain("LEASE_RELEASED");
   });
 });
+
+async function writeFakeSystemdRun(root: string): Promise<string> {
+  const path = join(root, "systemd-run");
+  await writeFile(path, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAKE_SYSTEMD_ARGS) writeFileSync(process.env.FAKE_SYSTEMD_ARGS, JSON.stringify(args));
+const commandIndex = args.findIndex((value) => value.startsWith("/"));
+if (commandIndex < 0) process.exit(2);
+const child = spawn(args[commandIndex], args.slice(commandIndex + 1), { detached: true, stdio: "ignore", env: process.env });
+child.unref();
+`);
+  await chmod(path, 0o755);
+  return path;
+}
 
 async function waitForRun(leases: string): Promise<string> {
   const deadline = Date.now() + 3_000;

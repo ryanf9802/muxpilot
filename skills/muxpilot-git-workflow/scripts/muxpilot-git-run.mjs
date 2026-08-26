@@ -10,9 +10,20 @@ import { standaloneConfiguration } from "./local-workflow.mjs";
 
 class DeferredError extends Error {}
 
-const parsed = parseArguments(process.argv.slice(2));
+const WORKER_BOOTSTRAP_FLAG = "--muxpilot-heavy-worker-bootstrap";
+const RUN_ID_PATTERN = /^[a-z0-9]+-[a-f0-9]{12}$/;
+const RESOURCE_UNIT_PATTERN = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
+const workerBootstrap = process.argv[2] === WORKER_BOOTSTRAP_FLAG
+  ? await receiveWorkerBootstrap(process.argv[3])
+  : null;
+if (workerBootstrap) {
+  process.chdir(workerBootstrap.cwd);
+  for (const key of Object.keys(process.env)) delete process.env[key];
+  Object.assign(process.env, workerBootstrap.environment);
+}
+const parsed = parseArguments(workerBootstrap?.arguments ?? process.argv.slice(2));
 const command = parsed.command;
-const workerMode = process.env.MUXPILOT_HEAVY_WORKER === "1";
+const workerMode = Boolean(workerBootstrap);
 const concurrency = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY, 2);
 const leaseRoot = process.env.MUXPILOT_HEAVY_VALIDATION_DIR ?? join(tmpdir(), `muxpilot-heavy-validation-${process.getuid?.() ?? "user"}`);
 const pollMs = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_POLL_MS, 250);
@@ -24,7 +35,8 @@ const inactivityTimeoutMs = duration(parsed.inactivityTimeout, process.env.MUXPI
 const runtimeTimeoutMs = duration(parsed.runtimeTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS, 30 * 60_000);
 const terminationGraceMs = duration(parsed.terminationGrace, process.env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS, 30_000);
 const completionEnabled = process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED === "1";
-const runId = parsed.resumeRunId ?? (workerMode ? process.env.MUXPILOT_HEAVY_RUN_ID : null) ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+const runId = parsed.resumeRunId ?? workerBootstrap?.runId ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+const resourceUnit = workerBootstrap?.resourceUnit ?? null;
 const partialManagedConfig = !process.env.MUXPILOT_GIT_WORKSPACE_ID && [
   "MUXPILOT_GIT_REPO_ROOT",
   "MUXPILOT_GIT_TARGET_BRANCH",
@@ -192,19 +204,35 @@ try {
 async function launchManagedWorker() {
   await mkdir(runDir, { recursive: true, mode: 0o700 });
   await chmod(runDir, 0o700);
-  let workerExit = null;
-  const worker = spawn(process.execPath, [resolve(process.argv[1]), ...process.argv.slice(2)], {
+  const bootstrapSocket = join(runDir, `bootstrap-${process.pid}-${randomBytes(3).toString("hex")}.sock`);
+  const bootstrap = await createWorkerBootstrapServer(bootstrapSocket, {
+    version: 1,
+    runId,
+    resourceUnit: `muxpilot-heavy-${runId}-${randomBytes(3).toString("hex")}.service`,
+    arguments: process.argv.slice(2),
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      MUXPILOT_HEAVY_WORKER: "1",
-      MUXPILOT_HEAVY_RUN_ID: runId
-    },
-    detached: true,
-    stdio: "ignore"
+    environment: process.env
   });
-  worker.once("error", (error) => { workerExit = { error }; });
-  worker.once("exit", (code, signal) => { workerExit = { code, signal }; });
+  const systemdRun = process.env.MUXPILOT_HEAVY_SYSTEMD_RUN ?? "systemd-run";
+  const launched = spawnSync(systemdRun, [
+    "--user", "--quiet", "--collect", "--service-type=exec",
+    `--unit=${bootstrap.payload.resourceUnit}`,
+    "--property=StandardOutput=null", "--property=StandardError=null",
+    process.execPath, resolve(process.argv[1]), WORKER_BOOTSTRAP_FLAG, bootstrapSocket
+  ], { encoding: "utf8", timeout: 15_000, env: process.env });
+  if (launched.error || launched.status !== 0) {
+    await bootstrap.close();
+    const detail = launched.error?.message ?? launched.stderr?.trim() ?? `exit ${launched.status ?? "unknown"}`;
+    fail(`could not launch heavyweight worker service ${bootstrap.payload.resourceUnit} (${detail})`);
+  }
+  try {
+    await withTimeout(bootstrap.delivered, 15_000, "heavyweight worker did not accept its private bootstrap payload");
+  } catch (error) {
+    spawnSync("systemctl", ["--user", "stop", bootstrap.payload.resourceUnit], { timeout: 5_000, env: process.env });
+    await bootstrap.close();
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  await bootstrap.close();
 
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -212,7 +240,6 @@ async function launchManagedWorker() {
     try { owner = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8")); } catch { /* worker is still starting */ }
     if (owner?.runId === runId) {
       if (owner.state === "waiting") {
-        worker.unref();
         await writeLauncherRelease(
           "queue_released",
           `[muxpilot-heavy] ${new Date().toISOString()} QUEUED_NOT_RUN run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("use $muxpilot-heavy-command-queue; do not poll or retry")}\n`
@@ -220,7 +247,6 @@ async function launchManagedWorker() {
         process.exit(75);
       }
       if (["running", "stalled", "terminating", "reporting", "completed"].includes(owner.state)) {
-        worker.unref();
         await writeLauncherRelease(
           "run_released",
           `[muxpilot-heavy] ${new Date().toISOString()} RUNNING_DEFERRED run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("return the run_released event and end the turn; muxpilot will resume on completion")}\n`
@@ -229,16 +255,79 @@ async function launchManagedWorker() {
       }
       if (owner.state === "cancelled") fail(`heavyweight command ${runId} was cancelled before launch completed`);
     }
-    if (workerExit) {
-      const detail = "error" in workerExit
-        ? workerExit.error.message
-        : `code=${workerExit.code ?? "null"} signal=${workerExit.signal ?? "none"}`;
-      fail(`heavyweight worker ${runId} exited before handoff (${detail})`);
-    }
     await delay(25);
   }
-  try { process.kill(worker.pid, "SIGTERM"); } catch { /* worker may have exited */ }
+  spawnSync("systemctl", ["--user", "stop", bootstrap.payload.resourceUnit], { timeout: 5_000, env: process.env });
   fail(`heavyweight worker ${runId} did not become ready for handoff`);
+}
+
+async function createWorkerBootstrapServer(path, payload) {
+  let resolveDelivered;
+  let rejectDelivered;
+  const delivered = new Promise((resolveDelivery, rejectDelivery) => {
+    resolveDelivered = resolveDelivery;
+    rejectDelivered = rejectDelivery;
+  });
+  let accepted = false;
+  const bootstrapServer = createServer((socket) => {
+    if (accepted) {
+      socket.destroy();
+      return;
+    }
+    accepted = true;
+    socket.once("error", rejectDelivered);
+    socket.end(`${JSON.stringify(payload)}\n`, resolveDelivered);
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    bootstrapServer.once("error", rejectListen);
+    bootstrapServer.listen(path, resolveListen);
+  });
+  await chmod(path, 0o600);
+  return {
+    payload,
+    delivered,
+    close: async () => {
+      await new Promise((resolveClose) => bootstrapServer.close(resolveClose));
+      await rm(path, { force: true });
+    }
+  };
+}
+
+function receiveWorkerBootstrap(path) {
+  if (typeof path !== "string" || !path) fail("heavyweight worker bootstrap socket is missing");
+  return new Promise((resolveBootstrap, rejectBootstrap) => {
+    const socket = createConnection(path);
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(15_000, () => socket.destroy(new Error("heavyweight worker bootstrap timed out")));
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (input.length > 2 * 1024 * 1024) socket.destroy(new Error("heavyweight worker bootstrap exceeded 2 MiB"));
+    });
+    socket.once("end", () => {
+      try {
+        const payload = JSON.parse(input.trim());
+        if (payload.version !== 1 || !RUN_ID_PATTERN.test(String(payload.runId)) ||
+          !RESOURCE_UNIT_PATTERN.test(String(payload.resourceUnit)) ||
+          !Array.isArray(payload.arguments) || !payload.arguments.every((part) => typeof part === "string") ||
+          typeof payload.cwd !== "string" || !payload.cwd || !payload.environment || typeof payload.environment !== "object" ||
+          Array.isArray(payload.environment) || !Object.values(payload.environment).every((value) => typeof value === "string")) {
+          throw new Error("heavyweight worker bootstrap payload is invalid");
+        }
+        resolveBootstrap(payload);
+      } catch (error) {
+        rejectBootstrap(error);
+      }
+    });
+    socket.once("error", rejectBootstrap);
+  });
+}
+
+function withTimeout(promise, milliseconds, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, rejectTimeout) => setTimeout(() => rejectTimeout(new Error(message)), milliseconds))
+  ]);
 }
 
 function parseArguments(args) {
@@ -527,6 +616,7 @@ async function writeOwner() {
     childPid: child?.pid ?? null,
     slot,
     controlSocket,
+    resourceUnit,
     runnerPath: resolve(process.argv[1]),
     runnerOptions: [
       parsed.inactivityWarn ? ["--inactivity-warn", parsed.inactivityWarn] : [],
