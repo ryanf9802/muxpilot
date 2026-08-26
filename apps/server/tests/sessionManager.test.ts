@@ -124,6 +124,7 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("does not authorize repository-wide validation");
     expect(options.developerInstructions).toContain("$muxpilot-heavy-command-queue");
     expect(options.developerInstructions).toContain("QUEUED_NOT_RUN");
+    expect(options.developerInstructions).toContain("RUNNING_DEFERRED");
     expect(options.developerInstructions).toContain("writable for test caches");
   });
 

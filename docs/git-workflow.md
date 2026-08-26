@@ -69,9 +69,11 @@ Heavyweight work runs through `muxpilot-git-run.mjs --heavy -- <command>`. The w
 - Applies a shared concurrency limit across sessions.
 - Records queue, process, output, CPU/I/O, and labeled-container activity.
 - Warns on prolonged inactivity and enforces inactivity, runtime, and termination deadlines.
-- Preserves the child command's output, signal, and exit status.
+- Retains child output in a private capped log and preserves the signal and exit status.
 
 When capacity is unavailable, the helper prints `QUEUED_NOT_RUN`; the command has not run. The agent releases its turn instead of polling. muxpilot reserves the FIFO ticket and later resumes the session with an exact claim command. Queue and resume transitions appear as structured transcript events. See [Runtime Reliability](runtime-reliability.md#heavyweight-command-scheduler) for the operator view.
+
+After a managed command starts, the helper prints `RUNNING_DEFERRED` and a structured `run_released` event. The agent ends its turn instead of polling. Muxpilot resumes it with one `run_completed` event containing a compact success result or a bounded failure tail plus the retained-log path. Standalone helpers continue to return the child result synchronously.
 
 The scheduler controls resources only. It does not authorize a broader test or scan than the operator requested.
 

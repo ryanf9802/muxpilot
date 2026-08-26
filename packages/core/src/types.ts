@@ -217,7 +217,7 @@ export interface AgentSessionSummary {
   worstStatusSessionId: string | null;
 }
 
-export type HeavyCommandState = "waiting" | "reserved" | "running" | "stalled" | "terminating";
+export type HeavyCommandState = "waiting" | "reserved" | "running" | "stalled" | "terminating" | "reporting";
 
 export interface HeavyCommandPackageDiagnostics {
   declared: string | null;
@@ -258,6 +258,9 @@ export interface HeavyCommand {
   };
   packageDiagnostics: HeavyCommandPackageDiagnostics | null;
   terminationReason: string | null;
+  exitCode?: number | null;
+  signal?: string | null;
+  finishedAt?: string | null;
   resumeSentAt?: string | null;
   resumeDeadlineAt?: string | null;
   queuePosition?: number | null;

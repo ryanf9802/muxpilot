@@ -4,10 +4,14 @@ import { createConnection } from "node:net";
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
-const ACTIVE_STATES = new Set(["waiting", "reserved", "running", "stalled", "terminating"]);
+const ACTIVE_STATES = new Set(["waiting", "reserved", "running", "stalled", "terminating", "reporting"]);
+const RUNNING_STATES = new Set(["running", "stalled", "terminating"]);
 const RUN_ID = /^[a-z0-9]+-[a-f0-9]{12}$/;
 const MAX_OWNER_BYTES = 256 * 1024;
 const MAX_TAIL_BYTES = 128 * 1024;
+const COMPLETION_TAIL_BYTES = 32 * 1024;
+const ACTIVE_OWNER_STALE_MS = 60_000;
+const COMPLETION_SUPPRESSION_FILE = "completion-suppressed";
 
 export interface HeavyCommandSessionCoordinator {
   sessionIdForWorkspace(workspaceId: string): Promise<string | null>;
@@ -47,11 +51,27 @@ export class HeavyCommandService {
     return (await this.list(workspaceId)).commands.length > 0;
   }
 
+  async hasRunning(workspaceId: string): Promise<boolean> {
+    return (await this.list(workspaceId)).commands.some((command) => RUNNING_STATES.has(command.state));
+  }
+
+  async runningWorkspaceIds(): Promise<Set<string>> {
+    const now = Date.now();
+    return new Set((await this.readPersistentOwners())
+      .filter((owner) => RUNNING_STATES.has(owner.state) &&
+        Number.isFinite(Date.parse(owner.heartbeatAt)) && now - Date.parse(owner.heartbeatAt) <= ACTIVE_OWNER_STALE_MS)
+      .map((owner) => owner.workspaceId));
+  }
+
   async cancelWorkspace(workspaceId: string, reason: string): Promise<void> {
     await this.withSchedulerLock(async () => {
-      for (const owner of await this.readQueueOwners()) {
-        if (owner.workspaceId === workspaceId && (owner.state === "waiting" || owner.state === "reserved")) {
+      for (const owner of await this.readPersistentOwners()) {
+        if (owner.workspaceId !== workspaceId) continue;
+        if (owner.state === "waiting" || owner.state === "reserved" || owner.state === "reporting") {
           await this.cancelOwner(owner, reason);
+        } else if (owner.state === "acquiring" || RUNNING_STATES.has(owner.state)) {
+          await writeFile(join(this.leaseRoot, "runs", owner.runId, COMPLETION_SUPPRESSION_FILE), reason, { mode: 0o600 });
+          await sendControl(join(this.leaseRoot, "runs", owner.runId, "control.sock"), { action: "cancel", reason }).catch(() => null);
         }
       }
     });
@@ -100,6 +120,7 @@ export class HeavyCommandService {
     const command = await this.readOwner(runId, workspaceId);
     if (!command) return "missing";
     if (!ACTIVE_STATES.has(command.state)) return "inactive";
+    if (command.state === "reporting") return "inactive";
     if (command.state === "waiting" || command.state === "reserved") {
       await this.withSchedulerLock(async () => {
         const owner = await this.readQueueOwner(runId);
@@ -157,9 +178,60 @@ export class HeavyCommandService {
       });
 
       for (const owner of reserved) await this.dispatchResume(owner);
+      for (const owner of await this.readPersistentOwners()) {
+        if (owner.state === "reporting" && !owner.completionSentAt) await this.dispatchCompletion(owner);
+      }
     } finally {
       this.ticking = false;
     }
+  }
+
+  private async dispatchCompletion(owner: QueueOwner): Promise<void> {
+    if (!this.coordinator) return;
+    const sessionId = await this.coordinator.sessionIdForWorkspace(owner.workspaceId);
+    if (!sessionId) {
+      await this.cancelWorkspace(owner.workspaceId, "owning session is no longer available");
+      return;
+    }
+    await this.withSchedulerLock(async () => {
+      const current = await this.readQueueOwner(owner.runId);
+      if (!current || current.state !== "reporting" || current.completionSentAt || !current.logPath || !current.startedAt || !current.finishedAt) return;
+      current.heartbeatAt = new Date().toISOString();
+      await this.writeOwner(current);
+      const exitCode = current.exitCode ?? null;
+      const signal = current.signal ?? null;
+      const outcome = current.terminationReason || signal ? "terminated" : exitCode === 0 ? "passed" : "failed";
+      const durationMs = Math.max(0, Date.parse(current.finishedAt) - Date.parse(current.startedAt));
+      let outputTail: string | undefined;
+      let outputTruncated: boolean | undefined;
+      if (outcome !== "passed") {
+        const output = await this.output(current.workspaceId, current.runId);
+        if (output) {
+          outputTail = utf8Tail(output.output, COMPLETION_TAIL_BYTES);
+          outputTruncated = output.truncated || Buffer.byteLength(output.output) > COMPLETION_TAIL_BYTES;
+        }
+      }
+      const message = serializeHeavyCommandQueueEvent({
+        version: 1,
+        kind: "run_completed",
+        runId: current.runId,
+        commandDisplay: current.commandDisplay,
+        skill: "$muxpilot-heavy-command-queue",
+        outcome,
+        exitCode,
+        signal,
+        durationMs,
+        logPath: current.logPath,
+        ...(outputTail === undefined ? {} : { outputTail }),
+        ...(outputTruncated === undefined ? {} : { outputTruncated })
+      });
+      if (!await this.coordinator!.resumeHeavyCommand(sessionId, message)) return;
+      const sentAt = new Date().toISOString();
+      current.state = "completed";
+      current.completionSentAt = sentAt;
+      current.heartbeatAt = sentAt;
+      await this.writeOwner(current);
+    });
   }
 
   private async dispatchResume(owner: QueueOwner): Promise<void> {
@@ -230,10 +302,14 @@ export class HeavyCommandService {
   }
 
   private async readQueueOwners(): Promise<QueueOwner[]> {
+    return (await this.readPersistentOwners()).filter((owner) => owner.state === "waiting" || owner.state === "reserved");
+  }
+
+  private async readPersistentOwners(): Promise<QueueOwner[]> {
     const owners: QueueOwner[] = [];
     for (const runId of await readdir(join(this.leaseRoot, "runs")).catch(() => [])) {
       const owner = await this.readQueueOwner(runId);
-      if (owner && (owner.state === "waiting" || owner.state === "reserved")) owners.push(owner);
+      if (owner) owners.push(owner);
     }
     return owners;
   }
@@ -286,7 +362,7 @@ export class HeavyCommandService {
       if (typeof owner.cwd !== "string" || typeof owner.commandDisplay !== "string" || typeof owner.queuedAt !== "string" || typeof owner.heartbeatAt !== "string") return null;
       const heartbeatAt = Date.parse(owner.heartbeatAt);
       if (!Number.isFinite(heartbeatAt) || !Number.isFinite(Date.parse(owner.queuedAt))) return null;
-      if (ACTIVE_STATES.has(String(owner.state)) && Date.now() - heartbeatAt > 60_000) return null;
+      if (ACTIVE_STATES.has(String(owner.state)) && Date.now() - heartbeatAt > ACTIVE_OWNER_STALE_MS) return null;
       if (owner.startedAt !== null && typeof owner.startedAt !== "string") return null;
       if (owner.lastOutputAt !== null && typeof owner.lastOutputAt !== "string") return null;
       if (Number(owner.version) >= 3 && ((owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string") || !validActivity(owner.activity))) return null;
@@ -295,6 +371,11 @@ export class HeavyCommandService {
       if (owner.slot !== null && (!Number.isInteger(owner.slot) || Number(owner.slot) < 0)) return null;
       if (!validDeadlines(owner.deadlines) || (owner.packageDiagnostics !== null && !validPackageDiagnostics(owner.packageDiagnostics))) return null;
       if (owner.terminationReason !== null && typeof owner.terminationReason !== "string") return null;
+      if (owner.state === "reporting") {
+        if (!Number.isInteger(owner.exitCode) && owner.exitCode !== null) return null;
+        if (owner.signal !== null && typeof owner.signal !== "string") return null;
+        if (typeof owner.finishedAt !== "string" || !Number.isFinite(Date.parse(owner.finishedAt))) return null;
+      }
       return owner as unknown as HeavyCommand;
     } catch {
       return null;
@@ -307,6 +388,7 @@ interface QueueOwner extends Omit<HeavyCommand, "state"> {
   state: HeavyCommand["state"] | "acquiring" | "cancelled" | "completed";
   runnerPath: string;
   runnerOptions: string[];
+  completionSentAt?: string | null;
 }
 
 function validActivity(value: unknown): boolean {
@@ -359,4 +441,12 @@ function shellQuote(value: string): string {
 
 function inside(root: string, path: string): boolean {
   return path === root || path.startsWith(`${root}${sep}`);
+}
+
+function utf8Tail(value: string, maxBytes: number): string {
+  const buffer = Buffer.from(value);
+  if (buffer.length <= maxBytes) return value;
+  let start = buffer.length - maxBytes;
+  while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
+  return buffer.subarray(start).toString("utf8");
 }

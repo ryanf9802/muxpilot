@@ -168,6 +168,7 @@ describe("heavyweight validation helper", () => {
     const output = join(root, "events.txt");
     const environment = {
       ...process.env,
+      MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
       MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "leases"),
       MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
     };
@@ -205,6 +206,7 @@ describe("heavyweight validation helper", () => {
     }));
     const environment = {
       ...process.env,
+      MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
       MUXPILOT_HEAVY_VALIDATION_DIR: leases,
       MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
       MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10"
@@ -283,6 +285,72 @@ describe("heavyweight validation helper", () => {
     await outcome.catch((error: { stderr: string }) => {
       expect(error.stderr).not.toContain("RESOURCE_LIMIT_WARNING");
     });
+  });
+
+  it("releases a managed running command and retains its output for completion reporting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const session = join(root, "session");
+    const statusFile = join(session, "git-workflow.json");
+    await mkdir(session);
+    const outcome = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "process.stdout.write(process.env.NOISY_MARKER + '\\n'); setTimeout(() => {}, 80)"
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_GIT_STATUS_FILE: statusFile,
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        NOISY_MARKER: "noisy output"
+      }
+    });
+    let stderr = "";
+    await outcome.catch((error: { code: number; stderr: string }) => {
+      expect(error.code).toBe(75);
+      stderr = error.stderr;
+    });
+    expect(stderr).toContain("RUNNING_DEFERRED");
+    expect(stderr).not.toContain("noisy output");
+    expect(normalizeHeavyCommandQueueEvent(stderr.slice(stderr.indexOf("<muxpilot_heavy_command>")))).toMatchObject({
+      event: { kind: "run_released" }
+    });
+
+    const runId = await waitForState(leases, "reporting");
+    const owner = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
+    expect(owner).toMatchObject({ state: "reporting", exitCode: 0, signal: null, slot: null });
+    expect(await readFile(owner.logPath, "utf8")).toContain("noisy output");
+  });
+
+  it("suppresses a detached worker completion after a durable session cancellation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const session = join(root, "session");
+    await mkdir(session);
+    const outcome = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 1000)"
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+        MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
+        MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
+        MUXPILOT_GIT_STATUS_FILE: join(session, "git-workflow.json"),
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases
+      }
+    });
+    let event: ReturnType<typeof normalizeHeavyCommandQueueEvent> = null;
+    await outcome.catch((error: { code: number; stderr: string }) => {
+      expect(error.code).toBe(75);
+      event = normalizeHeavyCommandQueueEvent(error.stderr.slice(error.stderr.indexOf("<muxpilot_heavy_command>")));
+    });
+    expect(event).toMatchObject({ event: { kind: "run_released" } });
+    const runId = event!.event.runId;
+    await writeFile(join(leases, "runs", runId, "completion-suppressed"), "session interrupted");
+    expect(await waitForState(leases, "cancelled")).toBe(runId);
   });
 
   it("force-removes labeled containers after a failed Docker command", async () => {

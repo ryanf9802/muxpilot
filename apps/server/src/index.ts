@@ -88,6 +88,7 @@ const managedEnvironment: Record<string, string> = {
   MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+  MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
   MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: String(config.heavyValidationInactivityWarnMs),
@@ -158,7 +159,14 @@ const resourceGovernor = new ResourceGovernor({
   agentMemoryHardPercent: config.agentMemoryHardPercent,
   agentCpuPercent: config.agentCpuPercent,
   sessionTasksMax: config.sessionTasksMax
-}, () => db.listSessions(), app.log, new UserSystemdController(sessionScopes.environment));
+}, async () => {
+  const runningWorkspaces = await heavyCommands.runningWorkspaceIds();
+  return (await db.listSessions()).map((session) =>
+    session.gitWorkspace && runningWorkspaces.has(session.gitWorkspace.id)
+      ? { ...session, status: "executing" as const }
+      : session
+  );
+}, app.log, new UserSystemdController(sessionScopes.environment));
 manager.setResourceUsageLookup(resourceGovernor);
 const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
 await sessionTransfers.initialize();

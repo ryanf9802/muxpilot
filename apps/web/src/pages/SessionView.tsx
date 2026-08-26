@@ -355,7 +355,7 @@ export function isLiveManagedSession(session: (Pick<ManagedSession, "archived" |
 }
 
 export function hasActiveHeavyCommand(commands: readonly Pick<HeavyCommand, "state">[]): boolean {
-  return commands.some((command) => command.state === "waiting" || command.state === "reserved" || command.state === "running" || command.state === "stalled" || command.state === "terminating");
+  return commands.some((command) => command.state === "waiting" || command.state === "reserved" || command.state === "running" || command.state === "stalled" || command.state === "terminating" || command.state === "reporting");
 }
 
 export function isLatestSessionRefresh(requestId: number, latestRequestId: number): boolean {
@@ -715,6 +715,7 @@ export function shouldResetInitialTranscriptForLiveTail(
 
 const HEAVY_STATE_PRIORITY: Record<HeavyCommand["state"], number> = {
   terminating: 4,
+  reporting: 3,
   stalled: 3,
   running: 2,
   reserved: 2,
@@ -779,7 +780,7 @@ export function HeavyCommandsModal({
               <article className="heavy-command-detail" key={command.runId} data-state={command.state}>
                 <div className="heavy-command-detail-head">
                   <span className="heavy-command-state">{heavyStateLabel(command.state)}</span>
-                  <span>{command.startedAt ? `${elapsed} running` : `${elapsed} waiting`}</span>
+                  <span>{command.state === "reporting" ? "preparing completion" : command.startedAt ? `${elapsed} running` : `${elapsed} waiting`}</span>
                 </div>
                 <code className="heavy-command-command">{command.commandDisplay}</code>
                 <dl className="heavy-command-facts">
@@ -805,7 +806,7 @@ export function HeavyCommandsModal({
                       <button type="button" onClick={() => setConfirming(null)}>Cancel</button>
                     </>
                   ) : (
-                    <button type="button" disabled={command.state === "terminating"} onClick={() => setConfirming(command.runId)}>{command.state === "terminating" ? "Terminating…" : "Terminate command"}</button>
+                    <button type="button" disabled={command.state === "terminating" || command.state === "reporting"} onClick={() => setConfirming(command.runId)}>{command.state === "terminating" ? "Terminating…" : command.state === "reporting" ? "Command finished" : "Terminate command"}</button>
                   )}
                 </div>
               </article>
@@ -973,7 +974,7 @@ export function DocumentsButton({ documentCount, open, onOpen }: { documentCount
 }
 
 function heavyStateLabel(state: HeavyCommand["state"]): string {
-  return { waiting: "Waiting for slot", reserved: "Resuming session", running: "Running", stalled: "No observed progress", terminating: "Terminating" }[state];
+  return { waiting: "Waiting for slot", reserved: "Resuming session", running: "Running", stalled: "No observed progress", terminating: "Terminating", reporting: "Reporting result" }[state];
 }
 
 function compactDuration(milliseconds: number): string {

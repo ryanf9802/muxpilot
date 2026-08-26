@@ -12,6 +12,7 @@ class DeferredError extends Error {}
 
 const parsed = parseArguments(process.argv.slice(2));
 const command = parsed.command;
+const workerMode = process.env.MUXPILOT_HEAVY_WORKER === "1";
 const concurrency = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_CONCURRENCY, 2);
 const leaseRoot = process.env.MUXPILOT_HEAVY_VALIDATION_DIR ?? join(tmpdir(), `muxpilot-heavy-validation-${process.getuid?.() ?? "user"}`);
 const pollMs = positiveInteger(process.env.MUXPILOT_HEAVY_VALIDATION_POLL_MS, 250);
@@ -22,7 +23,8 @@ const inactivityWarnMs = duration(parsed.inactivityWarn, process.env.MUXPILOT_HE
 const inactivityTimeoutMs = duration(parsed.inactivityTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS, 10 * 60_000);
 const runtimeTimeoutMs = duration(parsed.runtimeTimeout, process.env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS, 30 * 60_000);
 const terminationGraceMs = duration(parsed.terminationGrace, process.env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS, 30_000);
-const runId = parsed.resumeRunId ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+const completionEnabled = process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED === "1";
+const runId = parsed.resumeRunId ?? (workerMode ? process.env.MUXPILOT_HEAVY_RUN_ID : null) ?? `${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
 const partialManagedConfig = !process.env.MUXPILOT_GIT_WORKSPACE_ID && [
   "MUXPILOT_GIT_REPO_ROOT",
   "MUXPILOT_GIT_TARGET_BRANCH",
@@ -39,6 +41,12 @@ const workspaceId = process.env.MUXPILOT_GIT_WORKSPACE_ID ?? standaloneConfig?.w
 const workflowStatusFile = process.env.MUXPILOT_GIT_STATUS_FILE ?? standaloneConfig?.statusFile ?? null;
 const runDir = join(leaseRoot, "runs", runId);
 const controlSocket = join(runDir, "control.sock");
+const completionSuppressionFile = join(runDir, "completion-suppressed");
+
+if (queueEnabled && completionEnabled && !workerMode) {
+  await launchManagedWorker();
+}
+
 let startedWaitingAt = Date.now();
 let executionCwd = process.cwd();
 let state = queueEnabled ? "acquiring" : "waiting";
@@ -68,6 +76,8 @@ let forceTimer = null;
 let ownerWrite = Promise.resolve();
 let deferred = false;
 let resumeOwner = null;
+let suppressCompletion = false;
+let finishedAt = null;
 
 if (parsed.resumeRunId) {
   try { resumeOwner = await loadResumeOwner(); } catch (error) { fail(error instanceof Error ? error.message : String(error)); }
@@ -163,6 +173,8 @@ try {
   if (leasePath) {
     await rm(leasePath, { recursive: true, force: true });
     lifecycle("LEASE_RELEASED", `run=${runId} slot=${slot}`);
+    leasePath = null;
+    slot = null;
   }
   if (deferred) {
     try { await updateOwner(); } catch { /* best effort queue metadata */ }
@@ -175,6 +187,58 @@ try {
     process.removeAllListeners(stoppingSignal);
     process.kill(process.pid, stoppingSignal);
   }
+}
+
+async function launchManagedWorker() {
+  await mkdir(runDir, { recursive: true, mode: 0o700 });
+  await chmod(runDir, 0o700);
+  let workerExit = null;
+  const worker = spawn(process.execPath, [resolve(process.argv[1]), ...process.argv.slice(2)], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      MUXPILOT_HEAVY_WORKER: "1",
+      MUXPILOT_HEAVY_RUN_ID: runId
+    },
+    detached: true,
+    stdio: "ignore"
+  });
+  worker.once("error", (error) => { workerExit = { error }; });
+  worker.once("exit", (code, signal) => { workerExit = { code, signal }; });
+
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    let owner = null;
+    try { owner = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8")); } catch { /* worker is still starting */ }
+    if (owner?.runId === runId) {
+      if (owner.state === "waiting") {
+        worker.unref();
+        await writeLauncherRelease(
+          "queue_released",
+          `[muxpilot-heavy] ${new Date().toISOString()} QUEUED_NOT_RUN run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("use $muxpilot-heavy-command-queue; do not poll or retry")}\n`
+        );
+        process.exit(75);
+      }
+      if (["running", "stalled", "terminating", "reporting", "completed"].includes(owner.state)) {
+        worker.unref();
+        await writeLauncherRelease(
+          "run_released",
+          `[muxpilot-heavy] ${new Date().toISOString()} RUNNING_DEFERRED run=${runId} command=${formatCommand(command)} guidance=${JSON.stringify("return the run_released event and end the turn; muxpilot will resume on completion")}\n`
+        );
+        process.exit(75);
+      }
+      if (owner.state === "cancelled") fail(`heavyweight command ${runId} was cancelled before launch completed`);
+    }
+    if (workerExit) {
+      const detail = "error" in workerExit
+        ? workerExit.error.message
+        : `code=${workerExit.code ?? "null"} signal=${workerExit.signal ?? "none"}`;
+      fail(`heavyweight worker ${runId} exited before handoff (${detail})`);
+    }
+    await delay(25);
+  }
+  try { process.kill(worker.pid, "SIGTERM"); } catch { /* worker may have exited */ }
+  fail(`heavyweight worker ${runId} did not become ready for handoff`);
 }
 
 function parseArguments(args) {
@@ -213,7 +277,8 @@ async function createControlServer() {
       try {
         const request = JSON.parse(input.trim());
         if (request.action === "probe") socket.end(`${JSON.stringify({ ok: true, runId, state })}\n`);
-        else if (request.action === "terminate") {
+        else if (request.action === "terminate" || request.action === "cancel") {
+          if (request.action === "cancel") suppressCompletion = true;
           const accepted = (state === "acquiring" || state === "waiting" || Boolean(child)) && state !== "terminating";
           if (accepted && !child) {
             state = "terminating";
@@ -486,7 +551,10 @@ async function writeOwner() {
     terminationReason,
     resumeSentAt: resumeOwner?.resumeSentAt ?? null,
     resumeDeadlineAt: resumeOwner?.resumeDeadlineAt ?? null,
-    exitCode: state === "completed" ? process.exitCode ?? null : null
+    exitCode: state === "reporting" || state === "completed" || state === "cancelled" ? process.exitCode ?? null : null,
+    signal: state === "reporting" || state === "completed" || state === "cancelled" ? childOutcome?.signal ?? null : null,
+    finishedAt,
+    completionSentAt: resumeOwner?.completionSentAt ?? null
   };
   const temporary = join(runDir, `owner-${process.pid}-${randomBytes(3).toString("hex")}.tmp`);
   await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 });
@@ -543,13 +611,27 @@ function queueEvent(kind, details) {
   writeLog(message);
 }
 
+async function writeLauncherRelease(kind, lifecycleMessage) {
+  const event = {
+    version: 1,
+    kind,
+    runId,
+    commandDisplay: formatCommand(command),
+    skill: "$muxpilot-heavy-command-queue"
+  };
+  const message = `${lifecycleMessage}<muxpilot_heavy_command>\n${JSON.stringify(event)}\n</muxpilot_heavy_command>\n`;
+  await new Promise((resolveWrite) => process.stderr.write(message, resolveWrite));
+}
+
 async function finalizeRun() {
-  state = "completed";
+  finishedAt = new Date().toISOString();
+  suppressCompletion ||= existsSync(completionSuppressionFile);
+  state = suppressCompletion ? "cancelled" : completionEnabled ? "reporting" : "completed";
   try { await updateOwner(); } catch { /* best effort final metadata */ }
   if (log) {
     await new Promise((resolveEnd) => log.stream.end(resolveEnd));
     const summaryPath = `${log.path}.json`;
-    await writeFile(summaryPath, JSON.stringify({ runId, workspaceId, command, state, terminationReason, forced, exitCode: process.exitCode, finishedAt: new Date().toISOString() }), { mode: 0o600 });
+    await writeFile(summaryPath, JSON.stringify({ runId, workspaceId, command, state, terminationReason, forced, exitCode: process.exitCode, signal: childOutcome?.signal ?? null, finishedAt }), { mode: 0o600 });
     await pruneLogs(log.root);
   }
 }

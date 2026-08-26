@@ -1206,6 +1206,7 @@ describe("session fallback polling", () => {
     expect(hasActiveHeavyCommand([{ state: "reserved" }])).toBe(true);
     expect(hasActiveHeavyCommand([{ state: "running" }])).toBe(true);
     expect(hasActiveHeavyCommand([{ state: "stalled" }])).toBe(true);
+    expect(hasActiveHeavyCommand([{ state: "reporting" }])).toBe(true);
     expect(hasActiveHeavyCommand([])).toBe(false);
   });
 });

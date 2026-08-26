@@ -2815,6 +2815,7 @@ select:focus-visible {
 }
 
 .heavy-command-indicator[data-state="waiting"] { color: var(--color-text-muted); }
+.heavy-command-indicator[data-state="reporting"] { color: var(--color-accent); }
 .heavy-command-indicator[data-state="stalled"] { color: var(--color-warning); }
 .heavy-command-indicator[data-state="terminating"] { color: var(--color-error); }
 .heavy-command-indicator span { font-size: 11px; font-weight: 700; }
@@ -2950,6 +2951,7 @@ select:focus-visible {
   background: var(--color-surface-raised);
 }
 .heavy-command-detail[data-state="waiting"] { border-left-color: var(--color-text-muted); }
+.heavy-command-detail[data-state="reporting"] { border-left-color: var(--color-accent); }
 .heavy-command-detail[data-state="stalled"] { border-left-color: var(--color-warning); }
 .heavy-command-detail[data-state="terminating"] { border-left-color: var(--color-error); }
 .heavy-command-detail-head,

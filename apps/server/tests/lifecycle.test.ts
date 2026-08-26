@@ -38,6 +38,7 @@ describe("production bundled skill startup", () => {
       await expect(access(join(home, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-init.mjs"))).resolves.toBeUndefined();
       const installedQueueSkill = await readFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "utf8");
       expect(installedQueueSkill).toContain("QUEUED_NOT_RUN");
+      expect(installedQueueSkill).toContain("run_completed");
       expect(installedQueueSkill).toContain("treat its delivery as proof that muxpilot ended the deferred phase");
       const installedOrchestrationSkill = await readFile(join(home, "skills", "muxpilot-session-orchestration", "SKILL.md"), "utf8");
       expect(installedOrchestrationSkill).toContain("event-driven wait");

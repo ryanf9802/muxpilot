@@ -47,4 +47,49 @@ describe("heavy command queue transcript events", () => {
     expect(heavyCommandQueueCommandSummary(event, 12)).toBe("a very long…");
     expect(event.commandDisplay).toBe("a very long heavyweight command");
   });
+
+  it("round trips released and completed runs with compact terminal metadata", () => {
+    expect(normalizeHeavyCommandQueueEvent(serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "run_released",
+      runId: "mabc-012345abcdef",
+      commandDisplay: "pnpm test",
+      skill: "$muxpilot-heavy-command-queue"
+    }))).toMatchObject({ legacy: false, event: { kind: "run_released" } });
+
+    expect(normalizeHeavyCommandQueueEvent(serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "run_completed",
+      runId: "mabc-012345abcdef",
+      commandDisplay: "pnpm test",
+      skill: "$muxpilot-heavy-command-queue",
+      outcome: "failed",
+      exitCode: 1,
+      signal: null,
+      durationMs: 12_345,
+      logPath: "/session/heavy-commands/run.log",
+      outputTail: "failed assertion",
+      outputTruncated: true
+    }))).toMatchObject({
+      legacy: false,
+      event: {
+        kind: "run_completed",
+        outcome: "failed",
+        exitCode: 1,
+        outputTail: "failed assertion",
+        outputTruncated: true
+      }
+    });
+  });
+
+  it("continues to accept the original queue tag", () => {
+    const raw = `<muxpilot_heavy_command_queue>\n${JSON.stringify({
+      version: 1,
+      kind: "queue_released",
+      runId: "mabc-012345abcdef",
+      commandDisplay: "make lint",
+      skill: "$muxpilot-heavy-command-queue"
+    })}\n</muxpilot_heavy_command_queue>`;
+    expect(normalizeHeavyCommandQueueEvent(raw)).toMatchObject({ legacy: true, event: { kind: "queue_released" } });
+  });
 });

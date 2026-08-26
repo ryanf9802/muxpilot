@@ -156,7 +156,170 @@ describe("HeavyCommandService", () => {
       await service.stop();
     }
   });
+
+  it("delivers compact success and bounded failure completion events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const messages: string[] = [];
+    const passed = "mabc123-444444444444";
+    const failed = "mabc123-555555555555";
+    await writeReportingOwner(leases, sessions, passed, 0, "successful but noisy output");
+    await writeReportingOwner(leases, sessions, failed, 1, `${"old failure context\n".repeat(4_000)}final assertion failed\n`);
+    const service = new HeavyCommandService(leases, sessions, 2, 120_000);
+    service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+    });
+    try {
+      await waitFor(async () => messages.length === 2);
+      const events = messages.map((message) => normalizeHeavyCommandQueueEvent(message)?.event);
+      expect(events.find((event) => event?.runId === passed)).toMatchObject({
+        kind: "run_completed",
+        outcome: "passed",
+        exitCode: 0,
+        logPath: expect.stringContaining("passed.log")
+      });
+      expect(events.find((event) => event?.runId === passed)?.outputTail).toBeUndefined();
+      expect(events.find((event) => event?.runId === failed)).toMatchObject({
+        kind: "run_completed",
+        outcome: "failed",
+        exitCode: 1,
+        outputTruncated: true,
+        outputTail: expect.stringContaining("final assertion failed")
+      });
+      expect(Buffer.byteLength(events.find((event) => event?.runId === failed)?.outputTail ?? "")).toBeLessThanOrEqual(32 * 1024);
+      expect(JSON.parse(await readFile(join(leases, "runs", passed, "owner.json"), "utf8"))).toMatchObject({ state: "completed", completionSentAt: expect.any(String) });
+      expect(JSON.parse(await readFile(join(leases, "runs", failed, "owner.json"), "utf8"))).toMatchObject({ state: "completed", completionSentAt: expect.any(String) });
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("counts only process-owning states as resource-busy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const runId = "mabc123-666666666666";
+    const runDir = join(leases, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      lastActivityAt: new Date().toISOString(),
+      activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    const service = new HeavyCommandService(leases, sessions);
+    expect(await service.hasRunning("workspace-a")).toBe(true);
+    expect(await service.runningWorkspaceIds()).toEqual(new Set(["workspace-a"]));
+    const runningOwner = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8"));
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({ ...runningOwner, heartbeatAt: "2026-01-01T00:00:00.000Z" }));
+    expect(await service.runningWorkspaceIds()).toEqual(new Set());
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", null),
+      state: "reporting",
+      slot: null,
+      exitCode: 0,
+      signal: null,
+      finishedAt: new Date().toISOString()
+    }));
+    expect(await service.hasActive("workspace-a")).toBe(true);
+    expect(await service.hasRunning("workspace-a")).toBe(false);
+    expect(await service.runningWorkspaceIds()).toEqual(new Set());
+  });
+
+  it("durably suppresses completion before cancelling a running worker", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-777777777777";
+    const runDir = join(leases, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      lastActivityAt: new Date().toISOString(),
+      activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    const requests: Array<{ action: string; reason: string }> = [];
+    const server = createServer((socket) => socket.once("data", (chunk) => {
+      requests.push(JSON.parse(chunk.toString().trim()));
+      socket.end(`${JSON.stringify({ ok: true, accepted: true })}\n`);
+    }));
+    await new Promise<void>((resolve) => server.listen(join(runDir, "control.sock"), resolve));
+    await chmod(join(runDir, "control.sock"), 0o600);
+    try {
+      const service = new HeavyCommandService(leases, join(root, "sessions"));
+      await service.cancelWorkspace("workspace-a", "session interrupted");
+      expect(await readFile(join(runDir, "completion-suppressed"), "utf8")).toBe("session interrupted");
+      expect(requests).toEqual([{ action: "cancel", reason: "session interrupted" }]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("does not deliver a reporting completion after workspace cancellation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const runId = "mabc123-888888888888";
+    await writeReportingOwner(leases, sessions, runId, 0, "finished output");
+    const service = new HeavyCommandService(leases, sessions);
+    await service.cancelWorkspace("workspace-a", "session interrupted");
+    const messages: string[] = [];
+    service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+    });
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+      expect(messages).toEqual([]);
+      expect(JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"))).toMatchObject({
+        state: "cancelled",
+        terminationReason: "session interrupted"
+      });
+    } finally {
+      await service.stop();
+    }
+  });
 });
+
+async function writeReportingOwner(
+  leases: string,
+  sessions: string,
+  runId: string,
+  exitCode: number,
+  output: string
+): Promise<void> {
+  const runDir = join(leases, "runs", runId);
+  const logDir = join(sessions, "workspace-a", "heavy-commands");
+  const logPath = join(logDir, `${exitCode === 0 ? "passed" : "failed"}.log`);
+  await mkdir(runDir, { recursive: true });
+  await mkdir(logDir, { recursive: true });
+  await writeFile(logPath, output);
+  const now = new Date().toISOString();
+  await writeFile(join(runDir, "owner.json"), JSON.stringify({
+    ...owner(runId, "workspace-a", logPath),
+    version: 4,
+    state: "reporting",
+    runnerPath: "/skills/muxpilot-git-run.mjs",
+    runnerOptions: [],
+    slot: null,
+    exitCode,
+    signal: null,
+    finishedAt: now,
+    completionSentAt: null,
+    lastActivityAt: now,
+    activity: { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+  }));
+}
 
 async function writeQueueOwner(leases: string, runId: string, queuedAt: string): Promise<void> {
   const runDir = join(leases, "runs", runId);
