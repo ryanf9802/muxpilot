@@ -59,20 +59,30 @@ describe("mobile session viewport layout", () => {
     expect(compactButtonRule).toContain("min-height: 40px;");
   });
 
-  it("places composer settings in a vertical rail left of the input", () => {
+  it("places composer settings in an exact two-row block left of the input", () => {
     const settingsRule = cssBlock(styles, ".composer-settings");
     const composerRule = cssBlock(styles, ".composer");
-    const vimComposerRule = cssBlock(styles, ".composer-vim-available");
+    const modeRule = cssBlock(styles, ".composer-settings .mode-toggle");
+    const fastRule = cssBlock(styles, ".composer-settings .fast-mode-toggle");
+    const vimFastRule = cssBlock(styles, ".composer-vim-available .composer-settings .fast-mode-toggle");
+    const vimRule = cssBlock(styles, ".composer-settings .vim-toggle");
     const sendRule = cssBlock(styles, ".composer > .send-button");
     const inputRule = cssBlock(styles, ".composer > .skill-textarea");
     const inputSurfaceRule = cssBlock(styles, ".composer > .skill-textarea textarea:not([data-composer-resizing]),\n.composer > .skill-textarea .skill-textarea-mirror");
     expect(settingsRule).toContain("display: grid;");
-    expect(settingsRule).toContain("grid-auto-flow: row;");
+    expect(settingsRule).toContain("grid-template-columns: repeat(2, 32px);");
+    expect(settingsRule).toContain("grid-template-rows: repeat(2, 34px);");
     expect(settingsRule).toContain("align-content: start;");
+    expect(modeRule).toContain("grid-column: 1 / -1;");
+    expect(modeRule).toContain("grid-row: 1;");
+    expect(fastRule).toContain("grid-column: 1 / -1;");
+    expect(fastRule).toContain("grid-row: 2;");
+    expect(vimFastRule).toContain("grid-column: 1;");
+    expect(vimRule).toContain("grid-column: 2;");
+    expect(vimRule).toContain("grid-row: 2;");
     expect(composerRule).toContain("grid-template-columns: auto minmax(0, 1fr) 48px;");
     expect(composerRule).toContain("align-items: stretch;");
     expect(composerRule).toContain("--composer-control-rail-height: 74px;");
-    expect(vimComposerRule).toContain("--composer-control-rail-height: 114px;");
     expect(inputRule).toContain("min-height: var(--composer-control-rail-height);");
     expect(inputSurfaceRule).toContain("max(var(--composer-control-rail-height), var(--composer-content-height, 52px))");
     expect(sendRule).toContain("align-self: start;");

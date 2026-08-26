@@ -2849,7 +2849,6 @@ export function SessionView() {
               onBlur={() => setComposerFocused(false)}
               skills={codexSkills}
               onSkillSearch={() => void refreshCodexSkills()}
-              layoutKey={vimAvailable ? "vim-available" : "compact"}
               placeholder={
                 composerLock ??
                 (shouldQueueComposerInput(readySession, queuedInputs)
@@ -3537,7 +3536,6 @@ export function SkillTextArea({
   onSkillSearch,
   placeholder,
   rows,
-  layoutKey,
   focusRequestKey,
   focusCommand = "focus",
   disabled
@@ -3552,7 +3550,6 @@ export function SkillTextArea({
   onSkillSearch?: () => void;
   placeholder?: string;
   rows?: number;
-  layoutKey?: string;
   focusRequestKey?: string | null;
   focusCommand?: PrimaryInputFocusCommand;
   disabled?: boolean;
@@ -3573,7 +3570,7 @@ export function SkillTextArea({
   useLayoutEffect(() => {
     if (!textareaRef.current) return;
     resizeComposerTextarea(textareaRef.current, mirrorRef.current);
-  }, [layoutKey, placeholder, value]);
+  }, [placeholder, value]);
 
   useEffect(() => {
     setSelectedIndex(0);

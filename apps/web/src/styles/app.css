@@ -4912,11 +4912,18 @@ select:focus-visible {
 
 .composer-settings {
   display: grid;
-  grid-auto-flow: row;
+  grid-template-columns: repeat(2, 32px);
+  grid-template-rows: repeat(2, 34px);
   align-content: start;
   justify-items: center;
-  gap: 6px;
+  column-gap: 2px;
+  row-gap: 6px;
   min-width: 0;
+}
+
+.composer-settings .mode-toggle {
+  grid-column: 1 / -1;
+  grid-row: 1;
 }
 
 .composer-settings .mode-toggle-text,
@@ -4935,16 +4942,25 @@ select:focus-visible {
 }
 
 .composer-settings .fast-mode-toggle {
-  width: 36px;
-  min-width: 36px;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  width: 100%;
+  min-width: 32px;
   min-height: 34px;
   padding: 0;
 }
 
+.composer-vim-available .composer-settings .fast-mode-toggle {
+  grid-column: 1;
+  width: 32px;
+}
+
 .composer-settings .vim-toggle {
+  grid-column: 2;
+  grid-row: 2;
   align-self: auto;
-  width: 36px;
-  min-width: 36px;
+  width: 32px;
+  min-width: 32px;
   min-height: 34px;
   height: 34px;
 }
@@ -4972,10 +4988,6 @@ select:focus-visible {
   padding: 0;
   background: transparent;
   border: 0;
-}
-
-.composer-vim-available {
-  --composer-control-rail-height: 114px;
 }
 
 .composer > .skill-textarea {
