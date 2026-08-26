@@ -1,4 +1,4 @@
-import type { ChatMessage, ManagedSession } from "@muxpilot/core";
+import { normalizeGitWorkspaceSummary, type ChatMessage, type ManagedSession } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
 import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
@@ -201,13 +201,14 @@ export class OpenAIActivitySummaryClient implements SummaryModelClient {
 }
 
 export function buildSummaryPrompt(input: ActivitySummaryInput): string {
+  const workspace = normalizeGitWorkspaceSummary(input.session.gitWorkspace);
   const context = compactPrompts(input.prompts)
     .map((message) => `${message.sequence}. user prompt: ${message.text}`)
     .join("\n");
 
   return [
     `Repository: ${input.session.repo.name}`,
-    `Branch: ${input.session.repo.branch ?? "unknown"}`,
+    `Branch: ${workspace?.targetBranch ?? input.session.repo.branch ?? "unknown"}`,
     "",
     "Recent user prompts only:",
     context,

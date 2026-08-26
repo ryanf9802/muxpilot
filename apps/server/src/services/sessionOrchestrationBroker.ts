@@ -4,11 +4,12 @@ import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
-import type { ManagedSession, QuestionAnswerRequest } from "@muxpilot/core";
+import { serializeSessionWaitEvent, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionScope } from "./sessionScopes.js";
 import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
+import { agentWorkTokensUsed } from "./agentUsage.js";
 import type { CodexMcpServerConfig } from "../tmux/tmuxAdapter.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
@@ -258,6 +259,7 @@ export class SessionOrchestrationBroker {
           return session ? [session] : [];
         });
         const conditions = await Promise.all(targets.map(async (session) => {
+          if (await this.manager.hasActiveHeavyCommand(session.id)) return false;
           if ((session.contextUsage?.contextPercent ?? 0) >= 70) return true;
           if (!TERMINAL_OR_ATTENTION.has(session.status)) return false;
           if (session.status !== "idle" && session.status !== "waiting") return true;
@@ -271,7 +273,7 @@ export class SessionOrchestrationBroker {
           await this.db.upsertAgentWait(wait, nowIso());
         }
         const snapshot = targets.map(summarizeSession);
-        const event = `<muxpilot_session_wait>${JSON.stringify({ version: 1, kind: Date.now() >= wait.expiresAt ? "timeout" : "resume_requested", sessions: snapshot })}</muxpilot_session_wait>`;
+        const event = serializeSessionWaitEvent({ version: 1, kind: Date.now() >= wait.expiresAt ? "timeout" : "resume_requested", sessions: snapshot });
         if (await this.manager.resumeAgentWait(wait.actorSessionId, event)) {
           this.waits.delete(wait.actorSessionId);
           await this.db.deleteAgentWait(wait.actorSessionId);
@@ -308,7 +310,7 @@ export class SessionOrchestrationBroker {
 function summarizeSession(session: ManagedSession) {
   const ownership = session.agentOwnership;
   const usage = session.contextUsage;
-  const used = ownership && usage ? Math.max(0, usage.lifetimeWorkTokens - ownership.workTokenBaseline) : null;
+  const used = ownership ? agentWorkTokensUsed(ownership, usage) : null;
   return {
     id: session.id,
     name: session.tmux.windowName,

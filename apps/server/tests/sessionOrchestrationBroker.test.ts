@@ -11,6 +11,59 @@ import { SessionOrchestrationBroker } from "../src/services/sessionOrchestration
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
+  it("does not resume a parent while a child still has active queued work", async () => {
+    const child: ManagedSession = {
+      ...managedSession(),
+      id: "child-1",
+      status: "waiting",
+      contextUsage: {
+        activeTokens: 75,
+        contextWindowTokens: 100,
+        contextPercent: 75,
+        lifetimeTotalTokens: 100,
+        lifetimeCachedInputTokens: 0,
+        lifetimeWorkTokens: 100,
+        sampledAt: "2026-08-25T00:00:00.000Z"
+      }
+    };
+    let activeHeavyCommand = true;
+    const wait = {
+      actorSessionId: "parent-1",
+      sessionIds: [child.id],
+      mode: "all" as const,
+      expiresAt: Date.now() + 60_000,
+      readyAt: null
+    };
+    const db = {
+      listAgentWaits: vi.fn(async () => [wait]),
+      listSessions: vi.fn(async () => [child]),
+      listQueuedInputs: vi.fn(async () => []),
+      upsertAgentWait: vi.fn(async () => undefined),
+      deleteAgentWait: vi.fn(async () => undefined)
+    } as unknown as AppDatabase;
+    const manager = {
+      hasActiveHeavyCommand: vi.fn(async () => activeHeavyCommand),
+      resumeAgentWait: vi.fn(async () => true)
+    } as unknown as SessionManager;
+    const broker = new SessionOrchestrationBroker(
+      db,
+      manager,
+      "/tmp/muxpilot-unused.sock",
+      "/tmp/muxpilot-unused-capabilities",
+      { info: vi.fn(), warn: vi.fn() },
+      {} as RawSessionEvidence
+    );
+    const tick = () => (broker as unknown as { tick(): Promise<void> }).tick();
+
+    await tick();
+    expect(manager.resumeAgentWait).not.toHaveBeenCalled();
+
+    activeHeavyCommand = false;
+    await tick();
+    expect(manager.resumeAgentWait).toHaveBeenCalledOnce();
+    expect(db.deleteAgentWait).toHaveBeenCalledWith(wait.actorSessionId);
+  });
+
   it("pre-approves its capability-scoped MCP tools for managed Codex launches", async () => {
     const capabilityRoot = await mkdtemp(join(tmpdir(), "muxpilot-capabilities-"));
     try {

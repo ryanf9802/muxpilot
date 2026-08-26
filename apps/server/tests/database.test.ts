@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type { ChatMessage, ManagedSession, QueuedInput, SessionHistoryResult, TranscriptPageResponse } from "@muxpilot/core";
+import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type QueuedInput, type SessionHistoryResult, type TranscriptPageResponse } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
@@ -32,6 +32,49 @@ describe("AppDatabase session visibility", () => {
     await restarted.deleteAgentWait(session.id);
     expect(await restarted.listAgentWaits()).toEqual([]);
     await restarted.close();
+  });
+
+  it("repairs persisted orchestration wake echoes into one system event", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const paired = testSession("wait-paired");
+    const rawOnly = testSession("wait-raw-only");
+    const event = { version: 1 as const, kind: "resume_requested" as const, sessions: [{ id: "child-1" }] };
+    const marker = serializeSessionWaitEvent(event);
+    const db = new AppDatabase(path);
+    await db.upsertSession(paired, "2026-08-25T00:00:00.000Z");
+    await db.upsertSession(rawOnly, "2026-08-25T00:00:00.000Z");
+    await db.appendMessage({
+      ...testMessage(paired.id, 1, "system", "Agent session wait resumed", "2026-08-25T00:00:01.000Z", "status"),
+      payload: { agentSessionWait: event }
+    });
+    await db.appendMessage(testMessage(paired.id, 2, "user", marker, "2026-08-25T00:00:01.100Z"));
+    await db.appendMessage(testMessage(rawOnly.id, 1, "user", marker, "2026-08-25T00:00:02.000Z"));
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listMessages(paired.id, 0)).toMatchObject([
+      { role: "system", type: "status", payload: { agentSessionWait: event } }
+    ]);
+    expect(await restarted.listMessages(rawOnly.id, 0)).toMatchObject([
+      { role: "system", type: "status", text: "Agent session wait resumed", payload: { agentSessionWait: event } }
+    ]);
+    expect(await restarted.listPromptHistory("muxpilot_session_wait", 10)).toEqual([]);
+    await restarted.close();
+  });
+
+  it("deduplicates normalized orchestration wakes across parser batches", async () => {
+    const db = await tempDb();
+    const session = testSession("wait-deduped");
+    const event = { version: 1 as const, kind: "resume_requested" as const, sessions: [] };
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    const first = {
+      ...testMessage(session.id, 1, "system", "Agent session wait resumed", "2026-08-25T00:00:01.000Z", "status"),
+      payload: { agentSessionWait: event }
+    };
+    expect(await db.appendMessage(first)).toBe(true);
+    expect(await db.appendMessage({ ...first, id: `${session.id}-2`, sequence: 2, timestamp: "2026-08-25T00:00:01.100Z" })).toBe(false);
+    await db.close();
   });
 
   it("persists runtime and pending crash-recovery state", async () => {
@@ -289,7 +332,13 @@ describe("AppDatabase activity summaries", () => {
   it("searches restorable session history through the prompt index", async () => {
     const db = await tempDb();
     const active = { ...testSession("session-history-active"), codexSessionId: "codex-active" };
-    const missing = { ...testSession("session-history-missing"), codexSessionId: "codex-missing", status: "missing" as const };
+    const missingBase = testSession("session-history-missing");
+    const missing = {
+      ...missingBase,
+      repo: { ...missingBase.repo, branch: "muxpilot/session-task" },
+      codexSessionId: "codex-missing",
+      status: "missing" as const
+    };
     const noCodex = testSession("session-history-no-codex");
     db.upsertSession(active, "2026-07-07T00:00:00.000Z");
     db.upsertSession(missing, "2026-07-07T00:00:00.000Z");
@@ -311,6 +360,7 @@ describe("AppDatabase activity summaries", () => {
       sessionBranch: "muxpilot/workspace-rekey",
       targetBranch: "main"
     });
+    expect(history.find((result) => result.sessionId === missing.id)?.repoBranch).toBe("main");
     db.close();
   });
 

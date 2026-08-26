@@ -32,10 +32,14 @@ import {
   buildTranscriptItems,
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
-  normalizeSubagentNotificationText,
   normalizeGitWorkspaceSummary,
+  normalizeSessionWaitEvent,
+  normalizeSubagentNotificationText,
   normalizeUserContextText,
-  sessionHistoryIdentity
+  sessionHistoryIdentity,
+  sessionWaitEventFromPayload,
+  sessionWaitEventSummary,
+  withSessionWaitEventPayload
 } from "@muxpilot/core";
 
 type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
@@ -1145,6 +1149,7 @@ export class SyncAppDatabase {
   appendMessage(message: ChatMessage): boolean {
     if (this.reconcileMuxpilotSubmissionEcho(message)) return false;
     if (!isMuxpilotSubmissionMessage(message) && this.isDuplicateUserEcho(message)) return false;
+    if (this.isDuplicateSessionWaitEvent(message)) return false;
 
     const result = this.db
       .prepare(
@@ -1181,6 +1186,28 @@ export class SyncAppDatabase {
     }
 
     return false;
+  }
+
+  private isDuplicateSessionWaitEvent(message: ChatMessage): boolean {
+    const event = sessionWaitEventFromPayload(message.payload);
+    if (message.role !== "system" || message.type !== "status" || !event) return false;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND role = 'system' AND type = 'status'
+         ORDER BY sequence DESC
+         LIMIT 20`
+      )
+      .all(message.sessionId) as unknown as MessageRow[];
+    return rows.some((row) => {
+      if (!timestampsAreNear(row.timestamp, message.timestamp)) return false;
+      try {
+        const candidate = sessionWaitEventFromPayload(JSON.parse(row.payload_json) as Record<string, unknown>);
+        return candidate !== null && JSON.stringify(candidate) === JSON.stringify(event);
+      } catch {
+        return false;
+      }
+    });
   }
 
   private reconcileMuxpilotSubmissionEcho(message: ChatMessage): boolean {
@@ -2317,10 +2344,12 @@ export class SyncAppDatabase {
 
   private hydrateSession(row: SessionRow): ManagedSession {
     const session = JSON.parse(row.data_json) as ManagedSession;
+    const gitWorkspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
     const recentUserPrompts = this.recentUserPrompts(row.id);
     const activitySummary = this.getActivitySummary(row.id);
     return {
       ...session,
+      repo: gitWorkspace ? { ...session.repo, branch: gitWorkspace.targetBranch } : session.repo,
       status: row.status,
       initializing: session.initializing === true,
       startupError: typeof session.startupError === "string" ? session.startupError : null,
@@ -2339,7 +2368,7 @@ export class SyncAppDatabase {
       unreadCount: row.unread_count,
       pinned: session.pinned === true,
       archived: row.archived === 1,
-      gitWorkspace: normalizeGitWorkspaceSummary(session.gitWorkspace)
+      gitWorkspace
     };
   }
 
@@ -2585,6 +2614,7 @@ export class SyncAppDatabase {
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
+    this.normalizePersistedSessionWaitMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
   }
@@ -2605,6 +2635,63 @@ export class SyncAppDatabase {
     this.setSetting(PROMPT_INDEX_BACKFILLED_SETTING, "true", new Date().toISOString());
   }
 
+  private normalizePersistedSessionWaitMessages(): void {
+    const rawRows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE role = 'user' AND LTRIM(text) LIKE '<muxpilot_session_wait>%'
+         ORDER BY session_id, sequence`
+      )
+      .all() as unknown as MessageRow[];
+    if (rawRows.length === 0) return;
+    const systemRows = this.db
+      .prepare("SELECT * FROM messages WHERE role = 'system' AND type = 'status'")
+      .all() as unknown as MessageRow[];
+    const deletedBySession = new Map<string, number>();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rawRows) {
+        const normalized = normalizeSessionWaitEvent(row.text);
+        if (!normalized) continue;
+        const duplicate = systemRows.some((candidate) => {
+          if (candidate.session_id !== row.session_id || !timestampsAreNear(candidate.timestamp, row.timestamp)) return false;
+          try {
+            const event = sessionWaitEventFromPayload(JSON.parse(candidate.payload_json) as Record<string, unknown>);
+            return event !== null && JSON.stringify(event) === JSON.stringify(normalized.event);
+          } catch {
+            return false;
+          }
+        });
+        this.deletePromptIndexMessage(row.id);
+        if (duplicate) {
+          this.db.prepare("DELETE FROM messages WHERE id = ?").run(row.id);
+          deletedBySession.set(row.session_id, (deletedBySession.get(row.session_id) ?? 0) + 1);
+          continue;
+        }
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { /* Preserve a valid event even if its old wrapper payload is malformed. */ }
+        this.db
+          .prepare("UPDATE messages SET type = 'status', role = 'system', text = ?, payload_json = ? WHERE id = ?")
+          .run(sessionWaitEventSummary(normalized.event), JSON.stringify(withSessionWaitEventPayload(payload, normalized)), row.id);
+        systemRows.push({
+          ...row,
+          type: "status",
+          role: "system",
+          text: sessionWaitEventSummary(normalized.event),
+          payload_json: JSON.stringify(withSessionWaitEventPayload(payload, normalized))
+        });
+      }
+      for (const [sessionId, deleted] of deletedBySession) {
+        this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?").run(deleted, sessionId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private backfillSessionRepositories(): void {
     const rows = this.db.prepare("SELECT data_json, updated_at FROM managed_sessions").all() as unknown as Array<{
       data_json: string;
@@ -2617,13 +2704,14 @@ export class SyncAppDatabase {
     );
     for (const row of rows) {
       const session = JSON.parse(row.data_json) as ManagedSession;
+      const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
       const path = session.repo.root ?? session.tmux.cwd;
       if (!path) continue;
       insert.run(
         path,
         session.repo.name || path,
         session.repo.root,
-        session.repo.branch,
+        workspace?.targetBranch ?? session.repo.branch,
         session.lastActivityAt,
         row.updated_at
       );
@@ -2704,6 +2792,7 @@ function normalizePreviewText(text: string): string {
 
 function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
   const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -2712,7 +2801,7 @@ function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
     text: row.text,
     sessionName: session.tmux.windowName || session.tmux.sessionName || row.session_id,
     repoName: session.repo.name,
-    repoBranch: session.repo.branch,
+    repoBranch: workspace?.targetBranch ?? session.repo.branch,
     cwd: session.tmux.cwd
   };
 }
@@ -2763,7 +2852,7 @@ function sessionHistoryResultFromSession(
     archived: session.archived,
     sessionName: session.tmux.windowName || session.tmux.sessionName || session.id,
     repoName: session.repo.name,
-    repoBranch: session.repo.branch,
+    repoBranch: workspace?.targetBranch ?? session.repo.branch,
     cwd: session.tmux.cwd,
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,

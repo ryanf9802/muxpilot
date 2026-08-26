@@ -59,7 +59,9 @@ describe("HeavyCommandService", () => {
     const service = new HeavyCommandService(leases, sessions);
 
     expect((await service.list("workspace-a")).commands).toHaveLength(1);
+    expect(await service.hasActive("workspace-a")).toBe(true);
     expect((await service.list("workspace-b")).commands).toHaveLength(0);
+    expect(await service.hasActive("workspace-b")).toBe(false);
     expect((await service.output("workspace-a", runId))?.output).toBe("visible output");
     expect(await service.output("workspace-b", runId)).toBeNull();
 
@@ -69,6 +71,7 @@ describe("HeavyCommandService", () => {
       activity: { processCount: 0, cpuTicks: 0, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
     }));
     expect((await service.list("workspace-a")).commands[0]).toMatchObject({ state: "waiting", lastActivityAt: null });
+    expect(await service.hasActive("workspace-a")).toBe(true);
   });
 
   it("rejects malformed owners and sends termination over the private control socket", async () => {

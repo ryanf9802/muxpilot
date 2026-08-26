@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent } from "@muxpilot/core";
+import { serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
@@ -54,6 +54,50 @@ describe("parseCodexJsonl", () => {
 
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ type: "status", role: "system", text: "Agent session wait resumed" });
+  });
+
+  it("normalizes and deduplicates orchestration wake response-item echoes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const marker = serializeSessionWaitEvent({ version: 1, kind: "resume_requested", sessions: [{ id: "child-1" }] });
+    await writeFile(path, [
+      JSON.stringify({
+        timestamp: "2026-08-25T00:00:00Z",
+        type: "event_msg",
+        payload: { type: "user_message", message: marker }
+      }),
+      JSON.stringify({
+        timestamp: "2026-08-25T00:00:00.100Z",
+        type: "response_item",
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text: marker }] }
+      }),
+      ""
+    ].join("\n"));
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      type: "status",
+      role: "system",
+      text: "Agent session wait resumed",
+      payload: { agentSessionWait: { version: 1, kind: "resume_requested", sessions: [{ id: "child-1" }] } }
+    });
+  });
+
+  it("leaves malformed orchestration wake text visible as user input", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const marker = '<muxpilot_session_wait>{"version":2,"kind":"resume_requested","sessions":[]}</muxpilot_session_wait>';
+    await writeFile(path, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:00Z",
+      type: "response_item",
+      payload: { type: "message", role: "user", content: [{ type: "input_text", text: marker }] }
+    })}\n`);
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages[0]).toMatchObject({ role: "user", text: marker });
   });
 
   it("advances across a JSONL record larger than the normal read batch", async () => {

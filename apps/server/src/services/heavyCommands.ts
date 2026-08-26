@@ -43,8 +43,8 @@ export class HeavyCommandService {
     void this.tick().catch((error) => console.error("Muxpilot heavyweight scheduler tick failed", error));
   }
 
-  async hasDeferred(workspaceId: string): Promise<boolean> {
-    return (await this.list(workspaceId)).commands.some((command) => command.state === "waiting" || command.state === "reserved");
+  async hasActive(workspaceId: string): Promise<boolean> {
+    return (await this.list(workspaceId)).commands.length > 0;
   }
 
   async cancelWorkspace(workspaceId: string, reason: string): Promise<void> {

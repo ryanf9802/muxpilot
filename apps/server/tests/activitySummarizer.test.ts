@@ -15,8 +15,13 @@ import {
 
 describe("ActivitySummarizer", () => {
   it("builds context from user prompts only", () => {
+    const session = testSession("session-1");
     const prompt = buildSummaryPrompt({
-      session: testSession("session-1"),
+      session: {
+        ...session,
+        repo: { ...session.repo, branch: "muxpilot/session-task" },
+        gitWorkspace: { id: "workspace-1", entryPath: "/repo", targetBranch: "main" }
+      },
       prompts: [
         testMessage("session-1", 1, "user", "Replace recent prompts with an active work summary."),
         {
@@ -27,6 +32,8 @@ describe("ActivitySummarizer", () => {
     });
 
     expect(prompt).toContain("Repository: repo");
+    expect(prompt).toContain("Branch: main");
+    expect(prompt).not.toContain("muxpilot/session-task");
     expect(prompt).toContain("1. user prompt: Replace recent prompts");
     expect(prompt).toContain("Recent user prompts only");
     expect(prompt).toContain("Base the answer only on the prompts above");

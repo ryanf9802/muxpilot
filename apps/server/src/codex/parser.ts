@@ -8,10 +8,14 @@ import {
   heavyCommandQueueEventFromPayload,
   heavyCommandQueueEventSummary,
   normalizeHeavyCommandQueueEvent,
+  normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
+  sessionWaitEventFromPayload,
+  sessionWaitEventSummary,
   withGitWorkflowEventPayload,
-  withHeavyCommandQueueEventPayload
+  withHeavyCommandQueueEventPayload,
+  withSessionWaitEventPayload
 } from "@muxpilot/core";
 import type { ApprovalKind, ApprovalRequest, ChatMessage, CollaborationMode, MessageType, QuestionRequest, SessionContextUsage } from "@muxpilot/core";
 
@@ -145,7 +149,7 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
       if (!isDuplicateGitWorkflowEvent(workflowMessage, messages)) messages.push(workflowMessage);
     }
     const mapped = mapEvent(line, collaborationMode);
-    if (mapped && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
+    if (mapped && !isDuplicateSessionWaitEvent(mapped, messages) && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
   }
 
   return { messages, nextOffset: consumed, pendingSkillNames, contextUsage };
@@ -296,6 +300,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
     if (role === "assistant" || role === "user") {
       const text = contentToText(event.payload?.content);
       if (!text) return null;
+      const sessionWaitMessage = muxpilotSessionWaitMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+      if (sessionWaitMessage) return sessionWaitMessage;
       const queueMessage = heavyCommandQueueMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
       if (queueMessage) return queueMessage;
       if (role === "user") return userMessageFromText(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
@@ -312,12 +318,16 @@ function muxpilotSessionWaitMessage(
   payload: Record<string, unknown>,
   collaborationMode: CollaborationMode | null
 ): Omit<ChatMessage, "sessionId" | "sequence"> | null {
-  const match = text.match(/<muxpilot_session_wait>([\s\S]*?)<\/muxpilot_session_wait>/);
-  if (!match) return null;
-  try {
-    const event = JSON.parse(match[1]!) as Record<string, unknown>;
-    return message("status", "system", timestamp, event.kind === "timeout" ? "Agent session wait timed out" : "Agent session wait resumed", { ...payload, agentSessionWait: event }, collaborationMode);
-  } catch { return null; }
+  const normalized = normalizeSessionWaitEvent(text);
+  if (!normalized) return null;
+  return message(
+    "status",
+    "system",
+    timestamp,
+    sessionWaitEventSummary(normalized.event),
+    withSessionWaitEventPayload(payload, normalized),
+    collaborationMode
+  );
 }
 
 function heavyCommandQueueMessage(
@@ -379,6 +389,18 @@ function isDuplicateHeavyCommandQueueEvent(
       timestampsAreNear(previous.timestamp, message.timestamp)) return true;
   }
   return false;
+}
+
+function isDuplicateSessionWaitEvent(
+  message: Omit<ChatMessage, "sessionId" | "sequence">,
+  messages: Omit<ChatMessage, "sessionId" | "sequence">[]
+): boolean {
+  const current = sessionWaitEventFromPayload(message.payload);
+  if (!current) return false;
+  return messages.some((previous) => {
+    const candidate = sessionWaitEventFromPayload(previous.payload);
+    return candidate && JSON.stringify(candidate) === JSON.stringify(current) && timestampsAreNear(previous.timestamp, message.timestamp);
+  });
 }
 
 function isDuplicateGitWorkflowEvent(

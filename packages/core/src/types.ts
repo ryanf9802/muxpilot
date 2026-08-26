@@ -198,6 +198,9 @@ export interface AgentSessionOwnership {
   origin: "created" | "claimed";
   createdAt: string;
   workTokenBaseline: number;
+  workTokensUsed?: number;
+  workTokenLastObserved?: number;
+  workTokenLastSampledAt?: string | null;
   workTokenBudget: number;
   completedAt: string | null;
   budgetExhaustedAt?: string | null;

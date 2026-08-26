@@ -59,6 +59,7 @@ import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
 import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
 import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
+import { accountAgentWorkTokens, agentWorkTokensUsed } from "./agentUsage.js";
 import type { PortableSession } from "./sessionTransfer.js";
 import { isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
 interface ActivitySummaryScheduler {
@@ -90,7 +91,7 @@ interface SessionResourceUsageLookup {
 }
 
 interface HeavyCommandQueueLookup {
-  hasDeferred(workspaceId: string): Promise<boolean>;
+  hasActive(workspaceId: string): Promise<boolean>;
   cancelWorkspace(workspaceId: string, reason: string): Promise<void>;
 }
 
@@ -493,7 +494,7 @@ export class SessionManager {
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
       const activeGitWorkspace = refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null;
       const projectedStatus =
-        !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace && await this.heavyCommandQueue?.hasDeferred(activeGitWorkspace.id)
+        !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace && await this.heavyCommandQueue?.hasActive(activeGitWorkspace.id)
           ? "queued"
           : effectiveStatus;
       const session: ManagedSession = {
@@ -813,26 +814,35 @@ export class SessionManager {
     return this.db.listQueuedInputs(sessionId);
   }
 
+  async hasActiveHeavyCommand(sessionId: string): Promise<boolean> {
+    const session = await this.db.getSession(sessionId);
+    return Boolean(session?.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id));
+  }
+
   private withResourceUsage(session: ManagedSession): ManagedSession {
     if (!this.resourceUsageLookup) return session;
     return { ...session, resourceUsage: this.resourceUsageLookup.usageForSession(session.id) };
   }
 
   private decorateSession(session: ManagedSession, allSessions: ManagedSession[]): ManagedSession {
-    const origin = session.forkedFrom;
+    const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+    const canonicalSession = workspace
+      ? { ...session, repo: { ...session.repo, branch: workspace.targetBranch } }
+      : session;
+    const origin = canonicalSession.forkedFrom;
     const source = origin
       ? preferredForkSource(allSessions.filter((candidate) => candidate.codexSessionId === origin.codexSessionId))
       : null;
     const withOrigin = origin
       ? {
-          ...session,
+          ...canonicalSession,
           forkedFrom: {
             ...origin,
             sessionId: source?.id ?? null,
             sessionName: source ? sessionName(source) : origin.sessionName
           }
         }
-      : session;
+      : canonicalSession;
     const descendants = agentDescendants(allSessions, session.id);
     const liveDescendants = descendants.filter(isLiveAgentSession);
     return this.withResourceUsage({
@@ -1204,7 +1214,7 @@ export class SessionManager {
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
     if (this.deliveringInputSessionIds.has(session.id)) return true;
     if (session.initializing) return true;
-    if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return true;
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return true;
     if (isPlanActionInput(text)) return false;
     const queuedInputs = await this.db.listQueuedInputs(session.id);
     if (queuedInputs.length > 0) return true;
@@ -1261,7 +1271,7 @@ export class SessionManager {
     if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
     const usage = target.contextUsage;
     const ownership = target.agentOwnership;
-    const used = ownership && usage ? Math.max(0, usage.lifetimeWorkTokens - ownership.workTokenBaseline) : 0;
+    const used = ownership ? agentWorkTokensUsed(ownership, usage) : 0;
     if (ownership && used >= ownership.workTokenBudget) {
       throw new AgentSessionError(`Work-token budget exhausted (${used} of ${ownership.workTokenBudget}); extend it before sending more work`);
     }
@@ -1288,6 +1298,11 @@ export class SessionManager {
     let ownership = session.agentOwnership;
     const usage = session.contextUsage;
     if (!ownership || !usage || ownership.completedAt) return;
+    const accounted = accountAgentWorkTokens(ownership, usage);
+    if (accounted !== ownership) {
+      ownership = accounted;
+      await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
+    }
     if (usage.contextPercent < 85 && ownership.contextPausedAt) {
       ownership = { ...ownership, contextPausedAt: null };
       await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
@@ -1313,7 +1328,7 @@ export class SessionManager {
       return;
     }
     if (ownership.budgetExhaustedAt) return;
-    const used = Math.max(0, usage.lifetimeWorkTokens - ownership.workTokenBaseline);
+    const used = agentWorkTokensUsed(ownership, usage);
     if (used < ownership.workTokenBudget) return;
     const exhaustedAt = nowIso();
     try {
@@ -1367,6 +1382,9 @@ export class SessionManager {
         origin: "created",
         createdAt: nowIso(),
         workTokenBaseline: child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokensUsed: 0,
+        workTokenLastObserved: child.contextUsage?.lifetimeWorkTokens,
+        workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
         budgetExhaustedAt: null,
@@ -1415,6 +1433,9 @@ export class SessionManager {
         origin: "claimed",
         createdAt: nowIso(),
         workTokenBaseline: child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokensUsed: 0,
+        workTokenLastObserved: child.contextUsage?.lifetimeWorkTokens,
+        workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
         budgetExhaustedAt: null,
@@ -1495,6 +1516,9 @@ export class SessionManager {
         origin: child.agentOwnership?.origin ?? "claimed",
         createdAt: child.agentOwnership?.createdAt ?? nowIso(),
         workTokenBaseline: child.agentOwnership?.workTokenBaseline ?? child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokensUsed: child.agentOwnership?.workTokensUsed,
+        workTokenLastObserved: child.agentOwnership?.workTokenLastObserved,
+        workTokenLastSampledAt: child.agentOwnership?.workTokenLastSampledAt ?? null,
         workTokenBudget: child.agentOwnership?.workTokenBudget ?? DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: child.agentOwnership?.completedAt ?? null,
         budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null,
@@ -1751,7 +1775,7 @@ export class SessionManager {
       const next = await directorySuggestionFromPath(candidate, "active", session.lastActivityAt, {
         label: session.repo.name,
         repoRoot: session.repo.root,
-        branch: session.repo.branch
+        branch: normalizeGitWorkspaceSummary(session.gitWorkspace)?.targetBranch ?? session.repo.branch
       });
       if (next && !dismissedPaths.has(next.path)) suggestions.set(next.path, mergeDirectorySuggestion(suggestions.get(next.path), next));
     }
@@ -2367,7 +2391,7 @@ export class SessionManager {
 
       const session = requireSession(await this.db.getSession(sessionId));
       if (session.status === "input_failed") return;
-      if (session.gitWorkspace && await this.heavyCommandQueue?.hasDeferred(session.gitWorkspace.id)) return;
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return;
       if (!queuedInputMatchesSession(input, session)) {
         await this.markQueuedInputFailed(input, "Session source changed before this input was sent");
         return;
@@ -2650,7 +2674,7 @@ export class SessionManager {
         path,
         label: session.repo.name || basename(path),
         repoRoot: session.repo.root,
-        branch: session.repo.branch,
+        branch: normalizeGitWorkspaceSummary(session.gitWorkspace)?.targetBranch ?? session.repo.branch,
         lastActivityAt: session.lastActivityAt
       },
       updatedAt
@@ -3000,7 +3024,7 @@ function recoveryCandidateFromSession(session: ManagedSession): SessionRecoveryC
     archived: false,
     sessionName: sessionName(session),
     repoName: session.repo.name,
-    repoBranch: session.repo.branch,
+    repoBranch: workspace?.targetBranch ?? session.repo.branch,
     cwd: session.tmux.cwd,
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,

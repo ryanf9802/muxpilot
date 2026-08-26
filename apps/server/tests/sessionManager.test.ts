@@ -3208,7 +3208,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.close();
   });
 
-  it("keeps user input queued while an otherwise-ready session owns a deferred heavyweight command", async () => {
+  it("keeps user input queued while an otherwise-ready session owns an active heavyweight command", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -3222,7 +3222,7 @@ describe("SessionManager transcript isolation", () => {
       ...session,
       gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
     }, new Date().toISOString());
-    harness.manager.setHeavyCommandQueue({ hasDeferred: async () => true, cancelWorkspace: async () => undefined });
+    harness.manager.setHeavyCommandQueue({ hasActive: async () => true, cancelWorkspace: async () => undefined });
 
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("queued");
@@ -3231,6 +3231,23 @@ describe("SessionManager transcript isolation", () => {
     expect(sentInputs).toEqual([]);
     expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ text: "wait behind heavy task", status: "queued" }]);
     harness.db.close();
+  });
+
+  it("reports a managed session's target branch as its canonical repository branch", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...session,
+      repo: { ...session.repo, branch: "muxpilot/session-task" },
+      gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
+    }, new Date().toISOString());
+
+    expect((await harness.manager.getSession(session.id))?.repo.branch).toBe("main");
+    await harness.db.close();
   });
 
   it("marks an automatic heavyweight resume as active work", async () => {
@@ -3263,7 +3280,7 @@ describe("SessionManager transcript isolation", () => {
     const sentInputs: string[] = [];
     let deferred = true;
     harness.manager.setHeavyCommandQueue({
-      hasDeferred: async () => deferred,
+      hasActive: async () => deferred,
       cancelWorkspace: async () => { operations.push("cancel"); deferred = false; }
     });
     harness.tmux.interrupt = async () => { operations.push("interrupt"); };
