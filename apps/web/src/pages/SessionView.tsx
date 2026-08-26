@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowLeft,
+  ArrowLeftRight,
   ArrowUpToLine,
   Check,
   Clock3,
@@ -399,6 +400,25 @@ export function isNearMessageListBottom(
   thresholdPx = MESSAGE_BOTTOM_LOAD_THRESHOLD_PX
 ): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= thresholdPx;
+}
+
+export interface TranscriptJumpVisibility {
+  top: boolean;
+  bottom: boolean;
+}
+
+export function transcriptJumpVisibility(
+  metrics: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
+  hasMoreBefore: boolean,
+  hasMoreAfter: boolean
+): TranscriptJumpVisibility {
+  const scrollable = metrics.scrollHeight > metrics.clientHeight;
+  const atAbsoluteTop = metrics.scrollTop <= 1 && !hasMoreBefore;
+  const atAbsoluteBottom = metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= 1 && !hasMoreAfter;
+  return {
+    top: !atAbsoluteTop,
+    bottom: (scrollable || hasMoreAfter) && !atAbsoluteBottom
+  };
 }
 
 export function scrollBehaviorForTranscriptUpdate(reason: ScrollUpdateReason, isNearBottom: boolean): ScrollBehavior {
@@ -937,6 +957,7 @@ export function DocumentsButton({ documentCount, open, onOpen }: { documentCount
       onClick={onOpen}
       aria-haspopup="dialog"
       aria-expanded={open}
+      aria-label="Open session documents"
       title="Documents"
     >
       <FileText size={17} />
@@ -1008,6 +1029,7 @@ export function SessionView() {
     syncSessionStoplight,
     sessions: shellSessions,
     openCreateSession,
+    openSessionTransfer,
     openForkSession,
     registerCreateSessionCwdPrefill,
     registerPromptHistoryPrefill,
@@ -1073,6 +1095,7 @@ export function SessionView() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadingNewer, setLoadingNewer] = useState(false);
   const [jumpBusy, setJumpBusy] = useState<"top" | "bottom" | null>(null);
+  const [jumpVisibility, setJumpVisibility] = useState<TranscriptJumpVisibility>({ top: false, bottom: false });
   const [pendingUserMessage, setPendingUserMessage] = useState<PendingUserMessage | null>(null);
   const [sentQueuedUserMessage, setSentQueuedUserMessage] = useState<PendingUserMessage | null>(null);
   const [expandedStacks, setExpandedStacks] = useState<Set<string>>(() => new Set());
@@ -1469,6 +1492,7 @@ export function SessionView() {
       setLoadingOlder(false);
       setLoadingNewer(false);
       setJumpBusy(null);
+      setJumpVisibility({ top: false, bottom: false });
       setPendingUserMessage(null);
       setSentQueuedUserMessage(null);
       setExpandedRangeItems({});
@@ -1746,7 +1770,10 @@ export function SessionView() {
       updateMessageListScrollState(container);
       return;
     }
-    if (behavior === "none" || behavior === "idle") return;
+    if (behavior === "none" || behavior === "idle") {
+      updateMessageListScrollState(container);
+      return;
+    }
     scrollMessageListToBottom(container);
     updateMessageListScrollState(container);
     const animationFrame = window.requestAnimationFrame(() => {
@@ -1755,7 +1782,7 @@ export function SessionView() {
       if (initialTranscriptSessionId === id && !initialScrollReady) setInitialScrollReady(true);
     });
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [bottomContentKey, id, initialScrollReady, initialTranscriptSessionId, sessionLoading, transcriptItems]);
+  }, [bottomContentKey, hasMoreAfter, hasMoreBefore, id, initialScrollReady, initialTranscriptSessionId, sessionLoading, transcriptItems]);
 
   async function trackRefreshRequest<T>(request: () => Promise<T>): Promise<T> {
     return request();
@@ -2017,8 +2044,14 @@ export function SessionView() {
     isNearBottomRef.current = isNearMessageListBottom(container);
   }
 
+  function updateJumpVisibility(container: HTMLElement) {
+    const next = transcriptJumpVisibility(container, hasMoreBefore, hasMoreAfter);
+    setJumpVisibility((current) => current.top === next.top && current.bottom === next.bottom ? current : next);
+  }
+
   function updateMessageListScrollState(container: HTMLElement) {
     updateNearBottomState(container);
+    updateJumpVisibility(container);
     lastMessageListScrollTopRef.current = container.scrollTop;
   }
 
@@ -2032,6 +2065,7 @@ export function SessionView() {
     if (!container) return;
     const previousScrollTop = lastMessageListScrollTopRef.current;
     updateNearBottomState(container);
+    updateJumpVisibility(container);
     lastMessageListScrollTopRef.current = container.scrollTop;
     const action = messageListAutoPageAction(container, {
       initialScrollReady,
@@ -2405,6 +2439,7 @@ export function SessionView() {
         onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
         onBack={() => navigate("/")}
         onNewSession={() => openCreateSession(loadingSession ? sessionCreateSessionCwd(loadingSession) : "")}
+        onOpenSessionTransfer={accessMode === "local" ? openSessionTransfer : undefined}
       />
     );
   }
@@ -2418,6 +2453,7 @@ export function SessionView() {
         onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
         onBack={() => navigate("/")}
         onNewSession={() => openCreateSession()}
+        onOpenSessionTransfer={accessMode === "local" ? openSessionTransfer : undefined}
       />
     );
   }
@@ -2439,20 +2475,21 @@ export function SessionView() {
             onFork={() => openForkSession(readySession)}
             forkDisabled={Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !readySession.codexSessionId}
           />
-          <SessionHeaderMeta session={readySession} />
+          <div className="session-title-meta">
+            <SessionHeaderMeta session={readySession} />
+            <TmuxCommandButton
+              compact
+              session={readySession}
+              copied={copiedTmuxCommand}
+              copyEnabled={!completed && accessMode === "local"}
+              onCopy={() => void copyTmuxCommand()}
+            />
+          </div>
         </div>
         <div className="session-header-state">
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
           {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
         </div>
-        {completed ? null : <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />}
-        <ModeToggle
-          mode={readySession.inputMode}
-          busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
-          onChange={setInputMode}
-        />
-        {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
-        {fastModeError ? <p className="mode-toggle-error">{fastModeError}</p> : null}
       </div>
 
       {readySession.startupError ? (
@@ -2497,8 +2534,8 @@ export function SessionView() {
         onCancel={cancelBtwQuestion}
       />
 
-      <div className="actions">
-        <div className="actions-main">
+      <div className="session-actions">
+        <div className="session-action-group session-tool-actions">
           <button
             className="session-new-session-button"
             type="button"
@@ -2509,6 +2546,12 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
+          {accessMode === "local" ? (
+            <button type="button" onClick={openSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
+              <ArrowLeftRight size={16} />
+              <span className="session-action-label">Transfer</span>
+            </button>
+          ) : null}
           <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => setDocumentsOpen(true)} />
           <button
             type="button"
@@ -2541,17 +2584,13 @@ export function SessionView() {
               <span>{readyWorkspace.targetBranch}</span>
             </button>
           ) : null}
-          <FastModeToggle
-            enabled={readySession.fastMode === true}
-            available={readySession.fastModeAvailable ?? null}
-            busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
-            status={readySession.status}
-            onChange={setFastMode}
-          />
+        </div>
+        <div className="session-action-group session-runtime-actions">
           {readySession.agentOwnership ? (
             <button
               disabled={completed || Boolean(actionBusy)}
               aria-busy={actionBusy === "setAgentParent"}
+              aria-label={actionBusy === "setAgentParent" ? "Detaching child session" : "Detach child session"}
               onClick={() => void runAction({ type: "setAgentParent", parentSessionId: null })}
               title="Return this session to the top level"
             >
@@ -2583,30 +2622,6 @@ export function SessionView() {
           >
             <Skull size={16} />
             <span className="session-action-label">{actionBusy === "kill" ? "Killing" : "Kill"}</span>
-          </button>
-        </div>
-        <div className="actions-jump">
-          <button
-            disabled={Boolean(jumpBusy)}
-            aria-busy={jumpBusy === "top"}
-            aria-label={jumpBusy === "top" ? "Loading top of chat" : "Jump to top of chat"}
-            data-busy={jumpBusy === "top" || undefined}
-            onClick={jumpToTop}
-            title="Jump to top"
-          >
-            <ArrowUpToLine size={16} />
-            <span className="session-action-label">{jumpBusy === "top" ? "Loading" : "Top"}</span>
-          </button>
-          <button
-            disabled={Boolean(jumpBusy)}
-            aria-busy={jumpBusy === "bottom"}
-            aria-label={jumpBusy === "bottom" ? "Loading bottom of chat" : "Jump to bottom of chat"}
-            data-busy={jumpBusy === "bottom" || undefined}
-            onClick={jumpToBottom}
-            title="Jump to bottom"
-          >
-            <ArrowDownToLine size={16} />
-            <span className="session-action-label">{jumpBusy === "bottom" ? "Loading" : "Bottom"}</span>
           </button>
         </div>
       </div>
@@ -2676,6 +2691,7 @@ export function SessionView() {
               : "message-list"
           }
           ref={messageListRef}
+          data-jump-controls={jumpVisibility.top || jumpVisibility.bottom || undefined}
           onScroll={handleMessageListScroll}
           tabIndex={-1}
         >
@@ -2719,6 +2735,36 @@ export function SessionView() {
             </button>
           ) : null}
         </div>
+        {jumpVisibility.top || jumpVisibility.bottom ? (
+          <div className="transcript-jump-rail" role="group" aria-label="Transcript navigation">
+            {jumpVisibility.top ? (
+              <button
+                type="button"
+                disabled={Boolean(jumpBusy)}
+                aria-busy={jumpBusy === "top"}
+                aria-label={jumpBusy === "top" ? "Loading top of chat" : "Jump to top of chat"}
+                data-busy={jumpBusy === "top" || undefined}
+                onClick={jumpToTop}
+                title="Jump to top"
+              >
+                {jumpBusy === "top" ? <LoaderCircle className="spin" size={17} /> : <ArrowUpToLine size={17} />}
+              </button>
+            ) : null}
+            {jumpVisibility.bottom ? (
+              <button
+                type="button"
+                disabled={Boolean(jumpBusy)}
+                aria-busy={jumpBusy === "bottom"}
+                aria-label={jumpBusy === "bottom" ? "Loading bottom of chat" : "Jump to bottom of chat"}
+                data-busy={jumpBusy === "bottom" || undefined}
+                onClick={jumpToBottom}
+                title="Jump to bottom"
+              >
+                {jumpBusy === "bottom" ? <LoaderCircle className="spin" size={17} /> : <ArrowDownToLine size={17} />}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       {approval ? (
@@ -2741,8 +2787,24 @@ export function SessionView() {
               onDelete={deleteQueuedInput}
             />
           ) : null}
-          <form className={`composer${vimAvailable ? " composer-vim-available" : ""}`} ref={composerFormRef} onSubmit={submit}>
+          <div className="composer-settings" role="group" aria-label="Composer settings">
+            <ModeToggle
+              mode={readySession.inputMode}
+              busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
+              onChange={setInputMode}
+            />
+            <FastModeToggle
+              enabled={readySession.fastMode === true}
+              available={readySession.fastModeAvailable ?? null}
+              busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
+              status={readySession.status}
+              onChange={setFastMode}
+            />
             {vimAvailable ? <VimModeToggle enabled={vimEnabled} onChange={updateVimMode} /> : null}
+          </div>
+          {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
+          {fastModeError ? <p className="mode-toggle-error" role="alert">{fastModeError}</p> : null}
+          <form className="composer" ref={composerFormRef} onSubmit={submit}>
             <SkillTextArea
               value={text}
               onChange={updateComposerText}
@@ -2843,7 +2905,8 @@ export function SessionLoadingView({
   retrying = true,
   onRetry,
   onBack,
-  onNewSession
+  onNewSession,
+  onOpenSessionTransfer
 }: {
   session: ManagedSession | null;
   error?: string;
@@ -2851,6 +2914,7 @@ export function SessionLoadingView({
   onRetry?: () => void;
   onBack: () => void;
   onNewSession: () => void;
+  onOpenSessionTransfer?: () => void;
 }) {
   const workspace = session ? normalizeGitWorkspaceSummary(session.gitWorkspace) : null;
   return (
@@ -2862,16 +2926,19 @@ export function SessionLoadingView({
           </button>
           <div className="session-title">
             <h1>{session ? sessionDisplayName(session) : "Loading session"}</h1>
-            {session ? <SessionHeaderMeta session={session} /> : <p className="session-header-meta">Starting session</p>}
+            {session ? (
+              <div className="session-title-meta">
+                <SessionHeaderMeta session={session} />
+                <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} />
+              </div>
+            ) : <p className="session-header-meta">Starting session</p>}
           </div>
           <LoadingStatusPill />
-          {session ? <TmuxCommandButton session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
-          {session ? <ModeToggle mode={session.inputMode} busy onChange={() => undefined} /> : null}
         </div>
       }
       actions={
-        <div className="actions">
-          <div className="actions-main">
+        <div className="session-actions">
+          <div className="session-action-group session-tool-actions">
             <button
               className="session-new-session-button"
               type="button"
@@ -2882,6 +2949,12 @@ export function SessionLoadingView({
               <Plus size={18} />
               <span className="session-new-session-button-label">New session</span>
             </button>
+            {onOpenSessionTransfer ? (
+              <button type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
+                <ArrowLeftRight size={16} />
+                <span className="session-action-label">Transfer</span>
+              </button>
+            ) : null}
             {workspace ? (
               <button
                 className="git-workspace-chip"
@@ -2893,6 +2966,8 @@ export function SessionLoadingView({
                 <span>{workspace.targetBranch}</span>
               </button>
             ) : null}
+          </div>
+          <div className="session-action-group session-runtime-actions">
             <button type="button" disabled aria-label="Interrupt session unavailable while loading" title="Interrupt">
               <Pause size={16} />
               <span className="session-action-label">Interrupt</span>
@@ -2900,16 +2975,6 @@ export function SessionLoadingView({
             <button className="danger" type="button" disabled aria-label="Kill session unavailable while loading" title="Kill session">
               <Skull size={16} />
               <span className="session-action-label">Kill</span>
-            </button>
-          </div>
-          <div className="actions-jump">
-            <button type="button" disabled aria-label="Jump to top unavailable while loading" title="Jump to top">
-              <ArrowUpToLine size={16} />
-              <span className="session-action-label">Top</span>
-            </button>
-            <button type="button" disabled aria-label="Jump to bottom unavailable while loading" title="Jump to bottom">
-              <ArrowDownToLine size={16} />
-              <span className="session-action-label">Bottom</span>
             </button>
           </div>
         </div>
@@ -3903,11 +3968,13 @@ function VimLogoMark() {
 export function TmuxCommandButton({
   session,
   copied,
+  compact = false,
   copyEnabled = true,
   onCopy
 }: {
   session: ManagedSession;
   copied: boolean;
+  compact?: boolean;
   copyEnabled?: boolean;
   onCopy: () => void;
 }) {
@@ -3923,9 +3990,10 @@ export function TmuxCommandButton({
       {copyEnabled && copied ? <span className="tmux-command-copied">Copied</span> : null}
     </>
   );
+  const className = `tmux-command-button${compact ? " tmux-command-metadata" : ""}`;
   if (!copyEnabled) {
     return (
-      <div className="tmux-command-button tmux-command-display" title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
+      <div className={`${className} tmux-command-display`} title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
         {content}
       </div>
     );
@@ -3933,7 +4001,7 @@ export function TmuxCommandButton({
   return (
     <button
       type="button"
-      className="tmux-command-button"
+      className={className}
       onClick={onCopy}
       title={`${model.model} / ${model.reasoningEffort}\n${command}`}
       aria-label={`Copy tmux attach command for ${model.model} ${model.reasoningEffort}`}

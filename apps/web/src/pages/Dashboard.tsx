@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
+import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -57,7 +57,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { sessions: shellSessions, sessionsLoaded, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity } =
+  const { sessions: shellSessions, sessionsLoaded, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
@@ -352,10 +352,11 @@ export function Dashboard() {
             placeholder="Search sessions"
           />
         </label>
-        <button className="dashboard-new-session-button" type="button" onClick={() => openCreateSession()}>
-          <Plus size={16} />
-          <span className="dashboard-new-session-button-label">New session</span>
-        </button>
+        <DashboardPrimaryActions
+          showTransfer={accessMode === "local"}
+          onOpenSessionTransfer={openSessionTransfer}
+          onNewSession={() => openCreateSession()}
+        />
       </div>
 
       {actionError && !renameSession && !agentParentSession ? (
@@ -593,6 +594,31 @@ export function Dashboard() {
         <UsageUnavailablePanel title="OpenAI cost, past 30 days" />
       )}
     </section>
+  );
+}
+
+export function DashboardPrimaryActions({
+  showTransfer,
+  onOpenSessionTransfer,
+  onNewSession
+}: {
+  showTransfer: boolean;
+  onOpenSessionTransfer: () => void;
+  onNewSession: () => void;
+}) {
+  return (
+    <div className="dashboard-primary-actions">
+      {showTransfer ? (
+        <button className="dashboard-transfer-button" type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
+          <ArrowLeftRight size={17} />
+          <span className="dashboard-transfer-button-label">Transfer</span>
+        </button>
+      ) : null}
+      <button className="dashboard-new-session-button" type="button" onClick={onNewSession} aria-label="New session" title="New session">
+        <Plus size={16} />
+        <span className="dashboard-new-session-button-label">New session</span>
+      </button>
+    </div>
   );
 }
 

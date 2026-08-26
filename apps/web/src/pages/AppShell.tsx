@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowLeftRight, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, GitFork, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, GitFork, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -582,6 +582,10 @@ export function AppShell() {
     setCreateSessionNameAutofocus(hasPrefilledCwd);
   }, []);
 
+  const openSessionTransfer = useCallback(() => {
+    setSessionTransferOpen(true);
+  }, []);
+
   const openForkSession = useCallback((session: ManagedSession) => {
     setForkSessionSource(session);
     setForkSessionName(defaultForkSessionName(session));
@@ -1016,11 +1020,6 @@ export function AppShell() {
         <AppBrand />
         <SessionStoplight counts={stoplightCounts} activeSeverity={activeStoplightSeverity} onSelect={selectSessionStoplightSeverity} />
         <div className="topbar-actions">
-          {accessMode === "local" ? (
-            <button className="icon-button" onClick={() => setSessionTransferOpen(true)} aria-label="Import or export sessions">
-              <ArrowLeftRight size={18} />
-            </button>
-          ) : null}
           <button className="icon-button" onClick={openGlobalNotificationMenu} aria-label="Global notifications">
             <Bell size={18} />
           </button>
@@ -1104,6 +1103,7 @@ export function AppShell() {
               subscribeSessionEvents,
               sessionStoplightSeverity,
               openCreateSession,
+              openSessionTransfer,
               openForkSession,
               registerCreateSessionCwdPrefill,
               registerPromptHistoryPrefill,
@@ -1411,6 +1411,7 @@ export interface AppShellOutletContext {
   subscribeSessionEvents: (listener: (event: SessionEvent) => void) => () => void;
   sessionStoplightSeverity: SessionStatusSeverity | null;
   openCreateSession: (cwd?: string) => void;
+  openSessionTransfer: () => void;
   openForkSession: (session: ManagedSession) => void;
   registerCreateSessionCwdPrefill: (provider: () => string) => () => void;
   registerPromptHistoryPrefill: (provider: () => string) => () => void;

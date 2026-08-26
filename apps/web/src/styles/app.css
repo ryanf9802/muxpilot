@@ -175,6 +175,20 @@ select:focus-visible {
   gap: 8px;
 }
 
+@media (max-width: 420px) {
+  .topbar {
+    gap: 6px;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .brand strong {
+    display: none;
+  }
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -1301,7 +1315,14 @@ select:focus-visible {
   gap: 10px;
 }
 
-.dashboard-new-session-button {
+.dashboard-primary-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.dashboard-new-session-button,
+.dashboard-transfer-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1316,12 +1337,25 @@ select:focus-visible {
   white-space: nowrap;
 }
 
+.dashboard-transfer-button {
+  color: var(--color-text);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+
+.dashboard-transfer-button:hover,
+.dashboard-transfer-button:focus-visible {
+  border-color: color-mix(in srgb, var(--color-secondary) 52%, var(--color-border));
+  background: color-mix(in srgb, var(--color-secondary) 8%, var(--color-surface));
+}
+
 .dashboard-new-session-button:hover,
 .dashboard-new-session-button:focus-visible {
   background: var(--color-action-hover);
 }
 
-.dashboard-new-session-button-label {
+.dashboard-new-session-button-label,
+.dashboard-transfer-button-label {
   display: inline;
 }
 
@@ -2726,15 +2760,13 @@ select:focus-visible {
 .card-head,
 .card-foot,
 .session-header,
-.actions,
 .message-meta {
   display: flex;
   align-items: center;
 }
 
 .card-head,
-.card-foot,
-.session-header {
+.card-foot {
   justify-content: space-between;
   gap: 12px;
 }
@@ -3554,16 +3586,31 @@ select:focus-visible {
 }
 
 .session-header {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
   max-width: 100%;
-  flex-wrap: wrap;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--color-border);
 }
 
 .session-title {
   min-width: 0;
-  flex: 1;
+}
+
+.session-title-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 1px;
+}
+
+.session-title-meta .session-header-meta {
+  flex: 1 1 auto;
+  margin: 0;
 }
 
 .session-title-heading {
@@ -3674,7 +3721,7 @@ select:focus-visible {
   box-shadow: none;
 }
 
-.actions .fast-mode-toggle.selected {
+.composer-settings .fast-mode-toggle.selected {
   color: var(--color-warning);
   border-color: color-mix(in srgb, var(--color-warning) 62%, var(--color-border));
   background: color-mix(in srgb, var(--color-warning) 14%, var(--color-surface));
@@ -3707,6 +3754,28 @@ select:focus-visible {
 
 .tmux-command-display {
   cursor: default;
+}
+
+.tmux-command-metadata {
+  flex: 0 1 auto;
+  min-height: 24px;
+  max-width: min(210px, 52%);
+  gap: 5px;
+  padding: 0 5px;
+  color: var(--color-text-muted);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 6px;
+}
+
+.tmux-command-metadata .tmux-command-model {
+  max-width: clamp(70px, 15vw, 132px);
+  font-size: 12px;
+}
+
+.tmux-command-metadata .tmux-command-effort {
+  padding: 1px 5px;
+  font-size: 9px;
 }
 
 .tmux-command-label {
@@ -3749,35 +3818,34 @@ select:focus-visible {
 }
 
 .mode-toggle-error {
-  flex-basis: 100%;
-  margin: -6px 0 0;
+  margin: -2px 0 0;
   color: var(--color-error);
   font-size: 12px;
 }
 
-.actions {
+.session-actions {
+  display: flex;
+  align-items: center;
   gap: 8px;
   width: 100%;
   min-width: 0;
   max-width: 100%;
   flex-wrap: wrap;
   justify-content: space-between;
-  overflow-x: hidden;
   padding-bottom: 2px;
 }
 
-.actions-main,
-.actions-jump {
+.session-action-group {
   display: flex;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
   max-width: 100%;
 }
 
-.actions-jump {
+.session-runtime-actions {
   margin-left: auto;
 }
 
@@ -3823,7 +3891,7 @@ select:focus-visible {
   padding: 0;
 }
 
-.actions button {
+.session-actions button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -3835,7 +3903,7 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.actions .git-workspace-chip {
+.session-actions .git-workspace-chip {
   max-width: 220px;
   color: var(--git-workspace-state-color);
   background: color-mix(in srgb, var(--git-workspace-state-color) 10%, var(--color-surface));
@@ -3843,11 +3911,11 @@ select:focus-visible {
   border-radius: 999px;
 }
 
-.actions .danger {
+.session-actions .danger {
   color: var(--color-error);
 }
 
-.actions .session-new-session-button {
+.session-actions .session-new-session-button {
   width: 36px;
   padding: 0;
   justify-content: center;
@@ -3856,8 +3924,8 @@ select:focus-visible {
   border-color: var(--color-action);
 }
 
-.actions .session-new-session-button:hover:not(:disabled),
-.actions .session-new-session-button:focus-visible {
+.session-actions .session-new-session-button:hover:not(:disabled),
+.session-actions .session-new-session-button:focus-visible {
   background: var(--color-action-hover);
   border-color: var(--color-action-hover);
 }
@@ -4099,6 +4167,38 @@ select:focus-visible {
   min-height: 0;
 }
 
+.transcript-jump-rail {
+  position: absolute;
+  right: 18px;
+  bottom: 12px;
+  z-index: 3;
+  display: grid;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.transcript-jump-rail button {
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-surface-raised) 94%, transparent);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 32%);
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
+}
+
+.transcript-jump-rail button:hover:not(:disabled),
+.transcript-jump-rail button:focus-visible {
+  color: var(--color-secondary);
+  border-color: color-mix(in srgb, var(--color-secondary) 62%, var(--color-border));
+}
+
 .message-list {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -4116,6 +4216,11 @@ select:focus-visible {
   background: var(--color-input);
   border: 1px solid var(--color-border);
   border-radius: 8px;
+}
+
+.message-list[data-jump-controls] {
+  padding-right: 60px;
+  padding-bottom: 60px;
 }
 
 .message-list-initializing {
@@ -4758,6 +4863,31 @@ select:focus-visible {
   border-top: 1px solid var(--color-border);
 }
 
+.composer-settings {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.composer-settings .fast-mode-toggle {
+  min-height: 34px;
+}
+
+.composer-settings .vim-toggle {
+  align-self: auto;
+  width: 36px;
+  min-width: 36px;
+  min-height: 34px;
+  height: 34px;
+}
+
+.composer-settings .vim-logo {
+  width: 22px;
+  height: 22px;
+}
+
 .composer {
   display: grid;
   flex: 0 0 auto;
@@ -4769,10 +4899,6 @@ select:focus-visible {
   padding: 0;
   background: transparent;
   border: 0;
-}
-
-.composer-vim-available {
-  grid-template-columns: 52px minmax(0, 1fr) 48px;
 }
 
 .skill-textarea {
@@ -5207,7 +5333,38 @@ select:focus-visible {
     padding: 10px;
   }
 
-  .actions .session-new-session-button {
+}
+
+@media (max-width: 959px) {
+  .session-actions,
+  .session-action-group {
+    gap: 6px;
+  }
+
+  .session-actions button {
+    width: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    justify-content: center;
+    gap: 5px;
+    padding: 0;
+    font-size: 13px;
+  }
+
+  .session-actions .git-workspace-chip {
+    width: 40px;
+    min-width: 40px;
+    padding: 0;
+  }
+
+  .session-actions .git-workspace-chip span,
+  .session-action-label {
+    display: none;
+  }
+}
+
+@media (min-width: 960px) {
+  .session-actions .session-new-session-button {
     width: auto;
     padding: 0 10px;
   }
@@ -5329,54 +5486,19 @@ select:focus-visible {
     gap: 8px;
   }
 
-  .dashboard-new-session-button {
+  .dashboard-new-session-button,
+  .dashboard-transfer-button {
     width: 44px;
     padding: 0;
   }
 
-  .dashboard-new-session-button-label {
+  .dashboard-new-session-button-label,
+  .dashboard-transfer-button-label {
     display: none;
-  }
-
-  .actions {
-    flex-wrap: nowrap;
-    gap: 6px;
-  }
-
-  .actions-main,
-  .actions-jump {
-    flex-wrap: nowrap;
-    gap: 6px;
-  }
-
-  .actions button {
-    min-height: 34px;
-    gap: 5px;
-    padding: 0 8px;
-    font-size: 13px;
-  }
-
-  .actions .session-new-session-button {
-    width: 34px;
-    padding: 0;
   }
 
   .session-header {
     gap: 7px;
-  }
-
-  .actions .git-workspace-chip,
-  .actions-main > button,
-  .actions-jump > button {
-    width: 34px;
-    min-width: 34px;
-    padding: 0;
-    justify-content: center;
-  }
-
-  .actions .git-workspace-chip span,
-  .session-action-label {
-    display: none;
   }
 
   .git-panel-backdrop { padding: 10px; }
@@ -5415,32 +5537,32 @@ select:focus-visible {
   .heavy-command-indicator { min-width: 24px; height: 24px; padding: 0 5px; }
   .heavy-command-facts { grid-template-columns: minmax(0, 1fr); }
 
-  .tmux-command-button {
-    min-height: 32px;
+  .tmux-command-metadata {
+    min-height: 24px;
     gap: 5px;
-    padding: 0 7px;
-    max-width: min(178px, 48vw);
+    padding: 0 4px;
+    max-width: min(164px, 58%);
   }
 
   .tmux-command-copied {
     display: none;
   }
 
-  .tmux-command-model {
+  .tmux-command-metadata .tmux-command-model {
     max-width: clamp(70px, 24vw, 108px);
     font-size: 12px;
   }
 
-  .tmux-command-effort {
-    padding: 2px 5px;
-    font-size: 10px;
+  .tmux-command-metadata .tmux-command-effort {
+    padding: 1px 5px;
+    font-size: 9px;
   }
 
   .mode-toggle {
     flex: 0 0 auto;
   }
 
-  .actions .fast-mode-toggle span {
+  .composer-settings .fast-mode-toggle span {
     display: none;
   }
 

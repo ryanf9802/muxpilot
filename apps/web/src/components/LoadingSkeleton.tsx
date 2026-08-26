@@ -157,18 +157,16 @@ export function SessionLoadingSkeleton({
             <SkeletonBlock className="skeleton-line skeleton-line-session-meta" />
           </div>
           <SkeletonBlock className="skeleton-pill" />
-          <SkeletonBlock className="skeleton-session-command" />
-          <SkeletonBlock className="skeleton-mode-toggle" />
         </div>
       )}
       {actions ?? (
-        <div className="actions" aria-hidden="true">
-          <div className="actions-main">
+        <div className="session-actions" aria-hidden="true">
+          <div className="session-action-group session-tool-actions">
             <SkeletonBlock className="skeleton-action skeleton-action-square" />
             <SkeletonBlock className="skeleton-action" />
             <SkeletonBlock className="skeleton-action skeleton-action-short" />
           </div>
-          <div className="actions-jump">
+          <div className="session-action-group session-runtime-actions">
             <SkeletonBlock className="skeleton-action skeleton-action-short" />
             <SkeletonBlock className="skeleton-action skeleton-action-short" />
           </div>

@@ -9,6 +9,7 @@ import {
   DASHBOARD_USAGE_RECONCILE_INTERVAL_MS,
   dashboardLocationState,
   dashboardPreviewLines,
+  DashboardPrimaryActions,
   dashboardStatusFilterFromSearchParams,
   filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
@@ -43,6 +44,31 @@ describe("dashboard data ownership", () => {
     const matching = testSession({ id: "matching", paneId: "%111", windowName: "codex-cache" });
     const other = testSession({ id: "other", paneId: "%112", windowName: "ui" });
     expect(filterSessionsByDashboardQuery([matching, other], "CACHE")).toEqual([matching]);
+  });
+});
+
+describe("DashboardPrimaryActions", () => {
+  it("keeps transfer and new session directly accessible for local operators", () => {
+    const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
+      showTransfer: true,
+      onOpenSessionTransfer: () => undefined,
+      onNewSession: () => undefined
+    }));
+
+    expect(html).toContain('aria-label="Import or export sessions"');
+    expect(html).toContain("Transfer");
+    expect(html).toContain('aria-label="New session"');
+  });
+
+  it("omits transfer when local filesystem access is unavailable", () => {
+    const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
+      showTransfer: false,
+      onOpenSessionTransfer: () => undefined,
+      onNewSession: () => undefined
+    }));
+
+    expect(html).not.toContain("Import or export sessions");
+    expect(html).toContain("New session");
   });
 });
 

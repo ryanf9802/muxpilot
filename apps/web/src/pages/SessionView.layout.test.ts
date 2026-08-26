@@ -38,10 +38,45 @@ describe("mobile session viewport layout", () => {
     expect(stackRule).toContain("flex-direction: column;");
     expect(stackRule).toContain("justify-content: flex-end;");
     expect(stackRule).toContain("min-height: 0;");
+    expect(stackRule).not.toContain("overflow: hidden;");
     expect(composerRule).toContain("flex: 0 0 auto;");
     expect(queuedRule).toContain("flex: 1 1 auto;");
     expect(queuedRule).toContain("min-height: 0;");
     expect(queuedRule).toContain("overflow-y: auto;");
+  });
+
+  it("assigns direct controls to deliberate responsive groups", () => {
+    const headerRule = cssBlock(styles, ".session-header");
+    const actionsRule = cssBlock(styles, ".session-actions");
+    const groupRule = cssBlock(styles, ".session-action-group");
+    const compactStyles = cssBlock(styles, "@media (max-width: 959px)");
+    const compactButtonRule = cssBlock(compactStyles, ".session-actions button");
+    expect(headerRule).toContain("grid-template-columns: 40px minmax(0, 1fr) auto;");
+    expect(actionsRule).toContain("flex-wrap: wrap;");
+    expect(actionsRule).not.toContain("overflow-x: hidden;");
+    expect(groupRule).toContain("flex-wrap: nowrap;");
+    expect(compactButtonRule).toContain("width: 40px;");
+    expect(compactButtonRule).toContain("min-height: 40px;");
+  });
+
+  it("keeps composer settings and adaptive transcript navigation out of the input width", () => {
+    const settingsRule = cssBlock(styles, ".composer-settings");
+    const composerRule = cssBlock(styles, ".composer");
+    const railRule = cssBlock(styles, ".transcript-jump-rail");
+    const protectedListRule = cssBlock(styles, ".message-list[data-jump-controls]");
+    expect(settingsRule).toContain("flex: 0 0 auto;");
+    expect(composerRule).toContain("grid-template-columns: minmax(0, 1fr) 48px;");
+    expect(railRule).toContain("position: absolute;");
+    expect(railRule).toContain("pointer-events: none;");
+    expect(protectedListRule).toContain("padding-right: 60px;");
+    expect(protectedListRule).toContain("padding-bottom: 60px;");
+  });
+
+  it("preserves the app logo while compacting the narrow global bar", () => {
+    const narrowTopbarStyles = cssBlock(styles, "@media (max-width: 420px)");
+    const wordmarkRule = cssBlock(narrowTopbarStyles, ".brand strong");
+    expect(wordmarkRule).toContain("display: none;");
+    expect(narrowTopbarStyles).not.toContain(".brand-logo");
   });
 });
 

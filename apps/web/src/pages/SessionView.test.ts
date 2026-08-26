@@ -106,6 +106,7 @@ import {
   skillSuggestions,
   stripAssistantSideChannelBlocks,
   transcriptItemsContainPendingUserMessage,
+  transcriptJumpVisibility,
   transcriptFindMatches,
   transcriptVimNavigationCommand,
   transcriptSourceKey,
@@ -1370,6 +1371,20 @@ describe("tmux command helpers", () => {
     expect(html).not.toContain("Copy tmux attach command");
     expect(html).not.toContain("tmux select-window");
   });
+
+  it("renders model state as compact title metadata without changing copy behavior", () => {
+    const session = managedSession({
+      models: {
+        default: { model: "gpt-5.5", reasoningEffort: "medium" },
+        plan: { model: "gpt-5.5", reasoningEffort: "high" }
+      }
+    });
+    const html = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, compact: true, onCopy: () => undefined }));
+
+    expect(html).toContain('class="tmux-command-button tmux-command-metadata"');
+    expect(html).toContain("Copy tmux attach command");
+    expect(html).toContain("gpt-5.5");
+  });
 });
 
 describe("queuedInputHasLineBreaks", () => {
@@ -1421,7 +1436,8 @@ describe("session scroll behavior", () => {
       createElement(SessionLoadingView, {
         session: managedSession(),
         onBack: () => undefined,
-        onNewSession: () => undefined
+        onNewSession: () => undefined,
+        onOpenSessionTransfer: () => undefined
       })
     );
 
@@ -1429,6 +1445,7 @@ describe("session scroll behavior", () => {
     expect(html).toContain("muxpilot");
     expect(html).toContain('aria-label="Back"');
     expect(html).toContain('aria-label="New session"');
+    expect(html).toContain('aria-label="Import or export sessions"');
     expect(html).toContain('class="status status-loading"');
     expect(html).toContain(">loading<");
     expect(html).not.toContain("status-red");
@@ -1498,6 +1515,19 @@ describe("session scroll behavior", () => {
   it("detects when the message list is near the bottom", () => {
     expect(isNearMessageListBottom({ scrollHeight: 1000, scrollTop: 780, clientHeight: 120 })).toBe(true);
     expect(isNearMessageListBottom({ scrollHeight: 1000, scrollTop: 700, clientHeight: 120 })).toBe(false);
+  });
+
+  it("shows transcript endpoint controls only when their direction is useful", () => {
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 0, clientHeight: 400 }, false, false)).toEqual({ top: false, bottom: true });
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 300, clientHeight: 400 }, false, false)).toEqual({ top: true, bottom: true });
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 500, clientHeight: 400 }, false, false)).toEqual({ top: true, bottom: true });
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 600, clientHeight: 400 }, false, false)).toEqual({ top: true, bottom: false });
+    expect(transcriptJumpVisibility({ scrollHeight: 300, scrollTop: 0, clientHeight: 400 }, false, false)).toEqual({ top: false, bottom: false });
+  });
+
+  it("keeps paginated transcript endpoints directly reachable", () => {
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 0, clientHeight: 400 }, true, false).top).toBe(true);
+    expect(transcriptJumpVisibility({ scrollHeight: 1000, scrollTop: 600, clientHeight: 400 }, false, true).bottom).toBe(true);
   });
 
   it("does not auto-page transcript history before the initial bottom scroll is ready", () => {
