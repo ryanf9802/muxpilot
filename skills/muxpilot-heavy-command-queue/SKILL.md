@@ -14,4 +14,6 @@ When `muxpilot-git-run.mjs` prints `QUEUED_NOT_RUN`, the command did not run. Tr
 
 When muxpilot sends a `<muxpilot_heavy_command_queue>` event whose `kind` is `resume_requested`, run its `resumeCommand` string exactly before doing other work. Do not reconstruct or alter it. A resume rejection or expiration means the original command remains unrun; report that boundary and do not call it a test failure.
 
+`LEASE_ACQUIRED` or `COMMAND_STARTED` output means the original wrapper invocation owns the live run. Continue waiting on that same execution handle; never construct a `--resume` command from its run id. Only the exact `resumeCommand` inside a `resume_requested` event may claim a deferred reservation. If the original invocation later reports `COMMAND_EXITED`, that exit result is authoritative.
+
 Muxpilot holds user messages while a run is waiting or reserved. If an ordinary user message arrives before a resume request, treat its delivery as proof that muxpilot ended the deferred phase, such as through an operator interrupt. Stop waiting for the old run, do not retry it, and handle the delivered message normally. Treat any later resume request for that ended run as stale. Messages held while a resumed command runs arrive only after that task finishes. Do not manually answer or replay queued drafts from continuation text.
