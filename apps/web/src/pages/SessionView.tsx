@@ -121,6 +121,7 @@ export const ACTIVE_HEAVY_COMMAND_RECONCILE_INTERVAL_MS = 2_000;
 export const SESSION_BOOTSTRAP_TIMEOUT_MS = 10_000;
 export const SESSION_BOOTSTRAP_NOTICE_MS = 5_000;
 export const SESSION_BOOTSTRAP_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
+const SESSION_DOCUMENTS_RECONCILE_INTERVAL_MS = 5_000;
 const SKILL_REFRESH_INTERVAL_MS = 60_000;
 const SKILL_REFRESH_STALE_MS = 10_000;
 // "none" explicitly preserves the viewport; "idle" means there is no pending transcript scroll request.
@@ -791,43 +792,31 @@ export function HeavyCommandsModal({
   );
 }
 
-export function DocumentsModal({ open, sessionId, onClose }: { open: boolean; sessionId: string; onClose: () => void }) {
-  const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
+export function DocumentsModal({
+  open,
+  sessionId,
+  documents,
+  listLoading,
+  listError,
+  onClose
+}: {
+  open: boolean;
+  sessionId: string;
+  documents: SessionDocumentSummary[];
+  listLoading: boolean;
+  listError: string;
+  onClose: () => void;
+}) {
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState("");
-  const [listLoading, setListLoading] = useState(false);
-  const [listError, setListError] = useState("");
   const [contentError, setContentError] = useState("");
 
   useEffect(() => {
-    if (!open) return undefined;
-    let cancelled = false;
-    let first = true;
-    let refreshing = false;
-    const refresh = async () => {
-      if (refreshing) return;
-      refreshing = true;
-      if (first) setListLoading(true);
-      try {
-        const response = await api.sessionDocuments(sessionId);
-        if (cancelled) return;
-        setDocuments(response.documents);
-        setListError("");
-        setSelected((current) => response.documents.some((document) => document.name === current)
-          ? current
-          : response.documents.find((document) => document.name.toLowerCase() === "index.md")?.name ?? response.documents[0]?.name ?? null);
-      } catch (error) {
-        if (!cancelled) setListError(error instanceof Error ? error.message : "Unable to load documents");
-      } finally {
-        if (!cancelled) setListLoading(false);
-        first = false;
-        refreshing = false;
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 2_000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [open, sessionId]);
+    if (!open) return;
+    setSelected((current) => documents.some((document) => document.name === current)
+      ? current
+      : documents.find((document) => document.name.toLowerCase() === "index.md")?.name ?? documents[0]?.name ?? null);
+  }, [documents, open]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
   useEffect(() => {
@@ -869,6 +858,23 @@ export function DocumentsModal({ open, sessionId, onClose }: { open: boolean; se
         </div>
       )}
     </Modal>
+  );
+}
+
+export function DocumentsButton({ documentCount, open, onOpen }: { documentCount: number; open: boolean; onOpen: () => void }) {
+  if (documentCount === 0) return null;
+  return (
+    <button
+      className="session-documents-button"
+      type="button"
+      onClick={onOpen}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      title="Documents"
+    >
+      <FileText size={17} />
+      <span className="session-action-label">Documents</span>
+    </button>
   );
 }
 
@@ -966,6 +972,9 @@ export function SessionView() {
   const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [documentsOpen, setDocumentsOpen] = useState(false);
+  const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(true);
+  const [documentsError, setDocumentsError] = useState("");
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
   const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
@@ -1365,6 +1374,9 @@ export function SessionView() {
       setCopiedTmuxCommand(false);
       setGitPanelOpen(false);
       setDocumentsOpen(false);
+      setDocuments([]);
+      setDocumentsLoading(true);
+      setDocumentsError("");
       setHeavyCommands([]);
       setHeavyCommandsOpen(false);
       setHeavyOutputs({});
@@ -1473,6 +1485,36 @@ export function SessionView() {
       clearInterval(interval);
     };
   }, [connectionEpoch, id, sessionLoadRetryNonce]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let refreshing = false;
+    const refreshDocuments = async () => {
+      if (refreshing || document.visibilityState !== "visible") return;
+      refreshing = true;
+      try {
+        const response = await api.sessionDocuments(id);
+        if (cancelled) return;
+        setDocuments(response.documents);
+        setDocumentsError("");
+        if (response.documents.length === 0) setDocumentsOpen(false);
+      } catch (error) {
+        if (!cancelled) setDocumentsError(error instanceof Error ? error.message : "Unable to load documents");
+      } finally {
+        if (!cancelled) setDocumentsLoading(false);
+        refreshing = false;
+      }
+    };
+    void refreshDocuments();
+    const interval = window.setInterval(
+      () => void refreshDocuments(),
+      SESSION_DOCUMENTS_RECONCILE_INTERVAL_MS,
+    );
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [connectionEpoch, id]);
 
   useEffect(() => {
     return subscribeSessionEvents((event) => {
@@ -2279,7 +2321,14 @@ export function SessionView() {
         onClose={() => setHeavyCommandsOpen(false)}
         onTerminate={(runId) => void terminateHeavyCommand(runId)}
       />
-      <DocumentsModal open={documentsOpen} sessionId={readySession.id} onClose={() => setDocumentsOpen(false)} />
+      <DocumentsModal
+        open={documentsOpen}
+        sessionId={readySession.id}
+        documents={documents}
+        listLoading={documentsLoading}
+        listError={documentsError}
+        onClose={() => setDocumentsOpen(false)}
+      />
 
       <div className="actions">
         <div className="actions-main">
@@ -2293,17 +2342,7 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
-          <button
-            className="session-documents-button"
-            type="button"
-            onClick={() => setDocumentsOpen(true)}
-            aria-haspopup="dialog"
-            aria-expanded={documentsOpen}
-            title="Documents"
-          >
-            <FileText size={17} />
-            <span className="session-action-label">Documents</span>
-          </button>
+          <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => setDocumentsOpen(true)} />
           {readyWorkspace ? (
             <button
               className="git-workspace-chip"

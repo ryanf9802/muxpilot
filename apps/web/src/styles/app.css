@@ -2814,7 +2814,13 @@ select:focus-visible {
   flex-direction: column;
   width: min(960px, calc(100vw - 28px));
   height: min(720px, calc(100dvh - 36px));
+  padding: 18px;
   overflow: hidden;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-elevated);
 }
 
 .documents-layout {
