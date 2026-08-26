@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   ArrowDownToLine,
   ArrowLeft,
-  ArrowLeftRight,
   ArrowUpToLine,
   Check,
   Clock3,
@@ -1033,7 +1032,6 @@ export function SessionView() {
     syncSessionStoplight,
     sessions: shellSessions,
     openCreateSession,
-    openSessionTransfer,
     openForkSession,
     registerCreateSessionCwdPrefill,
     registerPromptHistoryPrefill,
@@ -2462,7 +2460,6 @@ export function SessionView() {
         onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
         onBack={() => navigate("/")}
         onNewSession={() => openCreateSession(loadingSession ? sessionCreateSessionCwd(loadingSession) : "")}
-        onOpenSessionTransfer={accessMode === "local" ? openSessionTransfer : undefined}
       />
     );
   }
@@ -2476,7 +2473,6 @@ export function SessionView() {
         onRetry={() => setSessionLoadRetryNonce((current) => current + 1)}
         onBack={() => navigate("/")}
         onNewSession={() => openCreateSession()}
-        onOpenSessionTransfer={accessMode === "local" ? openSessionTransfer : undefined}
       />
     );
   }
@@ -2575,12 +2571,6 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
-          {accessMode === "local" ? (
-            <button type="button" onClick={openSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
-              <ArrowLeftRight size={16} />
-              <span className="session-action-label">Transfer</span>
-            </button>
-          ) : null}
           <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => {
             setRequestedDocument(null);
             setDocumentsOpen(true);
@@ -2723,7 +2713,6 @@ export function SessionView() {
               : "message-list"
           }
           ref={messageListRef}
-          data-jump-controls={jumpVisibility.top || jumpVisibility.bottom || undefined}
           onScroll={handleMessageListScroll}
           tabIndex={-1}
         >
@@ -2937,8 +2926,7 @@ export function SessionLoadingView({
   retrying = true,
   onRetry,
   onBack,
-  onNewSession,
-  onOpenSessionTransfer
+  onNewSession
 }: {
   session: ManagedSession | null;
   error?: string;
@@ -2946,7 +2934,6 @@ export function SessionLoadingView({
   onRetry?: () => void;
   onBack: () => void;
   onNewSession: () => void;
-  onOpenSessionTransfer?: () => void;
 }) {
   const workspace = session ? normalizeGitWorkspaceSummary(session.gitWorkspace) : null;
   return (
@@ -2981,12 +2968,6 @@ export function SessionLoadingView({
               <Plus size={18} />
               <span className="session-new-session-button-label">New session</span>
             </button>
-            {onOpenSessionTransfer ? (
-              <button type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
-                <ArrowLeftRight size={16} />
-                <span className="session-action-label">Transfer</span>
-              </button>
-            ) : null}
             {workspace ? (
               <button
                 className="git-workspace-chip"

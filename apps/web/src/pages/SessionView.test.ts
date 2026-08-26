@@ -1441,8 +1441,7 @@ describe("session scroll behavior", () => {
       createElement(SessionLoadingView, {
         session: managedSession(),
         onBack: () => undefined,
-        onNewSession: () => undefined,
-        onOpenSessionTransfer: () => undefined
+        onNewSession: () => undefined
       })
     );
 
@@ -1450,7 +1449,7 @@ describe("session scroll behavior", () => {
     expect(html).toContain("muxpilot");
     expect(html).toContain('aria-label="Back"');
     expect(html).toContain('aria-label="New session"');
-    expect(html).toContain('aria-label="Import or export sessions"');
+    expect(html).not.toContain("Import or export sessions");
     expect(html).toContain('class="status status-loading"');
     expect(html).toContain(">loading<");
     expect(html).not.toContain("status-red");

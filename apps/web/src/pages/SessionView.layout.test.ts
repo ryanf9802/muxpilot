@@ -89,13 +89,11 @@ describe("mobile session viewport layout", () => {
     expect(sendRule).toContain("height: 52px;");
   });
 
-  it("keeps adaptive transcript navigation clear of message content", () => {
+  it("overlays adaptive transcript navigation without reserving message-list geometry", () => {
     const railRule = cssBlock(styles, ".transcript-jump-rail");
-    const protectedListRule = cssBlock(styles, ".message-list[data-jump-controls]");
     expect(railRule).toContain("position: absolute;");
     expect(railRule).toContain("pointer-events: none;");
-    expect(protectedListRule).toContain("padding-right: 60px;");
-    expect(protectedListRule).toContain("padding-bottom: 60px;");
+    expect(styles).not.toContain(".message-list[data-jump-controls]");
   });
 
   it("preserves the app logo while compacting the narrow global bar", () => {

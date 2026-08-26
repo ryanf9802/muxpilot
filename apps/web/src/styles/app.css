@@ -4265,11 +4265,6 @@ select:focus-visible {
   border-radius: 8px;
 }
 
-.message-list[data-jump-controls] {
-  padding-right: 60px;
-  padding-bottom: 60px;
-}
-
 .message-list-initializing {
   visibility: hidden;
 }
