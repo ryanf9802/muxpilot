@@ -4,6 +4,7 @@ set +e
 
 readonly max_attempts=3
 readonly startup_window_seconds=15
+readonly child_supervisor="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/codex-child-supervisor.mjs"
 attempt=1
 
 if [[ "${1:-}" == "--" ]]; then
@@ -18,8 +19,12 @@ fi
 
 while true; do
   started_at=$SECONDS
+  node "$child_supervisor" "$$" &
+  supervisor_pid=$!
   "$@"
   exit_code=$?
+  kill -TERM "$supervisor_pid" 2>/dev/null
+  wait "$supervisor_pid" 2>/dev/null
   elapsed_seconds=$((SECONDS - started_at))
 
   if [[ $exit_code -eq 0 ]]; then
