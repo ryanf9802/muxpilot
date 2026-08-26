@@ -1,5 +1,4 @@
 import {
-  Check,
   CircleAlert,
   CircleCheck,
   Clock3,
@@ -10,12 +9,20 @@ import {
   Square,
   X
 } from "lucide-react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { BtwDeltaPayload, BtwExchange } from "@muxpilot/core";
 import { copyText } from "../utils/clipboard.js";
 import { noAutofillTextField } from "../utils/formFields.js";
+import {
+  ContextMenu,
+  ContextMenuItem,
+  clampContextMenuPosition,
+  useContextMenuTrigger,
+  useDismissableContextMenu,
+  type ContextMenuPosition
+} from "./ContextMenu.js";
 
 const FOCUSABLE_SELECTOR = [
   "a[href]",
@@ -25,6 +32,18 @@ const FOCUSABLE_SELECTOR = [
   "textarea:not([disabled])",
   "[tabindex]:not([tabindex='-1'])"
 ].join(",");
+
+const BTW_COPY_MENU_WIDTH = 190;
+const BTW_COPY_MENU_HEIGHT = 54;
+
+interface BtwCopyTarget {
+  kind: "question" | "answer";
+  exchangeId: string;
+}
+
+interface BtwCopyMenu extends BtwCopyTarget {
+  position: ContextMenuPosition;
+}
 
 export interface ParsedBtwComposerInput {
   question: string | null;
@@ -78,15 +97,18 @@ export function BtwDrawer({
   onOpenDocument: (name: string) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copyMenu, setCopyMenu] = useState<BtwCopyMenu | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
+  const copyMenuRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   const previousExchangeCountRef = useRef(exchanges.length);
   const active = exchanges.find((exchange) => exchange.status === "running") ?? null;
   const latest = exchanges.at(-1) ?? null;
   onCloseRef.current = onClose;
+
+  useDismissableContextMenu(Boolean(copyMenu), copyMenuRef, () => setCopyMenu(null));
 
   useEffect(() => {
     if (!open) return;
@@ -141,6 +163,10 @@ export function BtwDrawer({
     }
   }, [exchanges.length, latest?.answer.length, latest?.status, open]);
 
+  useEffect(() => {
+    if (!open) setCopyMenu(null);
+  }, [open]);
+
   if (!open) return null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -150,14 +176,28 @@ export function BtwDrawer({
     if (await onAsk(question)) setDraft("");
   }
 
-  async function copyAnswer(exchange: BtwExchange) {
-    if (!exchange.answer) return;
+  function openCopyMenu(target: BtwCopyTarget, x: number, y: number) {
+    setCopyMenu({
+      ...target,
+      position: clampContextMenuPosition(x, y, {
+        width: BTW_COPY_MENU_WIDTH,
+        height: BTW_COPY_MENU_HEIGHT
+      })
+    });
+  }
+
+  async function copyFromMenu() {
+    if (!copyMenu) return;
+    const target = copyMenu;
+    setCopyMenu(null);
+    const exchange = exchanges.find((candidate) => candidate.id === target.exchangeId);
+    if (!exchange) return;
+    const text = target.kind === "question" ? exchange.question : exchange.answer;
+    if (!text) return;
     try {
-      await copyText(exchange.answer);
-      setCopiedId(exchange.id);
-      window.setTimeout(() => setCopiedId((current) => current === exchange.id ? null : current), 1_600);
-    } catch {
-      setCopiedId(null);
+      await copyText(text);
+    } catch (copyError) {
+      console.error(copyError);
     }
   }
 
@@ -205,11 +245,20 @@ export function BtwDrawer({
                 <time dateTime={exchange.createdAt}>{formatBtwTime(exchange.createdAt)}</time>
                 <span className="btw-status">{btwStatusIcon(exchange)} {btwStatusLabel(exchange)}</span>
               </header>
-              <div className="btw-question">
+              <BtwCopyableSection
+                className="btw-question"
+                target={{ kind: "question", exchangeId: exchange.id }}
+                onOpenMenu={openCopyMenu}
+              >
                 <span>You asked</span>
                 <p>{exchange.question}</p>
-              </div>
-              <div className="btw-answer">
+              </BtwCopyableSection>
+              <BtwCopyableSection
+                className="btw-answer"
+                target={{ kind: "answer", exchangeId: exchange.id }}
+                onOpenMenu={openCopyMenu}
+                disabled={!exchange.answer}
+              >
                 <div className="btw-answer-heading">
                   <span>Answer</span>
                 </div>
@@ -225,20 +274,14 @@ export function BtwDrawer({
                 {exchange.documentOperation ? (
                   <DocumentOperation exchange={exchange} onOpenDocument={onOpenDocument} />
                 ) : null}
-                <div className="btw-exchange-actions">
-                  {exchange.status === "running" ? (
+                {exchange.status === "running" ? (
+                  <div className="btw-exchange-actions">
                     <button type="button" className="btw-action-button btw-cancel-button" onClick={() => void onCancel(exchange.id)}>
                       <Square size={13} /> Cancel
                     </button>
-                  ) : null}
-                  {exchange.answer ? (
-                    <button type="button" className="btw-action-button" onClick={() => void copyAnswer(exchange)}>
-                      {copiedId === exchange.id ? <Check size={13} /> : <Copy size={13} />}
-                      {copiedId === exchange.id ? "Copied" : "Copy answer"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
+                  </div>
+                ) : null}
+              </BtwCopyableSection>
             </article>
           ))}
         </div>
@@ -280,9 +323,39 @@ export function BtwDrawer({
             </div>
           </form>
         </footer>
+
+        {copyMenu ? (
+          <ContextMenu
+            ref={copyMenuRef}
+            position={copyMenu.position}
+            width={BTW_COPY_MENU_WIDTH}
+            label={`BTW ${copyMenu.kind} actions`}
+          >
+            <ContextMenuItem icon={<Copy size={16} />} onClick={() => void copyFromMenu()}>
+              Copy {copyMenu.kind}
+            </ContextMenuItem>
+          </ContextMenu>
+        ) : null}
       </aside>
     </div>
   );
+}
+
+function BtwCopyableSection({
+  className,
+  target,
+  onOpenMenu,
+  disabled = false,
+  children
+}: {
+  className: string;
+  target: BtwCopyTarget;
+  onOpenMenu: (target: BtwCopyTarget, x: number, y: number) => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  const menuTrigger = useContextMenuTrigger(target, onOpenMenu, { disabled });
+  return <div className={`${className}${disabled ? "" : " btw-copyable-section"}`} {...menuTrigger.triggerProps}>{children}</div>;
 }
 
 function DocumentOperation({ exchange, onOpenDocument }: { exchange: BtwExchange; onOpenDocument: (name: string) => void }) {

@@ -6,12 +6,17 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BtwExchange } from "@muxpilot/core";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "./BtwDrawer.js";
 
+const copyTextMock = vi.hoisted(() => vi.fn(async () => undefined));
+
+vi.mock("../utils/clipboard.js", () => ({ copyText: copyTextMock }));
+
 beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 afterEach(() => {
   document.body.innerHTML = "";
+  copyTextMock.mockClear();
   vi.restoreAllMocks();
 });
 
@@ -156,6 +161,66 @@ describe("BtwDrawer", () => {
     expect(container.querySelectorAll(".btw-answer-heading")).toHaveLength(2);
     expect(container.querySelectorAll(".btw-answer-heading")[0]?.textContent).toContain("Answer");
     expect(container.querySelector(".btw-answer-heading svg")).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("copies exact question and answer text from their context menus", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const saved = exchange({
+      question: "Which branch is active?",
+      answer: "**main** is active."
+    });
+
+    act(() => root.render(
+      <BtwDrawer
+        open
+        exchanges={[saved]}
+        loading={false}
+        error=""
+        submitting={false}
+        onClose={() => undefined}
+        onAsk={async () => true}
+        onCancel={async () => undefined}
+        onOpenDocument={() => undefined}
+      />
+    ));
+
+    expect(container.querySelector(".btw-exchange-actions")).toBeNull();
+    expect(container.textContent).not.toContain("Copy answer");
+    const question = container.querySelector(".btw-question")!;
+    const answer = container.querySelector(".btw-answer")!;
+    expect(question.hasAttribute("data-context-menu-trigger")).toBe(true);
+    expect(answer.hasAttribute("data-context-menu-trigger")).toBe(true);
+
+    act(() => question.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 24,
+      clientY: 32
+    })));
+    expect(container.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("BTW question actions");
+    expect(container.querySelector('[role="menuitem"]')?.textContent).toContain("Copy question");
+    await act(async () => {
+      (container.querySelector('[role="menuitem"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(copyTextMock).toHaveBeenLastCalledWith(saved.question);
+
+    act(() => answer.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 40,
+      clientY: 48
+    })));
+    expect(container.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("BTW answer actions");
+    expect(container.querySelector('[role="menuitem"]')?.textContent).toContain("Copy answer");
+    await act(async () => {
+      (container.querySelector('[role="menuitem"]') as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    expect(copyTextMock).toHaveBeenLastCalledWith(saved.answer);
     act(() => root.unmount());
   });
 
