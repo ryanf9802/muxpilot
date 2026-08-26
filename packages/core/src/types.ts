@@ -456,9 +456,50 @@ export interface UpdateQueuedInputRequest {
   mode?: CollaborationMode;
 }
 
+export type BtwExchangeStatus = "running" | "completed" | "failed" | "cancelled";
+
+export interface BtwExchange {
+  id: string;
+  sessionId: string;
+  question: string;
+  answer: string;
+  status: BtwExchangeStatus;
+  error: string | null;
+  createdAt: string;
+  firstTokenAt: string | null;
+  completedAt: string | null;
+}
+
+export interface CreateBtwExchangeRequest {
+  text: string;
+}
+
+export interface BtwExchangeResponse {
+  exchange: BtwExchange;
+}
+
+export interface BtwExchangesResponse {
+  exchanges: BtwExchange[];
+}
+
+export interface BtwDeltaPayload {
+  exchangeId: string;
+  delta: string;
+  firstTokenAt: string | null;
+}
+
 export interface SessionEvent {
   id: string;
-  type: "session.updated" | "message.appended" | "status.changed" | "notification.created" | "notification.triggered" | "queue.updated";
+  type:
+    | "session.updated"
+    | "message.appended"
+    | "status.changed"
+    | "notification.created"
+    | "notification.triggered"
+    | "queue.updated"
+    | "btw.started"
+    | "btw.delta"
+    | "btw.finished";
   sessionId: string;
   payload: unknown;
   timestamp: string;

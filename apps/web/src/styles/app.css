@@ -2999,6 +2999,155 @@ select:focus-visible {
   z-index: 70;
 }
 
+.btw-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in srgb, var(--color-overlay) 76%, transparent);
+}
+
+.btw-drawer {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  width: min(460px, calc(100vw - 32px));
+  height: 100%;
+  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
+  background: var(--color-surface);
+  border-left: 1px solid var(--color-border);
+  box-shadow: var(--shadow-elevated);
+}
+
+.btw-drawer-header,
+.btw-answer-heading,
+.btw-exchange-actions,
+.btw-thinking {
+  display: flex;
+  align-items: center;
+}
+
+.btw-drawer-header {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.btw-drawer-header h2,
+.btw-drawer-header p,
+.btw-question p,
+.btw-thinking,
+.btw-error {
+  margin: 0;
+}
+
+.btw-drawer-header h2 { font-size: 19px; }
+.btw-drawer-header p { margin-top: 3px; color: var(--color-text-muted); font-size: 12px; line-height: 1.35; }
+
+.btw-exchange-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding-right: 3px;
+  overflow-y: auto;
+}
+
+.btw-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 120px;
+  margin: 0;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+.btw-exchange {
+  display: grid;
+  gap: 8px;
+}
+
+.btw-question,
+.btw-answer {
+  display: grid;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+}
+
+.btw-question {
+  margin-left: 30px;
+  background: color-mix(in srgb, var(--color-action) 8%, var(--color-surface-raised));
+}
+
+.btw-answer {
+  margin-right: 30px;
+  background: var(--color-surface-raised);
+}
+
+.btw-question > span,
+.btw-answer-heading > span:first-child {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.btw-question p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.btw-answer-heading { justify-content: space-between; gap: 8px; }
+.btw-status { color: var(--color-text-subtle); font-size: 11px; }
+.btw-thinking { gap: 6px; color: var(--color-text-muted); font-size: 13px; }
+.btw-error { color: var(--color-error); font-size: 12px; overflow-wrap: anywhere; }
+.btw-drawer-error { padding: 8px 10px; background: var(--color-error-soft); border: 1px solid var(--color-error); border-radius: 7px; }
+.btw-exchange[data-status="completed"] .btw-status { color: var(--color-success); }
+.btw-exchange[data-status="failed"] .btw-status { color: var(--color-error); }
+.btw-exchange[data-status="running"] .btw-status { color: var(--color-warning); }
+
+.btw-exchange-actions {
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.btw-exchange-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.btw-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.btw-composer textarea {
+  width: 100%;
+  min-height: 76px;
+  max-height: 180px;
+  resize: vertical;
+  padding: 10px 11px;
+  color: var(--color-text);
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.btw-composer textarea:focus { outline: 2px solid color-mix(in srgb, var(--color-action) 60%, transparent); outline-offset: 1px; }
+.btw-composer .send-button { width: 40px; height: 40px; }
+.btw-button { position: relative; }
+.btw-unread-dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; background: var(--color-secondary); border: 1px solid var(--color-surface); border-radius: 50%; }
+
 .git-workspace-panel {
   display: grid;
   gap: 16px;
@@ -4896,6 +5045,15 @@ select:focus-visible {
     width: calc(100vw - 20px);
     height: calc(100dvh - 20px);
   }
+
+  .btw-drawer {
+    width: 100%;
+    max-width: none;
+    border-left: 0;
+  }
+
+  .btw-question { margin-left: 18px; }
+  .btw-answer { margin-right: 18px; }
 
   .documents-layout {
     grid-template-columns: minmax(0, 1fr);

@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { DatabaseSync } from "node:sqlite";
 import type {
   AgentSessionOwnership,
+  BtwExchange,
   ChatMessage,
   CollaborationMode,
   GitWorkspaceSummary,
@@ -140,6 +141,18 @@ interface QueuedInputRow {
   created_at: string;
   updated_at: string;
   sent_at: string | null;
+}
+
+interface BtwExchangeRow {
+  id: string;
+  session_id: string;
+  question: string;
+  answer: string;
+  status: string;
+  error: string | null;
+  created_at: string;
+  first_token_at: string | null;
+  completed_at: string | null;
 }
 
 interface QueuedInputEchoCandidateRow {
@@ -371,6 +384,26 @@ export class AppDatabase {
 
   deleteAgentWait(actorSessionId: string): Promise<void> {
     return this.call("deleteAgentWait", actorSessionId) as Promise<void>;
+  }
+
+  putBtwExchange(exchange: BtwExchange): Promise<void> {
+    return this.call("putBtwExchange", exchange) as Promise<void>;
+  }
+
+  getBtwExchange(sessionId: string, exchangeId: string): Promise<BtwExchange | null> {
+    return this.call("getBtwExchange", sessionId, exchangeId) as Promise<BtwExchange | null>;
+  }
+
+  listBtwExchanges(sessionId: string, limit = 50): Promise<BtwExchange[]> {
+    return this.call("listBtwExchanges", sessionId, limit) as Promise<BtwExchange[]>;
+  }
+
+  activeBtwExchange(sessionId: string): Promise<BtwExchange | null> {
+    return this.call("activeBtwExchange", sessionId) as Promise<BtwExchange | null>;
+  }
+
+  failRunningBtwExchanges(error: string, completedAt: string): Promise<BtwExchange[]> {
+    return this.call("failRunningBtwExchanges", error, completedAt) as Promise<BtwExchange[]>;
   }
 
   listSessions(includeArchived = false, includeMissing = true): Promise<ManagedSession[]> {
@@ -841,6 +874,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE btw_exchanges SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     const waitRows = this.db.prepare("SELECT actor_session_id, wait_json FROM agent_session_waits")
       .all() as unknown as Array<{ actor_session_id: string; wait_json: string }>;
@@ -1019,6 +1053,74 @@ export class SyncAppDatabase {
 
   deleteAgentWait(actorSessionId: string): void {
     this.db.prepare("DELETE FROM agent_session_waits WHERE actor_session_id = ?").run(actorSessionId);
+  }
+
+  putBtwExchange(exchange: BtwExchange): void {
+    this.db.prepare(
+      `INSERT INTO btw_exchanges
+        (id, session_id, question, answer, status, error, created_at, first_token_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         question=excluded.question,
+         answer=excluded.answer,
+         status=excluded.status,
+         error=excluded.error,
+         first_token_at=excluded.first_token_at,
+         completed_at=excluded.completed_at`
+    ).run(
+      exchange.id,
+      exchange.sessionId,
+      exchange.question,
+      exchange.answer,
+      exchange.status,
+      exchange.error,
+      exchange.createdAt,
+      exchange.firstTokenAt,
+      exchange.completedAt
+    );
+  }
+
+  getBtwExchange(sessionId: string, exchangeId: string): BtwExchange | null {
+    const row = this.db.prepare("SELECT * FROM btw_exchanges WHERE session_id = ? AND id = ?")
+      .get(sessionId, exchangeId) as BtwExchangeRow | undefined;
+    return row ? hydrateBtwExchange(row) : null;
+  }
+
+  listBtwExchanges(sessionId: string, limit = 50): BtwExchange[] {
+    const boundedLimit = Math.max(1, Math.min(200, Math.trunc(limit)));
+    const rows = this.db.prepare(
+      `SELECT * FROM btw_exchanges
+       WHERE session_id = ?
+       ORDER BY created_at DESC
+       LIMIT ?`
+    ).all(sessionId, boundedLimit) as unknown as BtwExchangeRow[];
+    return rows.map(hydrateBtwExchange).reverse();
+  }
+
+  activeBtwExchange(sessionId: string): BtwExchange | null {
+    const row = this.db.prepare(
+      `SELECT * FROM btw_exchanges
+       WHERE session_id = ? AND status = 'running'
+       ORDER BY created_at DESC
+       LIMIT 1`
+    ).get(sessionId) as BtwExchangeRow | undefined;
+    return row ? hydrateBtwExchange(row) : null;
+  }
+
+  failRunningBtwExchanges(error: string, completedAt: string): BtwExchange[] {
+    const rows = this.db.prepare("SELECT * FROM btw_exchanges WHERE status = 'running'")
+      .all() as unknown as BtwExchangeRow[];
+    this.db.prepare(
+      `UPDATE btw_exchanges
+       SET status = 'failed', error = ?, completed_at = ?
+       WHERE status = 'running'`
+    ).run(error, completedAt);
+    return rows.map((row) => ({
+      ...hydrateBtwExchange(row),
+      status: "failed" as const,
+      error,
+      completedAt
+    }));
   }
 
   private updateSessionData(sessionId: string, changes: Partial<ManagedSession>, updatedAt: string): ManagedSession | null {
@@ -2553,6 +2655,19 @@ export class SyncAppDatabase {
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS btw_exchanges (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        answer TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        first_token_at TEXT,
+        completed_at TEXT,
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS agent_session_waits (
         actor_session_id TEXT PRIMARY KEY,
         wait_json TEXT NOT NULL,
@@ -2634,6 +2749,8 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_btw_exchanges_session_created ON btw_exchanges(session_id, created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_btw_exchanges_one_running ON btw_exchanges(session_id) WHERE status = 'running';
       CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
       CREATE INDEX IF NOT EXISTS idx_notification_device_rules_session ON notification_device_rules(session_id);
       CREATE INDEX IF NOT EXISTS idx_notification_push_subscriptions_endpoint ON notification_push_subscriptions(endpoint);
@@ -3054,6 +3171,23 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     sentAt: row.sent_at
+  };
+}
+
+function hydrateBtwExchange(row: BtwExchangeRow): BtwExchange {
+  const status = row.status === "completed" || row.status === "failed" || row.status === "cancelled"
+    ? row.status
+    : "running";
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    question: row.question,
+    answer: row.answer,
+    status,
+    error: row.error,
+    createdAt: row.created_at,
+    firstTokenAt: row.first_token_at,
+    completedAt: row.completed_at
   };
 }
 

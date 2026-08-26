@@ -60,6 +60,8 @@ import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell
 import type {
   ApprovalDecision,
   ApprovalRequest,
+  BtwDeltaPayload,
+  BtwExchange,
   ChatMessage,
   CodexSkill,
   CollaborationMode,
@@ -112,6 +114,7 @@ import { copyText } from "../utils/clipboard.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 import { sessionStatusPresentation } from "../utils/sessionStatus.js";
+import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
 
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
@@ -1039,6 +1042,12 @@ export function SessionView() {
   const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
+  const [btwOpen, setBtwOpen] = useState(false);
+  const [btwExchanges, setBtwExchanges] = useState<BtwExchange[]>([]);
+  const [btwLoading, setBtwLoading] = useState(true);
+  const [btwError, setBtwError] = useState("");
+  const [btwSubmitting, setBtwSubmitting] = useState(false);
+  const [btwCompletedWhileClosed, setBtwCompletedWhileClosed] = useState(false);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
   const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
@@ -1097,12 +1106,14 @@ export function SessionView() {
   const previousEffectIdRef = useRef(id);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const messageMenuRef = useRef<HTMLDivElement>(null);
+  const btwOpenRef = useRef(false);
   const transcriptFindInputRef = useRef<HTMLInputElement>(null);
   const transcriptFindRequestRef = useRef(0);
   const vimPendingGRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
   activeIdRef.current = id;
+  btwOpenRef.current = btwOpen;
   promptHistoryPrefillTextRef.current = text;
 
   const closeGitPanel = useCallback(() => {
@@ -1581,8 +1592,44 @@ export function SessionView() {
   }, [connectionEpoch, id]);
 
   useEffect(() => {
+    let cancelled = false;
+    setBtwLoading(true);
+    setBtwExchanges([]);
+    setBtwError("");
+    setBtwSubmitting(false);
+    setBtwCompletedWhileClosed(false);
+    void api.btwExchanges(id)
+      .then((response) => {
+        if (!cancelled) {
+          setBtwExchanges((current) => response.exchanges.reduce(upsertBtwExchange, current));
+          setBtwError("");
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setBtwError(error instanceof Error ? error.message : "Unable to load BTW history");
+      })
+      .finally(() => {
+        if (!cancelled) setBtwLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [connectionEpoch, id]);
+
+  useEffect(() => {
     return subscribeSessionEvents((event) => {
       if (event.sessionId !== id) return;
+      if (event.type === "btw.started") {
+        setBtwExchanges((current) => upsertBtwExchange(current, event.payload as BtwExchange));
+        return;
+      }
+      if (event.type === "btw.delta") {
+        setBtwExchanges((current) => appendBtwDelta(current, event.payload as BtwDeltaPayload));
+        return;
+      }
+      if (event.type === "btw.finished") {
+        setBtwExchanges((current) => upsertBtwExchange(current, event.payload as BtwExchange));
+        if (!btwOpenRef.current) setBtwCompletedWhileClosed(true);
+        return;
+      }
       sessionRefreshRequestRef.current += 1;
       const token = requestTokenRef.current;
       if (event.type === "message.appended") {
@@ -2077,9 +2124,18 @@ export function SessionView() {
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (submitBusy || composerLocked) return;
+    if (submitBusy || btwSubmitting || composerLocked) return;
     if (!composerHasContent(text)) return;
     const value = text.trimEnd();
+    const btwInput = parseBtwComposerInput(value);
+    if (btwInput) {
+      blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
+      openBtwDrawer();
+      updateComposerText("");
+      if (!btwInput.question) return;
+      if (!await askBtwQuestion(btwInput.question)) updateComposerText(value);
+      return;
+    }
     const pendingMessage = createPendingUserMessage(id, value, session?.inputMode ?? "default");
     blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
     updateComposerText("");
@@ -2109,6 +2165,46 @@ export function SessionView() {
       throw error;
     } finally {
       setSubmitBusy(false);
+    }
+  }
+
+  function openBtwDrawer() {
+    setBtwOpen(true);
+    setBtwCompletedWhileClosed(false);
+  }
+
+  async function askBtwQuestion(question: string): Promise<boolean> {
+    if (btwSubmitting || btwExchanges.some((exchange) => exchange.status === "running")) return false;
+    const targetId = id;
+    setBtwSubmitting(true);
+    setBtwError("");
+    setBtwOpen(true);
+    try {
+      const response = await api.askBtw(targetId, question);
+      if (activeIdRef.current !== targetId) return true;
+      setBtwExchanges((current) => upsertBtwExchange(current, response.exchange));
+      return true;
+    } catch (error) {
+      if (activeIdRef.current === targetId) {
+        setBtwError(error instanceof Error ? error.message : "Could not ask the BTW agent");
+      }
+      return false;
+    } finally {
+      if (activeIdRef.current === targetId) setBtwSubmitting(false);
+    }
+  }
+
+  async function cancelBtwQuestion(exchangeId: string): Promise<void> {
+    const targetId = id;
+    setBtwError("");
+    try {
+      const response = await api.cancelBtw(targetId, exchangeId);
+      if (activeIdRef.current !== targetId) return;
+      setBtwExchanges((current) => upsertBtwExchange(current, response.exchange));
+    } catch (error) {
+      if (activeIdRef.current === targetId) {
+        setBtwError(error instanceof Error ? error.message : "Could not cancel the BTW question");
+      }
     }
   }
 
@@ -2390,6 +2486,16 @@ export function SessionView() {
         listError={documentsError}
         onClose={() => setDocumentsOpen(false)}
       />
+      <BtwDrawer
+        open={btwOpen}
+        exchanges={btwExchanges}
+        loading={btwLoading}
+        error={btwError}
+        submitting={btwSubmitting}
+        onClose={() => setBtwOpen(false)}
+        onAsk={askBtwQuestion}
+        onCancel={cancelBtwQuestion}
+      />
 
       <div className="actions">
         <div className="actions-main">
@@ -2404,6 +2510,22 @@ export function SessionView() {
             <span className="session-new-session-button-label">New session</span>
           </button>
           <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => setDocumentsOpen(true)} />
+          <button
+            type="button"
+            className="btw-button"
+            onClick={openBtwDrawer}
+            disabled={readySession.initializing === true || !readySession.codexSessionId || Boolean(readySession.startupError)}
+            aria-haspopup="dialog"
+            aria-expanded={btwOpen}
+            aria-label="Open BTW side questions"
+            title="Ask without interrupting this session"
+          >
+            {btwExchanges.some((exchange) => exchange.status === "running")
+              ? <LoaderCircle className="spin" size={16} />
+              : <MessageSquare size={16} />}
+            <span className="session-action-label">BTW</span>
+            {btwCompletedWhileClosed ? <span className="btw-unread-dot" aria-label="New BTW answer" /> : null}
+          </button>
           {readyWorkspace ? (
             <button
               className="git-workspace-chip"
@@ -2626,7 +2748,7 @@ export function SessionView() {
               onChange={updateComposerText}
               vimEnabled={effectiveVimEnabled}
               onSubmitShortcut={() => {
-                if (submitBusy || composerLocked) return;
+                if (submitBusy || btwSubmitting || composerLocked) return;
                 composerFormRef.current?.requestSubmit();
               }}
               onFocus={() => setComposerFocused(true)}
@@ -2645,7 +2767,7 @@ export function SessionView() {
               }
               focusRequestKey={composerFocusRequest ? String(composerFocusRequest.nonce) : null}
               focusCommand={composerFocusRequest?.command ?? "focus"}
-              disabled={submitBusy || composerLocked}
+              disabled={submitBusy || btwSubmitting || composerLocked}
             />
             <button
               className="send-button"
@@ -2653,7 +2775,7 @@ export function SessionView() {
               aria-busy={submitBusy}
               aria-label={submitBusy ? "Sending" : shouldQueueComposerInput(readySession, queuedInputs) ? "Queue" : "Send"}
               data-busy={submitBusy || undefined}
-              disabled={submitBusy || composerLocked || !composerHasContent(text)}
+              disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
             >
               {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
             </button>

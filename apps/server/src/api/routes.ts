@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type {
+  BtwExchangeResponse,
+  BtwExchangesResponse,
   CodexSkillsResponse,
   CreateSessionRequest,
   ForkSessionRequest,
@@ -52,6 +54,7 @@ import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
 import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
+import { BtwError, type BtwService } from "../services/btwService.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const restoreSessionRecoverySchema = z.object({
@@ -80,6 +83,7 @@ const createSessionSchema = z.object({
 });
 const forkSessionSchema = z.object({ name: sessionNameSchema });
 const queuedInputSchema = inputBodySchema;
+const btwQuestionSchema = z.object({ text: z.string().trim().min(1).max(20_000) });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
 const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
@@ -159,7 +163,8 @@ export function registerRoutes(
   activitySummarizer?: ActivitySummarizer,
   notificationService?: NotificationService,
   sessionTransfers?: SessionTransferService,
-  heavyCommands?: HeavyCommandService
+  heavyCommands?: HeavyCommandService,
+  btw?: BtwService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -594,6 +599,58 @@ export function registerRoutes(
       }
       if (error instanceof InputDeliveryError) {
         return reply.code(error.statusCode).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/sessions/:id/btw", { preHandler: access.requireAccess }, async (request, reply): Promise<BtwExchangesResponse | void> => {
+    const { id } = request.params as { id: string };
+    if (!btw) {
+      await reply.code(503).send({ error: "BTW questions are unavailable" });
+      return;
+    }
+    try {
+      return { exchanges: await btw.list(id) };
+    } catch (error) {
+      if (error instanceof BtwError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/sessions/:id/btw", { preHandler: access.requireAccess }, async (request, reply): Promise<BtwExchangeResponse | void> => {
+    const { id } = request.params as { id: string };
+    if (!btw) {
+      await reply.code(503).send({ error: "BTW questions are unavailable" });
+      return;
+    }
+    const body = btwQuestionSchema.parse(request.body);
+    try {
+      return reply.code(202).send({ exchange: await btw.ask(id, body.text) });
+    } catch (error) {
+      if (error instanceof BtwError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/sessions/:id/btw/:exchangeId/cancel", { preHandler: access.requireAccess }, async (request, reply): Promise<BtwExchangeResponse | void> => {
+    const { id, exchangeId } = request.params as { id: string; exchangeId: string };
+    if (!btw) {
+      await reply.code(503).send({ error: "BTW questions are unavailable" });
+      return;
+    }
+    try {
+      return reply.code(202).send({ exchange: await btw.cancel(id, exchangeId) });
+    } catch (error) {
+      if (error instanceof BtwError) {
+        await reply.code(error.statusCode).send({ error: error.message });
+        return;
       }
       throw error;
     }

@@ -1,5 +1,7 @@
 import type {
   ApprovalResponse,
+  BtwExchangeResponse,
+  BtwExchangesResponse,
   ActivitySummarySettingsResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
@@ -190,6 +192,17 @@ export const api = {
   question: (id: string) => json<QuestionResponse>(`/api/sessions/${id}/question`),
   answerQuestion: (id: string, request: QuestionAnswerRequest) =>
     json<{ ok: true }>(`/api/sessions/${id}/question`, { method: "POST", body: JSON.stringify(request) }),
+  btwExchanges: (id: string) =>
+    json<BtwExchangesResponse>(`/api/sessions/${encodeURIComponent(id)}/btw`),
+  askBtw: (id: string, text: string) =>
+    json<BtwExchangeResponse>(`/api/sessions/${encodeURIComponent(id)}/btw`, {
+      method: "POST",
+      body: JSON.stringify({ text })
+    }),
+  cancelBtw: (id: string, exchangeId: string) =>
+    json<BtwExchangeResponse>(`/api/sessions/${encodeURIComponent(id)}/btw/${encodeURIComponent(exchangeId)}/cancel`, {
+      method: "POST"
+    }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
   enqueueInput: (id: string, text: string, mode?: CollaborationMode) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode }) }),

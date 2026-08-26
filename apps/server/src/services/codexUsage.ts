@@ -26,13 +26,21 @@ interface JsonRpcFailure {
   };
 }
 
+export interface CodexAppServerMessage {
+  id?: string | number;
+  method?: string;
+  params?: unknown;
+  result?: unknown;
+  error?: unknown;
+}
+
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
-interface CodexAppServerClientOptions {
+export interface CodexAppServerClientOptions {
   codexHome: string;
   timeoutMs?: number;
   logger?: Pick<Logger, "warn" | "debug">;
@@ -151,6 +159,8 @@ export class CodexAppServerClient {
   private initialized: Promise<void> | null = null;
   private stdoutBuffer = "";
   private readonly pending = new Map<string | number, PendingRequest>();
+  private readonly messageListeners = new Set<(message: CodexAppServerMessage) => void>();
+  private readonly closeListeners = new Set<(error: Error) => void>();
 
   constructor(options: CodexAppServerClientOptions) {
     this.codexHome = options.codexHome;
@@ -163,12 +173,36 @@ export class CodexAppServerClient {
     return this.send<T>(method, params);
   }
 
-  stop(): void {
-    if (!this.child) return;
-    this.child.kill();
+  async initialize(): Promise<void> {
+    await this.ensureInitialized();
+  }
+
+  subscribe(listener: (message: CodexAppServerMessage) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
+  }
+
+  subscribeClose(listener: (error: Error) => void): () => void {
+    this.closeListeners.add(listener);
+    return () => this.closeListeners.delete(listener);
+  }
+
+  respond(id: string | number, result: unknown): void {
+    this.write({ id, result });
+  }
+
+  respondError(id: string | number, message: string, code = -32000): void {
+    this.write({ id, error: { code, message } });
+  }
+
+  stop(reason = new Error("Codex app-server stopped.")): void {
+    const child = this.child;
+    if (!child) return;
     this.child = null;
     this.initialized = null;
-    this.rejectPending(new Error("Codex app-server stopped."));
+    child.kill();
+    this.rejectPending(reason);
+    for (const listener of this.closeListeners) listener(reason);
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -188,7 +222,9 @@ export class CodexAppServerClient {
           ]
         }
       })
-        .then(() => undefined)
+        .then(() => {
+          this.write({ method: "initialized" });
+        })
         .catch((error) => {
           this.initialized = null;
           throw error;
@@ -199,16 +235,18 @@ export class CodexAppServerClient {
 
   private start(): void {
     if (this.child) return;
-    this.child = spawn("codex", ["app-server", "--stdio"], {
+    const child = spawn("codex", ["app-server", "--stdio"], {
       env: { ...process.env, CODEX_HOME: this.codexHome },
       stdio: ["pipe", "pipe", "pipe"]
     });
-    this.child.stdout.setEncoding("utf8");
-    this.child.stdout.on("data", (chunk) => this.handleStdout(chunk));
-    this.child.stderr.setEncoding("utf8");
-    this.child.stderr.on("data", (chunk) => this.logger?.debug({ stderr: chunk }, "codex app-server stderr"));
-    this.child.on("error", (error) => this.handleExit(error));
-    this.child.on("exit", (code, signal) => this.handleExit(new Error(`Codex app-server exited (${signal ?? code ?? "unknown"}).`)));
+    this.child = child;
+    this.stdoutBuffer = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => this.handleStdout(chunk));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => this.logger?.debug({ stderr: chunk }, "codex app-server stderr"));
+    child.on("error", (error) => this.handleExit(child, error));
+    child.on("exit", (code, signal) => this.handleExit(child, new Error(`Codex app-server exited (${signal ?? code ?? "unknown"}).`)));
   }
 
   private send<T = unknown>(method: string, params?: unknown): Promise<T> {
@@ -219,16 +257,23 @@ export class CodexAppServerClient {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Codex app-server request timed out: ${method}`));
-        this.stop();
+        const error = new Error(`Codex app-server request timed out: ${method}`);
+        reject(error);
+        this.stop(error);
       }, this.timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
         timer
       });
-      child.stdin.write(`${JSON.stringify(request)}\n`);
+      this.write(request);
     });
+  }
+
+  private write(message: unknown): void {
+    const child = this.child;
+    if (!child) return;
+    child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
   private handleStdout(chunk: string): void {
@@ -251,23 +296,30 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (!isResponse(message)) return;
-    const pending = this.pending.get(message.id);
-    if (!pending) return;
-    this.pending.delete(message.id);
-    clearTimeout(pending.timer);
-    if ("error" in message) {
-      pending.reject(new Error(typeof message.error.message === "string" ? message.error.message : "Codex app-server request failed."));
-      return;
+    if (isResponse(message)) {
+      const pending = this.pending.get(message.id);
+      if (pending) {
+        this.pending.delete(message.id);
+        clearTimeout(pending.timer);
+        if ("error" in message) {
+          pending.reject(new Error(typeof message.error.message === "string" ? message.error.message : "Codex app-server request failed."));
+        } else {
+          pending.resolve(message.result);
+        }
+      }
     }
-    pending.resolve(message.result);
+    if (isAppServerMessage(message)) {
+      for (const listener of this.messageListeners) listener(message);
+    }
   }
 
-  private handleExit(error: Error): void {
+  private handleExit(child: ChildProcessWithoutNullStreams, error: Error): void {
+    if (this.child !== child) return;
     this.logger?.debug({ error }, "codex app-server closed");
     this.child = null;
     this.initialized = null;
     this.rejectPending(error);
+    for (const listener of this.closeListeners) listener(error);
   }
 
   private rejectPending(error: Error): void {
@@ -277,6 +329,10 @@ export class CodexAppServerClient {
       this.pending.delete(id);
     }
   }
+}
+
+function isAppServerMessage(value: unknown): value is CodexAppServerMessage {
+  return Boolean(value) && typeof value === "object";
 }
 
 interface RawModelListResponse {

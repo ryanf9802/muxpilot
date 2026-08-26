@@ -29,6 +29,7 @@ import { GitWorkflowBroker } from "./services/gitWorkflowBroker.js";
 import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroker.js";
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
+import { BtwService } from "./services/btwService.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -36,10 +37,11 @@ const db = new AppDatabase(config.dbPath);
 const tmux = new TmuxAdapter(config.inputSubmitKeys);
 const codex = new CodexSessionStore(config.codexHome);
 const codexProcessResolver = new CodexProcessResolver();
+const events = new EventBus();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
+const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
-const events = new EventBus();
 const gitWorkflowBroker = new GitWorkflowBroker(db, join(config.dataDir, "runtime", "git-workflow-broker.sock"), app.log);
 await gitWorkflowBroker.start();
 const gitWorkspaces = new GitWorkspaceManager(db, {
@@ -184,7 +186,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw);
 
 app.get("/healthz", async () => ({
   ok: true,
@@ -195,6 +197,7 @@ app.get("/healthz", async () => ({
 let closing = false;
 
 await manager.prepareStartupRecovery();
+await btw.start();
 await manager.discoverNow();
 await manager.finishStartupRecovery();
 manager.start({ runInitialTick: false });
@@ -222,6 +225,7 @@ const close = async () => {
   await heavyCommands.stop();
   await resourceGovernor.stop();
   notifications.stop();
+  await btw.stop();
   codexUsage.stop();
   codexModels.stop();
   await pwaTrustServer.close();
