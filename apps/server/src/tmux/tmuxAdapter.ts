@@ -452,7 +452,12 @@ function isComposerContinuationBoundary(line: string, composerFirstLine: string)
     /context \d+% left/.test(normalized) ||
     isCodexReadyFooter(line) ||
     normalized === "type yes to continue" ||
+    isPlanModeSuggestion(normalized) ||
     isSlashCommandSuggestion(normalized, composerFirstLine);
+}
+
+function isPlanModeSuggestion(line: string): boolean {
+  return line.startsWith("create a plan?") && line.includes("use plan mode") && line.includes("dismiss");
 }
 
 function isSlashCommandSuggestion(line: string, composerFirstLine: string): boolean {
