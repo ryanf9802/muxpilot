@@ -239,6 +239,29 @@ describe("SessionHeaderMeta", () => {
     expect(html).toContain('href="/sessions/parent-session"');
     expect(html).toContain("Forked from original-chat");
   });
+
+  it("places context usage immediately after the repository name", () => {
+    const html = renderToStaticMarkup(createElement(SessionHeaderMeta, {
+      session: {
+        repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
+        gitWorkspace: null,
+        contextUsage: {
+          activeTokens: 12345,
+          contextWindowTokens: 200000,
+          contextPercent: 6.1725,
+          lifetimeInputTokens: 12345,
+          lifetimeCachedInputTokens: 1000,
+          lifetimeOutputTokens: 1000,
+          lifetimeReasoningTokens: 500,
+          lifetimeTotalTokens: 13845,
+          lifetimeWorkTokens: 1500,
+          sampledAt: "2026-08-26T17:00:00.000Z"
+        }
+      }
+    }));
+
+    expect(html).toContain('<span class="session-header-repo">project</span><span class="session-context-usage"');
+  });
 });
 
 describe("SessionContextUsage", () => {

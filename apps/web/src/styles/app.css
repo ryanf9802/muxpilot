@@ -2804,14 +2804,6 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.session-header-state {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-  align-self: center;
-}
-
 .heavy-command-indicator {
   min-width: 26px;
   height: 26px;
@@ -3662,19 +3654,11 @@ select:focus-visible {
 }
 
 .session-header-runtime {
-  display: grid;
-  justify-items: end;
-  gap: 4px;
-  min-width: 0;
-}
-
-.session-header-runtime-meta {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
-  max-width: 100%;
 }
 
 .session-context-usage {
@@ -3691,6 +3675,19 @@ select:focus-visible {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: 999px;
+}
+
+.session-header-meta .session-context-usage {
+  margin-left: 2px;
+}
+
+.session-header-runtime .tmux-command-metadata {
+  flex: 0 0 auto;
+  max-width: none;
+}
+
+.session-header-runtime .tmux-command-metadata .tmux-command-model {
+  max-width: none;
 }
 
 .session-title-heading {
@@ -5641,24 +5638,7 @@ select:focus-visible {
   }
 
   .session-header {
-    grid-template-rows: auto auto;
-    row-gap: 4px;
-    column-gap: 7px;
-  }
-
-  .session-header-runtime {
-    display: contents;
-  }
-
-  .session-header > .icon-button {
-    grid-column: 1;
-    grid-row: 1 / -1;
-    align-self: center;
-  }
-
-  .session-title {
-    grid-column: 2;
-    grid-row: 1;
+    gap: 7px;
   }
 
   .git-panel-backdrop { padding: 10px; }
@@ -5693,19 +5673,11 @@ select:focus-visible {
     display: none;
   }
 
-  .session-header-state {
-    grid-column: 3;
-    grid-row: 1;
-    gap: 5px;
-  }
   .heavy-command-indicator { min-width: 24px; height: 24px; padding: 0 5px; }
   .heavy-command-facts { grid-template-columns: minmax(0, 1fr); }
 
-  .session-header-runtime-meta {
-    grid-column: 2 / -1;
-    grid-row: 2;
-    justify-self: end;
-    gap: 4px;
+  .session-header-runtime {
+    gap: 5px;
   }
 
   .session-context-usage {
@@ -5716,25 +5688,8 @@ select:focus-visible {
     display: none;
   }
 
-  .tmux-command-metadata {
-    min-height: 24px;
-    gap: 5px;
-    padding: 0 4px;
-    max-width: min(164px, 58%);
-  }
-
-  .tmux-command-copied {
+  .session-header-runtime .tmux-command-metadata {
     display: none;
-  }
-
-  .tmux-command-metadata .tmux-command-model {
-    max-width: clamp(70px, 24vw, 108px);
-    font-size: 12px;
-  }
-
-  .tmux-command-metadata .tmux-command-effort {
-    padding: 1px 5px;
-    font-size: 9px;
   }
 
   .mode-toggle {

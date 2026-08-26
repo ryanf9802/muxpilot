@@ -2502,20 +2502,15 @@ export function SessionView() {
           </div>
         </div>
         <div className="session-header-runtime">
-          <div className="session-header-state">
-            <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
-            {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
-          </div>
-          <div className="session-header-runtime-meta">
-            <TmuxCommandButton
-              compact
-              session={readySession}
-              copied={copiedTmuxCommand}
-              copyEnabled={!completed && accessMode === "local"}
-              onCopy={() => void copyTmuxCommand()}
-            />
-            <SessionContextUsage session={readySession} />
-          </div>
+          <TmuxCommandButton
+            compact
+            session={readySession}
+            copied={copiedTmuxCommand}
+            copyEnabled={!completed && accessMode === "local"}
+            onCopy={() => void copyTmuxCommand()}
+          />
+          <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
+          {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
         </div>
       </div>
 
@@ -2960,15 +2955,8 @@ export function SessionLoadingView({
             ) : <p className="session-header-meta">Starting session</p>}
           </div>
           <div className="session-header-runtime">
-            <div className="session-header-state">
-              <LoadingStatusPill />
-            </div>
-            {session ? (
-              <div className="session-header-runtime-meta">
-                <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} />
-                <SessionContextUsage session={session} />
-              </div>
-            ) : null}
+            {session ? <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
+            <LoadingStatusPill />
           </div>
         </div>
       }
@@ -3805,7 +3793,10 @@ export function SessionTitleHeading({
   );
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> }) {
+export function SessionHeaderMeta({ session }: {
+  session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> &
+    Partial<Pick<ManagedSession, "contextUsage">>;
+}) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
   const title = `${session.repo.name}${dirty ? " · dirty" : ""}`;
@@ -3813,6 +3804,7 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
   return (
     <p className="session-header-meta" title={title}>
       <span className="session-header-repo">{session.repo.name}</span>
+      <SessionContextUsage session={session} />
       {dirty ? (
         <>
           <span className="session-header-meta-separator" aria-hidden="true">
@@ -3841,7 +3833,7 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
   );
 }
 
-export function SessionContextUsage({ session }: { session: Pick<ManagedSession, "contextUsage"> }) {
+export function SessionContextUsage({ session }: { session: Partial<Pick<ManagedSession, "contextUsage">> }) {
   if (!session.contextUsage) return null;
   const percent = Math.round(session.contextUsage.contextPercent);
   const detail = `${session.contextUsage.activeTokens.toLocaleString()} of ${session.contextUsage.contextWindowTokens.toLocaleString()} active context tokens`;
