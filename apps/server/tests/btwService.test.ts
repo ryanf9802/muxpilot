@@ -26,6 +26,7 @@ describe("BtwService", () => {
     expect(fork?.params).toMatchObject({
       threadId: "codex-source",
       ephemeral: true,
+      excludeTurns: true,
       approvalPolicy: "never",
       sandbox: "read-only"
     });

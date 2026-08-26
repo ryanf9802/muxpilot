@@ -199,6 +199,7 @@ export class BtwService {
       const fork = await this.client.request<ThreadForkResponse>("thread/fork", {
         threadId: run.sourceCodexSessionId,
         ephemeral: true,
+        excludeTurns: true,
         approvalPolicy: "never",
         sandbox: "read-only",
         developerInstructions: BTW_DEVELOPER_INSTRUCTIONS
