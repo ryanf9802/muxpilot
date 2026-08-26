@@ -306,6 +306,46 @@ describe("verified input transport", () => {
     expect(composerContainsInput(`› ${prompt}\n  gpt-5.6-sol · Context 100% left`, prompt)).toBe(true);
   });
 
+  it("ignores the current Codex ready footer below composed input", () => {
+    const prompt = "Can you adopt the 1316 muxpilot session with the new tooling available and just handle the workflow yourself? Make sure its good to go, get its PR up and let me know when it's ready";
+    const capture = [
+      "› Can you adopt the 1316 muxpilot session with the new tooling available and",
+      "  just handle the workflow yourself? Make sure its good to go, get its PR up",
+      "  and let me know when it's ready",
+      "",
+      "  gpt-5.6-sol medium fast · ~/.muxpilot/sessions/example · Ready"
+    ].join("\n");
+
+    expect(composerContainsInput(capture, prompt)).toBe(true);
+  });
+
+  it("submits pasted input when the current Codex ready footer remains visible", async () => {
+    const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
+    let composer = "";
+    let pasteCount = 0;
+    const submits: string[][] = [];
+    adapter.pasteText = async (_paneId, text) => {
+      pasteCount += 1;
+      composer = text;
+    };
+    adapter.capturePane = async () => [
+      `› ${composer}`,
+      "",
+      "  gpt-5.6-sol medium fast · ~/.muxpilot/sessions/example · Ready"
+    ].join("\n");
+    adapter.sendKeys = async (_paneId, keys) => {
+      submits.push(keys);
+      composer = "";
+    };
+
+    await expect(adapter.sendInput("%1", "submit this prompt")).resolves.toEqual({
+      pasteReplayCount: 0,
+      submitKeyRetryCount: 0
+    });
+    expect(pasteCount).toBe(1);
+    expect(submits).toEqual([["Enter"]]);
+  });
+
   it("replays a paste once when Codex does not display the first paste", async () => {
     const adapter = new TmuxAdapter(["Enter"], { pasteVerifyTimeoutMs: 0, pasteSettleMs: 0, submitVerifyMs: 0, pollMs: 0 });
     let pasteCount = 0;

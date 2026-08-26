@@ -443,6 +443,7 @@ function isComposerContinuationBoundary(line: string, composerFirstLine: string)
   return normalized.includes("working (") ||
     normalized.includes("esc to interrupt") ||
     /context \d+% left/.test(normalized) ||
+    isCodexReadyFooter(line) ||
     normalized === "type yes to continue" ||
     isSlashCommandSuggestion(normalized, composerFirstLine);
 }
@@ -595,12 +596,20 @@ function codexReadyScreenIndex(text: string): number {
   let contextIndex = -1;
   for (const match of text.matchAll(/\bcontext\s+\d+%\s+left\b/gi)) contextIndex = match.index;
   let readyFooterIndex = -1;
-  for (const match of text.matchAll(/^[^\S\n]*[^\n]*·[^\n]*·[^\S\n]*ready[^\S\n]*$/gim)) readyFooterIndex = match.index;
+  let lineIndex = 0;
+  for (const line of text.split("\n")) {
+    if (isCodexReadyFooter(line)) readyFooterIndex = lineIndex;
+    lineIndex += line.length + 1;
+  }
   return Math.max(
     normalized.lastIndexOf("use /skills to list available skills"),
     contextIndex,
     readyFooterIndex
   );
+}
+
+function isCodexReadyFooter(line: string): boolean {
+  return /^[^\S\n]*[^\n]*·[^\n]*·[^\S\n]*ready[^\S\n]*$/i.test(stripTerminalFormatting(line));
 }
 
 function delay(ms: number): Promise<void> {
