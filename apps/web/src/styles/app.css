@@ -4970,7 +4970,7 @@ select:focus-visible {
 }
 
 .composer > .send-button {
-  align-self: start;
+  align-self: center;
   height: 52px;
 }
 

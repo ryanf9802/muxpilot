@@ -85,7 +85,7 @@ describe("mobile session viewport layout", () => {
     expect(composerRule).toContain("--composer-control-rail-height: 74px;");
     expect(inputRule).toContain("min-height: var(--composer-control-rail-height);");
     expect(inputSurfaceRule).toContain("max(var(--composer-control-rail-height), var(--composer-content-height, 52px))");
-    expect(sendRule).toContain("align-self: start;");
+    expect(sendRule).toContain("align-self: center;");
     expect(sendRule).toContain("height: 52px;");
   });
 
