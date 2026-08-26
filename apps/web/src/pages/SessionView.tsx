@@ -107,7 +107,7 @@ import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
 import { copyText } from "../utils/clipboard.js";
-import { codeMirrorComposerFieldAttributes, noAutofillTextField } from "../utils/formFields.js";
+import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 
 const MESSAGE_PAGE_SIZE = 80;
@@ -3097,6 +3097,7 @@ export function SkillTextArea({
   skills,
   onSkillSearch,
   placeholder,
+  rows,
   focusRequestKey,
   focusCommand = "focus",
   disabled
@@ -3115,6 +3116,8 @@ export function SkillTextArea({
   focusCommand?: PrimaryInputFocusCommand;
   disabled?: boolean;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
   const [caret, setCaret] = useState(0);
   const [focused, setFocused] = useState(false);
   const [dismissedTokenStart, setDismissedTokenStart] = useState<number | null>(null);
@@ -3124,6 +3127,13 @@ export function SkillTextArea({
   const token = activeSkillToken(value, caret);
   const suggestions = useMemo(() => (token && !disabled ? skillSuggestions(skills, token.query) : []), [disabled, skills, token?.query]);
   const open = focused && Boolean(token) && token?.start !== dismissedTokenStart && suggestions.length > 0;
+  const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
+
+  useLayoutEffect(() => {
+    if (!textareaRef.current) return;
+    resizeComposerTextarea(textareaRef.current, mirrorRef.current);
+  }, [placeholder, value]);
+
   useEffect(() => {
     setSelectedIndex(0);
     setDismissedTokenStart(null);
@@ -3132,6 +3142,29 @@ export function SkillTextArea({
   useEffect(() => {
     if (focused && token) onSkillSearch?.();
   }, [focused, onSkillSearch, token?.start, token?.query]);
+
+  useEffect(() => {
+    if (vimEnabled || !focusRequestKey || disabled) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    if (focusCommand === "insertStart") {
+      textarea.setSelectionRange(0, 0);
+      setCaret(0);
+      return;
+    }
+    if (focusCommand === "appendEnd") {
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+      setCaret(end);
+      return;
+    }
+    syncCaret(textarea);
+  }, [disabled, focusCommand, focusRequestKey, vimEnabled]);
+
+  function syncCaret(element: HTMLTextAreaElement) {
+    setCaret(element.selectionStart ?? 0);
+  }
 
   function acceptSkill(skill: CodexSkill) {
     if (!token) return;
@@ -3143,9 +3176,11 @@ export function SkillTextArea({
       setCaret(next.caret);
       return;
     }
-    vimSelectionNonceRef.current += 1;
-    setVimSelectionRequest({ caret: next.caret, nonce: vimSelectionNonceRef.current });
-    setCaret(next.caret);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(next.caret, next.caret);
+      setCaret(next.caret);
+    });
   }
 
   function handleSuggestionCommand(command: SkillSuggestionCommand): boolean {
@@ -3167,30 +3202,99 @@ export function SkillTextArea({
     return true;
   }
 
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) return;
+    if (shouldSubmitComposer(event)) {
+      event.preventDefault();
+      onSubmitShortcut?.();
+      return;
+    }
+    if (!open || suggestions.length === 0) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      handleSuggestionCommand("next");
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      handleSuggestionCommand("previous");
+      return;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      handleSuggestionCommand("accept");
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      handleSuggestionCommand("dismiss");
+    }
+  }
+
+  function syncMirrorScroll(element: HTMLTextAreaElement) {
+    if (!mirrorRef.current) return;
+    mirrorRef.current.scrollTop = element.scrollTop;
+    mirrorRef.current.scrollLeft = element.scrollLeft;
+  }
+
   return (
     <div className={`skill-textarea${vimEnabled ? " skill-textarea-vim" : ""}`}>
-      <VimPromptEditor
-        value={value}
-        onChange={onChange}
-        onSubmitShortcut={onSubmitShortcut}
-        onSuggestionCommand={handleSuggestionCommand}
-        onFocus={() => {
-          setFocused(true);
-          onFocus?.();
-        }}
-        onBlur={() => {
-          setFocused(false);
-          onBlur?.();
-        }}
-        skills={skills}
-        placeholder={placeholder}
-        disabled={disabled}
-        vimEnabled={Boolean(vimEnabled)}
-        selectionRequest={vimSelectionRequest}
-        focusRequestKey={focusRequestKey}
-        focusCommand={focusCommand}
-        onCaretChange={setCaret}
-      />
+      {vimEnabled ? (
+        <VimPromptEditor
+          value={value}
+          onChange={onChange}
+          onSubmitShortcut={onSubmitShortcut}
+          onSuggestionCommand={handleSuggestionCommand}
+          onFocus={() => {
+            setFocused(true);
+            onFocus?.();
+          }}
+          onBlur={() => {
+            setFocused(false);
+            onBlur?.();
+          }}
+          skills={skills}
+          placeholder={placeholder}
+          disabled={disabled}
+          vimEnabled
+          selectionRequest={vimSelectionRequest}
+          focusRequestKey={focusRequestKey}
+          focusCommand={focusCommand}
+          onCaretChange={setCaret}
+        />
+      ) : (
+        <>
+          <div className="skill-textarea-mirror" ref={mirrorRef} aria-hidden="true">
+            {renderComposerHighlights(value, skillNames)}
+          </div>
+          <textarea
+            {...freeformComposerField}
+            ref={textareaRef}
+            value={value}
+            onChange={(event) => {
+              onChange(event.target.value);
+              syncCaret(event.target);
+              syncMirrorScroll(event.target);
+            }}
+            onKeyDown={handleKeyDown}
+            onKeyUp={(event) => syncCaret(event.currentTarget)}
+            onClick={(event) => syncCaret(event.currentTarget)}
+            onSelect={(event) => syncCaret(event.currentTarget)}
+            onFocus={() => {
+              setFocused(true);
+              onFocus?.();
+            }}
+            onBlur={() => {
+              setFocused(false);
+              onBlur?.();
+            }}
+            onScroll={(event) => syncMirrorScroll(event.currentTarget)}
+            placeholder={placeholder}
+            rows={rows}
+            disabled={disabled}
+          />
+        </>
+      )}
       {open ? (
         <div className="skill-suggestions" role="listbox" aria-label="Codex skills">
           {suggestions.map((skill, index) => (
@@ -3213,6 +3317,30 @@ export function SkillTextArea({
       ) : null}
     </div>
   );
+}
+
+function renderComposerHighlights(text: string, skillNames: Set<string>): ReactNode {
+  if (!text) return "\u00a0";
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(SKILL_REFERENCE_PATTERN)) {
+    const fullMatch = match[0];
+    const skillName = match[1];
+    const index = match.index ?? 0;
+    if (index > cursor) nodes.push(text.slice(cursor, index));
+    if (skillName && skillNames.has(skillName)) {
+      nodes.push(
+        <span className="composer-skill-reference" key={`${skillName}-${index}`}>
+          {fullMatch}
+        </span>
+      );
+    } else {
+      nodes.push(fullMatch);
+    }
+    cursor = index + fullMatch.length;
+  }
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return nodes;
 }
 
 export function SessionTitleHeading({
