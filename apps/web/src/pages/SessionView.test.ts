@@ -809,14 +809,19 @@ describe("resizeComposerTextarea", () => {
     vi.stubGlobal("window", {
       getComputedStyle: vi.fn(() => ({ minHeight: "52px", maxHeight: "180px" }))
     });
-    const textarea = { scrollHeight: 120, scrollTop: 8, scrollLeft: 2, style: {} } as HTMLTextAreaElement;
-    const mirror = { scrollTop: 0, scrollLeft: 0, style: {} } as HTMLElement;
+    const textareaSetProperty = vi.fn();
+    const mirrorSetProperty = vi.fn();
+    const textarea = { scrollHeight: 120, scrollTop: 8, scrollLeft: 2, dataset: {}, style: { setProperty: textareaSetProperty } } as unknown as HTMLTextAreaElement;
+    const mirror = { scrollTop: 0, scrollLeft: 0, style: { setProperty: mirrorSetProperty } } as unknown as HTMLElement;
 
     resizeComposerTextarea(textarea, mirror);
 
     expect(textarea.style.height).toBe("120px");
+    expect(textareaSetProperty).toHaveBeenCalledWith("--composer-content-height", "120px");
+    expect(textarea.dataset.composerResizing).toBeUndefined();
     expect(textarea.style.overflowY).toBe("hidden");
     expect(mirror.style.height).toBe("120px");
+    expect(mirrorSetProperty).toHaveBeenCalledWith("--composer-content-height", "120px");
     expect(mirror.scrollTop).toBe(8);
     expect(mirror.scrollLeft).toBe(2);
   });
@@ -825,8 +830,8 @@ describe("resizeComposerTextarea", () => {
     vi.stubGlobal("window", {
       getComputedStyle: vi.fn(() => ({ minHeight: "52px", maxHeight: "180px" }))
     });
-    const textarea = { scrollHeight: 260, scrollTop: 42, scrollLeft: 0, style: {} } as HTMLTextAreaElement;
-    const mirror = { scrollTop: 0, scrollLeft: 0, style: {} } as HTMLElement;
+    const textarea = { scrollHeight: 260, scrollTop: 42, scrollLeft: 0, dataset: {}, style: { setProperty: vi.fn() } } as unknown as HTMLTextAreaElement;
+    const mirror = { scrollTop: 0, scrollLeft: 0, style: { setProperty: vi.fn() } } as unknown as HTMLElement;
 
     resizeComposerTextarea(textarea, mirror);
 

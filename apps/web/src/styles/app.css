@@ -4956,16 +4956,36 @@ select:focus-visible {
 }
 
 .composer {
+  --composer-control-rail-height: 74px;
+
   display: grid;
   flex: 0 0 auto;
   grid-template-columns: auto minmax(0, 1fr) 48px;
   gap: 8px;
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
   max-width: 100%;
   padding: 0;
   background: transparent;
   border: 0;
+}
+
+.composer-vim-available {
+  --composer-control-rail-height: 114px;
+}
+
+.composer > .skill-textarea {
+  min-height: var(--composer-control-rail-height);
+}
+
+.composer > .skill-textarea textarea:not([data-composer-resizing]),
+.composer > .skill-textarea .skill-textarea-mirror {
+  height: max(var(--composer-control-rail-height), var(--composer-content-height, 52px)) !important;
+}
+
+.composer > .skill-textarea-vim > .vim-editor,
+.composer > .skill-textarea-vim .cm-editor {
+  min-height: var(--composer-control-rail-height);
 }
 
 .skill-textarea {

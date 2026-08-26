@@ -62,12 +62,19 @@ describe("mobile session viewport layout", () => {
   it("places composer settings in a vertical rail left of the input", () => {
     const settingsRule = cssBlock(styles, ".composer-settings");
     const composerRule = cssBlock(styles, ".composer");
+    const vimComposerRule = cssBlock(styles, ".composer-vim-available");
     const sendRule = cssBlock(styles, ".composer > .send-button");
+    const inputRule = cssBlock(styles, ".composer > .skill-textarea");
+    const inputSurfaceRule = cssBlock(styles, ".composer > .skill-textarea textarea:not([data-composer-resizing]),\n.composer > .skill-textarea .skill-textarea-mirror");
     expect(settingsRule).toContain("display: grid;");
     expect(settingsRule).toContain("grid-auto-flow: row;");
     expect(settingsRule).toContain("align-content: start;");
     expect(composerRule).toContain("grid-template-columns: auto minmax(0, 1fr) 48px;");
-    expect(composerRule).toContain("align-items: start;");
+    expect(composerRule).toContain("align-items: stretch;");
+    expect(composerRule).toContain("--composer-control-rail-height: 74px;");
+    expect(vimComposerRule).toContain("--composer-control-rail-height: 114px;");
+    expect(inputRule).toContain("min-height: var(--composer-control-rail-height);");
+    expect(inputSurfaceRule).toContain("max(var(--composer-control-rail-height), var(--composer-content-height, 52px))");
     expect(sendRule).toContain("align-self: start;");
     expect(sendRule).toContain("height: 52px;");
   });

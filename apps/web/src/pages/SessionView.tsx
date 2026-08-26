@@ -2821,7 +2821,7 @@ export function SessionView() {
           ) : null}
           {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
           {fastModeError ? <p className="mode-toggle-error" role="alert">{fastModeError}</p> : null}
-          <form className="composer" ref={composerFormRef} onSubmit={submit}>
+          <form className={vimAvailable ? "composer composer-vim-available" : "composer"} ref={composerFormRef} onSubmit={submit}>
             <div className="composer-settings" role="group" aria-label="Composer settings">
               <ModeToggle
                 mode={readySession.inputMode}
@@ -2849,6 +2849,7 @@ export function SessionView() {
               onBlur={() => setComposerFocused(false)}
               skills={codexSkills}
               onSkillSearch={() => void refreshCodexSkills()}
+              layoutKey={vimAvailable ? "vim-available" : "compact"}
               placeholder={
                 composerLock ??
                 (shouldQueueComposerInput(readySession, queuedInputs)
@@ -3178,14 +3179,19 @@ export function resizeComposerTextarea(textarea: HTMLTextAreaElement, mirror: HT
   const styles = window.getComputedStyle(textarea);
   const minHeight = parsePixelValue(styles.minHeight) ?? 0;
   const maxHeight = parsePixelValue(styles.maxHeight) ?? Number.POSITIVE_INFINITY;
+  textarea.dataset.composerResizing = "true";
   textarea.style.height = "auto";
-  const nextHeight = Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight);
+  const contentHeight = textarea.scrollHeight;
+  const nextHeight = Math.min(Math.max(contentHeight, minHeight), maxHeight);
   const height = `${nextHeight}px`;
-  const overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  const overflowY = contentHeight > maxHeight ? "auto" : "hidden";
   textarea.style.height = height;
+  textarea.style.setProperty("--composer-content-height", height);
+  delete textarea.dataset.composerResizing;
   textarea.style.overflowY = overflowY;
   if (!mirror) return;
   mirror.style.height = height;
+  mirror.style.setProperty("--composer-content-height", height);
   mirror.scrollTop = textarea.scrollTop;
   mirror.scrollLeft = textarea.scrollLeft;
 }
@@ -3531,6 +3537,7 @@ export function SkillTextArea({
   onSkillSearch,
   placeholder,
   rows,
+  layoutKey,
   focusRequestKey,
   focusCommand = "focus",
   disabled
@@ -3545,6 +3552,7 @@ export function SkillTextArea({
   onSkillSearch?: () => void;
   placeholder?: string;
   rows?: number;
+  layoutKey?: string;
   focusRequestKey?: string | null;
   focusCommand?: PrimaryInputFocusCommand;
   disabled?: boolean;
@@ -3565,7 +3573,7 @@ export function SkillTextArea({
   useLayoutEffect(() => {
     if (!textareaRef.current) return;
     resizeComposerTextarea(textareaRef.current, mirrorRef.current);
-  }, [placeholder, value]);
+  }, [layoutKey, placeholder, value]);
 
   useEffect(() => {
     setSelectedIndex(0);
