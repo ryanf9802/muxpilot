@@ -4725,6 +4725,10 @@ select:focus-visible {
   margin: 4px 0;
 }
 
+.markdown .task-list-item {
+  list-style: none;
+}
+
 .markdown blockquote {
   margin: 12px 0;
   padding-left: 12px;

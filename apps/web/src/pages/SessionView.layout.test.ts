@@ -102,6 +102,11 @@ describe("mobile session viewport layout", () => {
     expect(wordmarkRule).toContain("display: none;");
     expect(narrowTopbarStyles).not.toContain(".brand-logo");
   });
+
+  it("renders Markdown task checkboxes without a second list marker", () => {
+    const taskListItemRule = cssBlock(styles, ".markdown .task-list-item");
+    expect(taskListItemRule).toContain("list-style: none;");
+  });
 });
 
 function cssBlock(source: string, selector: string): string {
