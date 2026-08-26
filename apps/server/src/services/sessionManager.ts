@@ -196,7 +196,7 @@ export class SessionManager {
   private async prepareOrchestratedLaunch(options: CodexLaunchOptions): Promise<{ options: CodexLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
-    const instruction = "Use the muxpilot_sessions tools to coordinate with other muxpilot sessions. Agent-created children must use fresh context. Never poll a child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with the raw tmux, process, and Codex file tools; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
+    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with the raw tmux, process, and Codex file tools; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
     return {
       capabilityId: capability.capabilityId,
       options: {

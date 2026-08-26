@@ -5,7 +5,9 @@ description: Coordinate muxpilot sessions through the session tools, including d
 
 # Muxpilot Session Orchestration
 
-Use the tools exposed by `muxpilot_sessions` when a task benefits from another muxpilot session. These tools coordinate independent Codex sessions; they do not create in-process subagents.
+Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to run a review in parallel. If built-in subagents are unavailable, keep the review in the current session instead of substituting a nested muxpilot session.
+
+Use the tools exposed by `muxpilot_sessions` only when the operator explicitly requests a nested muxpilot session or the delegated work is durable and benefits from independent monitoring and its own resource scope. These tools coordinate independent Codex sessions; they do not create in-process subagents.
 
 ## Visibility and messaging
 

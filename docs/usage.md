@@ -82,6 +82,12 @@ Forking is allowed while the source is working, but Codex may record its partial
 
 A fork of a managed Git session inherits the same target branch but receives its own managed workspace. Unintegrated files from the source worktree are not copied; the fork starts from the current target branch.
 
+## Agent delegation
+
+Routine bounded delegation, including standard code-review passes, uses Codex's built-in subagents and does not create nested muxpilot sessions. If built-in subagents are unavailable, the review remains in the current session.
+
+Nested muxpilot sessions are reserved for work the operator explicitly requests as a separate session or durable delegated work that benefits from independent monitoring and its own resource scope. Those sessions remain visible in muxpilot and use the session-orchestration lifecycle and resource guardrails.
+
 ## Moving sessions between hosts
 
 The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts and portable session preferences, then resumes the imported sessions in tmux.

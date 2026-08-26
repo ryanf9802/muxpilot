@@ -5108,6 +5108,11 @@ describe("SessionManager transcript isolation", () => {
     expect(createCalls).toEqual([{ cwd: repo, name: "new-work", options: expect.objectContaining({
       resourceScopeName: "muxpilot-session-0123456789abcdef01234567.scope"
     }) }]);
+    expect(createCalls[0]?.options.developerInstructions).toContain("Use built-in Codex subagents for routine bounded delegation");
+    expect(createCalls[0]?.options.developerInstructions).toContain("especially standard code-review passes");
+    expect(createCalls[0]?.options.developerInstructions).toContain("Do not create a nested muxpilot session merely to perform a review in parallel");
+    expect(createCalls[0]?.options.developerInstructions).toContain("if built-in subagents are unavailable, keep the review in the current session");
+    expect(createCalls[0]?.options.developerInstructions).toContain("only when the operator explicitly requests a nested muxpilot session or the work is durable");
     expect(bindCapability).toHaveBeenCalledWith("0123456789abcdef01234567", created.id);
     expect(created).toMatchObject({
       orchestrationAvailable: true,

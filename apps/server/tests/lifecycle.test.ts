@@ -41,6 +41,9 @@ describe("production bundled skill startup", () => {
       const installedOrchestrationSkill = await readFile(join(home, "skills", "muxpilot-session-orchestration", "SKILL.md"), "utf8");
       expect(installedOrchestrationSkill).toContain("event-driven wait");
       expect(installedOrchestrationSkill).toContain("Approval decisions remain with the operator");
+      expect(installedOrchestrationSkill).toContain("Use built-in Codex subagents for routine bounded delegation");
+      expect(installedOrchestrationSkill).toContain("Do not create a nested muxpilot session merely to run a review in parallel");
+      expect(installedOrchestrationSkill).toContain("only when the operator explicitly requests a nested muxpilot session");
 
       await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
