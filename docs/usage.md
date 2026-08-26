@@ -72,6 +72,8 @@ The environment variable is the only documents directory; the session working di
 
 Open **Documents** in the session header to browse the current files and rendered Markdown. Relative links from one listed document to another, such as links in `INDEX.md`, switch the viewer in place; external links open separately. The operator view is read-only; document creation and editing remain agent-managed. Documents persist when a session is missing, archived, killed, or restored.
 
+The **BTW** drawer can also create or edit documents from a plain-language request while the main agent keeps working. The BTW agent works in an isolated copy and cannot delete or rename documents or write elsewhere. muxpilot validates the changes, waits for a safe boundary, applies them atomically, and gives the main agent a private notice so it can re-read and maintain the changed documents. If the canonical files change meanwhile, BTW regenerates once from the latest versions and otherwise fails without overwriting them.
+
 A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 MiB total. The viewer and transfer system reject nested paths, dotfiles, symlinks, non-UTF-8 content, and files outside those limits. Do not use session documents for credentials, tokens, raw transcripts, or other unnecessary sensitive data.
 
 ## Restoring sessions

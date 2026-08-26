@@ -1,5 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { TextDecoder } from "node:util";
 import type { SessionDocumentResponse, SessionDocumentsResponse } from "@muxpilot/core";
@@ -10,6 +11,7 @@ export const MAX_SESSION_DOCUMENT_BYTES = 256 * 1024;
 export const MAX_SESSION_DOCUMENT_TOTAL_BYTES = 10 * 1024 * 1024;
 const DOCUMENT_NAME = /^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*\.md$/i;
 const SCOPE_ID = /^[A-Za-z0-9_-]{8,128}$/;
+const EXCHANGE_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 export function isSessionDocumentName(name: string): boolean {
@@ -20,6 +22,20 @@ export interface SessionDocumentSnapshot {
   name: string;
   contents: Buffer;
   updatedAt: string;
+}
+
+export interface BtwDocumentChanges {
+  created: string[];
+  updated: string[];
+}
+
+export type BtwDocumentApplyResult =
+  | { status: "applied"; changes: BtwDocumentChanges }
+  | { status: "conflict"; names: string[] };
+
+interface BtwDocumentBaseline {
+  version: 1;
+  hashes: Record<string, string>;
 }
 
 export class SessionDocumentError extends Error {
@@ -79,39 +95,97 @@ export class SessionDocumentService {
   async snapshot(scopeId: string): Promise<SessionDocumentSnapshot[]> {
     const root = this.documentsRoot(scopeId);
     await this.ensureScope(scopeId);
-    const entries = await readdir(root, { withFileTypes: true });
-    const names = entries.map((entry) => entry.name);
-    if (names.length > MAX_SESSION_DOCUMENTS) throw new SessionDocumentError("Session has more than 100 documents", 413);
+    return snapshotDirectory(root);
+  }
 
-    const snapshots: SessionDocumentSnapshot[] = [];
-    let totalBytes = 0;
-    for (const name of names) {
-      requireDocumentName(name);
-      const path = join(root, name);
-      let handle;
-      try {
-        handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-      } catch {
-        throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
-      }
-      try {
-        const details = await handle.stat();
-        if (!details.isFile()) throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
-        if (details.size > MAX_SESSION_DOCUMENT_BYTES) {
-          throw new SessionDocumentError(`Document '${name}' exceeds the 256 KiB limit`, 413);
-        }
-        totalBytes += details.size;
-        if (totalBytes > MAX_SESSION_DOCUMENT_TOTAL_BYTES) {
-          throw new SessionDocumentError("Session documents exceed the 10 MiB total limit", 413);
-        }
-        const contents = await handle.readFile();
-        decodeDocument(contents);
-        snapshots.push({ name, contents, updatedAt: details.mtime.toISOString() });
-      } finally {
-        await handle.close();
-      }
+  async prepareBtwStaging(scopeId: string, exchangeId: string): Promise<string> {
+    const source = await this.snapshot(scopeId);
+    const root = this.btwStagingRoot(scopeId, exchangeId);
+    const documents = join(root, "documents");
+    await rm(root, { recursive: true, force: true });
+    await mkdir(documents, { recursive: true, mode: 0o700 });
+    for (const document of source) {
+      await writeFile(join(documents, document.name), document.contents, { mode: 0o600 });
     }
-    return snapshots.sort((first, second) => documentNameOrder(first.name, second.name));
+    const baseline: BtwDocumentBaseline = {
+      version: 1,
+      hashes: Object.fromEntries(source.map((document) => [document.name, documentHash(document.contents)]))
+    };
+    await writeFile(join(root, "baseline.json"), JSON.stringify(baseline), { mode: 0o600 });
+    return documents;
+  }
+
+  async inspectBtwStaging(scopeId: string, exchangeId: string): Promise<BtwDocumentChanges> {
+    const baseline = await this.readBtwBaseline(scopeId, exchangeId);
+    const staged = await snapshotDirectory(join(this.btwStagingRoot(scopeId, exchangeId), "documents"));
+    const stagedByName = new Map(staged.map((document) => [document.name, document]));
+    const missing = Object.keys(baseline.hashes).filter((name) => !stagedByName.has(name));
+    if (missing.length > 0) throw new SessionDocumentError(`BTW cannot delete or rename document '${missing[0]}'`, 409);
+    return {
+      created: staged.filter((document) => baseline.hashes[document.name] === undefined).map((document) => document.name),
+      updated: staged.filter((document) => {
+        const previous = baseline.hashes[document.name];
+        return previous !== undefined && previous !== documentHash(document.contents);
+      }).map((document) => document.name)
+    };
+  }
+
+  async applyBtwStaging(scopeId: string, exchangeId: string): Promise<BtwDocumentApplyResult> {
+    const baseline = await this.readBtwBaseline(scopeId, exchangeId);
+    const stagingRoot = join(this.btwStagingRoot(scopeId, exchangeId), "documents");
+    const staged = await snapshotDirectory(stagingRoot);
+    const changes = await this.inspectBtwStaging(scopeId, exchangeId);
+    const touched = [...changes.created, ...changes.updated];
+    const current = await this.snapshot(scopeId);
+    const currentByName = new Map(current.map((document) => [document.name.toLowerCase(), document]));
+    const conflicts: string[] = [];
+    for (const name of changes.created) {
+      if (currentByName.has(name.toLowerCase())) conflicts.push(name);
+    }
+    for (const name of changes.updated) {
+      const existing = currentByName.get(name.toLowerCase());
+      if (!existing || existing.name !== name || documentHash(existing.contents) !== baseline.hashes[name]) conflicts.push(name);
+    }
+    if (conflicts.length > 0) return { status: "conflict", names: conflicts };
+
+    const stagedByName = new Map(staged.map((document) => [document.name.toLowerCase(), document]));
+    const touchedKeys = new Set(touched.map((name) => name.toLowerCase()));
+    const merged = [
+      ...current.filter((document) => !touchedKeys.has(document.name.toLowerCase())),
+      ...touched.map((name) => stagedByName.get(name.toLowerCase())!).filter(Boolean)
+    ];
+    await this.replace(scopeId, merged);
+    return { status: "applied", changes };
+  }
+
+  async cleanupBtwStaging(scopeId: string, exchangeId: string): Promise<void> {
+    await rm(this.btwStagingRoot(scopeId, exchangeId), { recursive: true, force: true });
+  }
+
+  private async readBtwBaseline(scopeId: string, exchangeId: string): Promise<BtwDocumentBaseline> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(join(this.btwStagingRoot(scopeId, exchangeId), "baseline.json"), "utf8"));
+    } catch {
+      throw new SessionDocumentError("BTW document staging is unavailable", 409);
+    }
+    if (!parsed || typeof parsed !== "object" || (parsed as { version?: unknown }).version !== 1) {
+      throw new SessionDocumentError("BTW document staging is invalid", 409);
+    }
+    const hashes = (parsed as { hashes?: unknown }).hashes;
+    if (!hashes || typeof hashes !== "object" || Array.isArray(hashes)) {
+      throw new SessionDocumentError("BTW document staging is invalid", 409);
+    }
+    const entries = Object.entries(hashes);
+    if (entries.some(([name, hash]) => !isSessionDocumentName(name) || typeof hash !== "string" || !/^[a-f\d]{64}$/.test(hash))) {
+      throw new SessionDocumentError("BTW document staging is invalid", 409);
+    }
+    return { version: 1, hashes: Object.fromEntries(entries) };
+  }
+
+  private btwStagingRoot(scopeId: string, exchangeId: string): string {
+    if (!EXCHANGE_ID.test(exchangeId)) throw new SessionDocumentError("Invalid BTW exchange", 400);
+    return join(this.scopeRoot(scopeId), "btw-staging", exchangeId);
   }
 
   async replace(scopeId: string, documents: SessionDocumentSnapshot[]): Promise<void> {
@@ -152,6 +226,50 @@ export class SessionDocumentService {
     if (candidate === root || !candidate.startsWith(`${root}${sep}`)) throw new SessionDocumentError("Invalid document scope", 400);
     return candidate;
   }
+}
+
+async function snapshotDirectory(root: string): Promise<SessionDocumentSnapshot[]> {
+  const rootDetails = await lstat(root).catch(() => null);
+  if (!rootDetails?.isDirectory() || rootDetails.isSymbolicLink()) {
+    throw new SessionDocumentError("Session documents directory is invalid", 409);
+  }
+  const entries = await readdir(root, { withFileTypes: true });
+  const names = entries.map((entry) => entry.name);
+  if (names.length > MAX_SESSION_DOCUMENTS) throw new SessionDocumentError("Session has more than 100 documents", 413);
+
+  const snapshots: SessionDocumentSnapshot[] = [];
+  let totalBytes = 0;
+  for (const name of names) {
+    requireDocumentName(name);
+    const path = join(root, name);
+    let handle;
+    try {
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    } catch {
+      throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
+    }
+    try {
+      const details = await handle.stat();
+      if (!details.isFile()) throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
+      if (details.size > MAX_SESSION_DOCUMENT_BYTES) {
+        throw new SessionDocumentError(`Document '${name}' exceeds the 256 KiB limit`, 413);
+      }
+      totalBytes += details.size;
+      if (totalBytes > MAX_SESSION_DOCUMENT_TOTAL_BYTES) {
+        throw new SessionDocumentError("Session documents exceed the 10 MiB total limit", 413);
+      }
+      const contents = await handle.readFile();
+      decodeDocument(contents);
+      snapshots.push({ name, contents, updatedAt: details.mtime.toISOString() });
+    } finally {
+      await handle.close();
+    }
+  }
+  return snapshots.sort((first, second) => documentNameOrder(first.name, second.name));
+}
+
+function documentHash(contents: Buffer): string {
+  return createHash("sha256").update(contents).digest("hex");
 }
 
 function requireDocumentName(name: string): void {

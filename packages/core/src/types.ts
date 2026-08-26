@@ -458,6 +458,15 @@ export interface UpdateQueuedInputRequest {
 
 export type BtwExchangeStatus = "running" | "completed" | "failed" | "cancelled";
 
+export type BtwDocumentOperationPhase = "waiting" | "retrying" | "notifying" | "applied" | "conflict";
+
+export interface BtwDocumentOperation {
+  phase: BtwDocumentOperationPhase;
+  created: string[];
+  updated: string[];
+  retryCount: number;
+}
+
 export interface BtwExchange {
   id: string;
   sessionId: string;
@@ -468,6 +477,7 @@ export interface BtwExchange {
   createdAt: string;
   firstTokenAt: string | null;
   completedAt: string | null;
+  documentOperation?: BtwDocumentOperation | null;
 }
 
 export interface CreateBtwExchangeRequest {
@@ -499,7 +509,9 @@ export interface SessionEvent {
     | "queue.updated"
     | "btw.started"
     | "btw.delta"
-    | "btw.finished";
+    | "btw.updated"
+    | "btw.finished"
+    | "documents.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;

@@ -53,6 +53,7 @@ describe("production bundled skill startup", () => {
       expect(installedDocumentsSkill).toContain("Read `INDEX.md` first");
       expect(installedDocumentsSkill).toContain("The session working directory is not the documents directory");
       expect(installedDocumentsSkill).toContain("Never attempt a cross-session document write");
+      expect(installedDocumentsSkill).toContain("The muxpilot BTW flow is a controlled exception");
 
       await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });

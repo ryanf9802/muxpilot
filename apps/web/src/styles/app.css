@@ -3244,6 +3244,49 @@ select:focus-visible {
 
 .btw-error > svg { flex: 0 0 auto; margin-top: 1px; }
 
+.btw-document-operation {
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-action) 7%, var(--color-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--color-action) 28%, var(--color-border));
+  border-radius: 8px;
+}
+
+.btw-document-operation[data-phase="applied"] { color: var(--color-success); }
+.btw-document-operation[data-phase="conflict"],
+.btw-document-operation[data-status="failed"],
+.btw-document-operation[data-status="cancelled"] { color: var(--color-error); }
+
+.btw-document-operation-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+}
+
+.btw-document-links { display: grid; gap: 5px; }
+
+.btw-document-links button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 8px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  text-align: left;
+}
+
+.btw-document-links button:not(:disabled):hover { border-color: var(--color-action); }
+.btw-document-links button:disabled { color: var(--color-text-muted); opacity: 0.72; }
+.btw-document-links button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btw-document-links button small { color: var(--color-text-subtle); font-size: 10px; }
+
 .btw-drawer-error {
   padding: 8px 10px;
   background: var(--color-error-soft);

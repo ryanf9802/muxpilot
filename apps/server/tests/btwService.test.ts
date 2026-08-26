@@ -9,6 +9,178 @@ import type { CodexAppServerMessage } from "../src/services/codexUsage.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 describe("BtwService", () => {
+  it("isolates document writes and waits for a safe applied handoff", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    const events = new EventBus();
+    const published: SessionEvent[] = [];
+    events.subscribe((event) => published.push(event));
+    const service = new BtwService({ db, events, client, documents: coordinator, handoffRetryMs: 0, now: timestampClock() });
+    await service.start();
+
+    const exchange = await service.ask("source", "Create plan.md with an implementation checklist");
+    await eventually(() => client.requests.some((request) => request.method === "turn/start"));
+    expect(client.requests.find((request) => request.method === "thread/fork")?.params).toMatchObject({
+      ephemeral: true,
+      deferGoalContinuation: true,
+      sandbox: "workspace-write",
+      cwd: "/staging/documents",
+      runtimeWorkspaceRoots: ["/staging/documents"]
+    });
+    expect(client.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: ["/staging/documents"],
+        networkAccess: false,
+        excludeTmpdirEnvVar: true,
+        excludeSlashTmp: true
+      }
+    });
+
+    client.emit({
+      method: "turn/completed",
+      params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed", error: null } }
+    });
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "completed");
+
+    expect(coordinator.applyCalls).toBe(1);
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      status: "completed",
+      documentOperation: { phase: "applied", created: ["plan.md"], updated: [], retryCount: 0 }
+    });
+    expect(published.map((event) => event.type)).toEqual(["btw.started", "btw.updated", "btw.finished"]);
+    await service.stop();
+    await db.close();
+  });
+
+  it("completes an ordinary BTW answer without a document handoff when staging is unchanged", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    coordinator.changes = { created: [], updated: [] };
+    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    await service.start();
+
+    const exchange = await service.ask("source", "What owns input delivery?");
+    await eventually(() => client.requests.some((request) => request.method === "turn/start"));
+    client.emit({ method: "item/agentMessage/delta", params: { threadId: "btw-thread", delta: "SessionManager" } });
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "completed");
+
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      answer: "SessionManager",
+      status: "completed",
+      documentOperation: null
+    });
+    expect(coordinator.applyCalls).toBe(0);
+    await service.stop();
+    await db.close();
+  });
+
+  it("regenerates once from fresh documents when the handoff conflicts", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    coordinator.conflictsRemaining = 1;
+    const service = new BtwService({
+      db,
+      events: new EventBus(),
+      client,
+      documents: coordinator,
+      handoffRetryMs: 0,
+      now: timestampClock()
+    });
+    await service.start();
+
+    const exchange = await service.ask("source", "Update plan.md");
+    await eventually(() => client.requests.filter((request) => request.method === "turn/start").length === 1);
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(() => client.requests.filter((request) => request.method === "turn/start").length === 2);
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      status: "running",
+      documentOperation: { phase: "retrying", retryCount: 1 }
+    });
+
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "completed");
+    expect(coordinator.applyCalls).toBe(2);
+    expect(coordinator.prepareCalls).toBe(2);
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      documentOperation: { phase: "applied", retryCount: 1 }
+    });
+    await service.stop();
+    await db.close();
+  });
+
+  it("resumes a persisted waiting document handoff after restart without recreating staging", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    await db.putBtwExchange({
+      id: "waiting-exchange",
+      sessionId: "source",
+      question: "Create plan.md",
+      answer: "Created the requested plan.",
+      status: "running",
+      error: null,
+      createdAt: "2026-08-26T11:00:00.000Z",
+      firstTokenAt: "2026-08-26T11:00:01.000Z",
+      completedAt: null,
+      documentOperation: { phase: "waiting", created: ["plan.md"], updated: [], retryCount: 0 }
+    });
+    const coordinator = new FakeDocumentCoordinator();
+    const service = new BtwService({
+      db,
+      events: new EventBus(),
+      client: new FakeAppServerClient(),
+      documents: coordinator,
+      handoffRetryMs: 0,
+      now: timestampClock()
+    });
+
+    await service.start();
+    await eventually(async () => (await db.getBtwExchange("source", "waiting-exchange"))?.status === "completed");
+    expect(coordinator.prepareCalls).toBe(0);
+    expect(coordinator.applyCalls).toBe(1);
+    await service.stop();
+    await db.close();
+  });
+
+  it("fails safely instead of overwriting after a second document conflict", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    coordinator.conflictsRemaining = 2;
+    const service = new BtwService({
+      db,
+      events: new EventBus(),
+      client,
+      documents: coordinator,
+      handoffRetryMs: 0,
+      now: timestampClock()
+    });
+    await service.start();
+
+    const exchange = await service.ask("source", "Update plan.md");
+    await eventually(() => client.requests.filter((request) => request.method === "turn/start").length === 1);
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(() => client.requests.filter((request) => request.method === "turn/start").length === 2);
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "failed");
+
+    expect(coordinator.applyCalls).toBe(2);
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      status: "failed",
+      documentOperation: { phase: "conflict", retryCount: 1 }
+    });
+    await service.stop();
+    await db.close();
+  });
+
   it("answers through an ephemeral read-only fork and streams outside the source transcript", async () => {
     const db = await tempDb();
     await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
@@ -153,6 +325,40 @@ class FakeAppServerClient {
   }
 
   stop(): void {}
+}
+
+class FakeDocumentCoordinator {
+  applyCalls = 0;
+  prepareCalls = 0;
+  conflictsRemaining = 0;
+  changes = { created: ["plan.md"], updated: [] as string[] };
+
+  async prepareBtwDocumentStaging(): Promise<{ documentsRoot: string; sourceCwd: string }> {
+    this.prepareCalls += 1;
+    return { documentsRoot: "/staging/documents", sourceCwd: "/repo" };
+  }
+
+  async inspectBtwDocumentStaging(): Promise<{ created: string[]; updated: string[] }> {
+    return this.changes;
+  }
+
+  async cleanupBtwDocumentStaging(): Promise<void> {}
+
+  async applyBtwDocumentStaging(): Promise<
+    | { status: "conflict"; names: string[] }
+    | { status: "applied"; changes: { created: string[]; updated: string[] }; noticeDelivered: boolean }
+  > {
+    this.applyCalls += 1;
+    if (this.conflictsRemaining > 0) {
+      this.conflictsRemaining -= 1;
+      return { status: "conflict", names: ["plan.md"] };
+    }
+    return { status: "applied", changes: this.changes, noticeDelivered: true };
+  }
+
+  async deliverBtwDocumentNotice(): Promise<boolean> {
+    return true;
+  }
 }
 
 async function tempDb(): Promise<AppDatabase> {

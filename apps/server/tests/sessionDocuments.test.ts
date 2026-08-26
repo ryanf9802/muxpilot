@@ -41,6 +41,43 @@ describe("SessionDocumentService", () => {
     await writeFile(join(root, "documents", "large.md"), Buffer.alloc(256 * 1024 + 1));
     await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 413 });
   });
+
+  it("applies created and updated BTW documents without replacing concurrent untouched files", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-btw");
+    await writeFile(join(root, "documents", "plan.md"), "# Original\n");
+    const staging = await service.prepareBtwStaging("documents-btw", "exchange-1");
+    await writeFile(join(staging, "plan.md"), "# Updated\n");
+    await writeFile(join(staging, "notes.md"), "# Notes\n");
+    await writeFile(join(root, "documents", "main-agent.md"), "# Concurrent untouched file\n");
+
+    expect(await service.inspectBtwStaging("documents-btw", "exchange-1")).toEqual({
+      created: ["notes.md"],
+      updated: ["plan.md"]
+    });
+    expect(await service.applyBtwStaging("documents-btw", "exchange-1")).toEqual({
+      status: "applied",
+      changes: { created: ["notes.md"], updated: ["plan.md"] }
+    });
+    expect((await service.read("documents-btw", "plan.md")).document.content).toBe("# Updated\n");
+    expect((await service.read("documents-btw", "main-agent.md")).document.content).toBe("# Concurrent untouched file\n");
+  });
+
+  it("detects conflicts and rejects BTW deletes or renames", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-conflict");
+    await writeFile(join(root, "documents", "plan.md"), "# Original\n");
+    const staging = await service.prepareBtwStaging("documents-conflict", "exchange-2");
+    await writeFile(join(staging, "plan.md"), "# BTW update\n");
+    await writeFile(join(root, "documents", "plan.md"), "# Main update\n");
+
+    expect(await service.applyBtwStaging("documents-conflict", "exchange-2")).toEqual({
+      status: "conflict",
+      names: ["plan.md"]
+    });
+    await rm(join(staging, "plan.md"));
+    await expect(service.inspectBtwStaging("documents-conflict", "exchange-2")).rejects.toMatchObject({ statusCode: 409 });
+  });
 });
 
 async function fixture(): Promise<SessionDocumentService> {

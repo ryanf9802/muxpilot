@@ -17,6 +17,29 @@ afterEach(() => {
 });
 
 describe("DocumentsModal", () => {
+  it("opens a requested applied document instead of the default index", async () => {
+    const documents = [
+      { name: "INDEX.md", sizeBytes: 10, updatedAt: "2026-08-25T00:00:00.000Z" },
+      { name: "plan.md", sizeBytes: 12, updatedAt: "2026-08-25T00:00:00.000Z" }
+    ];
+    const read = vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: { name: "plan.md", content: "# Requested plan", sizeBytes: 12, updatedAt: documents[1]!.updatedAt }
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents} requestedDocument="plan.md" listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(read).toHaveBeenCalledWith("session-1", "plan.md");
+    expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
+    act(() => root.unmount());
+  });
+
   it("prefers INDEX.md and renders its Markdown read-only", async () => {
     const documents = [
       { name: "tasks.md", sizeBytes: 8, updatedAt: "2026-08-25T00:00:00.000Z" },

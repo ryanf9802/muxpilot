@@ -40,7 +40,6 @@ const codexProcessResolver = new CodexProcessResolver();
 const events = new EventBus();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
-const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const gitWorkflowBroker = new GitWorkflowBroker(db, join(config.dataDir, "runtime", "git-workflow-broker.sock"), app.log);
 await gitWorkflowBroker.start();
@@ -132,6 +131,7 @@ const manager = new SessionManager(
   managedEnvironment,
   codexModels
 );
+const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   db,
   manager,

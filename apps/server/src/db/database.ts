@@ -153,6 +153,7 @@ interface BtwExchangeRow {
   created_at: string;
   first_token_at: string | null;
   completed_at: string | null;
+  document_operation_json: string | null;
 }
 
 interface QueuedInputEchoCandidateRow {
@@ -400,6 +401,14 @@ export class AppDatabase {
 
   activeBtwExchange(sessionId: string): Promise<BtwExchange | null> {
     return this.call("activeBtwExchange", sessionId) as Promise<BtwExchange | null>;
+  }
+
+  listRunningBtwExchanges(): Promise<BtwExchange[]> {
+    return this.call("listRunningBtwExchanges") as Promise<BtwExchange[]>;
+  }
+
+  failBtwExchange(sessionId: string, exchangeId: string, error: string, completedAt: string): Promise<BtwExchange | null> {
+    return this.call("failBtwExchange", sessionId, exchangeId, error, completedAt) as Promise<BtwExchange | null>;
   }
 
   failRunningBtwExchanges(error: string, completedAt: string): Promise<BtwExchange[]> {
@@ -1058,15 +1067,16 @@ export class SyncAppDatabase {
   putBtwExchange(exchange: BtwExchange): void {
     this.db.prepare(
       `INSERT INTO btw_exchanges
-        (id, session_id, question, answer, status, error, created_at, first_token_at, completed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, question, answer, status, error, created_at, first_token_at, completed_at, document_operation_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          question=excluded.question,
          answer=excluded.answer,
          status=excluded.status,
          error=excluded.error,
          first_token_at=excluded.first_token_at,
-         completed_at=excluded.completed_at`
+         completed_at=excluded.completed_at,
+         document_operation_json=excluded.document_operation_json`
     ).run(
       exchange.id,
       exchange.sessionId,
@@ -1076,7 +1086,8 @@ export class SyncAppDatabase {
       exchange.error,
       exchange.createdAt,
       exchange.firstTokenAt,
-      exchange.completedAt
+      exchange.completedAt,
+      exchange.documentOperation ? JSON.stringify(exchange.documentOperation) : null
     );
   }
 
@@ -1105,6 +1116,22 @@ export class SyncAppDatabase {
        LIMIT 1`
     ).get(sessionId) as BtwExchangeRow | undefined;
     return row ? hydrateBtwExchange(row) : null;
+  }
+
+  listRunningBtwExchanges(): BtwExchange[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM btw_exchanges WHERE status = 'running' ORDER BY created_at"
+    ).all() as unknown as BtwExchangeRow[];
+    return rows.map(hydrateBtwExchange);
+  }
+
+  failBtwExchange(sessionId: string, exchangeId: string, error: string, completedAt: string): BtwExchange | null {
+    this.db.prepare(
+      `UPDATE btw_exchanges
+       SET status = 'failed', error = ?, completed_at = ?
+       WHERE session_id = ? AND id = ? AND status = 'running'`
+    ).run(error, completedAt, sessionId, exchangeId);
+    return this.getBtwExchange(sessionId, exchangeId);
   }
 
   failRunningBtwExchanges(error: string, completedAt: string): BtwExchange[] {
@@ -2665,6 +2692,7 @@ export class SyncAppDatabase {
         created_at TEXT NOT NULL,
         first_token_at TEXT,
         completed_at TEXT,
+        document_operation_json TEXT,
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
@@ -2759,6 +2787,7 @@ export class SyncAppDatabase {
     `);
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
+    this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.normalizePersistedSessionWaitMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
@@ -3187,8 +3216,37 @@ function hydrateBtwExchange(row: BtwExchangeRow): BtwExchange {
     error: row.error,
     createdAt: row.created_at,
     firstTokenAt: row.first_token_at,
-    completedAt: row.completed_at
+    completedAt: row.completed_at,
+    documentOperation: parseBtwDocumentOperation(row.document_operation_json)
   };
+}
+
+function parseBtwDocumentOperation(value: string | null): BtwExchange["documentOperation"] {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const validPhase = parsed?.phase === "waiting" || parsed?.phase === "retrying" || parsed?.phase === "notifying"
+      || parsed?.phase === "applied" || parsed?.phase === "conflict";
+    if (
+      !validPhase
+      || !stringArray(parsed.created)
+      || !stringArray(parsed.updated)
+      || !Number.isInteger(parsed.retryCount)
+      || (parsed.retryCount as number) < 0
+    ) return null;
+    return {
+      phase: parsed.phase as NonNullable<BtwExchange["documentOperation"]>["phase"],
+      created: parsed.created,
+      updated: parsed.updated,
+      retryCount: parsed.retryCount as number
+    };
+  } catch {
+    return null;
+  }
+}
+
+function stringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function queuedInputStatus(value: unknown): QueuedInput["status"] {

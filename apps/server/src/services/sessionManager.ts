@@ -64,7 +64,12 @@ import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from ".
 import { accountAgentWorkTokens, agentWorkTokensUsed } from "./agentUsage.js";
 import type { PortableSession } from "./sessionTransfer.js";
 import { isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
-import { SessionDocumentService, type SessionDocumentSnapshot } from "./sessionDocuments.js";
+import {
+  SessionDocumentService,
+  type BtwDocumentApplyResult,
+  type BtwDocumentChanges,
+  type SessionDocumentSnapshot
+} from "./sessionDocuments.js";
 interface ActivitySummaryScheduler {
   schedule(sessionId: string): void;
   stop(): void;
@@ -218,6 +223,99 @@ export class SessionManager {
     return this.requireDocuments().snapshot(await this.ensureDocumentScope(session));
   }
 
+  async prepareBtwDocumentStaging(sessionId: string, exchangeId: string): Promise<{ documentsRoot: string; sourceCwd: string }> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    const scopeId = await this.ensureDocumentScope(session);
+    return {
+      documentsRoot: await this.requireDocuments().prepareBtwStaging(scopeId, exchangeId),
+      sourceCwd: session.tmux.cwd
+    };
+  }
+
+  async inspectBtwDocumentStaging(sessionId: string, exchangeId: string): Promise<BtwDocumentChanges> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    return this.requireDocuments().inspectBtwStaging(await this.ensureDocumentScope(session), exchangeId);
+  }
+
+  async cleanupBtwDocumentStaging(sessionId: string, exchangeId: string): Promise<void> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) return;
+    await this.requireDocuments().cleanupBtwStaging(await this.ensureDocumentScope(session), exchangeId);
+  }
+
+  async applyBtwDocumentStaging(
+    sessionId: string,
+    exchangeId: string
+  ): Promise<{ status: "not_ready" } | (BtwDocumentApplyResult & { noticeDelivered?: boolean })> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    if (session.archived || session.status === "missing") {
+      const result = await this.requireDocuments().applyBtwStaging(await this.ensureDocumentScope(session), exchangeId);
+      if (result.status === "applied") this.publishDocumentsUpdated(sessionId, result.changes);
+      return { ...result, noticeDelivered: result.status === "applied" };
+    }
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
+    if ((await this.db.listQueuedInputs(sessionId)).length > 0) return { status: "not_ready" };
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return { status: "not_ready" };
+    const ready = await this.readyLiveSession(session);
+    if (!ready) return { status: "not_ready" };
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
+
+    this.deliveringInputSessionIds.add(sessionId);
+    try {
+      if ((await this.db.listQueuedInputs(sessionId)).length > 0) return { status: "not_ready" };
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return { status: "not_ready" };
+      const result = await this.requireDocuments().applyBtwStaging(await this.ensureDocumentScope(session), exchangeId);
+      if (result.status === "conflict") return result;
+      this.publishDocumentsUpdated(sessionId, result.changes);
+      try {
+        await this.sendRawInput(ready, btwDocumentNotice(exchangeId, result.changes));
+        const now = nowIso();
+        const status = activeInputStatus(ready.inputMode);
+        await this.db.setSessionStatus(sessionId, status, now);
+        this.publish("status.changed", sessionId, { status });
+        return { ...result, noticeDelivered: true };
+      } catch {
+        return { ...result, noticeDelivered: false };
+      }
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
+    }
+  }
+
+  async deliverBtwDocumentNotice(sessionId: string, exchangeId: string, changes: BtwDocumentChanges): Promise<boolean> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) return false;
+    if (session.archived || session.status === "missing") return true;
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+    if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
+    const ready = await this.readyLiveSession(session);
+    if (!ready) return false;
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+    this.deliveringInputSessionIds.add(sessionId);
+    try {
+      if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
+      await this.sendRawInput(ready, btwDocumentNotice(exchangeId, changes));
+      const now = nowIso();
+      const status = activeInputStatus(ready.inputMode);
+      await this.db.setSessionStatus(sessionId, status, now);
+      this.publish("status.changed", sessionId, { status });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
+    }
+  }
+
+  private publishDocumentsUpdated(sessionId: string, changes: BtwDocumentChanges): void {
+    this.publish("documents.updated", sessionId, changes);
+  }
+
   private requireDocuments(): SessionDocumentService {
     return this.documents;
   }
@@ -241,6 +339,7 @@ export class SessionManager {
       "Use $muxpilot-documents whenever durable plans, checklists, reminders, requirements, decisions, or acceptance criteria would help.",
       "Before substantive work on each turn, and after resume or context compaction, inspect the existing documents and read INDEX.md first when present.",
       "Keep relevant documents current after material progress or decisions and before asking a question or giving a final answer.",
+      "A muxpilot BTW document notice inside <environment_context> is internal additive context, not a replacement operator request: read the named documents, reconcile them with newer user instructions, maintain INDEX.md, continue unfinished work, and do not emit a standalone acknowledgement.",
       "Document scopes are private: agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR and return structured proposed updates; built-in Codex subagents share this session's scope and must not edit documents; only the main parent agent verifies and updates canonical documents, and cross-session document writes are forbidden.",
       "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; do not store secrets or raw transcripts."
     ].join(" ");
@@ -287,17 +386,24 @@ export class SessionManager {
   }
 
   async resumeHeavyCommand(sessionId: string, message: string): Promise<boolean> {
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
     const ready = await this.readyLiveSession(session);
     if (!ready) return false;
-    await this.sendRawInput(ready, message);
-    const now = nowIso();
-    const status = activeInputStatus(ready.inputMode);
-    await this.db.setSessionStatus(sessionId, status, now);
-    await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
-    this.publish("status.changed", sessionId, { status });
-    return true;
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+    this.deliveringInputSessionIds.add(sessionId);
+    try {
+      await this.sendRawInput(ready, message);
+      const now = nowIso();
+      const status = activeInputStatus(ready.inputMode);
+      await this.db.setSessionStatus(sessionId, status, now);
+      await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
+      this.publish("status.changed", sessionId, { status });
+      return true;
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
+    }
   }
 
   async discoverNow(): Promise<void> {
@@ -1677,17 +1783,24 @@ export class SessionManager {
   }
 
   async resumeAgentWait(sessionId: string, message: string): Promise<boolean> {
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
     const ready = await this.readyLiveSession(session);
     if (!ready) return false;
-    await this.sendRawInput(ready, message);
-    const now = nowIso();
-    const status = activeInputStatus(ready.inputMode);
-    await this.db.setSessionStatus(sessionId, status, now);
-    await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
-    this.publish("status.changed", sessionId, { status });
-    return true;
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+    this.deliveringInputSessionIds.add(sessionId);
+    try {
+      await this.sendRawInput(ready, message);
+      const now = nowIso();
+      const status = activeInputStatus(ready.inputMode);
+      await this.db.setSessionStatus(sessionId, status, now);
+      await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
+      this.publish("status.changed", sessionId, { status });
+      return true;
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
+    }
   }
 
   private withAgentMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -2487,7 +2600,7 @@ export class SessionManager {
   }
 
   private async processQueuedInputs(sessionId: string): Promise<void> {
-    if (this.processingQueuedSessionIds.has(sessionId)) return;
+    if (this.processingQueuedSessionIds.has(sessionId) || this.deliveringInputSessionIds.has(sessionId)) return;
     this.processingQueuedSessionIds.add(sessionId);
     try {
       if ((await this.db.deleteEchoedSentQueuedInputs(sessionId)) > 0) {
@@ -2792,7 +2905,7 @@ export class SessionManager {
   }
 
   private publish(
-    type: "session.updated" | "message.appended" | "status.changed" | "notification.created" | "queue.updated",
+    type: "session.updated" | "message.appended" | "status.changed" | "notification.created" | "queue.updated" | "documents.updated",
     sessionId: string,
     payload: unknown
   ): void {
@@ -2997,6 +3110,17 @@ function resolveSessionStatus(
 
 function activeInputStatus(mode: CollaborationMode): SessionStatus {
   return mode === "plan" ? "planning" : "working";
+}
+
+function btwDocumentNotice(exchangeId: string, changes: BtwDocumentChanges): string {
+  return [
+    "<environment_context>",
+    "  <muxpilot_document_notice>",
+    `    ${JSON.stringify({ exchangeId, created: changes.created, updated: changes.updated })}`,
+    "  </muxpilot_document_notice>",
+    "  <instruction>This is internal additive context. Read the changed session documents now, reconcile them with the latest operator instructions, keep them current, and continue unfinished work without a standalone acknowledgement.</instruction>",
+    "</environment_context>"
+  ].join("\n");
 }
 
 function isPendingMuxpilotSubmission(

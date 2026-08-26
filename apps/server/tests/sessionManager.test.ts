@@ -5142,6 +5142,7 @@ describe("SessionManager transcript isolation", () => {
     expect(createCalls[0]?.options.developerInstructions).toContain("agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR");
     expect(createCalls[0]?.options.developerInstructions).toContain("built-in Codex subagents share this session's scope and must not edit documents");
     expect(createCalls[0]?.options.developerInstructions).toContain("only the main parent agent verifies and updates canonical documents");
+    expect(createCalls[0]?.options.developerInstructions).toContain("A muxpilot BTW document notice inside <environment_context> is internal additive context");
     expect(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR).toMatch(/sessions\/documents-[^/]+\/documents$/);
     expect(createCalls[0]?.options.writableRoots).toContain(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR);
     expect(bindCapability).toHaveBeenCalledWith("0123456789abcdef01234567", created.id);
@@ -5999,6 +6000,43 @@ describe("agent-managed session hierarchy", () => {
     await expect(harness.manager.agentClaim(root.id, child.id))
       .rejects.toThrow("loginctl enable-linger");
     expect(await harness.db.getSession(child.id)).toMatchObject({ agentOwnership: null });
+    await harness.db.close();
+  });
+
+  it("applies staged BTW documents only when ready and privately notifies the main agent", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-documents",
+      cwd: repo,
+      user: "Implement the task",
+      assistant: "Working on it",
+      mtime: new Date("2026-08-26T12:00:00.000Z")
+    });
+    const pane = testPane({ cwd: repo, paneId: "%documents", title: "codex" });
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => "› ";
+    const sentInputs: string[] = [];
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    const eventTypes: string[] = [];
+    harness.events.subscribe((event) => eventTypes.push(event.type));
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const staging = await harness.manager.prepareBtwDocumentStaging(session.id, "exchange-documents");
+    await writeFile(join(staging.documentsRoot, "plan.md"), "# Plan\n\n- [ ] Ship\n");
+
+    expect(await harness.manager.applyBtwDocumentStaging(session.id, "exchange-documents")).toMatchObject({
+      status: "applied",
+      noticeDelivered: true,
+      changes: { created: ["plan.md"], updated: [] }
+    });
+    expect((await harness.manager.readDocument(session.id, "plan.md")).document.content).toContain("- [ ] Ship");
+    expect(sentInputs).toHaveLength(1);
+    expect(sentInputs[0]).toContain("<muxpilot_document_notice>");
+    expect(sentInputs[0]).toContain('"created":["plan.md"]');
+    expect(eventTypes).toContain("documents.updated");
+    expect(eventTypes).not.toContain("message.appended");
     await harness.db.close();
   });
 

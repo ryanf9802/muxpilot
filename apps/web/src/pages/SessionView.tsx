@@ -819,6 +819,7 @@ export function DocumentsModal({
   open,
   sessionId,
   documents,
+  requestedDocument,
   listLoading,
   listError,
   onClose
@@ -826,6 +827,7 @@ export function DocumentsModal({
   open: boolean;
   sessionId: string;
   documents: SessionDocumentSummary[];
+  requestedDocument?: string | null;
   listLoading: boolean;
   listError: string;
   onClose: () => void;
@@ -840,10 +842,12 @@ export function DocumentsModal({
 
   useEffect(() => {
     if (!open) return;
-    setSelected((current) => documents.some((document) => document.name === current)
-      ? current
-      : documents.find((document) => document.name.toLowerCase() === "index.md")?.name ?? documents[0]?.name ?? null);
-  }, [documents, open]);
+    setSelected((current) => documents.find((document) => document.name === requestedDocument)?.name
+      ?? (documents.some((document) => document.name === current) ? current : null)
+      ?? documents.find((document) => document.name.toLowerCase() === "index.md")?.name
+      ?? documents[0]?.name
+      ?? null);
+  }, [documents, open, requestedDocument]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
   const selectedContentKey = selected ? `${selected}\u0000${selectedVersion}` : null;
@@ -1061,6 +1065,7 @@ export function SessionView() {
   const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [documentsOpen, setDocumentsOpen] = useState(false);
+  const [requestedDocument, setRequestedDocument] = useState<string | null>(null);
   const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
@@ -1472,6 +1477,7 @@ export function SessionView() {
       setCopiedTmuxCommand(false);
       setGitPanelOpen(false);
       setDocumentsOpen(false);
+      setRequestedDocument(null);
       setDocuments([]);
       setDocumentsLoading(true);
       setDocumentsError("");
@@ -1649,9 +1655,26 @@ export function SessionView() {
         setBtwExchanges((current) => appendBtwDelta(current, event.payload as BtwDeltaPayload));
         return;
       }
+      if (event.type === "btw.updated") {
+        setBtwExchanges((current) => upsertBtwExchange(current, event.payload as BtwExchange));
+        return;
+      }
       if (event.type === "btw.finished") {
         setBtwExchanges((current) => upsertBtwExchange(current, event.payload as BtwExchange));
         if (!btwOpenRef.current) setBtwCompletedWhileClosed(true);
+        return;
+      }
+      if (event.type === "documents.updated") {
+        const token = requestTokenRef.current;
+        void api.sessionDocuments(id).then((response) => {
+          if (!isCurrentRequest(id, token)) return;
+          setDocuments(response.documents);
+          setDocumentsError("");
+          setDocumentsLoading(false);
+        }).catch((error) => {
+          if (!isCurrentRequest(id, token)) return;
+          setDocumentsError(error instanceof Error ? error.message : "Unable to load documents");
+        });
         return;
       }
       sessionRefreshRequestRef.current += 1;
@@ -2519,6 +2542,7 @@ export function SessionView() {
         open={documentsOpen}
         sessionId={readySession.id}
         documents={documents}
+        requestedDocument={requestedDocument}
         listLoading={documentsLoading}
         listError={documentsError}
         onClose={() => setDocumentsOpen(false)}
@@ -2532,6 +2556,11 @@ export function SessionView() {
         onClose={() => setBtwOpen(false)}
         onAsk={askBtwQuestion}
         onCancel={cancelBtwQuestion}
+        onOpenDocument={(name) => {
+          setRequestedDocument(name);
+          setBtwOpen(false);
+          setDocumentsOpen(true);
+        }}
       />
 
       <div className="session-actions">
@@ -2552,7 +2581,10 @@ export function SessionView() {
               <span className="session-action-label">Transfer</span>
             </button>
           ) : null}
-          <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => setDocumentsOpen(true)} />
+          <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => {
+            setRequestedDocument(null);
+            setDocumentsOpen(true);
+          }} />
           <button
             type="button"
             className="btw-button"

@@ -4,6 +4,7 @@ import {
   CircleCheck,
   Clock3,
   Copy,
+  FileText,
   LoaderCircle,
   Send,
   Square,
@@ -63,7 +64,8 @@ export function BtwDrawer({
   submitting,
   onClose,
   onAsk,
-  onCancel
+  onCancel,
+  onOpenDocument
 }: {
   open: boolean;
   exchanges: BtwExchange[];
@@ -73,6 +75,7 @@ export function BtwDrawer({
   onClose: () => void;
   onAsk: (question: string) => Promise<boolean>;
   onCancel: (exchangeId: string) => Promise<void>;
+  onOpenDocument: (name: string) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -166,13 +169,13 @@ export function BtwDrawer({
         <header className="btw-drawer-header">
           <div>
             <h2 id="btw-drawer-title">BTW side questions</h2>
-            <p>Ask without interrupting the main task.</p>
+            <p>Ask questions or update Documents without interrupting the main task.</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close BTW drawer">
             <X size={18} />
           </button>
           <p className="btw-context-note" role="note">
-            <strong>Each question is independent.</strong> It uses a fresh, read-only snapshot of the main session. Saved BTW history is not included in later answers.
+            <strong>Each request is independent.</strong> It uses a fresh snapshot of the main session. Document changes are isolated until muxpilot can hand them off safely.
           </p>
         </header>
 
@@ -215,10 +218,13 @@ export function BtwDrawer({
                 ) : exchange.status === "running" ? (
                   <div className="btw-thinking">
                     <LoaderCircle className="spin" size={15} />
-                    <span>Checking the current session snapshot…</span>
+                    <span>{exchange.documentOperation ? documentOperationLabel(exchange.documentOperation.phase) : "Checking the current session snapshot…"}</span>
                   </div>
                 ) : null}
                 {exchange.error ? <p className="btw-error" role="alert"><CircleAlert size={15} /> <span>{exchange.error}</span></p> : null}
+                {exchange.documentOperation ? (
+                  <DocumentOperation exchange={exchange} onOpenDocument={onOpenDocument} />
+                ) : null}
                 <div className="btw-exchange-actions">
                   {exchange.status === "running" ? (
                     <button type="button" className="btw-action-button btw-cancel-button" onClick={() => void onCancel(exchange.id)}>
@@ -241,7 +247,7 @@ export function BtwDrawer({
           {error ? <p className="btw-error btw-drawer-error" role="alert"><CircleAlert size={15} /> <span>{error}</span></p> : null}
           <form className="btw-composer" onSubmit={submit}>
             <div className="btw-composer-heading">
-              <label htmlFor="btw-question-input">Ask a new independent question</label>
+              <label htmlFor="btw-question-input">Ask a question or request a document update</label>
               <span><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
             </div>
             <div className="btw-composer-control">
@@ -257,7 +263,7 @@ export function BtwDrawer({
                     event.currentTarget.form?.requestSubmit();
                   }
                 }}
-                placeholder={active ? "Waiting for the current answer…" : "What do you want to know?"}
+                placeholder={active ? "Waiting for the current request…" : "Ask a question, or describe the document you want…"}
                 disabled={Boolean(active) || submitting}
                 maxLength={20_000}
                 rows={2}
@@ -279,6 +285,51 @@ export function BtwDrawer({
   );
 }
 
+function DocumentOperation({ exchange, onOpenDocument }: { exchange: BtwExchange; onOpenDocument: (name: string) => void }) {
+  const documentOperation = exchange.documentOperation!;
+  const documents = [
+    ...documentOperation.created.map((name) => ({ name, kind: "Created" })),
+    ...documentOperation.updated.map((name) => ({ name, kind: "Updated" }))
+  ];
+  return (
+    <section className="btw-document-operation" data-phase={documentOperation.phase} data-status={exchange.status}>
+      <div className="btw-document-operation-heading">
+        {exchange.status === "failed" || exchange.status === "cancelled" || documentOperation.phase === "conflict"
+          ? <CircleAlert size={14} />
+          : documentOperation.phase === "applied"
+            ? <CircleCheck size={14} />
+            : <LoaderCircle className="spin" size={14} />}
+        <strong>{documentOperationStatusLabel(exchange)}</strong>
+      </div>
+      {documents.length > 0 ? (
+        <div className="btw-document-links">
+          {documents.map((document) => (
+            <button key={`${document.kind}-${document.name}`} type="button" disabled={documentOperation.phase !== "applied"} onClick={() => onOpenDocument(document.name)}>
+              <FileText size={13} />
+              <span>{document.name}</span>
+              <small>{document.kind}</small>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function documentOperationStatusLabel(exchange: BtwExchange): string {
+  if (exchange.status === "cancelled") return "Document update cancelled";
+  if (exchange.status === "failed" && exchange.documentOperation?.phase !== "conflict") return "Document update failed";
+  return documentOperationLabel(exchange.documentOperation!.phase);
+}
+
+function documentOperationLabel(phase: NonNullable<BtwExchange["documentOperation"]>["phase"]): string {
+  if (phase === "waiting") return "Waiting for a safe handoff";
+  if (phase === "retrying") return "Documents changed; regenerating once";
+  if (phase === "notifying") return "Documents saved; notifying the main agent";
+  if (phase === "applied") return "Document changes applied";
+  return "Document changes conflicted";
+}
+
 function exchangeCountLabel(count: number): string {
   if (count === 0) return "No questions yet";
   return `${count} ${count === 1 ? "question" : "questions"}`;
@@ -298,6 +349,9 @@ function btwStatusIcon(exchange: BtwExchange) {
 }
 
 function btwStatusLabel(exchange: BtwExchange): string {
+  if (exchange.status === "running" && exchange.documentOperation?.phase === "waiting") return "Handing off";
+  if (exchange.status === "running" && exchange.documentOperation?.phase === "retrying") return "Regenerating";
+  if (exchange.status === "running" && exchange.documentOperation?.phase === "notifying") return "Notifying";
   if (exchange.status === "running") return exchange.firstTokenAt ? "Answering" : "Starting";
   if (exchange.status === "completed") return "Complete";
   if (exchange.status === "cancelled") return "Cancelled";

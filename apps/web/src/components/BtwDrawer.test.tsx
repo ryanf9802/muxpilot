@@ -55,6 +55,7 @@ describe("BtwDrawer", () => {
         onClose={() => undefined}
         onAsk={ask}
         onCancel={cancel}
+        onOpenDocument={() => undefined}
       />
     ));
     const textarea = container.querySelector("textarea")!;
@@ -78,6 +79,7 @@ describe("BtwDrawer", () => {
         onClose={() => undefined}
         onAsk={ask}
         onCancel={cancel}
+        onOpenDocument={() => undefined}
       />
     ));
     expect(container.textContent).toContain("Checking the current session snapshot…");
@@ -105,6 +107,7 @@ describe("BtwDrawer", () => {
         onClose={() => undefined}
         onAsk={ask}
         onCancel={async () => undefined}
+        onOpenDocument={() => undefined}
       />
     ));
     const textarea = container.querySelector("textarea")!;
@@ -139,19 +142,49 @@ describe("BtwDrawer", () => {
         onClose={() => undefined}
         onAsk={async () => true}
         onCancel={async () => undefined}
+        onOpenDocument={() => undefined}
       />
     ));
 
-    expect(container.textContent).toContain("Each question is independent.");
-    expect(container.textContent).toContain("fresh, read-only snapshot of the main session");
-    expect(container.textContent).toContain("Saved BTW history is not included in later answers.");
+    expect(container.textContent).toContain("Each request is independent.");
+    expect(container.textContent).toContain("fresh snapshot of the main session");
+    expect(container.textContent).toContain("Document changes are isolated until muxpilot can hand them off safely.");
     expect(container.textContent).toContain("History");
-    expect(container.textContent).toContain("Ask a new independent question");
+    expect(container.textContent).toContain("Ask a question or request a document update");
     expect(container.querySelector(".btw-exchange-list")?.getAttribute("aria-label")).toBe("Saved independent question history");
     expect(container.querySelectorAll(".btw-exchange")).toHaveLength(2);
     expect(container.querySelectorAll(".btw-answer-heading")).toHaveLength(2);
     expect(container.querySelectorAll(".btw-answer-heading")[0]?.textContent).toContain("Answer");
     expect(container.querySelector(".btw-answer-heading svg")).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("shows document handoff progress and opens applied files", () => {
+    const openDocument = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    act(() => root.render(
+      <BtwDrawer
+        open
+        exchanges={[exchange({
+          documentOperation: { phase: "applied", created: ["plan.md"], updated: ["INDEX.md"], retryCount: 0 }
+        })]}
+        loading={false}
+        error=""
+        submitting={false}
+        onClose={() => undefined}
+        onAsk={async () => true}
+        onCancel={async () => undefined}
+        onOpenDocument={openDocument}
+      />
+    ));
+
+    expect(container.textContent).toContain("Document changes applied");
+    expect(container.textContent).toContain("plan.mdCreated");
+    act(() => (container.querySelector(".btw-document-links button") as HTMLButtonElement).click());
+    expect(openDocument).toHaveBeenCalledWith("plan.md");
     act(() => root.unmount());
   });
 });
