@@ -42,8 +42,11 @@ import {
   placeholder as codeMirrorPlaceholder
 } from "@codemirror/view";
 import {
+  Children,
   FormEvent,
   KeyboardEvent,
+  cloneElement,
+  isValidElement,
   type ReactNode,
   useCallback,
   useEffect,
@@ -852,7 +855,7 @@ export function DocumentsModal({
   const selectedContentKey = selected ? `${selected}\u0000${selectedVersion}` : null;
   const documentMarkdownComponents = useMemo<Components>(() => ({
     ...markdownComponents,
-    a({ href, children, ...props }) {
+    a({ href, children, node: _node, ...props }) {
       const relativeHref = href && !href.startsWith("/") && !href.startsWith("//") && !/^[a-z][a-z\d+.-]*:/i.test(href)
         ? href
         : null;
@@ -4897,7 +4900,7 @@ export function copyableMessageText(message: ChatMessage): string {
 }
 
 const markdownComponents: Components = {
-  a(props) {
+  a({ node: _node, ...props }) {
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
   },
   pre({ children }) {
@@ -5003,7 +5006,41 @@ function trimPlanWrapperWhitespace(text: string): string {
 
 export function UserText({ text }: { text: string }) {
   const { body, skills } = userTextDisplayParts(text);
-  return <PlainText text={body} skillNames={skills} />;
+  return <MarkdownBlock text={body} components={userMarkdownComponents(skills)} />;
+}
+
+function userMarkdownComponents(skillNames: string[]): Components {
+  const withSkillReferences = (children: ReactNode) => renderSkillReferencesInMarkdown(children, skillNames);
+  return {
+    ...markdownComponents,
+    p({ children, node: _node, ...props }) {
+      return <p {...props}>{withSkillReferences(children)}</p>;
+    },
+    li({ children, node: _node, ...props }) {
+      return <li {...props}>{withSkillReferences(children)}</li>;
+    },
+    h1({ children, node: _node, ...props }) {
+      return <h1 {...props}>{withSkillReferences(children)}</h1>;
+    },
+    h2({ children, node: _node, ...props }) {
+      return <h2 {...props}>{withSkillReferences(children)}</h2>;
+    },
+    h3({ children, node: _node, ...props }) {
+      return <h3 {...props}>{withSkillReferences(children)}</h3>;
+    },
+    h4({ children, node: _node, ...props }) {
+      return <h4 {...props}>{withSkillReferences(children)}</h4>;
+    }
+  };
+}
+
+function renderSkillReferencesInMarkdown(children: ReactNode, skillNames: string[]): ReactNode {
+  return Children.map(children, (child) => {
+    if (typeof child === "string") return renderSkillReferences(child, skillNames);
+    if (!isValidElement<{ children?: ReactNode }>(child) || child.type === "code" || child.type === "pre") return child;
+    if (child.props.children === undefined) return child;
+    return cloneElement(child, undefined, renderSkillReferencesInMarkdown(child.props.children, skillNames));
+  });
 }
 
 function PlainText({ text, skillNames = [] }: { text: string; skillNames?: string[] }) {

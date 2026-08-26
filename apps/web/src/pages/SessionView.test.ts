@@ -2130,6 +2130,19 @@ describe("UserText", () => {
     expect(html).not.toContain('class="user-skill-reference"');
   });
 
+  it("renders user messages as GitHub-flavored Markdown", () => {
+    const html = renderToStaticMarkup(createElement(UserText, {
+      text: "# Request\n\n- [x] Preserve **formatting**\n\nRead [the docs](https://example.com)."
+    }));
+
+    expect(html).toContain('class="markdown"');
+    expect(html).toContain("<h1>Request</h1>");
+    expect(html).toContain('class="contains-task-list"');
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain("<strong>formatting</strong>");
+    expect(html).toContain('target="_blank"');
+  });
+
 });
 
 describe("MessageBubble", () => {
