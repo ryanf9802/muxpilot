@@ -150,7 +150,7 @@ describe("SessionCard", () => {
     expect(html).toContain("1 need attention");
   });
 
-  it("renders completed descendants as subdued retained history", () => {
+  it("hides completed descendants behind a subdued disclosure", () => {
     const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent" });
     const child = testSession({
       id: "child",
@@ -170,9 +170,47 @@ describe("SessionCard", () => {
 
     const html = renderSessionCard(parent, [], null, [child]);
 
+    expect(html).toContain('<details class="agent-session-tree" data-completed="true"><summary><span>1 completed agent</span></summary>');
+    expect(html).not.toContain('<details class="agent-session-tree" data-completed="true" open="">');
+    expect(html).not.toContain('class="agent-session-completed"');
     expect(html).toContain('data-completed="true"');
     expect(html).toContain('aria-label="completed"');
-    expect(html).toContain("all complete");
+    expect(html).not.toContain("all complete");
+  });
+
+  it("keeps live descendants visible above the completed disclosure", () => {
+    const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent" });
+    const live = testSession({
+      id: "live",
+      paneId: "%112",
+      windowName: "live-child",
+      status: "working",
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+    const completed = testSession({
+      id: "completed",
+      paneId: "%113",
+      windowName: "completed-child",
+      status: "missing",
+      agentOwnership: {
+        ...live.agentOwnership!,
+        completedAt: "2026-08-25T01:00:00.000Z"
+      }
+    });
+
+    const html = renderSessionCard(parent, [], null, [live, completed]);
+
+    expect(html.indexOf("live-child")).toBeLessThan(html.indexOf('class="agent-session-completed"'));
+    expect(html).toContain('<details class="agent-session-completed"><summary>1 completed agent</summary>');
+    expect(html).toContain("1 working");
   });
 
   it("renders the actionable startup failure instead of an empty prompt preview", () => {

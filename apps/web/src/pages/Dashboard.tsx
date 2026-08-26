@@ -711,6 +711,7 @@ export function SessionCard({
   const statusPresentation = sessionStatusPresentation(session, [session, ...children]);
   const statusSource = children.find((candidate) => candidate.id === statusPresentation.sourceSessionId);
   const statusDetail = statusSource ? `from ${sessionDisplayName(statusSource, [session, ...children])}` : null;
+  const allChildrenCompleted = children.length > 0 && children.every((child) => Boolean(child.agentOwnership?.completedAt));
   const cardClassName = `session-card${session.pinned ? " session-card-pinned" : ""}${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function handleClick() {
@@ -793,15 +794,13 @@ export function SessionCard({
         </div>
       </button>
       {children.length > 0 ? (
-        <details className="agent-session-tree">
+        <details className="agent-session-tree" data-completed={allChildrenCompleted || undefined}>
           <summary>
-            <span>{formatSessionCount(children.length, "agent")}</span>
-            <span>{agentTreeStatusLabel(children)}</span>
+            <span>{formatSessionCount(children.length, allChildrenCompleted ? "completed agent" : "agent")}</span>
+            {allChildrenCompleted ? null : <span>{agentTreeStatusLabel(children)}</span>}
           </summary>
           <div className="agent-session-children">
-            {agentSessionChildren(session.id, children).map((child) => (
-              <AgentSessionRow key={child.id} session={child} allSessions={children} depth={0} onOpen={onOpenChild} />
-            ))}
+            <AgentSessionRows parentSessionId={session.id} allSessions={children} depth={0} onOpen={onOpenChild} revealCompleted={allChildrenCompleted} />
           </div>
         </details>
       ) : null}
@@ -1029,8 +1028,47 @@ function includeAgentAncestors(filtered: ManagedSession[], all: ManagedSession[]
   return all.filter((session) => included.has(session.id));
 }
 
-function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void }) {
-  const children = agentSessionChildren(session.id, allSessions);
+function AgentSessionRows({
+  parentSessionId,
+  allSessions,
+  depth,
+  onOpen,
+  revealCompleted = false
+}: {
+  parentSessionId: string;
+  allSessions: ManagedSession[];
+  depth: number;
+  onOpen: (sessionId: string) => void;
+  revealCompleted?: boolean;
+}) {
+  const children = agentSessionChildren(parentSessionId, allSessions);
+  const completedRoots: ManagedSession[] = [];
+  const visibleChildren: ManagedSession[] = [];
+  for (const child of children) {
+    if (!revealCompleted && isCompletedAgentBranch(child, allSessions)) completedRoots.push(child);
+    else visibleChildren.push(child);
+  }
+  const completedCount = completedRoots.reduce((count, child) => count + 1 + agentSessionDescendants(child.id, allSessions).length, 0);
+  return (
+    <>
+      {visibleChildren.map((child) => (
+        <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted={revealCompleted} />
+      ))}
+      {completedRoots.length > 0 ? (
+        <details className="agent-session-completed">
+          <summary>{formatSessionCount(completedCount, "completed agent")}</summary>
+          <div className="agent-session-completed-children">
+            {completedRoots.map((child) => (
+              <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted />
+            ))}
+          </div>
+        </details>
+      ) : null}
+    </>
+  );
+}
+
+function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
   const statusPresentation = sessionStatusPresentation(session, allSessions);
   const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
   const contextPressure = (session.contextUsage?.contextPercent ?? 0) >= 85
@@ -1046,9 +1084,13 @@ function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: Man
         <span className="agent-session-row-meta" data-context-pressure={contextPressure}>{context}{budget ? ` · ${budget}` : ""}</span>
         {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} />}
       </button>
-      {children.map((child) => <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} />)}
+      <AgentSessionRows parentSessionId={session.id} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />
     </div>
   );
+}
+
+function isCompletedAgentBranch(session: ManagedSession, allSessions: ManagedSession[]): boolean {
+  return Boolean(session.agentOwnership?.completedAt) && !agentSessionDescendants(session.id, allSessions).some((descendant) => !descendant.agentOwnership?.completedAt);
 }
 
 function agentTreeStatusLabel(children: ManagedSession[]): string {

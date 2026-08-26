@@ -1400,6 +1400,7 @@ select:focus-visible {
 
 .agent-session-tree > summary::-webkit-details-marker { display: none; }
 .agent-session-tree[open] > summary { border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent); }
+.agent-session-tree[data-completed="true"] > summary { opacity: 0.58; }
 .agent-session-children { padding: 0.25rem; }
 .agent-session-branch { margin-left: calc(var(--agent-depth, 0) * 0.65rem); }
 
@@ -1424,6 +1425,21 @@ select:focus-visible {
 .agent-session-row-meta { white-space: nowrap; opacity: 0.72; }
 .agent-session-row-meta[data-context-pressure="warning"] { color: var(--color-warning); opacity: 1; }
 .agent-session-row-meta[data-context-pressure="high"] { color: var(--color-error); opacity: 1; }
+
+.agent-session-completed {
+  margin: 0.12rem 0.35rem;
+  opacity: 0.58;
+}
+
+.agent-session-completed > summary {
+  width: fit-content;
+  padding: 0.15rem 0;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 0.68rem;
+}
+
+.agent-session-completed-children { padding-top: 0.1rem; }
 
 .dialog-help {
   margin: 0;
