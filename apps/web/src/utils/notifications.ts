@@ -30,7 +30,8 @@ export function notificationSoundEnabled(settings: NotificationSettings | null):
 }
 
 export function notificationToastMessage(payload: NotificationTriggeredPayload): string {
-  return `${payload.sessionName}: ${notificationStatusLabel(payload.status)}`;
+  const sessionLabel = payload.sourceSessionName ? `${payload.sessionName} · ${payload.sourceSessionName}` : payload.sessionName;
+  return `${sessionLabel}: ${notificationStatusLabel(payload.status)}`;
 }
 
 export function notificationStatusLabel(status: NotificationTriggeredPayload["status"]): string {

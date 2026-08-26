@@ -1,13 +1,15 @@
 import webPush from "web-push";
-import type {
-  CollaborationMode,
-  ManagedSession,
-  NotificationRuleType,
-  NotificationSettings,
-  NotificationTriggeredPayload,
-  PushSubscriptionInput,
-  SessionEvent,
-  SessionStatus
+import {
+  agentSessionRoot,
+  sessionStatusPresentation,
+  type CollaborationMode,
+  type ManagedSession,
+  type NotificationRuleType,
+  type NotificationSettings,
+  type NotificationTriggeredPayload,
+  type PushSubscriptionInput,
+  type SessionEvent,
+  type SessionStatus
 } from "@muxpilot/core";
 import type { Logger } from "pino";
 import type { AppDatabase, PushVapidKeys } from "../db/database.js";
@@ -24,9 +26,12 @@ interface NotificationServiceOptions {
 }
 
 export class NotificationService {
-  private readonly knownStatuses = new Map<string, SessionStatus>();
+  private readonly knownTreeStatuses = new Map<string, SessionStatus>();
+  private readonly knownRootIds = new Map<string, string>();
+  private readonly knownParentIds = new Map<string, string | null>();
   private readonly syncingSessions = new Set<string>();
   private readonly lastTriggeredAt = new Map<string, number>();
+  private eventQueue = Promise.resolve();
   private unsubscribe: (() => void) | null = null;
   private vapidKeys: PushVapidKeys | null = null;
 
@@ -40,12 +45,9 @@ export class NotificationService {
   async start(): Promise<void> {
     this.vapidKeys = await this.ensureVapidKeys();
     webPush.setVapidDetails("mailto:muxpilot@localhost", this.vapidKeys.publicKey, this.vapidKeys.privateKey);
-    const sessions = await this.db.listSessions(true);
-    for (const session of sessions) {
-      this.knownStatuses.set(session.id, session.status);
-    }
+    await this.reseedNotificationBaselines();
     this.unsubscribe = this.events.subscribe((event) => {
-      void this.handleEvent(event).catch((error) => {
+      this.eventQueue = this.eventQueue.then(() => this.handleEvent(event)).catch((error) => {
         this.logger.error({ err: error }, "notification event handling failed");
       });
     });
@@ -72,19 +74,25 @@ export class NotificationService {
       const session = event.payload as Partial<ManagedSession>;
       if (typeof session.id === "string" && isSessionStatus(session.status)) {
         if (session.initializing === true) {
-          this.knownStatuses.set(session.id, session.status);
+          await this.reseedForStatus(session.id, session.status);
           return;
         }
         if (session.transcriptSyncing === true) {
-          this.knownStatuses.set(session.id, session.status);
           this.syncingSessions.add(session.id);
+          await this.reseedForStatus(session.id, session.status);
           return;
         }
         if (this.syncingSessions.delete(session.id)) {
-          this.knownStatuses.set(session.id, session.status);
+          await this.reseedForStatus(session.id, session.status);
           return;
         }
-        await this.handleStatusTransition(session.id, session.status);
+        const sessions = await this.notificationSessions(session.id, session.status);
+        const current = sessions.find((candidate) => candidate.id === session.id);
+        if (!current || this.hierarchyChanged(current)) {
+          await this.reseedNotificationBaselines(sessions);
+          return;
+        }
+        await this.handleStatusTransition(session.id, session.status, sessions);
       }
       return;
     }
@@ -94,31 +102,38 @@ export class NotificationService {
     if (!nextStatus) return;
 
     if (this.syncingSessions.has(event.sessionId)) {
-      this.knownStatuses.set(event.sessionId, nextStatus);
+      await this.reseedForStatus(event.sessionId, nextStatus);
       return;
     }
 
     await this.handleStatusTransition(event.sessionId, nextStatus);
   }
 
-  private async handleStatusTransition(sessionId: string, nextStatus: SessionStatus): Promise<void> {
-    const previousStatus = this.knownStatuses.get(sessionId);
-    this.knownStatuses.set(sessionId, nextStatus);
-    if (!previousStatus || previousStatus === nextStatus) return;
+  private async handleStatusTransition(sessionId: string, nextStatus: SessionStatus, providedSessions?: ManagedSession[]): Promise<void> {
+    const sessions = providedSessions ?? await this.notificationSessions(sessionId, nextStatus);
+    const source = sessions.find((session) => session.id === sessionId);
+    if (!source) return;
+    const root = agentSessionRoot(source, sessions);
+    const presentation = sessionStatusPresentation(root, sessions);
+    if (presentation.status === "completed") return;
+    const previousStatus = this.knownTreeStatuses.get(root.id);
+    this.recordHierarchy(sessions);
+    this.knownTreeStatuses.set(root.id, presentation.status);
+    const nextTreeStatus = presentation.status;
+    if (!previousStatus || previousStatus === nextTreeStatus) return;
 
-    const session = await this.db.getSession(sessionId);
     const settingsByDevice = await this.db.listNotificationSettings();
     await Promise.all(
       Object.entries(settingsByDevice).map(async ([deviceId, settings]) => {
-        const matchedRules = matchingNotificationRules(settings, sessionId, previousStatus, nextStatus, { inputMode: session?.inputMode ?? null });
-        const rules = matchedRules.filter((rule) => this.shouldTrigger(deviceId, sessionId, rule, nextStatus));
+        const matchedRules = matchingNotificationRules(settings, root.id, previousStatus, nextTreeStatus, { inputMode: source.inputMode });
+        const rules = matchedRules.filter((rule) => this.shouldTrigger(deviceId, root.id, rule, nextTreeStatus));
         if (rules.length === 0) return;
 
-        const payload = notificationPayload(deviceId, session, sessionId, previousStatus, nextStatus, rules);
+        const payload = notificationPayload(deviceId, root, source, previousStatus, nextTreeStatus, rules);
         const triggeredEvent: SessionEvent = {
           id: eventId(),
           type: "notification.triggered",
-          sessionId,
+          sessionId: root.id,
           payload,
           timestamp: nowIso()
         };
@@ -126,6 +141,52 @@ export class NotificationService {
         if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload);
       })
     );
+  }
+
+  private async notificationSessions(sessionId: string, status: SessionStatus): Promise<ManagedSession[]> {
+    const sessions = await this.db.listSessions(true);
+    const stored = await this.db.getSession(sessionId) ?? sessions.find((session) => session.id === sessionId);
+    if (!stored) return sessions;
+    const source = { ...stored, status };
+    const index = sessions.findIndex((session) => session.id === sessionId);
+    if (index < 0) return [...sessions, source];
+    const next = [...sessions];
+    next[index] = source;
+    return next;
+  }
+
+  private hierarchyChanged(session: ManagedSession): boolean {
+    if (!this.knownRootIds.has(session.id) || !this.knownParentIds.has(session.id)) return true;
+    return this.knownRootIds.get(session.id) !== (session.agentOwnership?.rootSessionId ?? session.id)
+      || this.knownParentIds.get(session.id) !== (session.agentOwnership?.parentSessionId ?? null);
+  }
+
+  private async reseedNotificationBaselines(providedSessions?: ManagedSession[]): Promise<void> {
+    const sessions = providedSessions ?? await this.db.listSessions(true);
+    this.knownTreeStatuses.clear();
+    this.recordHierarchy(sessions);
+    const roots = new Map<string, ManagedSession>();
+    for (const session of sessions) {
+      const root = agentSessionRoot(session, sessions);
+      roots.set(root.id, root);
+    }
+    for (const root of roots.values()) {
+      const presentation = sessionStatusPresentation(root, sessions);
+      if (presentation.status !== "completed") this.knownTreeStatuses.set(root.id, presentation.status);
+    }
+  }
+
+  private async reseedForStatus(sessionId: string, status: SessionStatus): Promise<void> {
+    await this.reseedNotificationBaselines(await this.notificationSessions(sessionId, status));
+  }
+
+  private recordHierarchy(sessions: ManagedSession[]): void {
+    this.knownRootIds.clear();
+    this.knownParentIds.clear();
+    for (const session of sessions) {
+      this.knownRootIds.set(session.id, agentSessionRoot(session, sessions).id);
+      this.knownParentIds.set(session.id, session.agentOwnership?.parentSessionId ?? null);
+    }
   }
 
   private shouldTrigger(
@@ -195,27 +256,34 @@ function isInputReadyStatus(status: SessionStatus): boolean {
 
 function notificationPayload(
   deviceId: string,
-  session: ManagedSession | null,
-  sessionId: string,
+  root: ManagedSession,
+  source: ManagedSession,
   previousStatus: SessionStatus,
   status: SessionStatus,
   rules: NotificationRuleType[]
 ): NotificationTriggeredPayload {
-  const sessionName = session?.tmux.windowName || session?.repo.name || "Session";
+  const sessionName = notificationSessionName(root);
+  const sourceSessionName = source.id === root.id ? undefined : notificationSessionName(source);
   const title = rules.length === 1 ? notificationRuleLabel(rules[0]!) : "Multiple muxpilot alerts";
-  const body = `${sessionName}: ${notificationStatusLabel(status)}`;
+  const body = `${sourceSessionName ? `${sessionName} · ${sourceSessionName}` : sessionName}: ${notificationStatusLabel(status)}`;
   return {
     deviceId,
-    sessionId,
+    sessionId: root.id,
     sessionName,
+    sourceSessionId: source.id === root.id ? undefined : source.id,
+    sourceSessionName,
     rules,
     previousStatus,
     status,
     severity: notificationSeverity(rules, status),
     title,
     body,
-    url: `/sessions/${sessionId}`
+    url: `/sessions/${source.id}`
   };
+}
+
+function notificationSessionName(session: ManagedSession): string {
+  return session.tmux.windowName || session.repo.name || "Session";
 }
 
 function notificationSeverity(rules: NotificationRuleType[], status: SessionStatus): NotificationSeverity {

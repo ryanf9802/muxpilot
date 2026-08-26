@@ -542,6 +542,8 @@ export interface NotificationTriggeredPayload {
   deviceId: string;
   sessionId: string;
   sessionName: string;
+  sourceSessionId?: string;
+  sourceSessionName?: string;
   rules: NotificationRuleType[];
   previousStatus: SessionStatus;
   status: SessionStatus;

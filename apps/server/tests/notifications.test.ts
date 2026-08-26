@@ -373,6 +373,162 @@ describe("matchingNotificationRules", () => {
     await transitionHandler.handleStatusTransition("a", "waiting");
     expect(triggeredEvents).toHaveLength(2);
   });
+
+  it("rolls parallel child completion into one parent-owned notification", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const root = namedSession("root", "waiting");
+    const first = namedSession("first", "working", agentOwnership(root.id));
+    const second = namedSession("second", "working", agentOwnership(root.id));
+    const sessions = [root, first, second];
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => sessions,
+        getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
+        listNotificationSettings: async () => ({
+          "device-test": testNotificationSettings([], {
+            [root.id]: ["done_task"],
+            [first.id]: ["status_change"],
+            [second.id]: ["status_change"]
+          })
+        }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: ManagedSession["status"]) => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition(first.id, "working");
+    first.status = "waiting";
+    await transitionHandler.handleStatusTransition(first.id, "waiting");
+    expect(triggeredEvents).toEqual([]);
+
+    second.status = "waiting";
+    await transitionHandler.handleStatusTransition(second.id, "waiting");
+    expect(triggeredEvents).toHaveLength(1);
+    expect(triggeredEvents[0]).toMatchObject({
+      sessionId: root.id,
+      payload: {
+        sessionId: root.id,
+        sessionName: "root",
+        sourceSessionId: second.id,
+        sourceSessionName: "second",
+        rules: ["done_task"],
+        previousStatus: "working",
+        status: "waiting",
+        url: `/sessions/${second.id}`
+      }
+    });
+  });
+
+  it("uses the root rules for child attention and opens the causal child", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const root = namedSession("root", "waiting");
+    const child = namedSession("child", "working", agentOwnership(root.id));
+    const sessions = [root, child];
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => sessions,
+        getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
+        listNotificationSettings: async () => ({
+          "device-test": testNotificationSettings([], {
+            [root.id]: ["approval_gate"],
+            [child.id]: ["done_task"]
+          })
+        }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: ManagedSession["status"]) => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition(child.id, "working");
+    child.status = "approval";
+    await transitionHandler.handleStatusTransition(child.id, "approval");
+
+    expect(triggeredEvents).toHaveLength(1);
+    expect(triggeredEvents[0]).toMatchObject({
+      sessionId: root.id,
+      payload: {
+        sourceSessionId: child.id,
+        rules: ["approval_gate"],
+        status: "approval",
+        body: "root · child: approval",
+        url: `/sessions/${child.id}`
+      }
+    });
+  });
+
+  it("silently rebases notification state when a session is adopted, reparented, or released", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const root = namedSession("root", "waiting");
+    const otherRoot = namedSession("other-root", "waiting");
+    const child = namedSession("child", "working");
+    const sessions = [root, otherRoot, child];
+    const vapidKeys = webPush.generateVAPIDKeys();
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => vapidKeys,
+        listSessions: async () => sessions,
+        getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["status_change"]) }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { warn: () => undefined, error: () => undefined } as never
+    );
+    await service.start();
+    const eventHandler = service as unknown as { handleEvent: (event: SessionEvent) => Promise<void> };
+
+    child.agentOwnership = agentOwnership(root.id);
+    await eventHandler.handleEvent({
+      id: "adopted",
+      type: "session.updated",
+      sessionId: child.id,
+      payload: child,
+      timestamp: "2026-08-26T00:00:00.000Z"
+    });
+
+    child.agentOwnership = agentOwnership(otherRoot.id);
+    await eventHandler.handleEvent({
+      id: "reparented",
+      type: "session.updated",
+      sessionId: child.id,
+      payload: child,
+      timestamp: "2026-08-26T00:00:01.000Z"
+    });
+
+    child.agentOwnership = null;
+    await eventHandler.handleEvent({
+      id: "released",
+      type: "session.updated",
+      sessionId: child.id,
+      payload: child,
+      timestamp: "2026-08-26T00:00:02.000Z"
+    });
+
+    expect(triggeredEvents).toEqual([]);
+    service.stop();
+  });
 });
 
 function testNotificationSettings(
@@ -419,5 +575,22 @@ function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
     pinned: false,
     archived: false,
     ...input
+  };
+}
+
+function namedSession(id: string, status: ManagedSession["status"], agentOwnership: ManagedSession["agentOwnership"] = null): ManagedSession {
+  const session = testSession({ id, status, agentOwnership });
+  return { ...session, tmux: { ...session.tmux, windowName: id } };
+}
+
+function agentOwnership(rootSessionId: string): NonNullable<ManagedSession["agentOwnership"]> {
+  return {
+    parentSessionId: rootSessionId,
+    rootSessionId,
+    origin: "created",
+    createdAt: "2026-08-26T00:00:00.000Z",
+    workTokenBaseline: 0,
+    workTokenBudget: 1_000_000,
+    completedAt: null
   };
 }

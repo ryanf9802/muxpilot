@@ -18,4 +18,23 @@ describe("notificationToastMessage", () => {
       })
     ).toBe("muxpilot: plan ready");
   });
+
+  it("identifies the child that caused a rolled-up tree notification", () => {
+    expect(
+      notificationToastMessage({
+        deviceId: "device-test",
+        sessionId: "parent",
+        sessionName: "parent",
+        sourceSessionId: "child",
+        sourceSessionName: "child",
+        rules: ["approval_gate"],
+        previousStatus: "working",
+        status: "approval",
+        severity: "red",
+        title: "Approval gate",
+        body: "parent · child: approval",
+        url: "/sessions/child"
+      })
+    ).toBe("parent · child: approval");
+  });
 });

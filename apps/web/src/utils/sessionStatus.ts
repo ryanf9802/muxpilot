@@ -1,4 +1,4 @@
-import { highestPrioritySession, type ManagedSession, type SessionDisplayStatus } from "@muxpilot/core";
+import { sessionStatusPresentation as coreSessionStatusPresentation, type ManagedSession, type SessionDisplayStatus } from "@muxpilot/core";
 
 export type SessionStatusSeverity = "red" | "yellow" | "green";
 
@@ -10,12 +10,6 @@ export interface SessionStoplightCounts {
 
 export const SESSION_STATUS_RECONCILE_INTERVAL_MS = 30_000;
 export const SESSION_STATUS_SEVERITIES: readonly SessionStatusSeverity[] = ["red", "yellow", "green"];
-
-export interface SessionStatusPresentation {
-  status: SessionDisplayStatus;
-  sourceSessionId: string;
-  inherited: boolean;
-}
 
 export function sessionStatusSeverity(status: SessionDisplayStatus): SessionStatusSeverity {
   if (status === "approval" || status === "question" || status === "plan_ready" || status === "blocked" || status === "input_failed" || status === "startup_failed" || status === "missing") {
@@ -35,14 +29,7 @@ export function isSessionStatusSeverity(value: string | null): value is SessionS
   return value === "red" || value === "yellow" || value === "green";
 }
 
-export function sessionStatusPresentation(session: ManagedSession, sessions: readonly ManagedSession[]): SessionStatusPresentation {
-  const descendants = liveAgentDescendants(session.id, sessions);
-  if (session.agentOwnership?.completedAt && descendants.length === 0) {
-    return { status: "completed", sourceSessionId: session.id, inherited: false };
-  }
-  const effective = highestPrioritySession([session, ...descendants]) ?? session;
-  return { status: effective.status, sourceSessionId: effective.id, inherited: effective.id !== session.id };
-}
+export const sessionStatusPresentation = coreSessionStatusPresentation;
 
 export function countSessionStatuses(sessions: readonly ManagedSession[]): SessionStoplightCounts {
   const counts: SessionStoplightCounts = { red: 0, yellow: 0, green: 0 };
@@ -52,21 +39,4 @@ export function countSessionStatuses(sessions: readonly ManagedSession[]): Sessi
     counts[sessionStatusSeverity(sessionStatusPresentation(session, sessions).status)] += 1;
   }
   return counts;
-}
-
-function liveAgentDescendants(parentSessionId: string, sessions: readonly ManagedSession[]): ManagedSession[] {
-  const descendants: ManagedSession[] = [];
-  const pending = [parentSessionId];
-  const seen = new Set(pending);
-  while (pending.length > 0) {
-    const parent = pending.shift()!;
-    for (const session of sessions) {
-      if (session.agentOwnership?.parentSessionId !== parent || seen.has(session.id)) continue;
-      seen.add(session.id);
-      if (session.agentOwnership.completedAt || session.archived || session.status === "missing") continue;
-      descendants.push(session);
-      pending.push(session.id);
-    }
-  }
-  return descendants;
 }

@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
-import { highestPrioritySession, serializeSessionWaitEvent, type ManagedSession, type QuestionAnswerRequest, type SessionDisplayStatus } from "@muxpilot/core";
+import { liveSessionSubtree, serializeSessionWaitEvent, sessionStatusPresentation, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionScope } from "./sessionScopes.js";
@@ -262,7 +262,7 @@ export class SessionOrchestrationBroker {
         const conditions = await Promise.all(targets.map(async (session) => {
           const subtree = liveSessionSubtree(session, sessions);
           if ((await Promise.all(subtree.map((candidate) => this.manager.hasActiveHeavyCommand(candidate.id)))).some(Boolean)) return false;
-          const effective = effectiveSessionStatus(session, sessions);
+          const effective = sessionStatusPresentation(session, sessions);
           if (effective.status === "completed") return true;
           if (!TERMINAL_OR_ATTENTION.has(effective.status)) return false;
           if (effective.status !== "idle" && effective.status !== "waiting") return true;
@@ -314,13 +314,13 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
   const ownership = session.agentOwnership;
   const usage = session.contextUsage;
   const used = ownership ? agentWorkTokensUsed(ownership, usage) : null;
-  const effective = effectiveSessionStatus(session, allSessions);
+  const effective = sessionStatusPresentation(session, allSessions);
   return {
     id: session.id,
     name: session.tmux.windowName,
     status: session.status,
     effectiveStatus: effective.status,
-    effectiveStatusSessionId: effective.sessionId,
+    effectiveStatusSessionId: effective.sourceSessionId,
     completedAt: ownership?.completedAt ?? null,
     initializing: session.initializing === true,
     parentSessionId: ownership?.parentSessionId ?? null,
@@ -338,35 +338,6 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
       scope: isMuxpilotSessionScope(session.resourceScope) ? session.resourceScope : null
     }
   };
-}
-
-function effectiveSessionStatus(
-  session: ManagedSession,
-  allSessions: ManagedSession[]
-): { status: SessionDisplayStatus; sessionId: string } {
-  const subtree = liveSessionSubtree(session, allSessions);
-  if (session.agentOwnership?.completedAt && subtree.length === 0) {
-    return { status: "completed", sessionId: session.id };
-  }
-  const effective = highestPrioritySession(subtree.length > 0 ? subtree : [session]);
-  return { status: effective?.status ?? session.status, sessionId: effective?.id ?? session.id };
-}
-
-function liveSessionSubtree(session: ManagedSession, allSessions: ManagedSession[]): ManagedSession[] {
-  const result = session.agentOwnership?.completedAt ? [] : [session];
-  const pending = [session.id];
-  const seen = new Set(pending);
-  while (pending.length > 0) {
-    const parentId = pending.shift()!;
-    for (const candidate of allSessions) {
-      if (candidate.agentOwnership?.parentSessionId !== parentId || seen.has(candidate.id)) continue;
-      seen.add(candidate.id);
-      if (candidate.agentOwnership.completedAt || candidate.archived || candidate.status === "missing") continue;
-      result.push(candidate);
-      pending.push(candidate.id);
-    }
-  }
-  return result;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
