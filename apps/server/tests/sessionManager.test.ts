@@ -747,6 +747,164 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("surfaces a matching generic MCP approval from a batched nested tool call", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "generic-mcp-approval.jsonl");
+    const sentKeys: string[][] = [];
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-generic-mcp-approval",
+            input: [
+              "const calls = [",
+              '  tools.mcp__muxpilot_sessions__read_session({sessionId:"session-id",limit:10}),',
+              '  tools.mcp__muxpilot_sessions__capture_tmux_pane({paneId:"%1",lines:100})',
+              "];",
+              "const results = await Promise.all(calls);"
+            ].join("\n")
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    let capture = ["Working (20s • esc to interrupt)", mcpApprovalCapture(1)].join("\n");
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: repo, paneId: "%1", title: "[ . ] Action Required | codex-session" })
+    ];
+    harness.tmux.capturePane = async () => capture;
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      sentKeys.push(keys);
+      capture = "› ";
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    expect(session.status).toBe("waiting");
+    const publishedStatuses: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.type === "session.updated") publishedStatuses.push((event.payload as ManagedSession).status);
+    });
+
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(publishedStatuses).toContain("approval");
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-generic-mcp-approval",
+      kind: "permissions",
+      title: 'Allow the muxpilot_sessions MCP server to run tool "capture_tmux_pane"?',
+      toolName: "muxpilot_sessions.capture_tmux_pane"
+    });
+
+    await harness.manager.resolveApproval(session.id, { decision: "approve_for_session" });
+    expect(sentKeys).toEqual([["Down", "Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    unsubscribe();
+    harness.db.close();
+  });
+
+  it("surfaces a matching generic MCP approval from a native function call", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "native-mcp-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "capture_tmux_pane",
+            namespace: "mcp__muxpilot_sessions",
+            call_id: "call-native-mcp-approval",
+            arguments: JSON.stringify({ paneId: "%1", lines: 100 })
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: repo, paneId: "%1", title: "[ . ] Action Required | codex-session" })
+    ];
+    harness.tmux.capturePane = async () => mcpApprovalCapture(1);
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-native-mcp-approval",
+      toolName: "muxpilot_sessions.capture_tmux_pane"
+    });
+    harness.db.close();
+  });
+
+  it("rejects a generic MCP approval that does not match the latest nested tool call", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "mismatched-mcp-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-26T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            name: "exec",
+            call_id: "call-unrelated-mcp-tool",
+            input: [
+              'const session = await tools.mcp__muxpilot_sessions__read_session({sessionId:"session-id",limit:10});',
+              'const capture = await tools.mcp__other_sessions__capture_tmux_pane({paneId:"%1",lines:100});'
+            ].join("\n")
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [
+      testPane({ cwd: repo, paneId: "%1", title: "[ . ] Action Required | codex-session" })
+    ];
+    harness.tmux.capturePane = async () => mcpApprovalCapture(1);
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
   it("surfaces and resolves wrapped custom command approvals despite working cues", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -6025,6 +6183,25 @@ function appApprovalCapture(selected: number): string {
     "",
     "  Title: Scope assignment CADs to workspace",
     "  base: stage",
+    "",
+    option(1, "Allow                   Run the tool and continue."),
+    option(2, "Allow for this session  Run the tool and remember this choice for this session."),
+    option(3, "Always allow            Run the tool and remember this choice for future tool calls."),
+    option(4, "Cancel                  Cancel this tool call"),
+    "  enter to submit | esc to cancel"
+  ].join("\n");
+}
+
+function mcpApprovalCapture(selected: number): string {
+  const option = (number: number, text: string) => `${number === selected ? "  ›" : "   "} ${number}. ${text}`;
+  return [
+    "◦ Calling muxpilot_sessions.capture_tmux_pane({paneId: \"%1\", lines: 100})",
+    "",
+    "  Field 1/1",
+    '  Allow the muxpilot_sessions MCP server to run tool "capture_tmux_pane"?',
+    "",
+    "  paneId: %1",
+    "  lines: 100",
     "",
     option(1, "Allow                   Run the tool and continue."),
     option(2, "Allow for this session  Run the tool and remember this choice for this session."),

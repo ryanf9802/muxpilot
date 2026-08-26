@@ -4030,7 +4030,7 @@ function materializeInteractiveApproval(
 ): ApprovalRequest {
   const toolCall = latestMessage?.type === "tool_call" ? recordValue(latestMessage.payload.payload) : null;
   const callId = stringValue(toolCall?.call_id);
-  const toolName = prompt.kind === "permissions" ? toolCallName(toolCall) : null;
+  const toolName = prompt.kind === "permissions" ? permissionToolCallName(prompt, toolCall) : null;
   const id =
     callId ??
     stableId(
@@ -4073,14 +4073,14 @@ function interactiveApprovalHasTranscriptContext(
   const payload = recordValue(latestMessage.payload.payload);
   if (!payload) return false;
   if (payload.type === "function_call") {
-    if (prompt.kind === "permissions") return true;
+    if (prompt.kind === "permissions") return permissionToolCallName(prompt, payload) !== null;
     const name = stringValue(payload.name)?.replace(/^_+/, "");
     if (prompt.kind === "patch") return name === "apply_patch";
     return prompt.kind === "command" && name === "exec_command";
   }
   if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
   const input = stringValue(payload.input);
-  if (prompt.kind === "permissions") return toolCallName(payload)?.startsWith("codex_apps.") ?? false;
+  if (prompt.kind === "permissions") return permissionToolCallName(prompt, payload) !== null;
   if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));
   if (prompt.kind !== "command") return false;
   if (!input || !/tools\.exec_command\s*\(/.test(input)) return false;
@@ -4147,21 +4147,81 @@ function stringArraysEqual(first: string[] | null, second: string[] | null): boo
   return first.length === second.length && first.every((value, index) => value === second[index]);
 }
 
-function toolCallName(payload: Record<string, unknown> | null): string | null {
+interface McpToolCall {
+  server: string;
+  tool: string;
+  name: string;
+}
+
+function permissionToolCallName(
+  prompt: InteractiveApprovalPrompt,
+  payload: Record<string, unknown> | null
+): string | null {
   if (!payload) return null;
-  if (payload.type === "function_call") {
-    const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
-    const namespace = stringValue(payload.namespace)
-      ?.replace(/^mcp__codex_apps__/, "codex_apps.")
-      .replace(/__/g, ".");
-    if (namespace && name) return `${namespace}.${name}`;
-    return name ?? namespace ?? null;
+  const calls = mcpToolCalls(payload);
+  const target = mcpPermissionTarget(prompt.title);
+  if (target) {
+    return calls.find((call) => call.server === target.server && call.tool === target.tool)?.name ?? null;
   }
-  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return null;
+
+  const appCall = calls.find((call) => call.server === "codex_apps");
+  if (appCall) return appCall.name;
+  if (payload.type !== "function_call") return null;
+  return functionCallName(payload);
+}
+
+function mcpPermissionTarget(title: string): { server: string; tool: string } | null {
+  const match = title.match(/^Allow the (.+?) MCP server to run tool ["“]([^"”]+)["”]\?$/i);
+  if (!match?.[1] || !match[2]) return null;
+  return { server: match[1], tool: match[2] };
+}
+
+function mcpToolCalls(payload: Record<string, unknown>): McpToolCall[] {
+  if (payload.type === "function_call") {
+    const call = functionMcpToolCall(payload);
+    return call ? [call] : [];
+  }
+  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return [];
   const input = stringValue(payload.input);
-  const nestedAppCall = input?.match(/tools\.mcp__codex_apps__([A-Za-z0-9]+)_([A-Za-z0-9_]+)\s*\(/);
-  if (!nestedAppCall?.[1] || !nestedAppCall[2]) return null;
-  return `codex_apps.${nestedAppCall[1]}.${nestedAppCall[2]}`;
+  if (!input) return [];
+
+  const calls: McpToolCall[] = [];
+  for (const match of input.matchAll(/tools\.mcp__([A-Za-z0-9_]+?)__([A-Za-z0-9_]+)\s*\(/g)) {
+    if (!match[1] || !match[2]) continue;
+    calls.push(mcpToolCall(match[1], match[2]));
+  }
+  return calls;
+}
+
+function functionMcpToolCall(payload: Record<string, unknown>): McpToolCall | null {
+  const namespace = stringValue(payload.namespace);
+  const tool = stringValue(payload.name)?.replace(/^_+/, "");
+  if (!namespace?.startsWith("mcp__") || !tool) return null;
+  const qualifiedServer = namespace.slice("mcp__".length);
+  if (qualifiedServer.startsWith("codex_apps__")) {
+    const app = qualifiedServer.slice("codex_apps__".length);
+    return { server: "codex_apps", tool: `${app}_${tool}`, name: `codex_apps.${app}.${tool}` };
+  }
+  return mcpToolCall(qualifiedServer, tool);
+}
+
+function mcpToolCall(server: string, tool: string): McpToolCall {
+  if (server === "codex_apps") {
+    const separator = tool.indexOf("_");
+    if (separator > 0) {
+      const app = tool.slice(0, separator);
+      const appTool = tool.slice(separator + 1);
+      return { server, tool, name: `codex_apps.${app}.${appTool}` };
+    }
+  }
+  return { server, tool, name: `${server}.${tool}` };
+}
+
+function functionCallName(payload: Record<string, unknown>): string | null {
+  const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
+  const namespace = stringValue(payload.namespace)?.replace(/__/g, ".") ?? null;
+  if (namespace && name) return `${namespace}.${name}`;
+  return name ?? namespace;
 }
 
 function approvalOptions(value: unknown, prefixRule: string[] | null): ApprovalRequest["options"] {
