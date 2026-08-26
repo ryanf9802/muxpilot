@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
@@ -293,9 +293,8 @@ describe("heavyweight validation helper", () => {
     const leases = join(root, "leases");
     const session = join(root, "session");
     const statusFile = join(session, "git-workflow.json");
-    const systemdArgs = join(root, "systemd-args.json");
     await mkdir(session);
-    const systemdRun = await writeFakeSystemdRun(root);
+    const broker = await startFakeBroker(root);
     const outcome = execFileAsync(process.execPath, [
       helper, "--heavy", "--", process.execPath, "-e", "process.stdout.write(process.env.NOISY_MARKER + '\\n'); setTimeout(() => {}, 80)"
     ], {
@@ -306,8 +305,8 @@ describe("heavyweight validation helper", () => {
         MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
         MUXPILOT_GIT_STATUS_FILE: statusFile,
         MUXPILOT_HEAVY_VALIDATION_DIR: leases,
-        MUXPILOT_HEAVY_SYSTEMD_RUN: systemdRun,
-        FAKE_SYSTEMD_ARGS: systemdArgs,
+        MUXPILOT_HEAVY_BROKER_SOCKET: broker.path,
+        MUXPILOT_HEAVY_BROKER_TOKEN: "broker-test-token",
         BOOTSTRAP_SECRET: "private-bootstrap-value",
         NOISY_MARKER: "noisy output"
       }
@@ -333,12 +332,17 @@ describe("heavyweight validation helper", () => {
       resourceUnit: expect.stringMatching(/^muxpilot-heavy-.+\.service$/)
     });
     expect(JSON.stringify(owner)).not.toContain("private-bootstrap-value");
-    const launchArguments = JSON.parse(await readFile(systemdArgs, "utf8")) as string[];
-    expect(launchArguments).toContain("--property=StandardOutput=null");
-    expect(launchArguments).toContain("--muxpilot-heavy-worker-bootstrap");
-    expect(JSON.stringify(launchArguments)).not.toContain("private-bootstrap-value");
+    expect(broker.requests).toMatchObject([{
+      action: "launch",
+      token: "broker-test-token",
+      runId,
+      resourceUnit: owner.resourceUnit,
+      bootstrapSocket: expect.stringContaining("bootstrap-")
+    }]);
+    expect(JSON.stringify(broker.requests)).not.toContain("private-bootstrap-value");
     expect((await readdir(join(leases, "runs", runId))).some((entry) => entry.startsWith("bootstrap-"))).toBe(false);
     expect(await readFile(owner.logPath, "utf8")).toContain("noisy output");
+    await broker.close();
   });
 
   it("suppresses a transient worker completion after a durable session cancellation", async () => {
@@ -347,7 +351,7 @@ describe("heavyweight validation helper", () => {
     const leases = join(root, "leases");
     const session = join(root, "session");
     await mkdir(session);
-    const systemdRun = await writeFakeSystemdRun(root);
+    const broker = await startFakeBroker(root);
     const outcome = execFileAsync(process.execPath, [
       helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 1000)"
     ], {
@@ -358,7 +362,8 @@ describe("heavyweight validation helper", () => {
         MUXPILOT_GIT_WORKSPACE_ID: "workspace-a",
         MUXPILOT_GIT_STATUS_FILE: join(session, "git-workflow.json"),
         MUXPILOT_HEAVY_VALIDATION_DIR: leases,
-        MUXPILOT_HEAVY_SYSTEMD_RUN: systemdRun
+        MUXPILOT_HEAVY_BROKER_SOCKET: broker.path,
+        MUXPILOT_HEAVY_BROKER_TOKEN: "broker-test-token"
       }
     });
     let event: ReturnType<typeof normalizeHeavyCommandQueueEvent> = null;
@@ -370,6 +375,7 @@ describe("heavyweight validation helper", () => {
     const runId = event!.event.runId;
     await writeFile(join(leases, "runs", runId, "completion-suppressed"), "session interrupted");
     expect(await waitForState(leases, "cancelled")).toBe(runId);
+    await broker.close();
   });
 
   it("force-removes labeled containers after a failed Docker command", async () => {
@@ -587,20 +593,39 @@ describe("heavyweight validation helper", () => {
   });
 });
 
-async function writeFakeSystemdRun(root: string): Promise<string> {
-  const path = join(root, "systemd-run");
-  await writeFile(path, `#!/usr/bin/env node
-const { spawn } = require("node:child_process");
-const { writeFileSync } = require("node:fs");
-const args = process.argv.slice(2);
-if (process.env.FAKE_SYSTEMD_ARGS) writeFileSync(process.env.FAKE_SYSTEMD_ARGS, JSON.stringify(args));
-const commandIndex = args.findIndex((value) => value.startsWith("/"));
-if (commandIndex < 0) process.exit(2);
-const child = spawn(args[commandIndex], args.slice(commandIndex + 1), { detached: true, stdio: "ignore", env: process.env });
-child.unref();
-`);
-  await chmod(path, 0o755);
-  return path;
+async function startFakeBroker(root: string): Promise<{
+  path: string;
+  requests: Array<Record<string, unknown>>;
+  close: () => Promise<void>;
+}> {
+  const path = join(root, "broker.sock");
+  const requests: Array<Record<string, unknown>> = [];
+  const server = createServer((socket) => {
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      const request = JSON.parse(input.trim()) as Record<string, unknown>;
+      requests.push(request);
+      if (request.action === "launch") {
+        const worker = spawn(process.execPath, [helper, "--muxpilot-heavy-worker-bootstrap", String(request.bootstrapSocket)], {
+          detached: true,
+          stdio: "ignore",
+          env: process.env
+        });
+        worker.unref();
+      }
+      socket.end(`${JSON.stringify({ ok: true })}\n`);
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(path, resolve));
+  await chmod(path, 0o600);
+  return {
+    path,
+    requests,
+    close: () => new Promise((resolve) => server.close(() => resolve()))
+  };
 }
 
 async function waitForRun(leases: string): Promise<string> {

@@ -1,8 +1,13 @@
 import { serializeHeavyCommandQueueEvent } from "@muxpilot/core";
 import type { HeavyCommand, HeavyCommandOutputResponse, HeavyCommandsResponse } from "@muxpilot/core";
-import { createConnection } from "node:net";
-import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
+import { createConnection, createServer, type Server } from "node:net";
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const ACTIVE_STATES = new Set(["waiting", "reserved", "running", "stalled", "terminating", "reporting"]);
 const RUNNING_STATES = new Set(["running", "stalled", "terminating"]);
@@ -19,21 +24,37 @@ export interface HeavyCommandSessionCoordinator {
   resumeHeavyCommand(sessionId: string, message: string): Promise<boolean>;
 }
 
+export interface HeavyCommandLaunchBrokerOptions {
+  enabled: boolean;
+  environment: Record<string, string>;
+  token: string;
+  runnerPath: string;
+  logger: { warn(values: object, message: string): void };
+  runCommand?: (command: string, args: string[]) => Promise<void>;
+}
+
 export class HeavyCommandService {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private coordinator: HeavyCommandSessionCoordinator | null = null;
+  private brokerServer: Server | null = null;
 
   constructor(
     private readonly leaseRoot: string,
     private readonly sessionRoot: string,
     private readonly concurrency = 2,
-    private readonly resumeTimeoutMs = 120_000
+    private readonly resumeTimeoutMs = 120_000,
+    private readonly launchBroker: HeavyCommandLaunchBrokerOptions | null = null
   ) {}
 
-  start(coordinator: HeavyCommandSessionCoordinator): void {
+  brokerSocketPath(): string | null {
+    return this.launchBroker?.enabled ? join(this.leaseRoot, "broker.sock") : null;
+  }
+
+  async start(coordinator: HeavyCommandSessionCoordinator): Promise<void> {
     this.coordinator = coordinator;
     if (this.timer) return;
+    if (this.launchBroker?.enabled) await this.startLaunchBroker();
     this.timer = setInterval(() => this.scheduleTick(), 250);
     this.scheduleTick();
   }
@@ -42,6 +63,85 @@ export class HeavyCommandService {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     while (this.ticking) await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    if (this.brokerServer) await new Promise<void>((resolveClose) => this.brokerServer!.close(() => resolveClose()));
+    this.brokerServer = null;
+    if (this.launchBroker?.enabled) {
+      await rm(join(this.leaseRoot, "broker.sock"), { force: true });
+      await rm(join(this.leaseRoot, "broker-token"), { force: true });
+    }
+  }
+
+  private async startLaunchBroker(): Promise<void> {
+    const options = this.launchBroker!;
+    const socketPath = join(this.leaseRoot, "broker.sock");
+    await mkdir(this.leaseRoot, { recursive: true, mode: 0o700 });
+    await rm(socketPath, { force: true });
+    await writeFile(join(this.leaseRoot, "broker-token"), options.token, { mode: 0o600 });
+    const server = createServer((socket) => {
+      let input = "";
+      let handled = false;
+      socket.setEncoding("utf8");
+      socket.on("data", (chunk) => {
+        input += chunk;
+        if (input.length > 16 * 1024) {
+          handled = true;
+          socket.destroy(new Error("heavyweight launch request exceeded 16 KiB"));
+          return;
+        }
+        if (handled || !input.includes("\n")) return;
+        handled = true;
+        void this.handleLaunchRequest(input.trim()).then(
+          (response) => socket.end(`${JSON.stringify(response)}\n`),
+          (error) => {
+            options.logger.warn({ err: error }, "could not launch transient heavyweight worker");
+            socket.end(`${JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) })}\n`);
+          }
+        );
+      });
+      socket.on("error", () => undefined);
+    });
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(socketPath, resolveListen);
+    });
+    await chmod(socketPath, 0o600);
+    this.brokerServer = server;
+  }
+
+  private async handleLaunchRequest(text: string): Promise<{ ok: true }> {
+    const request = JSON.parse(text) as Record<string, unknown>;
+    if (!safeToken(String(request.token ?? ""), this.launchBroker!.token)) throw new Error("unauthorized heavyweight launch request");
+    const resourceUnit = String(request.resourceUnit ?? "");
+    if (request.action === "stop" && RESOURCE_UNIT.test(resourceUnit)) {
+      await this.runBrokerCommand("systemctl", ["--user", "stop", resourceUnit], 5_000);
+      return { ok: true };
+    }
+    const runId = String(request.runId ?? "");
+    const bootstrapSocket = resolve(String(request.bootstrapSocket ?? ""));
+    if (request.action !== "launch" || !RUN_ID.test(runId) || !RESOURCE_UNIT.test(resourceUnit)) {
+      throw new Error("heavyweight launch request is invalid");
+    }
+    const expectedRunRoot = resolve(this.leaseRoot, "runs", runId);
+    if (!inside(expectedRunRoot, bootstrapSocket) || !/^bootstrap-[0-9]+-[a-f0-9]{6}\.sock$/.test(bootstrapSocket.slice(expectedRunRoot.length + 1))) {
+      throw new Error("heavyweight bootstrap socket is outside its run directory");
+    }
+    const socketDetails = await lstat(bootstrapSocket).catch(() => null);
+    if (!socketDetails?.isSocket() || socketDetails.isSymbolicLink()) throw new Error("heavyweight bootstrap socket is unavailable");
+    await this.runBrokerCommand("systemd-run", [
+      "--user", "--quiet", "--collect", "--service-type=exec",
+      `--unit=${resourceUnit}`,
+      "--property=StandardOutput=null", "--property=StandardError=null",
+      process.execPath, this.launchBroker!.runnerPath, "--muxpilot-heavy-worker-bootstrap", bootstrapSocket
+    ], 15_000);
+    return { ok: true };
+  }
+
+  private async runBrokerCommand(command: string, args: string[], timeout: number): Promise<void> {
+    if (this.launchBroker?.runCommand) return this.launchBroker.runCommand(command, args);
+    await execFileAsync(command, args, {
+      timeout,
+      env: { ...process.env, ...this.launchBroker!.environment }
+    });
   }
 
   private scheduleTick(): void {
@@ -459,4 +559,10 @@ function utf8Tail(value: string, maxBytes: number): string {
   let start = buffer.length - maxBytes;
   while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
   return buffer.subarray(start).toString("utf8");
+}
+
+function safeToken(candidate: string, expected: string): boolean {
+  const left = Buffer.from(candidate);
+  const right = Buffer.from(expected);
+  return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }

@@ -1,4 +1,4 @@
-import { createServer } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ describe("HeavyCommandService", () => {
     await writeFile(ownerPath, JSON.stringify({ ...initial, state: "acquiring" }));
     const messages: string[] = [];
     const service = new HeavyCommandService(leases, sessions, 1, 120_000);
-    service.start({
+    await service.start({
       sessionIdForWorkspace: async () => "session-a",
       resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
     });
@@ -108,7 +108,7 @@ describe("HeavyCommandService", () => {
     await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({ version: 2, runId: "orphan", controlSocket: join(leases, "missing.sock"), heartbeatAt: Date.now() }));
     const messages: string[] = [];
     const service = new HeavyCommandService(leases, sessions, 1, 120_000);
-    service.start({
+    await service.start({
       sessionIdForWorkspace: async () => "session-a",
       resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
     });
@@ -143,7 +143,7 @@ describe("HeavyCommandService", () => {
     const runId = "mabc123-333333333333";
     await writeQueueOwner(leases, runId, new Date().toISOString());
     const service = new HeavyCommandService(leases, join(root, "sessions"), 1, 40);
-    service.start({ sessionIdForWorkspace: async () => "session-a", resumeHeavyCommand: async () => true });
+    await service.start({ sessionIdForWorkspace: async () => "session-a", resumeHeavyCommand: async () => true });
     try {
       await waitFor(async () => {
         const current = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
@@ -168,7 +168,7 @@ describe("HeavyCommandService", () => {
     await writeReportingOwner(leases, sessions, passed, 0, "successful but noisy output");
     await writeReportingOwner(leases, sessions, failed, 1, `${"old failure context\n".repeat(4_000)}final assertion failed\n`);
     const service = new HeavyCommandService(leases, sessions, 2, 120_000);
-    service.start({
+    await service.start({
       sessionIdForWorkspace: async () => "session-a",
       resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
     });
@@ -280,7 +280,7 @@ describe("HeavyCommandService", () => {
     const service = new HeavyCommandService(leases, sessions);
     await service.cancelWorkspace("workspace-a", "session interrupted");
     const messages: string[] = [];
-    service.start({
+    await service.start({
       sessionIdForWorkspace: async () => "session-a",
       resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
     });
@@ -293,6 +293,74 @@ describe("HeavyCommandService", () => {
       });
     } finally {
       await service.stop();
+    }
+  });
+
+  it("brokers validated transient worker launch and stop requests", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-999999999999";
+    const runDir = join(leases, "runs", runId);
+    const bootstrapSocket = join(runDir, "bootstrap-123-a1b2c3.sock");
+    await mkdir(runDir, { recursive: true });
+    const bootstrapServer = createServer();
+    await new Promise<void>((resolve) => bootstrapServer.listen(bootstrapSocket, resolve));
+    const commands: Array<{ command: string; args: string[] }> = [];
+    const service = new HeavyCommandService(leases, join(root, "sessions"), 2, 120_000, {
+      enabled: true,
+      environment: {},
+      token: "broker-test-token",
+      runnerPath: "/installed/muxpilot-git-run.mjs",
+      logger: { warn: () => undefined },
+      runCommand: async (command, args) => { commands.push({ command, args }); }
+    });
+    await service.start({ sessionIdForWorkspace: async () => null, resumeHeavyCommand: async () => false });
+    const brokerSocket = service.brokerSocketPath()!;
+    try {
+      expect((await stat(brokerSocket)).mode & 0o777).toBe(0o600);
+      expect((await stat(join(leases, "broker-token"))).mode & 0o777).toBe(0o600);
+      expect(await readFile(join(leases, "broker-token"), "utf8")).toBe("broker-test-token");
+      expect(await brokerRequest(brokerSocket, {
+        action: "launch",
+        token: "broker-test-token",
+        runId,
+        resourceUnit: `muxpilot-heavy-${runId}-a1b2c3.service`,
+        bootstrapSocket
+      })).toEqual({ ok: true });
+      expect(commands[0]).toMatchObject({
+        command: "systemd-run",
+        args: expect.arrayContaining([
+          `--unit=muxpilot-heavy-${runId}-a1b2c3.service`,
+          "/installed/muxpilot-git-run.mjs",
+          "--muxpilot-heavy-worker-bootstrap",
+          bootstrapSocket
+        ])
+      });
+      expect(await brokerRequest(brokerSocket, {
+        action: "launch",
+        token: "broker-test-token",
+        runId,
+        resourceUnit: `muxpilot-heavy-${runId}-a1b2c3.service`,
+        bootstrapSocket: join(root, "outside.sock")
+      })).toMatchObject({ ok: false, error: expect.stringContaining("outside") });
+      expect(await brokerRequest(brokerSocket, {
+        action: "stop",
+        token: "broker-test-token",
+        resourceUnit: `muxpilot-heavy-${runId}-a1b2c3.service`
+      })).toEqual({ ok: true });
+      expect(commands.at(-1)).toEqual({
+        command: "systemctl",
+        args: ["--user", "stop", `muxpilot-heavy-${runId}-a1b2c3.service`]
+      });
+      expect(await brokerRequest(brokerSocket, {
+        action: "stop",
+        token: "wrong-token",
+        resourceUnit: `muxpilot-heavy-${runId}-a1b2c3.service`
+      })).toMatchObject({ ok: false, error: "unauthorized heavyweight launch request" });
+    } finally {
+      await service.stop();
+      await new Promise<void>((resolve) => bootstrapServer.close(() => resolve()));
     }
   });
 });
@@ -355,6 +423,22 @@ async function waitFor(predicate: () => Promise<boolean> | boolean): Promise<voi
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   }
   throw new Error("condition was not met");
+}
+
+function brokerRequest(path: string, request: object): Promise<Record<string, unknown>> {
+  return new Promise((resolveResponse, rejectResponse) => {
+    const socket = createConnection(path);
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      socket.end();
+      resolveResponse(JSON.parse(input.trim()));
+    });
+    socket.once("error", rejectResponse);
+  });
 }
 
 function owner(runId: string, workspaceId: string, logPath: string | null) {

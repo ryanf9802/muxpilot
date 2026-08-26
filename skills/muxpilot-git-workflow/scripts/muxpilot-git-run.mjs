@@ -213,22 +213,29 @@ async function launchManagedWorker() {
     cwd: process.cwd(),
     environment: process.env
   });
-  const systemdRun = process.env.MUXPILOT_HEAVY_SYSTEMD_RUN ?? "systemd-run";
-  const launched = spawnSync(systemdRun, [
-    "--user", "--quiet", "--collect", "--service-type=exec",
-    `--unit=${bootstrap.payload.resourceUnit}`,
-    "--property=StandardOutput=null", "--property=StandardError=null",
-    process.execPath, resolve(process.argv[1]), WORKER_BOOTSTRAP_FLAG, bootstrapSocket
-  ], { encoding: "utf8", timeout: 15_000, env: process.env });
-  if (launched.error || launched.status !== 0) {
+  const brokerSocket = process.env.MUXPILOT_HEAVY_BROKER_SOCKET ?? join(leaseRoot, "broker.sock");
+  const runtimeBrokerToken = await readFile(join(leaseRoot, "broker-token"), "utf8")
+    .then((value) => value.trim()).catch(() => "");
+  const brokerToken = runtimeBrokerToken || process.env.MUXPILOT_HEAVY_BROKER_TOKEN;
+  if (!brokerSocket || !brokerToken) {
     await bootstrap.close();
-    const detail = launched.error?.message ?? launched.stderr?.trim() ?? `exit ${launched.status ?? "unknown"}`;
-    fail(`could not launch heavyweight worker service ${bootstrap.payload.resourceUnit} (${detail})`);
+    fail("managed heavyweight completion broker is unavailable");
+  }
+  const launch = await requestWorkerBroker(brokerSocket, {
+    action: "launch",
+    token: brokerToken,
+    runId,
+    resourceUnit: bootstrap.payload.resourceUnit,
+    bootstrapSocket
+  }).catch((error) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  if (!launch.ok) {
+    await bootstrap.close();
+    fail(`could not launch heavyweight worker service ${bootstrap.payload.resourceUnit} (${launch.error ?? "broker rejected the request"})`);
   }
   try {
     await withTimeout(bootstrap.delivered, 15_000, "heavyweight worker did not accept its private bootstrap payload");
   } catch (error) {
-    spawnSync("systemctl", ["--user", "stop", bootstrap.payload.resourceUnit], { timeout: 5_000, env: process.env });
+    await requestWorkerBroker(brokerSocket, { action: "stop", token: brokerToken, resourceUnit: bootstrap.payload.resourceUnit }).catch(() => null);
     await bootstrap.close();
     fail(error instanceof Error ? error.message : String(error));
   }
@@ -257,8 +264,25 @@ async function launchManagedWorker() {
     }
     await delay(25);
   }
-  spawnSync("systemctl", ["--user", "stop", bootstrap.payload.resourceUnit], { timeout: 5_000, env: process.env });
+  await requestWorkerBroker(brokerSocket, { action: "stop", token: brokerToken, resourceUnit: bootstrap.payload.resourceUnit }).catch(() => null);
   fail(`heavyweight worker ${runId} did not become ready for handoff`);
+}
+
+function requestWorkerBroker(path, request) {
+  return new Promise((resolveResponse, rejectResponse) => {
+    const socket = createConnection(path);
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(15_000, () => socket.destroy(new Error("heavyweight launch broker timed out")));
+    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (!input.includes("\n")) return;
+      socket.end();
+      try { resolveResponse(JSON.parse(input.trim())); } catch (error) { rejectResponse(error); }
+    });
+    socket.once("error", rejectResponse);
+  });
 }
 
 async function createWorkerBootstrapServer(path, payload) {

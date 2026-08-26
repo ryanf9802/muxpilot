@@ -30,6 +30,7 @@ import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroke
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
+import { randomBytes } from "node:crypto";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -78,6 +79,7 @@ const activitySummarizer = new ActivitySummarizer({
 });
 let dockerProxy: DockerResourceProxy | null = null;
 const sessionScopes = await detectSessionScopeCapability(config.resourceGovernor !== "off");
+const heavyLaunchToken = randomBytes(32).toString("hex");
 if (sessionScopes.configured && !sessionScopes.available) {
   app.log.warn(
     { reason: sessionScopes.unavailableReason },
@@ -89,6 +91,10 @@ const managedEnvironment: Record<string, string> = {
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
   MUXPILOT_HEAVY_COMPLETION_ENABLED: sessionScopes.available ? "1" : "0",
+  ...(sessionScopes.available ? {
+    MUXPILOT_HEAVY_BROKER_SOCKET: join(config.heavyValidationDir, "broker.sock"),
+    MUXPILOT_HEAVY_BROKER_TOKEN: heavyLaunchToken
+  } : {}),
   MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: String(config.heavyValidationConcurrency),
   MUXPILOT_HEAVY_VALIDATION_DIR: config.heavyValidationDir,
   MUXPILOT_HEAVY_VALIDATION_INACTIVITY_WARN_MS: String(config.heavyValidationInactivityWarnMs),
@@ -147,10 +153,17 @@ const heavyCommands = new HeavyCommandService(
   config.heavyValidationDir,
   config.gitSessionRoot,
   config.heavyValidationConcurrency,
-  config.heavyValidationResumeTimeoutMs
+  config.heavyValidationResumeTimeoutMs,
+  {
+    enabled: sessionScopes.available,
+    environment: sessionScopes.environment,
+    token: heavyLaunchToken,
+    runnerPath: join(config.codexHome, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"),
+    logger: app.log
+  }
 );
 manager.setHeavyCommandQueue(heavyCommands);
-heavyCommands.start(manager);
+await heavyCommands.start(manager);
 const resourceGovernor = new ResourceGovernor({
   configured: sessionScopes.configured,
   enabled: sessionScopes.available,
