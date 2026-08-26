@@ -7,10 +7,13 @@ describe("mobile session viewport layout", () => {
   it("sizes the narrow app shell from measured visual viewport variables", () => {
     const mobileStyles = cssBlock(styles, "@media (max-width: 819px)");
     const appRule = cssBlock(mobileStyles, ".app");
+    const btwBackdropRule = cssBlock(mobileStyles, ".btw-drawer-backdrop");
     const textareaRule = cssBlock(mobileStyles, ".skill-textarea textarea,\n  .skill-textarea-mirror");
     expect(appRule).toContain("position: fixed;");
     expect(appRule).toContain("top: var(--app-viewport-offset-top, 0px);");
     expect(appRule).toContain("height: var(--app-viewport-height, 100dvh);");
+    expect(btwBackdropRule).toContain("top: var(--app-viewport-offset-top, 0px);");
+    expect(btwBackdropRule).toContain("height: var(--app-viewport-height, 100dvh);");
     expect(textareaRule).toContain("var(--app-viewport-unit, 1dvh)");
   });
 

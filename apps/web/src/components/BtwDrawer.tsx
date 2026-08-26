@@ -1,4 +1,17 @@
-import { Check, Copy, LoaderCircle, Send, Square, X } from "lucide-react";
+import {
+  Check,
+  CircleAlert,
+  CircleCheck,
+  Clock3,
+  Copy,
+  LoaderCircle,
+  MessageCircleQuestion,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  X
+} from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -67,9 +80,12 @@ export function BtwDrawer({
   const [draft, setDraft] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
+  const previousExchangeCountRef = useRef(exchanges.length);
   const active = exchanges.find((exchange) => exchange.status === "running") ?? null;
+  const latest = exchanges.at(-1) ?? null;
   onCloseRef.current = onClose;
 
   useEffect(() => {
@@ -79,6 +95,9 @@ export function BtwDrawer({
     document.body.style.overflow = "hidden";
     if (inputRef.current && !inputRef.current.disabled) inputRef.current.focus();
     else panelRef.current?.focus();
+    window.requestAnimationFrame(() => {
+      if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight;
+    });
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
         event.preventDefault();
@@ -111,6 +130,17 @@ export function BtwDrawer({
     };
   }, [open]);
 
+  useEffect(() => {
+    const list = listRef.current;
+    const previousCount = previousExchangeCountRef.current;
+    previousExchangeCountRef.current = exchanges.length;
+    if (!open || !list) return;
+    const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+    if (exchanges.length > previousCount || distanceFromBottom < 140) {
+      window.requestAnimationFrame(() => list.scrollTo({ top: list.scrollHeight, behavior: "smooth" }));
+    }
+  }, [exchanges.length, latest?.answer.length, latest?.status, open]);
+
   if (!open) return null;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -137,45 +167,74 @@ export function BtwDrawer({
     }}>
       <aside ref={panelRef} className="btw-drawer" role="dialog" aria-modal="true" aria-labelledby="btw-drawer-title" tabIndex={-1}>
         <header className="btw-drawer-header">
-          <div>
-            <h2 id="btw-drawer-title">BTW</h2>
-            <p>Ask from a read-only snapshot without interrupting this session.</p>
+          <div className="btw-title-lockup">
+            <span className="btw-brand-mark" aria-hidden="true"><MessageCircleQuestion size={20} /></span>
+            <div>
+              <span className="btw-eyebrow">BTW</span>
+              <h2 id="btw-drawer-title">Side questions</h2>
+              <p>Get a quick answer while the main task keeps moving.</p>
+            </div>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close BTW drawer">
             <X size={18} />
           </button>
+          <div className="btw-context-strip">
+            <span><ShieldCheck size={14} /> Read-only snapshot</span>
+            <span aria-hidden="true" className="btw-context-divider" />
+            <span>{exchangeCountLabel(exchanges.length)}</span>
+          </div>
         </header>
 
-        <div className="btw-exchange-list" aria-live="polite">
-          {loading ? <p className="btw-empty"><LoaderCircle className="spin" size={18} /> Loading BTW history…</p> : null}
-          {!loading && exchanges.length === 0 ? <p className="btw-empty">No side questions yet.</p> : null}
-          {exchanges.map((exchange) => (
-            <article className="btw-exchange" data-status={exchange.status} key={exchange.id}>
+        <div ref={listRef} className="btw-exchange-list" aria-live="polite">
+          {loading ? (
+            <div className="btw-empty">
+              <span className="btw-empty-icon"><LoaderCircle className="spin" size={22} /></span>
+              <strong>Loading side questions</strong>
+              <span>Restoring the separate BTW history…</span>
+            </div>
+          ) : null}
+          {!loading && exchanges.length === 0 ? (
+            <div className="btw-empty">
+              <span className="btw-empty-icon"><Sparkles size={22} /></span>
+              <strong>Ask without changing course</strong>
+              <span>Your question and its answer stay out of the main conversation.</span>
+            </div>
+          ) : null}
+          {exchanges.map((exchange, index) => (
+            <article className="btw-exchange" data-status={exchange.status} data-latest={index === exchanges.length - 1 || undefined} key={exchange.id}>
+              <header className="btw-exchange-heading">
+                <span className="btw-exchange-number">Question {String(index + 1).padStart(2, "0")}</span>
+                <time dateTime={exchange.createdAt}>{formatBtwTime(exchange.createdAt)}</time>
+                <span className="btw-status">{btwStatusIcon(exchange)} {btwStatusLabel(exchange)}</span>
+              </header>
               <div className="btw-question">
-                <span>You</span>
+                <span>You asked</span>
                 <p>{exchange.question}</p>
               </div>
               <div className="btw-answer">
                 <div className="btw-answer-heading">
-                  <span>BTW agent</span>
-                  <span className="btw-status">{btwStatusLabel(exchange)}</span>
+                  <span className="btw-agent-mark"><Sparkles size={13} /></span>
+                  <span>Side agent</span>
                 </div>
                 {exchange.answer ? (
                   <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{exchange.answer}</ReactMarkdown></div>
                 ) : exchange.status === "running" ? (
-                  <p className="btw-thinking"><LoaderCircle className="spin" size={15} /> Thinking from the session snapshot…</p>
+                  <div className="btw-thinking">
+                    <LoaderCircle className="spin" size={15} />
+                    <span><strong>Checking the session snapshot</strong><small>This won’t pause or steer the active task.</small></span>
+                  </div>
                 ) : null}
-                {exchange.error ? <p className="btw-error" role="alert">{exchange.error}</p> : null}
+                {exchange.error ? <p className="btw-error" role="alert"><CircleAlert size={15} /> <span>{exchange.error}</span></p> : null}
                 <div className="btw-exchange-actions">
                   {exchange.status === "running" ? (
-                    <button type="button" onClick={() => void onCancel(exchange.id)}>
+                    <button type="button" className="btw-action-button btw-cancel-button" onClick={() => void onCancel(exchange.id)}>
                       <Square size={13} /> Cancel
                     </button>
                   ) : null}
                   {exchange.answer ? (
-                    <button type="button" onClick={() => void copyAnswer(exchange)}>
+                    <button type="button" className="btw-action-button" onClick={() => void copyAnswer(exchange)}>
                       {copiedId === exchange.id ? <Check size={13} /> : <Copy size={13} />}
-                      {copiedId === exchange.id ? "Copied" : "Copy"}
+                      {copiedId === exchange.id ? "Copied" : "Copy answer"}
                     </button>
                   ) : null}
                 </div>
@@ -184,31 +243,65 @@ export function BtwDrawer({
           ))}
         </div>
 
-        <form className="btw-composer" onSubmit={submit}>
-          <textarea
-            {...noAutofillTextField}
-            ref={inputRef}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            placeholder={active ? "Wait for the active BTW answer" : "Ask a quick side question"}
-            disabled={Boolean(active) || submitting}
-            maxLength={20_000}
-            rows={3}
-          />
-          <button
-            className="send-button"
-            type="submit"
-            disabled={Boolean(active) || submitting || !draft.trim()}
-            aria-label={submitting ? "Asking BTW agent" : "Ask BTW agent"}
-            aria-busy={submitting}
-          >
-            {submitting ? <LoaderCircle className="spin" size={19} /> : <Send size={19} />}
-          </button>
-        </form>
-        {error ? <p className="btw-error btw-drawer-error" role="alert">{error}</p> : null}
+        <footer className="btw-composer-shell">
+          {error ? <p className="btw-error btw-drawer-error" role="alert"><CircleAlert size={15} /> <span>{error}</span></p> : null}
+          <form className="btw-composer" onSubmit={submit}>
+            <div className="btw-composer-heading">
+              <label htmlFor="btw-question-input">Ask a side question</label>
+              <span><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
+            </div>
+            <div className="btw-composer-control">
+              <textarea
+                {...noAutofillTextField}
+                id="btw-question-input"
+                ref={inputRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    event.currentTarget.form?.requestSubmit();
+                  }
+                }}
+                placeholder={active ? "Waiting for the current answer…" : "What do you want to know?"}
+                disabled={Boolean(active) || submitting}
+                maxLength={20_000}
+                rows={2}
+              />
+              <button
+                className="btw-send-button"
+                type="submit"
+                disabled={Boolean(active) || submitting || !draft.trim()}
+                aria-label={submitting ? "Asking BTW agent" : "Ask BTW agent"}
+                aria-busy={submitting}
+              >
+                {submitting ? <LoaderCircle className="spin" size={18} /> : <Send size={18} />}
+              </button>
+            </div>
+          </form>
+          <p className="btw-composer-note"><ShieldCheck size={13} /> Kept separate from the main conversation</p>
+        </footer>
       </aside>
     </div>
   );
+}
+
+function exchangeCountLabel(count: number): string {
+  if (count === 0) return "No questions yet";
+  return `${count} ${count === 1 ? "question" : "questions"}`;
+}
+
+function formatBtwTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date);
+}
+
+function btwStatusIcon(exchange: BtwExchange) {
+  if (exchange.status === "running") return <LoaderCircle className="spin" size={12} />;
+  if (exchange.status === "completed") return <CircleCheck size={12} />;
+  if (exchange.status === "failed") return <CircleAlert size={12} />;
+  return <Clock3 size={12} />;
 }
 
 function btwStatusLabel(exchange: BtwExchange): string {

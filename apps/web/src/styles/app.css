@@ -3005,148 +3005,436 @@ select:focus-visible {
   z-index: 80;
   display: flex;
   justify-content: flex-end;
-  background: color-mix(in srgb, var(--color-overlay) 76%, transparent);
+  background: color-mix(in srgb, var(--color-overlay) 68%, transparent);
+  backdrop-filter: blur(2px);
+  animation: btw-backdrop-in 160ms ease-out both;
 }
 
 .btw-drawer {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
-  gap: 12px;
-  width: min(460px, calc(100vw - 32px));
-  height: 100%;
-  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 16px);
-  background: var(--color-surface);
-  border-left: 1px solid var(--color-border);
-  box-shadow: var(--shadow-elevated);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(500px, calc(100vw - 32px));
+  height: calc(100% - 16px);
+  margin-block: 8px;
+  overflow: hidden;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-surface) 96%, var(--color-secondary) 4%);
+  border: 1px solid color-mix(in srgb, var(--color-border) 82%, var(--color-secondary) 18%);
+  border-right: 0;
+  border-radius: 16px 0 0 16px;
+  box-shadow: -18px 0 52px color-mix(in srgb, black 42%, transparent);
+  animation: btw-drawer-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
-.btw-drawer-header,
+.btw-drawer-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: calc(env(safe-area-inset-top) + 18px) 20px 14px;
+  background:
+    radial-gradient(circle at 14% -20%, color-mix(in srgb, var(--color-secondary) 16%, transparent), transparent 46%),
+    color-mix(in srgb, var(--color-surface-raised) 78%, var(--color-surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 82%, transparent);
+}
+
+.btw-title-lockup,
+.btw-context-strip,
+.btw-exchange-heading,
 .btw-answer-heading,
 .btw-exchange-actions,
-.btw-thinking {
+.btw-thinking,
+.btw-error,
+.btw-composer-heading,
+.btw-composer-note {
   display: flex;
   align-items: center;
 }
 
-.btw-drawer-header {
-  justify-content: space-between;
+.btw-title-lockup {
+  min-width: 0;
   gap: 12px;
+}
+
+.btw-brand-mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: var(--color-secondary);
+  background: color-mix(in srgb, var(--color-secondary) 10%, var(--color-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 30%, var(--color-border));
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
 }
 
 .btw-drawer-header h2,
 .btw-drawer-header p,
 .btw-question p,
 .btw-thinking,
-.btw-error {
+.btw-error,
+.btw-composer-note {
   margin: 0;
 }
 
-.btw-drawer-header h2 { font-size: 19px; }
-.btw-drawer-header p { margin-top: 3px; color: var(--color-text-muted); font-size: 12px; line-height: 1.35; }
+.btw-eyebrow {
+  display: block;
+  margin-bottom: 1px;
+  color: var(--color-secondary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  line-height: 1;
+}
+
+.btw-drawer-header h2 {
+  margin: 0;
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.btw-drawer-header p {
+  margin-top: 2px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.btw-drawer-header > .icon-button {
+  align-self: start;
+  background: color-mix(in srgb, var(--color-surface-raised) 82%, transparent);
+}
+
+.btw-context-strip {
+  grid-column: 1 / -1;
+  justify-self: start;
+  gap: 8px;
+  min-height: 27px;
+  padding: 4px 9px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-surface) 62%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.btw-context-strip > span:not(.btw-context-divider) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.btw-context-strip > span:first-child { color: color-mix(in srgb, var(--color-success) 76%, var(--color-text-muted)); }
+.btw-context-divider { width: 1px; height: 12px; background: var(--color-border); }
 
 .btw-exchange-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   min-height: 0;
-  padding-right: 3px;
+  padding: 18px 18px 22px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .btw-empty {
-  display: flex;
-  align-items: center;
+  display: grid;
+  align-content: center;
   justify-content: center;
-  gap: 7px;
-  min-height: 120px;
-  margin: 0;
+  justify-items: center;
+  gap: 6px;
+  min-height: 220px;
+  padding: 24px;
   color: var(--color-text-muted);
   text-align: center;
 }
 
-.btw-exchange {
+.btw-empty strong { color: var(--color-text); font-size: 14px; }
+.btw-empty > span:last-child { max-width: 280px; font-size: 12px; line-height: 1.45; }
+
+.btw-empty-icon {
   display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 5px;
+  place-items: center;
+  color: var(--color-secondary);
+  background: color-mix(in srgb, var(--color-secondary) 8%, var(--color-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 24%, var(--color-border));
+  border-radius: 15px;
+}
+
+.btw-exchange {
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-surface-raised) 88%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-border) 90%, transparent);
+  border-radius: 14px;
+  box-shadow: 0 7px 22px color-mix(in srgb, black 13%, transparent);
+}
+
+.btw-exchange[data-latest="true"] {
+  border-color: color-mix(in srgb, var(--color-secondary) 20%, var(--color-border));
+}
+
+.btw-exchange-heading {
   gap: 8px;
+  min-height: 34px;
+  padding: 7px 11px;
+  color: var(--color-text-subtle);
+  background: color-mix(in srgb, var(--color-surface) 48%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent);
+  font-size: 10px;
+}
+
+.btw-exchange-number {
+  color: var(--color-text-muted);
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.btw-exchange-heading time { margin-right: auto; }
+
+.btw-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 20px;
+  padding: 2px 7px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-surface-raised) 72%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 76%, transparent);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 650;
 }
 
 .btw-question,
 .btw-answer {
   display: grid;
-  gap: 6px;
-  padding: 10px 11px;
-  border: 1px solid var(--color-border);
-  border-radius: 9px;
+  gap: 8px;
+  padding: 13px 14px;
 }
 
 .btw-question {
-  margin-left: 30px;
-  background: color-mix(in srgb, var(--color-action) 8%, var(--color-surface-raised));
+  background: color-mix(in srgb, var(--color-action) 5%, var(--color-surface-raised));
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 72%, transparent);
 }
 
 .btw-answer {
-  margin-right: 30px;
-  background: var(--color-surface-raised);
+  padding-top: 14px;
 }
 
 .btw-question > span,
-.btw-answer-heading > span:first-child {
+.btw-answer-heading > span:last-child {
   color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.btw-question p { white-space: pre-wrap; overflow-wrap: anywhere; }
-.btw-answer-heading { justify-content: space-between; gap: 8px; }
-.btw-status { color: var(--color-text-subtle); font-size: 11px; }
-.btw-thinking { gap: 6px; color: var(--color-text-muted); font-size: 13px; }
-.btw-error { color: var(--color-error); font-size: 12px; overflow-wrap: anywhere; }
-.btw-drawer-error { padding: 8px 10px; background: var(--color-error-soft); border: 1px solid var(--color-error); border-radius: 7px; }
+.btw-question p {
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.btw-answer-heading { gap: 7px; }
+
+.btw-agent-mark {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  color: var(--color-secondary);
+  background: color-mix(in srgb, var(--color-secondary) 9%, var(--color-surface));
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 24%, var(--color-border));
+  border-radius: 7px;
+}
+
+.btw-answer .markdown-body {
+  color: color-mix(in srgb, var(--color-text) 94%, var(--color-text-muted));
+  font-size: 14px;
+  line-height: 1.52;
+}
+
+.btw-answer .markdown-body > :first-child { margin-top: 0; }
+.btw-answer .markdown-body > :last-child { margin-bottom: 0; }
+
+.btw-thinking {
+  gap: 9px;
+  min-height: 44px;
+  color: var(--color-secondary);
+}
+
+.btw-thinking > span { display: grid; gap: 2px; }
+.btw-thinking strong { color: var(--color-text); font-size: 12px; }
+.btw-thinking small { color: var(--color-text-muted); font-size: 11px; }
+
+.btw-error {
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--color-error);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.btw-error > svg { flex: 0 0 auto; margin-top: 1px; }
+
+.btw-drawer-error {
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--color-error-soft) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-error) 54%, var(--color-border));
+  border-radius: 9px;
+}
+
 .btw-exchange[data-status="completed"] .btw-status { color: var(--color-success); }
 .btw-exchange[data-status="failed"] .btw-status { color: var(--color-error); }
 .btw-exchange[data-status="running"] .btw-status { color: var(--color-warning); }
 
 .btw-exchange-actions {
   justify-content: flex-end;
-  gap: 6px;
+  gap: 7px;
+  min-height: 0;
 }
 
-.btw-exchange-actions button {
+.btw-action-button {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   min-height: 28px;
-  padding: 0 8px;
+  padding: 0 9px;
   color: var(--color-text-muted);
-  background: transparent;
-  border: 1px solid var(--color-border);
-  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-surface) 54%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
+  border-radius: 7px;
   font-size: 11px;
+}
+
+.btw-action-button:hover { color: var(--color-text); border-color: color-mix(in srgb, var(--color-secondary) 30%, var(--color-border)); }
+.btw-cancel-button:hover { color: var(--color-error); border-color: color-mix(in srgb, var(--color-error) 38%, var(--color-border)); }
+
+.btw-composer-shell {
+  display: grid;
+  gap: 8px;
+  padding: 13px 18px calc(env(safe-area-inset-bottom) + 12px);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--color-surface) 84%, transparent), var(--color-surface) 22px);
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 84%, transparent);
+  box-shadow: 0 -10px 28px color-mix(in srgb, black 10%, transparent);
 }
 
 .btw-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 8px;
+  gap: 7px;
+}
+
+.btw-composer-heading {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.btw-composer-heading label {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.btw-composer-heading > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--color-text-subtle);
+  font-size: 10px;
+}
+
+.btw-composer-heading kbd {
+  min-width: 20px;
+  padding: 1px 4px;
+  background: color-mix(in srgb, var(--color-surface-raised) 72%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font: inherit;
+  text-align: center;
+}
+
+.btw-composer-control {
+  position: relative;
 }
 
 .btw-composer textarea {
   width: 100%;
-  min-height: 76px;
-  max-height: 180px;
-  resize: vertical;
-  padding: 10px 11px;
+  min-height: 62px;
+  max-height: 140px;
+  resize: none;
+  padding: 10px 49px 10px 11px;
   color: var(--color-text);
-  background: var(--color-input);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-input) 88%, var(--color-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+  border-radius: 11px;
+  line-height: 1.4;
+  transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.btw-composer textarea:focus { outline: 2px solid color-mix(in srgb, var(--color-action) 60%, transparent); outline-offset: 1px; }
-.btw-composer .send-button { width: 40px; height: 40px; }
+.btw-composer textarea:focus {
+  border-color: color-mix(in srgb, var(--color-action) 66%, var(--color-border));
+  outline: 0;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-action) 16%, transparent);
+}
+
+.btw-send-button {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  color: color-mix(in srgb, var(--color-surface) 84%, black);
+  background: var(--color-action);
+  border: 0;
+  border-radius: 9px;
+  box-shadow: 0 5px 13px color-mix(in srgb, var(--color-action) 24%, transparent);
+  transition: filter 120ms ease, transform 120ms ease;
+}
+
+.btw-send-button:hover:not(:disabled) { filter: brightness(1.08); transform: translateY(-1px); }
+.btw-send-button:disabled { color: var(--color-text-subtle); background: color-mix(in srgb, var(--color-surface-raised) 72%, var(--color-border)); box-shadow: none; }
+
+.btw-composer-note {
+  justify-content: center;
+  gap: 5px;
+  color: var(--color-text-subtle);
+  font-size: 10px;
+}
+
 .btw-button { position: relative; }
+.btw-button[aria-expanded="true"] { color: var(--color-secondary); border-color: color-mix(in srgb, var(--color-secondary) 34%, var(--color-border)); }
 .btw-unread-dot { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; background: var(--color-secondary); border: 1px solid var(--color-surface); border-radius: 50%; }
+
+@keyframes btw-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes btw-drawer-in {
+  from { opacity: 0; transform: translateX(28px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btw-drawer-backdrop,
+  .btw-drawer { animation: none; }
+  .btw-exchange-list { scroll-behavior: auto; }
+  .btw-send-button { transition: none; }
+}
 
 .git-workspace-panel {
   display: grid;
@@ -5046,14 +5334,26 @@ select:focus-visible {
     height: calc(100dvh - 20px);
   }
 
+  .btw-drawer-backdrop {
+    top: var(--app-viewport-offset-top, 0px);
+    bottom: auto;
+    height: var(--app-viewport-height, 100dvh);
+  }
+
   .btw-drawer {
     width: 100%;
     max-width: none;
-    border-left: 0;
+    height: 100%;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
   }
 
-  .btw-question { margin-left: 18px; }
-  .btw-answer { margin-right: 18px; }
+  .btw-drawer-header { padding-inline: 15px; }
+  .btw-exchange-list { gap: 13px; padding: 14px 13px 18px; }
+  .btw-composer-shell { padding-inline: 13px; }
+  .btw-composer-heading > span { display: none; }
 
   .documents-layout {
     grid-template-columns: minmax(0, 1fr);

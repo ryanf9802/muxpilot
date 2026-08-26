@@ -80,12 +80,45 @@ describe("BtwDrawer", () => {
         onCancel={cancel}
       />
     ));
-    expect(container.textContent).toContain("Thinking from the session snapshot");
+    expect(container.textContent).toContain("Checking the session snapshot");
+    expect(container.textContent).toContain("This won’t pause or steer the active task.");
     await act(async () => {
       (container.querySelector(".btw-exchange-actions button") as HTMLButtonElement).click();
       await Promise.resolve();
     });
     expect(cancel).toHaveBeenCalledWith("exchange-1");
+    act(() => root.unmount());
+  });
+
+  it("submits with the side-question keyboard shortcut", async () => {
+    const ask = vi.fn(async () => true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    act(() => root.render(
+      <BtwDrawer
+        open
+        exchanges={[]}
+        loading={false}
+        error=""
+        submitting={false}
+        onClose={() => undefined}
+        onAsk={ask}
+        onCancel={async () => undefined}
+      />
+    ));
+    const textarea = container.querySelector("textarea")!;
+    act(() => {
+      setNativeTextareaValue(textarea, "Can I ask this without interrupting?");
+      textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: "Can I ask this without interrupting?", inputType: "insertText" }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "Enter" }));
+      await Promise.resolve();
+    });
+
+    expect(ask).toHaveBeenCalledWith("Can I ask this without interrupting?");
     act(() => root.unmount());
   });
 });
