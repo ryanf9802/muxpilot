@@ -5137,6 +5137,11 @@ describe("SessionManager transcript isolation", () => {
     expect(createCalls[0]?.options.developerInstructions).toContain("if built-in subagents are unavailable, keep the review in the current session");
     expect(createCalls[0]?.options.developerInstructions).toContain("only when the operator explicitly requests a nested muxpilot session or the work is durable");
     expect(createCalls[0]?.options.developerInstructions).toContain("Use $muxpilot-documents");
+    expect(createCalls[0]?.options.developerInstructions).toContain("never put INDEX.md or another muxpilot document in the session cwd");
+    expect(createCalls[0]?.options.developerInstructions).toContain("cross-session document writes are forbidden");
+    expect(createCalls[0]?.options.developerInstructions).toContain("agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR");
+    expect(createCalls[0]?.options.developerInstructions).toContain("built-in Codex subagents share this session's scope and must not edit documents");
+    expect(createCalls[0]?.options.developerInstructions).toContain("only the main parent agent verifies and updates canonical documents");
     expect(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR).toMatch(/sessions\/documents-[^/]+\/documents$/);
     expect(createCalls[0]?.options.writableRoots).toContain(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR);
     expect(bindCapability).toHaveBeenCalledWith("0123456789abcdef01234567", created.id);

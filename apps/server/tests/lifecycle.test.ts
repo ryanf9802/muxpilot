@@ -45,14 +45,22 @@ describe("production bundled skill startup", () => {
       expect(installedOrchestrationSkill).toContain("Use built-in Codex subagents for routine bounded delegation");
       expect(installedOrchestrationSkill).toContain("Do not create a nested muxpilot session merely to run a review in parallel");
       expect(installedOrchestrationSkill).toContain("only when the operator explicitly requests a nested muxpilot session");
+      expect(installedOrchestrationSkill).toContain("Every agent-created muxpilot child session has its own private `$MUXPILOT_DOCUMENTS_DIR`");
+      expect(installedOrchestrationSkill).toContain("returns a structured handoff");
+      expect(installedOrchestrationSkill).toContain("Built-in Codex subagents are not muxpilot child sessions");
       const installedDocumentsSkill = await readFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "utf8");
       expect(installedDocumentsSkill).toContain("MUXPILOT_DOCUMENTS_DIR");
       expect(installedDocumentsSkill).toContain("Read `INDEX.md` first");
+      expect(installedDocumentsSkill).toContain("The session working directory is not the documents directory");
+      expect(installedDocumentsSkill).toContain("Never attempt a cross-session document write");
 
       await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
       await writeFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });
+      const restoredDocumentsSkill = await readFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "utf8");
+      expect(restoredDocumentsSkill).toContain("name: muxpilot-documents");
+      expect(restoredDocumentsSkill).toContain("Built-in Codex subagents share the current session environment");
     } finally {
       log.mockRestore();
     }

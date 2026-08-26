@@ -52,6 +52,54 @@ describe("DocumentsModal", () => {
     act(() => root.unmount());
   });
 
+  it("opens linked session documents in the viewer and leaves external links safe", async () => {
+    const documents = [
+      { name: "INDEX.md", sizeBytes: 80, updatedAt: "2026-08-25T00:00:00.000Z" },
+      { name: "plan.md", sizeBytes: 20, updatedAt: "2026-08-25T00:00:00.000Z" }
+    ];
+    let resolvePlan!: (value: Awaited<ReturnType<typeof api.sessionDocument>>) => void;
+    const planResponse = new Promise<Awaited<ReturnType<typeof api.sessionDocument>>>((resolve) => { resolvePlan = resolve; });
+    const read = vi.spyOn(api, "sessionDocument").mockImplementation(async (_sessionId, name) => name === "INDEX.md"
+      ? { document: { name, content: "[Plan](./plan.md#current-plan) [External](https://example.com)", sizeBytes: 62, updatedAt: documents[0]!.updatedAt } }
+      : planResponse);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const documentLink = container.querySelector<HTMLAnchorElement>('a[href="./plan.md#current-plan"]');
+    const externalLink = container.querySelector<HTMLAnchorElement>('a[href="https://example.com"]');
+    expect(documentLink?.target).toBe("");
+    expect(externalLink?.target).toBe("_blank");
+    expect(externalLink?.rel).toBe("noopener noreferrer");
+
+    await act(async () => {
+      documentLink?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      await Promise.resolve();
+    });
+
+    expect(read).toHaveBeenLastCalledWith("session-1", "plan.md");
+    expect(container.querySelector(".documents-viewer")?.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelector(".documents-viewer")?.textContent).toBe("Loading plan.md…");
+    expect(container.querySelector("button[data-active='true']")?.getAttribute("aria-current")).toBe("page");
+
+    await act(async () => {
+      resolvePlan({ document: { name: "plan.md", content: "## Current plan", sizeBytes: 15, updatedAt: documents[1]!.updatedAt } });
+      await planResponse;
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector(".documents-viewer")?.hasAttribute("aria-busy")).toBe(false);
+    expect(container.querySelector(".documents-viewer h2")?.textContent).toBe("Current plan");
+    expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
+    act(() => root.unmount());
+  });
+
   it("renders the Documents button only when documents exist", () => {
     const container = document.createElement("div");
     const root = createRoot(container);

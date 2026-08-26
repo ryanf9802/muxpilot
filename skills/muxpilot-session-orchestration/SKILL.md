@@ -26,6 +26,19 @@ Create a child with a concrete, bounded task. A child starts with fresh model co
 
 Before delegating, state the expected result and what evidence the child should return. Avoid duplicating work already in progress elsewhere.
 
+### Durable document handoffs
+
+Every agent-created muxpilot child session has its own private `$MUXPILOT_DOCUMENTS_DIR`; it does not share the parent's document scope. Parent documents are canonical program state. A muxpilot child may read explicitly supplied parent document paths, but must never edit them or place muxpilot documents in its session cwd. It keeps optional working notes in its own documents directory and returns a structured handoff with:
+
+- independently verified evidence;
+- proposed plan/progress changes;
+- proposed acceptance-gate changes; and
+- proposed workflow or reminder changes.
+
+The parent verifies the evidence, applies accepted changes to its canonical documents, and rejects or corrects unsupported child conclusions before continuing.
+
+Built-in Codex subagents are not muxpilot child sessions: they share the main agent's environment and documents directory. Tell them not to edit session documents and to return proposed document changes to the main agent.
+
 ## Waiting without token burn
 
 After delegating work that blocks your next step, call `wait_for_sessions`. A successful wait ends the current turn. Muxpilot watches lifecycle events outside the model and sends exactly one structured wake-up message when a requested condition is satisfied, fails, or reaches its timeout. Do not poll with repeated list or transcript calls.

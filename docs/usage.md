@@ -68,7 +68,9 @@ Externally discovered Codex panes remain unmanaged because a running process can
 
 Every session created or restored by muxpilot has a private documents directory available to its Codex agent through `$MUXPILOT_DOCUMENTS_DIR`. The bundled `muxpilot-documents` skill teaches the agent to use flat Markdown files for durable implementation plans, checklists, reminders, decisions, requirements, and acceptance criteria, and to revisit and update them as work progresses. Agents maintain `INDEX.md` as a concise map when documents exist.
 
-Open **Documents** in the session header to browse the current files and rendered Markdown. The operator view is read-only; document creation and editing remain agent-managed. Documents persist when a session is missing, archived, killed, or restored.
+The environment variable is the only documents directory; the session working directory and repository are not document storage. Agent-created muxpilot child sessions receive private document scopes rather than shared write access. A parent keeps canonical program documents, while muxpilot children keep optional private notes and return proposed document updates for the parent to verify and apply. Built-in Codex subagents share the current session's scope and return proposed updates without editing its documents.
+
+Open **Documents** in the session header to browse the current files and rendered Markdown. Relative links from one listed document to another, such as links in `INDEX.md`, switch the viewer in place; external links open separately. The operator view is read-only; document creation and editing remain agent-managed. Documents persist when a session is missing, archived, killed, or restored.
 
 A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 MiB total. The viewer and transfer system reject nested paths, dotfiles, symlinks, non-UTF-8 content, and files outside those limits. Do not use session documents for credentials, tokens, raw transcripts, or other unnecessary sensitive data.
 

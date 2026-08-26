@@ -809,6 +809,8 @@ export function DocumentsModal({
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [content, setContent] = useState("");
+  const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
+  const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState("");
 
   useEffect(() => {
@@ -819,25 +821,62 @@ export function DocumentsModal({
   }, [documents, open]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
+  const selectedContentKey = selected ? `${selected}\u0000${selectedVersion}` : null;
+  const documentMarkdownComponents = useMemo<Components>(() => ({
+    ...markdownComponents,
+    a({ href, children, ...props }) {
+      const relativeHref = href && !href.startsWith("/") && !href.startsWith("//") && !/^[a-z][a-z\d+.-]*:/i.test(href)
+        ? href
+        : null;
+      const pathname = relativeHref?.split("#", 1)[0]?.split("?", 1)[0];
+      const candidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
+      const linkedDocument = documents.find((document) => document.name === candidate);
+      if (!linkedDocument) return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+      return (
+        <a
+          {...props}
+          href={href}
+          onClick={(event) => {
+            event.preventDefault();
+            setSelected(linkedDocument.name);
+          }}
+        >
+          {children}
+        </a>
+      );
+    }
+  }), [documents]);
   useEffect(() => {
     if (!open || !selected) {
       setContent("");
+      setLoadedContentKey(null);
+      setContentLoading(false);
       setContentError("");
       return undefined;
     }
     let cancelled = false;
+    setContentLoading(true);
+    setContentError("");
     void api.sessionDocument(sessionId, selected).then(
       (response) => {
         if (cancelled) return;
         setContent(response.document.content);
+        setLoadedContentKey(selectedContentKey);
+        setContentLoading(false);
         setContentError("");
       },
       (error) => {
-        if (!cancelled) setContentError(error instanceof Error ? error.message : "Unable to load document");
+        if (cancelled) return;
+        setLoadedContentKey(null);
+        setContentLoading(false);
+        setContentError(error instanceof Error ? error.message : "Unable to load document");
       }
     );
     return () => { cancelled = true; };
-  }, [open, selected, selectedVersion, sessionId]);
+  }, [open, selected, selectedContentKey, sessionId]);
+
+  const contentReady = selectedContentKey !== null && loadedContentKey === selectedContentKey;
+  const viewerBusy = Boolean(selected && !contentError && (contentLoading || !contentReady));
 
   return (
     <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
@@ -846,14 +885,14 @@ export function DocumentsModal({
         <div className="documents-layout">
           <nav className="documents-list" aria-label="Session documents">
             {documents.map((document) => (
-              <button key={document.name} type="button" data-active={selected === document.name || undefined} onClick={() => setSelected(document.name)}>
+              <button key={document.name} type="button" data-active={selected === document.name || undefined} aria-current={selected === document.name ? "page" : undefined} onClick={() => setSelected(document.name)}>
                 <FileText size={15} aria-hidden="true" />
                 <span><strong>{document.name}</strong><small>{formatDocumentBytes(document.sizeBytes)}</small></span>
               </button>
             ))}
           </nav>
-          <article className="documents-viewer" aria-label={selected ?? "Document viewer"}>
-            {contentError ? <p className="error-text" role="alert">{contentError}</p> : selected ? <MarkdownBlock text={content} /> : null}
+          <article className="documents-viewer" aria-label={selected ?? "Document viewer"} aria-busy={viewerBusy || undefined}>
+            {contentError ? <p className="error-text" role="alert">{contentError}</p> : viewerBusy ? <p className="muted" role="status">Loading {selected}…</p> : selected && contentReady ? <MarkdownBlock text={content} components={documentMarkdownComponents} /> : null}
           </article>
         </div>
       )}
@@ -4644,11 +4683,11 @@ const markdownComponents: Components = {
   }
 };
 
-export function MarkdownBlock({ text }: { text: string }) {
+export function MarkdownBlock({ text, components = markdownComponents }: { text: string; components?: Components }) {
   if (!text) return null;
   return (
     <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {text}
       </ReactMarkdown>
     </div>

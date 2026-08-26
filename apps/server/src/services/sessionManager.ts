@@ -236,10 +236,12 @@ export class SessionManager {
     const root = await this.requireDocuments().ensureScope(scopeId);
     const documentsRoot = join(root, "documents");
     const instruction = [
-      `Muxpilot documents persist in ${JSON.stringify(documentsRoot)} for this session.`,
+      `The only muxpilot documents directory for this session is $MUXPILOT_DOCUMENTS_DIR=${JSON.stringify(documentsRoot)}.`,
+      "Resolve that environment variable before every document write; never put INDEX.md or another muxpilot document in the session cwd, repository, or another session's directory.",
       "Use $muxpilot-documents whenever durable plans, checklists, reminders, requirements, decisions, or acceptance criteria would help.",
       "Before substantive work on each turn, and after resume or context compaction, inspect the existing documents and read INDEX.md first when present.",
       "Keep relevant documents current after material progress or decisions and before asking a question or giving a final answer.",
+      "Document scopes are private: agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR and return structured proposed updates; built-in Codex subagents share this session's scope and must not edit documents; only the main parent agent verifies and updates canonical documents, and cross-session document writes are forbidden.",
       "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; do not store secrets or raw transcripts."
     ].join(" ");
     return {
