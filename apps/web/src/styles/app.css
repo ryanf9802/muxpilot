@@ -2807,6 +2807,7 @@ select:focus-visible {
 .session-header-state {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 7px;
   align-self: center;
 }
@@ -3658,6 +3659,38 @@ select:focus-visible {
 .session-title-meta .session-header-meta {
   flex: 1 1 auto;
   margin: 0;
+}
+
+.session-header-runtime {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.session-header-runtime-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.session-context-usage {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 7px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
 }
 
 .session-title-heading {
@@ -5600,7 +5633,24 @@ select:focus-visible {
   }
 
   .session-header {
-    gap: 7px;
+    grid-template-rows: auto auto;
+    row-gap: 4px;
+    column-gap: 7px;
+  }
+
+  .session-header-runtime {
+    display: contents;
+  }
+
+  .session-header > .icon-button {
+    grid-column: 1;
+    grid-row: 1 / -1;
+    align-self: center;
+  }
+
+  .session-title {
+    grid-column: 2;
+    grid-row: 1;
   }
 
   .git-panel-backdrop { padding: 10px; }
@@ -5635,9 +5685,28 @@ select:focus-visible {
     display: none;
   }
 
-  .session-header-state { gap: 5px; }
+  .session-header-state {
+    grid-column: 3;
+    grid-row: 1;
+    gap: 5px;
+  }
   .heavy-command-indicator { min-width: 24px; height: 24px; padding: 0 5px; }
   .heavy-command-facts { grid-template-columns: minmax(0, 1fr); }
+
+  .session-header-runtime-meta {
+    grid-column: 2 / -1;
+    grid-row: 2;
+    justify-self: end;
+    gap: 4px;
+  }
+
+  .session-context-usage {
+    padding: 0 6px;
+  }
+
+  .session-context-usage-label {
+    display: none;
+  }
 
   .tmux-command-metadata {
     min-height: 24px;

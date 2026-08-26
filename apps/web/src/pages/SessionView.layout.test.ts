@@ -47,11 +47,22 @@ describe("mobile session viewport layout", () => {
 
   it("assigns direct controls to deliberate responsive groups", () => {
     const headerRule = cssBlock(styles, ".session-header");
+    const runtimeRule = cssBlock(styles, ".session-header-runtime");
+    const runtimeMetaRule = cssBlock(styles, ".session-header-runtime-meta");
     const actionsRule = cssBlock(styles, ".session-actions");
     const groupRule = cssBlock(styles, ".session-action-group");
     const compactStyles = cssBlock(styles, "@media (max-width: 959px)");
     const compactButtonRule = cssBlock(compactStyles, ".session-actions button");
+    const narrowStyles = cssBlock(styles, "@media (max-width: 819px)");
+    const narrowRuntimeRule = cssBlock(narrowStyles, ".session-header-runtime");
+    const narrowRuntimeMetaRule = cssBlock(narrowStyles, ".session-header-runtime-meta");
     expect(headerRule).toContain("grid-template-columns: 40px minmax(0, 1fr) auto;");
+    expect(runtimeRule).toContain("display: grid;");
+    expect(runtimeRule).toContain("justify-items: end;");
+    expect(runtimeMetaRule).toContain("justify-content: flex-end;");
+    expect(narrowRuntimeRule).toContain("display: contents;");
+    expect(narrowRuntimeMetaRule).toContain("grid-column: 2 / -1;");
+    expect(narrowRuntimeMetaRule).toContain("justify-self: end;");
     expect(actionsRule).toContain("flex-wrap: wrap;");
     expect(actionsRule).not.toContain("overflow-x: hidden;");
     expect(groupRule).toContain("flex-wrap: nowrap;");

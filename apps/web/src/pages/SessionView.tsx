@@ -2499,6 +2499,14 @@ export function SessionView() {
           />
           <div className="session-title-meta">
             <SessionHeaderMeta session={readySession} />
+          </div>
+        </div>
+        <div className="session-header-runtime">
+          <div className="session-header-state">
+            <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
+            {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
+          </div>
+          <div className="session-header-runtime-meta">
             <TmuxCommandButton
               compact
               session={readySession}
@@ -2506,11 +2514,8 @@ export function SessionView() {
               copyEnabled={!completed && accessMode === "local"}
               onCopy={() => void copyTmuxCommand()}
             />
+            <SessionContextUsage session={readySession} />
           </div>
-        </div>
-        <div className="session-header-state">
-          <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
-          {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
         </div>
       </div>
 
@@ -2951,11 +2956,20 @@ export function SessionLoadingView({
             {session ? (
               <div className="session-title-meta">
                 <SessionHeaderMeta session={session} />
-                <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} />
               </div>
             ) : <p className="session-header-meta">Starting session</p>}
           </div>
-          <LoadingStatusPill />
+          <div className="session-header-runtime">
+            <div className="session-header-state">
+              <LoadingStatusPill />
+            </div>
+            {session ? (
+              <div className="session-header-runtime-meta">
+                <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} />
+                <SessionContextUsage session={session} />
+              </div>
+            ) : null}
+          </div>
         </div>
       }
       actions={
@@ -3791,7 +3805,7 @@ export function SessionTitleHeading({
   );
 }
 
-export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership" | "contextUsage"> }) {
+export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
   const title = `${session.repo.name}${dirty ? " · dirty" : ""}`;
@@ -3823,15 +3837,19 @@ export function SessionHeaderMeta({ session }: { session: Pick<ManagedSession, "
           <Link to={`/sessions/${session.agentOwnership.parentSessionId}`}>Agent-managed child</Link>
         </>
       ) : null}
-      {session.contextUsage ? (
-        <>
-          <span className="session-header-meta-separator" aria-hidden="true">·</span>
-          <span title={`${session.contextUsage.activeTokens.toLocaleString()} of ${session.contextUsage.contextWindowTokens.toLocaleString()} active context tokens`}>
-            {Math.round(session.contextUsage.contextPercent)}% context
-          </span>
-        </>
-      ) : null}
     </p>
+  );
+}
+
+export function SessionContextUsage({ session }: { session: Pick<ManagedSession, "contextUsage"> }) {
+  if (!session.contextUsage) return null;
+  const percent = Math.round(session.contextUsage.contextPercent);
+  const detail = `${session.contextUsage.activeTokens.toLocaleString()} of ${session.contextUsage.contextWindowTokens.toLocaleString()} active context tokens`;
+  return (
+    <span className="session-context-usage" title={detail} aria-label={`${percent}% context used; ${detail}`}>
+      <span>{percent}%</span>
+      <span className="session-context-usage-label">context</span>
+    </span>
   );
 }
 

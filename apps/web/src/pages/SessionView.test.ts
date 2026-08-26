@@ -78,6 +78,7 @@ import {
   restoreScrollTopForAnchor,
   secondsUntil,
   sessionCreateSessionCwd,
+  SessionContextUsage,
   SessionHeaderMeta,
   SessionTitleHeading,
   SessionLoadingView,
@@ -237,6 +238,31 @@ describe("SessionHeaderMeta", () => {
 
     expect(html).toContain('href="/sessions/parent-session"');
     expect(html).toContain("Forked from original-chat");
+  });
+});
+
+describe("SessionContextUsage", () => {
+  it("renders compact context usage with exact token detail", () => {
+    const html = renderToStaticMarkup(createElement(SessionContextUsage, {
+      session: {
+        contextUsage: {
+          activeTokens: 12345,
+          contextWindowTokens: 200000,
+          contextPercent: 6.1725
+        }
+      }
+    }));
+
+    expect(html).toContain('class="session-context-usage"');
+    expect(html).toContain("6%");
+    expect(html).toContain("context");
+    expect(html).toContain("12,345 of 200,000 active context tokens");
+  });
+
+  it("omits the context control until usage is available", () => {
+    expect(renderToStaticMarkup(createElement(SessionContextUsage, {
+      session: { contextUsage: null }
+    }))).toBe("");
   });
 });
 
