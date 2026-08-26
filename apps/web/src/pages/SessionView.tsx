@@ -2323,9 +2323,6 @@ export function SessionView() {
         <div className="session-header-state">
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
           {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
-          {statusPresentation.inherited && statusSource ? (
-            <Link className="session-status-source" to={`/sessions/${statusSource.id}`}>via {sessionDisplayName(statusSource, shellSessions)}</Link>
-          ) : null}
         </div>
         {completed ? null : <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />}
         <ModeToggle
