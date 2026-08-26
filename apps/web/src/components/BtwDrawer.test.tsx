@@ -121,6 +121,39 @@ describe("BtwDrawer", () => {
     expect(ask).toHaveBeenCalledWith("Can I ask this without interrupting?");
     act(() => root.unmount());
   });
+
+  it("presents prior exchanges as saved independent history", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    act(() => root.render(
+      <BtwDrawer
+        open
+        exchanges={[
+          exchange({ id: "first", question: "First question", answer: "First answer" }),
+          exchange({ id: "second", question: "Second question", answer: "Second answer" })
+        ]}
+        loading={false}
+        error=""
+        submitting={false}
+        onClose={() => undefined}
+        onAsk={async () => true}
+        onCancel={async () => undefined}
+      />
+    ));
+
+    expect(container.textContent).toContain("Fresh main-session snapshot every time");
+    expect(container.textContent).toContain("Read-only; earlier BTW questions and answers aren’t included.");
+    expect(container.textContent).toContain("Saved question history");
+    expect(container.textContent).toContain("Visible to you, not carried into the next answer.");
+    expect(container.textContent).toContain("Uses the latest main session—not this BTW history");
+    expect(container.querySelector(".btw-exchange-list")?.getAttribute("aria-label")).toBe("Saved independent question history");
+    expect(container.querySelectorAll(".btw-exchange")).toHaveLength(2);
+    expect(container.querySelectorAll(".btw-answer-heading")).toHaveLength(2);
+    expect(container.querySelectorAll(".btw-answer-heading")[0]?.textContent).toContain("Independent answer");
+    act(() => root.unmount());
+  });
 });
 
 function exchange(overrides: Partial<BtwExchange> = {}): BtwExchange {

@@ -3039,6 +3039,7 @@ select:focus-visible {
 
 .btw-title-lockup,
 .btw-context-strip,
+.btw-history-heading,
 .btw-exchange-heading,
 .btw-answer-heading,
 .btw-exchange-actions,
@@ -3107,25 +3108,20 @@ select:focus-visible {
 
 .btw-context-strip {
   grid-column: 1 / -1;
-  justify-self: start;
-  gap: 8px;
-  min-height: 27px;
-  padding: 4px 9px;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
   color: var(--color-text-muted);
   background: color-mix(in srgb, var(--color-surface) 62%, transparent);
   border: 1px solid color-mix(in srgb, var(--color-border) 78%, transparent);
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: 10px;
 }
 
-.btw-context-strip > span:not(.btw-context-divider) {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.btw-context-strip > span:first-child { color: color-mix(in srgb, var(--color-success) 76%, var(--color-text-muted)); }
-.btw-context-divider { width: 1px; height: 12px; background: var(--color-border); }
+.btw-context-strip > svg { flex: 0 0 auto; margin-top: 2px; color: var(--color-secondary); }
+.btw-context-strip > span { display: grid; gap: 2px; min-width: 0; }
+.btw-context-strip strong { color: var(--color-text); font-size: 11px; line-height: 1.25; }
+.btw-context-strip small { color: var(--color-text-muted); font-size: 10px; line-height: 1.35; }
 
 .btw-exchange-list {
   display: flex;
@@ -3152,6 +3148,19 @@ select:focus-visible {
 
 .btw-empty strong { color: var(--color-text); font-size: 14px; }
 .btw-empty > span:last-child { max-width: 280px; font-size: 12px; line-height: 1.45; }
+
+.btw-history-heading {
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px;
+  color: var(--color-text-muted);
+}
+
+.btw-history-heading > span:first-child { display: grid; gap: 2px; }
+.btw-history-heading strong { color: var(--color-text); font-size: 12px; }
+.btw-history-heading small { color: var(--color-text-subtle); font-size: 10px; line-height: 1.3; }
+.btw-history-heading > span:last-child { flex: 0 0 auto; font-size: 10px; }
 
 .btw-empty-icon {
   display: grid;

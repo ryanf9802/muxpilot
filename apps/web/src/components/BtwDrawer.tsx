@@ -6,6 +6,7 @@ import {
   Copy,
   LoaderCircle,
   MessageCircleQuestion,
+  RefreshCw,
   Send,
   ShieldCheck,
   Sparkles,
@@ -172,20 +173,22 @@ export function BtwDrawer({
             <div>
               <span className="btw-eyebrow">BTW</span>
               <h2 id="btw-drawer-title">Side questions</h2>
-              <p>Get a quick answer while the main task keeps moving.</p>
+              <p>One-off answers while the main task keeps moving.</p>
             </div>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close BTW drawer">
             <X size={18} />
           </button>
-          <div className="btw-context-strip">
-            <span><ShieldCheck size={14} /> Read-only snapshot</span>
-            <span aria-hidden="true" className="btw-context-divider" />
-            <span>{exchangeCountLabel(exchanges.length)}</span>
+          <div className="btw-context-strip" role="note">
+            <RefreshCw size={15} aria-hidden="true" />
+            <span>
+              <strong>Fresh main-session snapshot every time</strong>
+              <small>Read-only; earlier BTW questions and answers aren’t included.</small>
+            </span>
           </div>
         </header>
 
-        <div ref={listRef} className="btw-exchange-list" aria-live="polite">
+        <div ref={listRef} className="btw-exchange-list" role="region" aria-label="Saved independent question history" aria-live="polite">
           {loading ? (
             <div className="btw-empty">
               <span className="btw-empty-icon"><LoaderCircle className="spin" size={22} /></span>
@@ -197,7 +200,16 @@ export function BtwDrawer({
             <div className="btw-empty">
               <span className="btw-empty-icon"><Sparkles size={22} /></span>
               <strong>Ask without changing course</strong>
-              <span>Your question and its answer stay out of the main conversation.</span>
+              <span>Each answer starts from a fresh snapshot of the latest main session.</span>
+            </div>
+          ) : null}
+          {!loading && exchanges.length > 0 ? (
+            <div className="btw-history-heading">
+              <span>
+                <strong>Saved question history</strong>
+                <small>Visible to you, not carried into the next answer.</small>
+              </span>
+              <span>{exchangeCountLabel(exchanges.length)}</span>
             </div>
           ) : null}
           {exchanges.map((exchange, index) => (
@@ -214,7 +226,7 @@ export function BtwDrawer({
               <div className="btw-answer">
                 <div className="btw-answer-heading">
                   <span className="btw-agent-mark"><Sparkles size={13} /></span>
-                  <span>Side agent</span>
+                  <span>Independent answer</span>
                 </div>
                 {exchange.answer ? (
                   <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{exchange.answer}</ReactMarkdown></div>
@@ -247,7 +259,7 @@ export function BtwDrawer({
           {error ? <p className="btw-error btw-drawer-error" role="alert"><CircleAlert size={15} /> <span>{error}</span></p> : null}
           <form className="btw-composer" onSubmit={submit}>
             <div className="btw-composer-heading">
-              <label htmlFor="btw-question-input">Ask a side question</label>
+              <label htmlFor="btw-question-input">Ask a new independent question</label>
               <span><kbd>Ctrl</kbd><kbd>Enter</kbd></span>
             </div>
             <div className="btw-composer-control">
@@ -279,7 +291,7 @@ export function BtwDrawer({
               </button>
             </div>
           </form>
-          <p className="btw-composer-note"><ShieldCheck size={13} /> Kept separate from the main conversation</p>
+          <p className="btw-composer-note"><ShieldCheck size={13} /> Uses the latest main session—not this BTW history</p>
         </footer>
       </aside>
     </div>
