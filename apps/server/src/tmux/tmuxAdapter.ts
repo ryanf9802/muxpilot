@@ -38,12 +38,19 @@ export interface CodexLaunchOptions {
   writableRoots?: string[];
   developerInstructions?: string;
   environment?: Record<string, string>;
-  mcpServers?: Array<{ name: string; command: string; args: string[] }>;
+  mcpServers?: CodexMcpServerConfig[];
   resourceScopeName?: string;
   resourceScopeEnvironment?: Record<string, string>;
   model?: string | null;
   reasoningEffort?: string | null;
   fastMode?: boolean | null;
+}
+
+export interface CodexMcpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+  defaultToolsApprovalMode?: "auto" | "prompt" | "approve";
 }
 
 export interface CodexPaneLaunch {
@@ -547,6 +554,9 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
       "-c", `mcp_servers.${server.name}.command=${JSON.stringify(server.command)}`,
       "-c", `mcp_servers.${server.name}.args=${JSON.stringify(server.args)}`
     );
+    if (server.defaultToolsApprovalMode) {
+      codexArgs.push("-c", `mcp_servers.${server.name}.default_tools_approval_mode=${JSON.stringify(server.defaultToolsApprovalMode)}`);
+    }
   }
   if (continuation) codexArgs.push(continuation.mode, continuation.sessionId);
   const command = ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];

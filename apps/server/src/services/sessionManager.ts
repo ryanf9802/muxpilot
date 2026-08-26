@@ -47,6 +47,7 @@ import {
   composerHasInput,
   inputVerificationCaptureLines,
   InputTransportError,
+  type CodexMcpServerConfig,
   type CodexLaunchOptions,
   type InputTransportResult,
   isCodexStartupFailureCapture,
@@ -94,7 +95,7 @@ interface HeavyCommandQueueLookup {
 }
 
 interface SessionOrchestrationProvider {
-  prepareLaunch(): Promise<{ capabilityId: string; server: { name: string; command: string; args: string[] } }>;
+  prepareLaunch(): Promise<{ capabilityId: string; server: CodexMcpServerConfig }>;
   bindCapability(capabilityId: string, sessionId: string): Promise<void>;
 }
 

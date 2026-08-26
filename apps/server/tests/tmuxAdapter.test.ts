@@ -43,7 +43,12 @@ describe("codexCommandArgs", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       fastMode: true,
-      mcpServers: [{ name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/app/mcp.mjs", "/run/capability.json"] }]
+      mcpServers: [{
+        name: "muxpilot_sessions",
+        command: "/usr/bin/node",
+        args: ["/app/mcp.mjs", "/run/capability.json"],
+        defaultToolsApprovalMode: "approve"
+      }]
     })).toEqual([
       "env",
       "XDG_RUNTIME_DIR=/run/user/1000",
@@ -69,8 +74,18 @@ describe("codexCommandArgs", () => {
       "-c",
       'mcp_servers.muxpilot_sessions.command="/usr/bin/node"',
       "-c",
-      'mcp_servers.muxpilot_sessions.args=["/app/mcp.mjs","/run/capability.json"]'
+      'mcp_servers.muxpilot_sessions.args=["/app/mcp.mjs","/run/capability.json"]',
+      "-c",
+      'mcp_servers.muxpilot_sessions.default_tools_approval_mode="approve"'
     ]);
+  });
+
+  it("does not add an MCP approval policy when the server leaves it unspecified", () => {
+    const args = codexCommandArgs("/tmp/control", {
+      mcpServers: [{ name: "other", command: "/usr/bin/node", args: ["/app/other.mjs"] }]
+    });
+
+    expect(args).not.toContain(expect.stringContaining("default_tools_approval_mode"));
   });
 
   it("launches managed sessions in a neutral root with scoped writable directories", () => {

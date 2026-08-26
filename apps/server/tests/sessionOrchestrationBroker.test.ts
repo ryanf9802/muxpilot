@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
@@ -8,6 +11,29 @@ import { SessionOrchestrationBroker } from "../src/services/sessionOrchestration
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
+  it("pre-approves its capability-scoped MCP tools for managed Codex launches", async () => {
+    const capabilityRoot = await mkdtemp(join(tmpdir(), "muxpilot-capabilities-"));
+    try {
+      const broker = new SessionOrchestrationBroker(
+        {} as AppDatabase,
+        {} as SessionManager,
+        join(capabilityRoot, "broker.sock"),
+        capabilityRoot,
+        { info: vi.fn(), warn: vi.fn() },
+        {} as RawSessionEvidence
+      );
+
+      await expect(broker.prepareLaunch()).resolves.toMatchObject({
+        server: {
+          name: "muxpilot_sessions",
+          defaultToolsApprovalMode: "approve"
+        }
+      });
+    } finally {
+      await rm(capabilityRoot, { recursive: true, force: true });
+    }
+  });
+
   it("dispatches authenticated raw evidence calls without interpreting their content", async () => {
     const session = managedSession();
     const db = {
