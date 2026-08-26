@@ -374,7 +374,7 @@ describe("matchingNotificationRules", () => {
     expect(triggeredEvents).toHaveLength(2);
   });
 
-  it("rolls parallel child completion into one parent-owned notification", async () => {
+  it("keeps parallel child completion silent for the operator", async () => {
     const events = new EventBus();
     const triggeredEvents: SessionEvent[] = [];
     events.subscribe((event) => {
@@ -412,23 +412,46 @@ describe("matchingNotificationRules", () => {
 
     second.status = "waiting";
     await transitionHandler.handleStatusTransition(second.id, "waiting");
-    expect(triggeredEvents).toHaveLength(1);
-    expect(triggeredEvents[0]).toMatchObject({
-      sessionId: root.id,
-      payload: {
-        sessionId: root.id,
-        sessionName: "root",
-        sourceSessionId: second.id,
-        sourceSessionName: "second",
-        rules: ["done_task"],
-        previousStatus: "working",
-        status: "waiting",
-        url: `/sessions/${second.id}`
-      }
-    });
+    expect(triggeredEvents).toEqual([]);
   });
 
-  it("uses the root rules for child attention and opens the causal child", async () => {
+  it.each(["working", "waiting", "question", "plan_ready", "blocked", "input_failed", "startup_failed"] as const)(
+    "keeps a child's %s transition silent",
+    async (status) => {
+      const events = new EventBus();
+      const triggeredEvents: SessionEvent[] = [];
+      events.subscribe((event) => {
+        if (event.type === "notification.triggered") triggeredEvents.push(event);
+      });
+      const root = namedSession("root", "waiting");
+      const child = namedSession("child", status === "working" ? "waiting" : "working", agentOwnership(root.id));
+      const sessions = [root, child];
+      const service = new NotificationService(
+        {
+          getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+          listSessions: async () => sessions,
+          getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
+          listNotificationSettings: async () => ({
+            "device-test": testNotificationSettings(["approval_gate", "done_task", "status_change"])
+          }),
+          listPushSubscriptions: async () => []
+        } as never,
+        events,
+        { warn: () => undefined, error: () => undefined } as never
+      );
+      const transitionHandler = service as unknown as {
+        handleStatusTransition: (sessionId: string, nextStatus: ManagedSession["status"]) => Promise<void>;
+      };
+
+      await transitionHandler.handleStatusTransition(child.id, child.status);
+      child.status = status;
+      await transitionHandler.handleStatusTransition(child.id, status);
+
+      expect(triggeredEvents).toEqual([]);
+    }
+  );
+
+  it("uses the root rules for child approval, opens the causal child, and silently resolves it", async () => {
     const events = new EventBus();
     const triggeredEvents: SessionEvent[] = [];
     events.subscribe((event) => {
@@ -472,6 +495,10 @@ describe("matchingNotificationRules", () => {
         url: `/sessions/${child.id}`
       }
     });
+
+    child.status = "working";
+    await transitionHandler.handleStatusTransition(child.id, "working");
+    expect(triggeredEvents).toHaveLength(1);
   });
 
   it("silently rebases notification state when a session is adopted, reparented, or released", async () => {

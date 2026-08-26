@@ -150,6 +150,32 @@ describe("SessionCard", () => {
     expect(html).toContain("1 need attention");
   });
 
+  it("keeps a blocked child visible without marking its parent as needing attention", () => {
+    const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent", status: "waiting" });
+    const child = testSession({
+      id: "child",
+      paneId: "%112",
+      windowName: "child",
+      status: "blocked",
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+
+    const html = renderSessionCard(parent, [], null, [child]);
+
+    expect(html).toContain('aria-label="waiting"');
+    expect(html).toContain('aria-label="blocked"');
+    expect(html).toContain("quiet");
+    expect(html).not.toContain("need attention");
+  });
+
   it("hides completed descendants behind a subdued disclosure", () => {
     const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent" });
     const child = testSession({

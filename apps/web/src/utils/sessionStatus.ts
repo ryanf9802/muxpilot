@@ -1,4 +1,4 @@
-import { sessionStatusPresentation as coreSessionStatusPresentation, type ManagedSession, type SessionDisplayStatus } from "@muxpilot/core";
+import { operatorSessionStatusPresentation, type ManagedSession, type SessionDisplayStatus } from "@muxpilot/core";
 
 export type SessionStatusSeverity = "red" | "yellow" | "green";
 
@@ -29,7 +29,7 @@ export function isSessionStatusSeverity(value: string | null): value is SessionS
   return value === "red" || value === "yellow" || value === "green";
 }
 
-export const sessionStatusPresentation = coreSessionStatusPresentation;
+export const sessionStatusPresentation = operatorSessionStatusPresentation;
 
 export function countSessionStatuses(sessions: readonly ManagedSession[]): SessionStoplightCounts {
   const counts: SessionStoplightCounts = { red: 0, yellow: 0, green: 0 };

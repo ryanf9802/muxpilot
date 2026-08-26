@@ -1,7 +1,7 @@
 import webPush from "web-push";
 import {
   agentSessionRoot,
-  sessionStatusPresentation,
+  operatorSessionStatusPresentation,
   type CollaborationMode,
   type ManagedSession,
   type NotificationRuleType,
@@ -114,13 +114,14 @@ export class NotificationService {
     const source = sessions.find((session) => session.id === sessionId);
     if (!source) return;
     const root = agentSessionRoot(source, sessions);
-    const presentation = sessionStatusPresentation(root, sessions);
+    const presentation = operatorSessionStatusPresentation(root, sessions);
     if (presentation.status === "completed") return;
     const previousStatus = this.knownTreeStatuses.get(root.id);
     this.recordHierarchy(sessions);
     this.knownTreeStatuses.set(root.id, presentation.status);
     const nextTreeStatus = presentation.status;
     if (!previousStatus || previousStatus === nextTreeStatus) return;
+    if (source.id !== root.id && source.status !== "approval") return;
 
     const settingsByDevice = await this.db.listNotificationSettings();
     await Promise.all(
@@ -171,7 +172,7 @@ export class NotificationService {
       roots.set(root.id, root);
     }
     for (const root of roots.values()) {
-      const presentation = sessionStatusPresentation(root, sessions);
+      const presentation = operatorSessionStatusPresentation(root, sessions);
       if (presentation.status !== "completed") this.knownTreeStatuses.set(root.id, presentation.status);
     }
   }

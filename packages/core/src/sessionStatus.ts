@@ -18,6 +18,14 @@ const SESSION_STATUS_PRIORITY: readonly SessionStatus[] = [
   "missing"
 ];
 
+const AGENT_INTERNAL_ATTENTION_STATUSES = new Set<SessionStatus>([
+  "question",
+  "input_failed",
+  "startup_failed",
+  "blocked",
+  "plan_ready"
+]);
+
 export function highestPrioritySession<T extends { status: SessionStatus }>(sessions: readonly T[]): T | null {
   for (const status of SESSION_STATUS_PRIORITY) {
     const session = sessions.find((candidate) => candidate.status === status);
@@ -60,5 +68,15 @@ export function sessionStatusPresentation(session: ManagedSession, sessions: rea
     return { status: "completed", sourceSessionId: session.id, inherited: false };
   }
   const effective = highestPrioritySession(subtree.length > 0 ? subtree : [session]) ?? session;
+  return { status: effective.status, sourceSessionId: effective.id, inherited: effective.id !== session.id };
+}
+
+export function operatorSessionStatusPresentation(session: ManagedSession, sessions: readonly ManagedSession[]): SessionStatusPresentation {
+  const subtree = liveSessionSubtree(session, sessions);
+  if (session.agentOwnership?.completedAt && subtree.length === 0) {
+    return { status: "completed", sourceSessionId: session.id, inherited: false };
+  }
+  const operatorVisible = subtree.filter((candidate) => candidate.id === session.id || !AGENT_INTERNAL_ATTENTION_STATUSES.has(candidate.status));
+  const effective = highestPrioritySession(operatorVisible.length > 0 ? operatorVisible : [session]) ?? session;
   return { status: effective.status, sourceSessionId: effective.id, inherited: effective.id !== session.id };
 }

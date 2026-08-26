@@ -1095,7 +1095,7 @@ function isCompletedAgentBranch(session: ManagedSession, allSessions: ManagedSes
 
 function agentTreeStatusLabel(children: ManagedSession[]): string {
   const liveChildren = children.filter((session) => !session.agentOwnership?.completedAt);
-  const urgent = liveChildren.filter((session) => ["approval", "question", "input_failed", "startup_failed", "blocked"].includes(session.status)).length;
+  const urgent = liveChildren.filter((session) => session.status === "approval").length;
   if (urgent > 0) return `${urgent} need attention`;
   const working = liveChildren.filter((session) => ["working", "planning", "executing", "generating"].includes(session.status)).length;
   if (working > 0) return `${working} working`;

@@ -80,6 +80,18 @@ describe("countSessionStatuses", () => {
     expect(sessionStatusPresentation(root, [root, child]).status).toBe("waiting");
     expect(sessionStatusPresentation(child, [root, child]).status).toBe("completed");
   });
+
+  it("keeps a live blocked child visible without making the root count red", () => {
+    const root = session("root", "waiting");
+    const child = {
+      ...session("child", "blocked"),
+      agentOwnership: ownership(root.id)
+    };
+
+    expect(countSessionStatuses([root, child])).toEqual({ red: 0, yellow: 0, green: 1 });
+    expect(sessionStatusPresentation(root, [root, child]).status).toBe("waiting");
+    expect(sessionStatusPresentation(child, [root, child]).status).toBe("blocked");
+  });
 });
 
 function session(id: string, status: SessionStatus): ManagedSession {
