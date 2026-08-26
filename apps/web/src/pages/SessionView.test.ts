@@ -248,7 +248,14 @@ describe("SessionContextUsage", () => {
         contextUsage: {
           activeTokens: 12345,
           contextWindowTokens: 200000,
-          contextPercent: 6.1725
+          contextPercent: 6.1725,
+          lifetimeInputTokens: 12345,
+          lifetimeCachedInputTokens: 1000,
+          lifetimeOutputTokens: 1000,
+          lifetimeReasoningTokens: 500,
+          lifetimeTotalTokens: 13845,
+          lifetimeWorkTokens: 1500,
+          sampledAt: "2026-08-26T17:00:00.000Z"
         }
       }
     }));
