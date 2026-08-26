@@ -1718,7 +1718,7 @@ function updateDirectorySuggestionRef(refs: Map<string, HTMLButtonElement>, path
 }
 
 export function syncSessionIntoStoplightSessions(currentSessions: ManagedSession[], session: ManagedSession): ManagedSession[] {
-  if (session.archived || (session.status === "missing" && session.initializing !== true)) {
+  if (session.archived || (session.status === "missing" && session.initializing !== true && !session.agentOwnership?.completedAt)) {
     return currentSessions.filter((item) => item.id !== session.id);
   }
   const index = currentSessions.findIndex((item) => item.id === session.id);

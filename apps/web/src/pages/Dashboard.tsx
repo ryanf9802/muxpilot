@@ -20,7 +20,7 @@ import type {
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
   SessionEvent,
-  SessionStatus
+  SessionDisplayStatus
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, notificationDeviceId } from "../api/client.js";
@@ -34,6 +34,7 @@ import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
+  sessionStatusPresentation,
   sessionStatusSeverity,
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
@@ -45,12 +46,12 @@ const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
-export const DASHBOARD_STATUSES = ["", "working", "planning", "queued", "waiting", "question", "plan_ready", "approval", "input_failed", "startup_failed", "unknown", "missing"];
+export const DASHBOARD_STATUSES = ["", "working", "planning", "queued", "waiting", "question", "plan_ready", "approval", "input_failed", "startup_failed", "unknown", "missing", "completed"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
 export type DashboardStatusFilter =
   | { kind: "all"; selectValue: "" }
-  | { kind: "status"; status: string; selectValue: string }
+  | { kind: "status"; status: SessionDisplayStatus; selectValue: string }
   | { kind: "severity"; severity: SessionStatusSeverity; selectValue: `severity:${SessionStatusSeverity}` };
 
 export function Dashboard() {
@@ -623,9 +624,9 @@ export function dashboardStatusFilterFromSearchParams(params: Pick<URLSearchPara
 }
 
 export function filterSessionsByDashboardStatus(sessions: ManagedSession[], filter: DashboardStatusFilter): ManagedSession[] {
-  if (filter.kind === "status") return sessions.filter((session) => session.status === filter.status);
+  if (filter.kind === "status") return sessions.filter((session) => sessionStatusPresentation(session, sessions).status === filter.status);
   if (filter.kind !== "severity") return sessions;
-  return sessions.filter((session) => !session.initializing && sessionStatusSeverity(session.status) === filter.severity);
+  return sessions.filter((session) => !session.initializing && sessionStatusSeverity(sessionStatusPresentation(session, sessions).status) === filter.severity);
 }
 
 export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query: string): ManagedSession[] {
@@ -678,7 +679,7 @@ export function dashboardLocationState(state: unknown): { optimisticallyRemovedS
   return { optimisticallyRemovedSessionId: typeof value === "string" ? value : null };
 }
 
-function isDashboardStatus(value: string | null): value is SessionStatus {
+function isDashboardStatus(value: string | null): value is SessionDisplayStatus {
   return typeof value === "string" && DASHBOARD_STATUSES.includes(value);
 }
 
@@ -707,6 +708,9 @@ export function SessionCard({
 }) {
   const menuTrigger = useContextMenuTrigger(session, onOpenMenu);
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
+  const statusPresentation = sessionStatusPresentation(session, [session, ...children]);
+  const statusSource = children.find((candidate) => candidate.id === statusPresentation.sourceSessionId);
+  const statusDetail = statusSource ? `from ${sessionDisplayName(statusSource, [session, ...children])}` : null;
   const cardClassName = `session-card${session.pinned ? " session-card-pinned" : ""}${notificationRing ? ` session-card-notification-ring session-card-notification-ring-${notificationRing}` : ""}`;
 
   function handleClick() {
@@ -748,7 +752,7 @@ export function SessionCard({
               </span>
             ) : null}
             <SessionResourceIndicator usage={session.resourceUsage} />
-            {session.initializing ? <LoadingStatusPill /> : <StatusPill status={session.status} />}
+            {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
           </span>
         </div>
         <div className="preview">
@@ -1027,6 +1031,7 @@ function includeAgentAncestors(filtered: ManagedSession[], all: ManagedSession[]
 
 function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void }) {
   const children = agentSessionChildren(session.id, allSessions);
+  const statusPresentation = sessionStatusPresentation(session, allSessions);
   const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
   const contextPressure = (session.contextUsage?.contextPercent ?? 0) >= 85
     ? "high"
@@ -1036,10 +1041,10 @@ function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: Man
   const budget = ownership && workUsed !== null ? `${Math.max(0, Math.round((ownership.workTokenBudget - workUsed) / 1000))}k budget` : "";
   return (
     <div className="agent-session-branch" style={{ "--agent-depth": depth } as CSSProperties}>
-      <button className="agent-session-row" type="button" onClick={() => onOpen(session.id)}>
+      <button className="agent-session-row" type="button" data-completed={statusPresentation.status === "completed" || undefined} onClick={() => onOpen(session.id)}>
         <span className="agent-session-row-name">{sessionDisplayName(session)}</span>
         <span className="agent-session-row-meta" data-context-pressure={contextPressure}>{context}{budget ? ` · ${budget}` : ""}</span>
-        {session.initializing ? <LoadingStatusPill /> : <StatusPill status={session.status} />}
+        {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} />}
       </button>
       {children.map((child) => <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} />)}
     </div>
@@ -1047,10 +1052,12 @@ function AgentSessionRow({ session, allSessions, depth, onOpen }: { session: Man
 }
 
 function agentTreeStatusLabel(children: ManagedSession[]): string {
-  const urgent = children.filter((session) => ["approval", "question", "input_failed", "startup_failed", "blocked"].includes(session.status)).length;
+  const liveChildren = children.filter((session) => !session.agentOwnership?.completedAt);
+  const urgent = liveChildren.filter((session) => ["approval", "question", "input_failed", "startup_failed", "blocked"].includes(session.status)).length;
   if (urgent > 0) return `${urgent} need attention`;
-  const working = children.filter((session) => ["working", "planning", "executing", "generating"].includes(session.status)).length;
-  return working > 0 ? `${working} working` : "quiet";
+  const working = liveChildren.filter((session) => ["working", "planning", "executing", "generating"].includes(session.status)).length;
+  if (working > 0) return `${working} working`;
+  return liveChildren.length === 0 ? "all complete" : "quiet";
 }
 
 function formatTranscriptSize(count: number): string {

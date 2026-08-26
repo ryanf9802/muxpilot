@@ -5890,6 +5890,43 @@ describe("agent-managed session hierarchy", () => {
     await harness.db.close();
   });
 
+  it("finishes descendants idempotently and retains completed history beneath a live root", async () => {
+    const harness = await createHarness();
+    const root = agentHierarchySession("finish-root");
+    const child = agentHierarchySession("finish-child");
+    await harness.db.upsertSession(root, "2026-08-25T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
+    const claimed = await harness.manager.agentClaim(root.id, child.id);
+    await harness.db.setSessionAgentOwnership(child.id, {
+      ...claimed.agentOwnership!,
+      contextPausedAt: "2026-08-25T00:01:00.000Z"
+    }, "2026-08-25T00:01:00.000Z");
+
+    await Promise.all([
+      harness.manager.agentFinish(root.id, child.id),
+      harness.manager.agentFinish(root.id, child.id)
+    ]);
+
+    const completed = await harness.manager.getSession(child.id);
+    expect(completed).toMatchObject({
+      status: "missing",
+      agentOwnership: {
+        parentSessionId: root.id,
+        completedAt: expect.any(String),
+        contextPausedAt: "2026-08-25T00:01:00.000Z"
+      }
+    });
+    const visible = await harness.manager.listSessions(false, false);
+    expect(visible.map((session) => session.id)).toEqual(expect.arrayContaining([root.id, child.id]));
+    expect(visible.find((session) => session.id === root.id)?.agentSummary).toMatchObject({
+      liveDescendantCount: 0,
+      totalDescendantCount: 1,
+      worstStatus: null,
+      worstStatusSessionId: null
+    });
+    await harness.db.close();
+  });
+
   it("interrupts an owned session when active context reaches 85 percent", async () => {
     const harness = await createHarness();
     const transcript = join(harness.codexHome, "sessions", "agent-context.jsonl");

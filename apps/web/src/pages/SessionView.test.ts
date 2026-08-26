@@ -1103,6 +1103,19 @@ describe("session fallback polling", () => {
     expect(isLiveManagedSession({ status: "waiting", archived: false })).toBe(true);
     expect(isLiveManagedSession({ status: "missing", archived: false })).toBe(false);
     expect(isLiveManagedSession({ status: "waiting", archived: true })).toBe(false);
+    expect(isLiveManagedSession({
+      status: "missing",
+      archived: false,
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: "2026-08-25T01:00:00.000Z"
+      }
+    })).toBe(false);
   });
 
   it("keeps heavyweight polling fast only while the panel or a command is active", () => {

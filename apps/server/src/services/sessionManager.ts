@@ -33,7 +33,7 @@ import type {
   TranscriptSearchResponse,
   TmuxPane
 } from "@muxpilot/core";
-import { canToggleFastMode, hasCompleteProposedPlan, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -790,9 +790,12 @@ export class SessionManager {
   }
 
   listSessions(includeArchived = false, includeMissing = true): Promise<ManagedSession[]> {
-    const result = this.db.listSessions(true, includeMissing) as Promise<ManagedSession[]> | ManagedSession[];
+    const result = this.db.listSessions(true, true) as Promise<ManagedSession[]> | ManagedSession[];
     const decorate = (allSessions: ManagedSession[]) => {
-      const sessions = includeArchived ? allSessions : allSessions.filter((session) => !session.archived);
+      const sessions = allSessions.filter((session) =>
+        (includeArchived || !session.archived) &&
+        (includeMissing || session.status !== "missing" || completedAgentSessionHasVisibleAncestor(session, allSessions, includeArchived))
+      );
       return sessions.map((session) => this.decorateSession(session, allSessions));
     };
     return (Array.isArray(result) ? decorate(result) : result.then(decorate)) as Promise<ManagedSession[]>;
@@ -845,15 +848,17 @@ export class SessionManager {
       : canonicalSession;
     const descendants = agentDescendants(allSessions, session.id);
     const liveDescendants = descendants.filter(isLiveAgentSession);
+    const worstDescendant = highestPrioritySession(liveDescendants);
     return this.withResourceUsage({
       ...withOrigin,
-      status: withOrigin.agentOwnership?.budgetExhaustedAt || withOrigin.agentOwnership?.contextPausedAt
+      status: !withOrigin.agentOwnership?.completedAt && (withOrigin.agentOwnership?.budgetExhaustedAt || withOrigin.agentOwnership?.contextPausedAt)
         ? "blocked"
         : withOrigin.status,
       agentSummary: descendants.length > 0 ? {
         liveDescendantCount: liveDescendants.length,
         totalDescendantCount: descendants.length,
-        worstStatus: worstAgentStatus(liveDescendants)
+        worstStatus: worstDescendant?.status ?? null,
+        worstStatusSessionId: worstDescendant?.id ?? null
       } : null
     });
   }
@@ -1557,7 +1562,12 @@ export class SessionManager {
   }
 
   async requireAgentControl(actorSessionId: string, targetSessionId: string): Promise<ManagedSession> {
-    const target = requireSession(await this.db.getSession(targetSessionId));
+    return requireSession(await this.requireAgentControlRecord(actorSessionId, targetSessionId));
+  }
+
+  private async requireAgentControlRecord(actorSessionId: string, targetSessionId: string): Promise<ManagedSession> {
+    const target = await this.db.getSession(targetSessionId);
+    if (!target) throw new AgentSessionError("Session not found");
     const all = await this.db.listSessions(true);
     let current = target;
     const seen = new Set<string>();
@@ -1572,15 +1582,23 @@ export class SessionManager {
   }
 
   async agentFinish(actorSessionId: string, targetSessionId: string): Promise<void> {
-    const target = await this.requireAgentControl(actorSessionId, targetSessionId);
-    const descendants = agentDescendants(await this.db.listSessions(true), target.id).reverse();
-    for (const session of [...descendants, target]) {
-      if (session.status !== "missing") await this.act(session.id, { type: "kill" });
-      const current = await this.db.getSession(session.id);
-      if (current?.agentOwnership) {
-        await this.db.setSessionAgentOwnership(session.id, { ...current.agentOwnership, completedAt: nowIso() }, nowIso());
+    await this.withAgentMutation(async () => {
+      const target = await this.requireAgentControlRecord(actorSessionId, targetSessionId);
+      if (target.agentOwnership?.completedAt) return;
+      const descendants = agentDescendants(await this.db.listSessions(true), target.id).reverse();
+      for (const session of [...descendants, target]) {
+        const current = await this.db.getSession(session.id);
+        if (!current?.agentOwnership || current.agentOwnership.completedAt) continue;
+        if (current.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(current.gitWorkspace.id, "owning agent session was finished");
+        const panes = await this.tmux.listPanes();
+        const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === current.id);
+        if (pane) await this.tmux.killPane(pane.paneId);
+        const completedAt = nowIso();
+        const completed = await this.db.completeAgentSession(current.id, completedAt);
+        await this.db.addAudit(`session:${actorSessionId}`, "finish_agent_session", current.id, "ok", completedAt);
+        if (completed) this.publish("session.updated", current.id, completed);
       }
-    }
+    });
   }
 
   async resumeAgentWait(sessionId: string, message: string): Promise<boolean> {
@@ -2832,9 +2850,24 @@ function agentDescendants(sessions: ManagedSession[], parentSessionId: string): 
   return result;
 }
 
-function worstAgentStatus(sessions: ManagedSession[]): SessionStatus | null {
-  const priority: SessionStatus[] = ["approval", "question", "input_failed", "startup_failed", "blocked", "plan_ready", "working", "planning", "executing", "generating", "queued", "waiting", "idle", "unknown", "missing"];
-  return priority.find((status) => sessions.some((session) => session.status === status)) ?? null;
+function completedAgentSessionHasVisibleAncestor(
+  session: ManagedSession,
+  allSessions: ManagedSession[],
+  includeArchived: boolean
+): boolean {
+  if (!session.agentOwnership?.completedAt) return false;
+  const byId = new Map(allSessions.map((candidate) => [candidate.id, candidate]));
+  let current: ManagedSession = session;
+  const seen = new Set<string>();
+  while (current.agentOwnership && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parent = byId.get(current.agentOwnership.parentSessionId);
+    if (!parent || (!includeArchived && parent.archived)) return false;
+    if (parent.status !== "missing") return true;
+    if (!parent.agentOwnership?.completedAt) return false;
+    current = parent;
+  }
+  return false;
 }
 
 function resolveSessionStatus(

@@ -3,6 +3,7 @@ export * from "./gitName.js";
 export * from "./heavyCommandQueueEvent.js";
 export * from "./gitWorkflowEvent.js";
 export * from "./sessionName.js";
+export * from "./sessionStatus.js";
 export * from "./sessionWaitEvent.js";
 export * from "./transcript.js";
 export * from "./types.js";

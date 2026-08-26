@@ -11,6 +11,103 @@ import { SessionOrchestrationBroker } from "../src/services/sessionOrchestration
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
+  it("ignores advisory context pressure but wakes after the 85-percent guard blocks work", async () => {
+    const child: ManagedSession = {
+      ...managedSession(),
+      id: "context-child",
+      status: "working",
+      contextUsage: {
+        activeTokens: 75,
+        contextWindowTokens: 100,
+        contextPercent: 75,
+        lifetimeInputTokens: 100,
+        lifetimeCachedInputTokens: 0,
+        lifetimeOutputTokens: 0,
+        lifetimeReasoningTokens: 0,
+        lifetimeTotalTokens: 100,
+        lifetimeWorkTokens: 100,
+        sampledAt: "2026-08-25T00:00:00.000Z"
+      }
+    };
+    const wait = {
+      actorSessionId: "parent-1",
+      sessionIds: [child.id],
+      mode: "all" as const,
+      expiresAt: Date.now() + 60_000,
+      readyAt: null
+    };
+    const db = {
+      listAgentWaits: vi.fn(async () => [wait]),
+      listSessions: vi.fn(async () => [child]),
+      listQueuedInputs: vi.fn(async () => []),
+      upsertAgentWait: vi.fn(async () => undefined),
+      deleteAgentWait: vi.fn(async () => undefined)
+    } as unknown as AppDatabase;
+    const manager = {
+      hasActiveHeavyCommand: vi.fn(async () => false),
+      resumeAgentWait: vi.fn(async () => true)
+    } as unknown as SessionManager;
+    const broker = new SessionOrchestrationBroker(db, manager, "/tmp/unused.sock", "/tmp/unused-capabilities", { info: vi.fn(), warn: vi.fn() }, {} as RawSessionEvidence);
+
+    await (broker as unknown as { tick(): Promise<void> }).tick();
+
+    expect(manager.resumeAgentWait).not.toHaveBeenCalled();
+
+    child.status = "blocked";
+    child.contextUsage!.contextPercent = 85;
+    await (broker as unknown as { tick(): Promise<void> }).tick();
+
+    expect(manager.resumeAgentWait).toHaveBeenCalledWith("parent-1", expect.stringContaining('"effectiveStatus":"blocked"'));
+  });
+
+  it("keeps waiting for a working descendant and wakes with its attention status", async () => {
+    const target = { ...managedSession(), id: "target", status: "waiting" as const };
+    const child: ManagedSession = {
+      ...managedSession(),
+      id: "target-child",
+      status: "working",
+      agentOwnership: {
+        parentSessionId: target.id,
+        rootSessionId: target.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    };
+    const sessions = [target, child];
+    const wait = {
+      actorSessionId: "actor",
+      sessionIds: [target.id],
+      mode: "all" as const,
+      expiresAt: Date.now() + 60_000,
+      readyAt: null
+    };
+    const db = {
+      listAgentWaits: vi.fn(async () => [wait]),
+      listSessions: vi.fn(async () => sessions),
+      listQueuedInputs: vi.fn(async () => []),
+      upsertAgentWait: vi.fn(async () => undefined),
+      deleteAgentWait: vi.fn(async () => undefined)
+    } as unknown as AppDatabase;
+    const manager = {
+      hasActiveHeavyCommand: vi.fn(async () => false),
+      resumeAgentWait: vi.fn(async () => true)
+    } as unknown as SessionManager;
+    const broker = new SessionOrchestrationBroker(db, manager, "/tmp/unused.sock", "/tmp/unused-capabilities", { info: vi.fn(), warn: vi.fn() }, {} as RawSessionEvidence);
+    const tick = () => (broker as unknown as { tick(): Promise<void> }).tick();
+
+    await tick();
+    expect(manager.resumeAgentWait).not.toHaveBeenCalled();
+
+    child.status = "approval";
+    await tick();
+    expect(manager.resumeAgentWait).toHaveBeenCalledOnce();
+    expect(manager.resumeAgentWait).toHaveBeenCalledWith("actor", expect.stringContaining('"effectiveStatus":"approval"'));
+    expect(manager.resumeAgentWait).toHaveBeenCalledWith("actor", expect.stringContaining('"effectiveStatusSessionId":"target-child"'));
+  });
+
   it("does not resume a parent while a child still has active queued work", async () => {
     const child: ManagedSession = {
       ...managedSession(),
@@ -109,7 +206,10 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       })),
       listQueuedInputs: vi.fn(async () => [{ id: "queued-1", text: "pending" }])
     } as unknown as AppDatabase;
-    const manager = { getSession: vi.fn(async () => session) } as unknown as SessionManager;
+    const manager = {
+      getSession: vi.fn(async () => session),
+      listSessions: vi.fn(async () => [session])
+    } as unknown as SessionManager;
     const rawEvidence: RawSessionEvidence = {
       listTmuxPanes: vi.fn(async () => ({ fields: ["pane_id"], output: "%7\n" })),
       captureTmuxPane: vi.fn(async () => ({ paneId: "%7", output: "raw pane\n" })),

@@ -15,6 +15,8 @@ export type SessionStatus =
   | "missing"
   | "unknown";
 
+export type SessionDisplayStatus = SessionStatus | "completed";
+
 export function canToggleFastMode(status: SessionStatus): boolean {
   return status === "idle"
     || status === "waiting"
@@ -212,6 +214,7 @@ export interface AgentSessionSummary {
   liveDescendantCount: number;
   totalDescendantCount: number;
   worstStatus: SessionStatus | null;
+  worstStatusSessionId: string | null;
 }
 
 export type HeavyCommandState = "waiting" | "reserved" | "running" | "stalled" | "terminating";

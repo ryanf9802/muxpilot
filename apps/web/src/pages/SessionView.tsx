@@ -109,6 +109,7 @@ import { Modal } from "../components/Modal.js";
 import { copyText } from "../utils/clipboard.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+import { sessionStatusPresentation } from "../utils/sessionStatus.js";
 
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
@@ -340,8 +341,8 @@ function useDesktopVimAvailable(): boolean {
   return available;
 }
 
-export function isLiveManagedSession(session: Pick<ManagedSession, "archived" | "status"> | null): boolean {
-  return Boolean(session && !session.archived && session.status !== "missing");
+export function isLiveManagedSession(session: (Pick<ManagedSession, "archived" | "status"> & Partial<Pick<ManagedSession, "agentOwnership">>) | null): boolean {
+  return Boolean(session && !session.archived && session.status !== "missing" && !session.agentOwnership?.completedAt);
 }
 
 export function hasActiveHeavyCommand(commands: readonly Pick<HeavyCommand, "state">[]): boolean {
@@ -844,6 +845,7 @@ export function SessionView() {
   const {
     refreshSessionStoplight,
     syncSessionStoplight,
+    sessions: shellSessions,
     openCreateSession,
     openForkSession,
     registerCreateSessionCwdPrefill,
@@ -966,7 +968,9 @@ export function SessionView() {
     () => latestUserPromptTimestamp(pendingUserChatMessage ? [...loadedMessages, pendingUserChatMessage] : loadedMessages),
     [loadedMessages, pendingUserChatMessage]
   );
-  const composerLock = session?.status === "input_failed"
+  const composerLock = session?.agentOwnership?.completedAt
+    ? "This agent-managed session is complete. Its transcript is read-only."
+    : session?.status === "input_failed"
     ? "Resolve the failed input delivery before sending another message."
     : composerLockReason(Boolean(question), Boolean(pendingPlan), session?.startupError);
   const composerLocked = Boolean(composerLock);
@@ -2125,6 +2129,10 @@ export function SessionView() {
     );
   }
   const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
+  const completed = Boolean(readySession.agentOwnership?.completedAt);
+  const statusPresentation = sessionStatusPresentation(readySession, shellSessions.some((candidate) => candidate.id === readySession.id) ? shellSessions : [readySession, ...shellSessions]);
+  const statusSource = shellSessions.find((candidate) => candidate.id === statusPresentation.sourceSessionId);
+  const statusDetail = statusPresentation.inherited && statusSource ? `from ${sessionDisplayName(statusSource, shellSessions)}` : null;
 
   return (
     <section className={composerFocused ? "session-view session-view-composer-focused" : "session-view"}>
@@ -2142,12 +2150,15 @@ export function SessionView() {
         </div>
         <div className="session-header-state">
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
-          {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={readySession.status} />}
+          {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
+          {statusPresentation.inherited && statusSource ? (
+            <Link className="session-status-source" to={`/sessions/${statusSource.id}`}>via {sessionDisplayName(statusSource, shellSessions)}</Link>
+          ) : null}
         </div>
-        <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />
+        {completed ? null : <TmuxCommandButton session={readySession} copied={copiedTmuxCommand} copyEnabled={accessMode === "local"} onCopy={() => void copyTmuxCommand()} />}
         <ModeToggle
           mode={readySession.inputMode}
-          busy={readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
+          busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
           onChange={setInputMode}
         />
         {inputModeError ? <p className="mode-toggle-error">{inputModeError}</p> : null}
@@ -2208,13 +2219,13 @@ export function SessionView() {
           <FastModeToggle
             enabled={readySession.fastMode === true}
             available={readySession.fastModeAvailable ?? null}
-            busy={readySession.initializing === true || actionBusy === "setFastMode"}
+            busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
             status={readySession.status}
             onChange={setFastMode}
           />
           {readySession.agentOwnership ? (
             <button
-              disabled={Boolean(actionBusy)}
+              disabled={completed || Boolean(actionBusy)}
               aria-busy={actionBusy === "setAgentParent"}
               onClick={() => void runAction({ type: "setAgentParent", parentSessionId: null })}
               title="Return this session to the top level"
@@ -2226,7 +2237,7 @@ export function SessionView() {
             </button>
           ) : null}
           <button
-            disabled={readySession.initializing === true || Boolean(actionBusy)}
+            disabled={completed || readySession.initializing === true || Boolean(actionBusy)}
             aria-busy={actionBusy === "interrupt"}
             aria-label={actionBusy === "interrupt" ? "Interrupting session" : "Interrupt session"}
             data-busy={actionBusy === "interrupt" || undefined}
@@ -2238,7 +2249,7 @@ export function SessionView() {
           </button>
           <button
             className="danger"
-            disabled={readySession.initializing === true || Boolean(actionBusy)}
+            disabled={completed || readySession.initializing === true || Boolean(actionBusy)}
             aria-busy={actionBusy === "kill"}
             aria-label={actionBusy === "kill" ? "Killing session" : "Kill session"}
             data-busy={actionBusy === "kill" || undefined}

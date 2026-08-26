@@ -1419,6 +1419,7 @@ select:focus-visible {
 }
 
 .agent-session-row:hover { background: color-mix(in srgb, var(--color-action) 8%, transparent); }
+.agent-session-row[data-completed="true"] { opacity: 0.58; }
 .agent-session-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text); }
 .agent-session-row-meta { white-space: nowrap; opacity: 0.72; }
 .agent-session-row-meta[data-context-pressure="warning"] { color: var(--color-warning); opacity: 1; }
@@ -2760,6 +2761,15 @@ select:focus-visible {
   align-items: center;
   gap: 7px;
   align-self: center;
+}
+
+.session-status-source {
+  max-width: 11rem;
+  overflow: hidden;
+  color: var(--color-text-muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .heavy-command-indicator {

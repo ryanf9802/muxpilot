@@ -759,6 +759,24 @@ describe("syncSessionIntoStoplightSessions", () => {
 
     expect(syncSessionIntoStoplightSessions([starting], transientMissing)).toEqual([transientMissing]);
   });
+
+  it("keeps completed agent history visible after its pane becomes missing", () => {
+    const completed = testSession({
+      id: "child",
+      status: "missing",
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: "2026-08-25T01:00:00.000Z"
+      }
+    });
+
+    expect(syncSessionIntoStoplightSessions([], completed)).toEqual([completed]);
+  });
 });
 
 describe("applySessionEventToSessions", () => {
@@ -870,7 +888,7 @@ function directorySuggestion(input: {
 }
 
 function testSession(
-  input: { id: string } & Partial<Pick<ManagedSession, "status" | "initializing" | "archived" | "lastActivityAt">> & {
+  input: { id: string } & Partial<Pick<ManagedSession, "status" | "initializing" | "archived" | "lastActivityAt" | "agentOwnership">> & {
       cwd?: string;
       repoRoot?: string | null;
       repoName?: string;
@@ -917,6 +935,7 @@ function testSession(
     transcriptSize: 0,
     unreadCount: 0,
     pinned: false,
-    archived: input.archived ?? false
+    archived: input.archived ?? false,
+    agentOwnership: input.agentOwnership ?? null
   };
 }

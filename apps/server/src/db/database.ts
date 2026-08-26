@@ -345,6 +345,10 @@ export class AppDatabase {
     return this.call("setSessionAgentOwnership", sessionId, ownership, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  completeAgentSession(sessionId: string, completedAt: string): Promise<ManagedSession | null> {
+    return this.call("completeAgentSession", sessionId, completedAt) as Promise<ManagedSession | null>;
+  }
+
   setSessionOrchestrationAvailable(sessionId: string, available: boolean, updatedAt: string): Promise<ManagedSession | null> {
     return this.call("setSessionOrchestrationAvailable", sessionId, available, updatedAt) as Promise<ManagedSession | null>;
   }
@@ -963,6 +967,20 @@ export class SyncAppDatabase {
 
   setSessionAgentOwnership(sessionId: string, agentOwnership: AgentSessionOwnership | null, updatedAt: string): ManagedSession | null {
     return this.updateSessionData(sessionId, { agentOwnership }, updatedAt);
+  }
+
+  completeAgentSession(sessionId: string, completedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing?.agentOwnership) return existing;
+    const next: ManagedSession = {
+      ...existing,
+      status: "missing",
+      agentOwnership: { ...existing.agentOwnership, completedAt }
+    };
+    this.db
+      .prepare("UPDATE managed_sessions SET data_json = ?, status = 'missing', updated_at = ? WHERE id = ?")
+      .run(JSON.stringify(next), completedAt, sessionId);
+    return this.getSession(sessionId);
   }
 
   setSessionOrchestrationAvailable(sessionId: string, orchestrationAvailable: boolean, updatedAt: string): ManagedSession | null {

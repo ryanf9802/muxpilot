@@ -125,6 +125,56 @@ describe("SessionCard", () => {
     expect(html).not.toContain("status-yellow");
   });
 
+  it("renders a parent with the representative status of its live descendant", () => {
+    const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent", status: "waiting" });
+    const child = testSession({
+      id: "child",
+      paneId: "%112",
+      windowName: "child",
+      status: "approval",
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+
+    const html = renderSessionCard(parent, [], null, [child]);
+
+    expect(html).toContain('class="status status-red"');
+    expect(html).toContain('aria-label="approval · from child"');
+    expect(html).toContain("1 need attention");
+  });
+
+  it("renders completed descendants as subdued retained history", () => {
+    const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent" });
+    const child = testSession({
+      id: "child",
+      paneId: "%112",
+      windowName: "child",
+      status: "missing",
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: "2026-08-25T01:00:00.000Z"
+      }
+    });
+
+    const html = renderSessionCard(parent, [], null, [child]);
+
+    expect(html).toContain('data-completed="true"');
+    expect(html).toContain('aria-label="completed"');
+    expect(html).toContain("all complete");
+  });
+
   it("renders the actionable startup failure instead of an empty prompt preview", () => {
     const html = renderSessionCard(testSession({
       id: "failed",
@@ -609,6 +659,29 @@ describe("dashboard status filters", () => {
     expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "working", selectValue: "working" })).toEqual([]);
     expect(filterSessionsByDashboardStatus(sessions, { kind: "all", selectValue: "" })).toBe(sessions);
   });
+
+  it("filters a parent by inherited child status instead of its own waiting state", () => {
+    const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent", status: "waiting" });
+    const child = testSession({
+      id: "child",
+      paneId: "%112",
+      windowName: "child",
+      status: "working",
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+    const sessions = [parent, child];
+
+    expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "working", selectValue: "working" })).toEqual(sessions);
+    expect(filterSessionsByDashboardStatus(sessions, { kind: "status", status: "waiting", selectValue: "waiting" })).toEqual([]);
+  });
 });
 
 describe("removeSessionFromDashboard", () => {
@@ -648,7 +721,8 @@ describe("dashboardLocationState", () => {
 function renderSessionCard(
   session: ManagedSession,
   notificationRules: Parameters<typeof SessionCard>[0]["notificationRules"] = [],
-  notificationRing: Parameters<typeof SessionCard>[0]["notificationRing"] = null
+  notificationRing: Parameters<typeof SessionCard>[0]["notificationRing"] = null,
+  children: ManagedSession[] = []
 ): string {
   return renderToStaticMarkup(
     createElement(SessionCard, {
@@ -657,6 +731,7 @@ function renderSessionCard(
       previewLines: dashboardPreviewLines(session),
       notificationRules,
       notificationRing,
+      children,
       onOpen: () => undefined,
       onOpenMenu: () => undefined,
       onOpenMenuFromButton: () => undefined
