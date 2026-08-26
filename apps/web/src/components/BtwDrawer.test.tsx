@@ -165,6 +165,7 @@ describe("BtwDrawer", () => {
   });
 
   it("copies exact question and answer text from their context menus", async () => {
+    const close = vi.fn();
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -180,7 +181,7 @@ describe("BtwDrawer", () => {
         loading={false}
         error=""
         submitting={false}
-        onClose={() => undefined}
+        onClose={close}
         onAsk={async () => true}
         onCancel={async () => undefined}
         onOpenDocument={() => undefined}
@@ -221,6 +222,18 @@ describe("BtwDrawer", () => {
       await Promise.resolve();
     });
     expect(copyTextMock).toHaveBeenLastCalledWith(saved.answer);
+
+    act(() => question.dispatchEvent(new MouseEvent("contextmenu", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 24,
+      clientY: 32
+    })));
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })));
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(close).not.toHaveBeenCalled();
+    act(() => document.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" })));
+    expect(close).toHaveBeenCalledOnce();
     act(() => root.unmount());
   });
 

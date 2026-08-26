@@ -102,10 +102,12 @@ export function BtwDrawer({
   const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLElement>(null);
   const copyMenuRef = useRef<HTMLDivElement>(null);
+  const copyMenuOpenRef = useRef(Boolean(copyMenu));
   const onCloseRef = useRef(onClose);
   const previousExchangeCountRef = useRef(exchanges.length);
   const active = exchanges.find((exchange) => exchange.status === "running") ?? null;
   const latest = exchanges.at(-1) ?? null;
+  copyMenuOpenRef.current = Boolean(copyMenu);
   onCloseRef.current = onClose;
 
   useDismissableContextMenu(Boolean(copyMenu), copyMenuRef, () => setCopyMenu(null));
@@ -123,6 +125,10 @@ export function BtwDrawer({
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing) {
         event.preventDefault();
+        if (copyMenuOpenRef.current) {
+          setCopyMenu(null);
+          return;
+        }
         onCloseRef.current();
         return;
       }
