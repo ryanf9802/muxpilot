@@ -812,6 +812,8 @@ export function DocumentsModal({
   const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState("");
+  const viewerRef = useRef<HTMLElement>(null);
+  const displayedDocumentRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -838,6 +840,7 @@ export function DocumentsModal({
           href={href}
           onClick={(event) => {
             event.preventDefault();
+            event.currentTarget.blur();
             setSelected(linkedDocument.name);
           }}
         >
@@ -852,6 +855,7 @@ export function DocumentsModal({
       setLoadedContentKey(null);
       setContentLoading(false);
       setContentError("");
+      if (!open) displayedDocumentRef.current = null;
       return undefined;
     }
     let cancelled = false;
@@ -878,6 +882,13 @@ export function DocumentsModal({
   const contentReady = selectedContentKey !== null && loadedContentKey === selectedContentKey;
   const viewerBusy = Boolean(selected && !contentError && (contentLoading || !contentReady));
 
+  useLayoutEffect(() => {
+    if (!loadedContentKey || !viewerRef.current) return;
+    const loadedDocument = loadedContentKey.split("\u0000", 1)[0] ?? null;
+    if (loadedDocument !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
+    displayedDocumentRef.current = loadedDocument;
+  }, [loadedContentKey]);
+
   return (
     <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
       {listError ? <p className="error-text" role="alert">{listError}</p> : null}
@@ -891,8 +902,22 @@ export function DocumentsModal({
               </button>
             ))}
           </nav>
-          <article className="documents-viewer" aria-label={selected ?? "Document viewer"} aria-busy={viewerBusy || undefined}>
-            {contentError ? <p className="error-text" role="alert">{contentError}</p> : viewerBusy ? <p className="muted" role="status">Loading {selected}…</p> : selected && contentReady ? <MarkdownBlock text={content} components={documentMarkdownComponents} /> : null}
+          <article ref={viewerRef} className="documents-viewer" aria-label={selected ?? "Document viewer"} aria-busy={viewerBusy || undefined}>
+            {viewerBusy ? (
+              <div className="documents-loading-indicator" role="status" aria-live="polite">
+                <span><LoaderCircle className="spin" size={16} aria-hidden="true" /></span>
+                <span className="sr-only">Loading {selected}</span>
+              </div>
+            ) : null}
+            {contentError ? <p className="error-text" role="alert">{contentError}</p> : loadedContentKey ? (
+              <div key={loadedContentKey} className="documents-viewer-content" data-loading={viewerBusy || undefined} aria-hidden={viewerBusy || undefined}>
+                <MarkdownBlock text={content} components={documentMarkdownComponents} />
+              </div>
+            ) : viewerBusy ? (
+              <div className="documents-viewer-skeleton" aria-hidden="true">
+                <span /><span /><span /><span /><span />
+              </div>
+            ) : null}
           </article>
         </div>
       )}

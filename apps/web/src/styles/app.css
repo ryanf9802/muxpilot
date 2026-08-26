@@ -2858,7 +2858,71 @@ select:focus-visible {
 .documents-list button > span { display: grid; gap: 3px; min-width: 0; }
 .documents-list strong { overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
 .documents-list small { color: var(--color-text-muted); font-size: 11px; }
-.documents-viewer { padding: 4px 12px 20px; border-left: 1px solid var(--color-border); }
+.documents-viewer {
+  position: relative;
+  padding: 4px 12px 20px;
+  border-left: 1px solid var(--color-border);
+}
+
+.documents-loading-indicator {
+  position: sticky;
+  top: 6px;
+  z-index: 2;
+  display: flex;
+  justify-content: flex-end;
+  height: 0;
+  pointer-events: none;
+}
+
+.documents-loading-indicator > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--color-action);
+  background: color-mix(in srgb, var(--color-surface-raised) 92%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(6px);
+}
+
+.documents-viewer-content {
+  animation: documents-content-in 120ms ease-out;
+  transition: opacity 120ms ease-out;
+}
+
+.documents-viewer-content[data-loading="true"] { opacity: 0.58; }
+
+.documents-viewer-skeleton {
+  display: grid;
+  gap: 12px;
+  padding-top: 8px;
+}
+
+.documents-viewer-skeleton span {
+  height: 12px;
+  background: color-mix(in srgb, var(--color-border) 64%, var(--color-surface));
+  border-radius: 5px;
+  opacity: 0.72;
+}
+
+.documents-viewer-skeleton span:nth-child(1) { width: 42%; height: 22px; }
+.documents-viewer-skeleton span:nth-child(2) { width: 88%; }
+.documents-viewer-skeleton span:nth-child(3) { width: 96%; }
+.documents-viewer-skeleton span:nth-child(4) { width: 74%; }
+.documents-viewer-skeleton span:nth-child(5) { width: 51%; }
+
+@keyframes documents-content-in {
+  from { opacity: 0.72; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .documents-viewer-content { animation: none; transition: none; }
+  .documents-loading-indicator .spin { animation: none; }
+}
 .heavy-command-list { display: grid; gap: 12px; overflow: auto; }
 .heavy-command-detail {
   display: grid;

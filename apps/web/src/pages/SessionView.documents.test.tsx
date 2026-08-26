@@ -74,9 +74,11 @@ describe("DocumentsModal", () => {
 
     const documentLink = container.querySelector<HTMLAnchorElement>('a[href="./plan.md#current-plan"]');
     const externalLink = container.querySelector<HTMLAnchorElement>('a[href="https://example.com"]');
+    const viewer = container.querySelector<HTMLElement>(".documents-viewer");
     expect(documentLink?.target).toBe("");
     expect(externalLink?.target).toBe("_blank");
     expect(externalLink?.rel).toBe("noopener noreferrer");
+    if (viewer) viewer.scrollTop = 160;
 
     await act(async () => {
       documentLink?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
@@ -85,7 +87,11 @@ describe("DocumentsModal", () => {
 
     expect(read).toHaveBeenLastCalledWith("session-1", "plan.md");
     expect(container.querySelector(".documents-viewer")?.getAttribute("aria-busy")).toBe("true");
-    expect(container.querySelector(".documents-viewer")?.textContent).toBe("Loading plan.md…");
+    expect(container.querySelector(".documents-loading-indicator")?.textContent).toBe("Loading plan.md");
+    expect(container.querySelector(".documents-viewer-content")?.textContent).toContain("Plan");
+    expect(container.querySelector(".documents-viewer-content")?.getAttribute("data-loading")).toBe("true");
+    expect(container.querySelector(".documents-viewer-content")?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector(".documents-viewer")?.textContent).not.toContain("Loading plan.md…");
     expect(container.querySelector("button[data-active='true']")?.getAttribute("aria-current")).toBe("page");
 
     await act(async () => {
@@ -95,6 +101,8 @@ describe("DocumentsModal", () => {
     });
 
     expect(container.querySelector(".documents-viewer")?.hasAttribute("aria-busy")).toBe(false);
+    expect(container.querySelector(".documents-loading-indicator")).toBeNull();
+    expect(viewer?.scrollTop).toBe(0);
     expect(container.querySelector(".documents-viewer h2")?.textContent).toBe("Current plan");
     expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
     act(() => root.unmount());
