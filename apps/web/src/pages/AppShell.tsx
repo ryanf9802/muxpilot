@@ -56,6 +56,7 @@ import {
   notificationToastMessage,
   playNotificationBell
 } from "../utils/notifications.js";
+import { installVisibleViewportVariables } from "../utils/visualViewport.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -147,6 +148,8 @@ export function AppShell() {
     promise: Promise<boolean>;
   } | null>(null);
   const connectionProbeFailureCountRef = useRef(0);
+
+  useEffect(() => installVisibleViewportVariables(), []);
 
   useEffect(() => installCtrlWGuard(), []);
 
