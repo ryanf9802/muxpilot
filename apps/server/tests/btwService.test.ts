@@ -22,13 +22,14 @@ describe("BtwService", () => {
 
     const exchange = await service.ask("source", "Create plan.md with an implementation checklist");
     await eventually(() => client.requests.some((request) => request.method === "turn/start"));
-    expect(client.requests.find((request) => request.method === "thread/fork")?.params).toMatchObject({
+    const forkParams = client.requests.find((request) => request.method === "thread/fork")?.params;
+    expect(forkParams).toMatchObject({
       ephemeral: true,
-      deferGoalContinuation: true,
       sandbox: "workspace-write",
       cwd: "/staging/documents",
       runtimeWorkspaceRoots: ["/staging/documents"]
     });
+    expect(forkParams).not.toHaveProperty("deferGoalContinuation");
     expect(client.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
       sandboxPolicy: {
         type: "workspaceWrite",

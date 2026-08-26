@@ -322,7 +322,6 @@ export class BtwService {
       threadId: run.sourceCodexSessionId,
       ephemeral: true,
       excludeTurns: true,
-      deferGoalContinuation: true,
       approvalPolicy: "never",
       sandbox: "workspace-write",
       cwd: run.documentsRoot,
