@@ -5,11 +5,7 @@ import {
   Clock3,
   Copy,
   LoaderCircle,
-  MessageCircleQuestion,
-  RefreshCw,
   Send,
-  ShieldCheck,
-  Sparkles,
   Square,
   X
 } from "lucide-react";
@@ -138,7 +134,7 @@ export function BtwDrawer({
     if (!open || !list) return;
     const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
     if (exchanges.length > previousCount || distanceFromBottom < 140) {
-      window.requestAnimationFrame(() => list.scrollTo({ top: list.scrollHeight, behavior: "smooth" }));
+      window.requestAnimationFrame(() => { list.scrollTop = list.scrollHeight; });
     }
   }, [exchanges.length, latest?.answer.length, latest?.status, open]);
 
@@ -168,52 +164,39 @@ export function BtwDrawer({
     }}>
       <aside ref={panelRef} className="btw-drawer" role="dialog" aria-modal="true" aria-labelledby="btw-drawer-title" tabIndex={-1}>
         <header className="btw-drawer-header">
-          <div className="btw-title-lockup">
-            <span className="btw-brand-mark" aria-hidden="true"><MessageCircleQuestion size={20} /></span>
-            <div>
-              <span className="btw-eyebrow">BTW</span>
-              <h2 id="btw-drawer-title">Side questions</h2>
-              <p>One-off answers while the main task keeps moving.</p>
-            </div>
+          <div>
+            <h2 id="btw-drawer-title">BTW side questions</h2>
+            <p>Ask without interrupting the main task.</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="Close BTW drawer">
             <X size={18} />
           </button>
-          <div className="btw-context-strip" role="note">
-            <RefreshCw size={15} aria-hidden="true" />
-            <span>
-              <strong>Fresh main-session snapshot every time</strong>
-              <small>Read-only; earlier BTW questions and answers aren’t included.</small>
-            </span>
-          </div>
+          <p className="btw-context-note" role="note">
+            <strong>Each question is independent.</strong> It uses a fresh, read-only snapshot of the main session. Saved BTW history is not included in later answers.
+          </p>
         </header>
 
         <div ref={listRef} className="btw-exchange-list" role="region" aria-label="Saved independent question history" aria-live="polite">
           {loading ? (
             <div className="btw-empty">
-              <span className="btw-empty-icon"><LoaderCircle className="spin" size={22} /></span>
-              <strong>Loading side questions</strong>
-              <span>Restoring the separate BTW history…</span>
+              <LoaderCircle className="spin" size={16} />
+              <span>Loading side-question history…</span>
             </div>
           ) : null}
           {!loading && exchanges.length === 0 ? (
             <div className="btw-empty">
-              <span className="btw-empty-icon"><Sparkles size={22} /></span>
-              <strong>Ask without changing course</strong>
-              <span>Each answer starts from a fresh snapshot of the latest main session.</span>
+              <strong>No side questions yet</strong>
+              <span>Ask a question to get an independent answer from the current main session.</span>
             </div>
           ) : null}
           {!loading && exchanges.length > 0 ? (
             <div className="btw-history-heading">
-              <span>
-                <strong>Saved question history</strong>
-                <small>Visible to you, not carried into the next answer.</small>
-              </span>
+              <strong>History</strong>
               <span>{exchangeCountLabel(exchanges.length)}</span>
             </div>
           ) : null}
           {exchanges.map((exchange, index) => (
-            <article className="btw-exchange" data-status={exchange.status} data-latest={index === exchanges.length - 1 || undefined} key={exchange.id}>
+            <article className="btw-exchange" data-status={exchange.status} key={exchange.id}>
               <header className="btw-exchange-heading">
                 <span className="btw-exchange-number">Question {String(index + 1).padStart(2, "0")}</span>
                 <time dateTime={exchange.createdAt}>{formatBtwTime(exchange.createdAt)}</time>
@@ -225,15 +208,14 @@ export function BtwDrawer({
               </div>
               <div className="btw-answer">
                 <div className="btw-answer-heading">
-                  <span className="btw-agent-mark"><Sparkles size={13} /></span>
-                  <span>Independent answer</span>
+                  <span>Answer</span>
                 </div>
                 {exchange.answer ? (
                   <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]}>{exchange.answer}</ReactMarkdown></div>
                 ) : exchange.status === "running" ? (
                   <div className="btw-thinking">
                     <LoaderCircle className="spin" size={15} />
-                    <span><strong>Checking the session snapshot</strong><small>This won’t pause or steer the active task.</small></span>
+                    <span>Checking the current session snapshot…</span>
                   </div>
                 ) : null}
                 {exchange.error ? <p className="btw-error" role="alert"><CircleAlert size={15} /> <span>{exchange.error}</span></p> : null}
@@ -291,7 +273,6 @@ export function BtwDrawer({
               </button>
             </div>
           </form>
-          <p className="btw-composer-note"><ShieldCheck size={13} /> Uses the latest main session—not this BTW history</p>
         </footer>
       </aside>
     </div>

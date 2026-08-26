@@ -4,6 +4,17 @@ import { describe, expect, it } from "vitest";
 const styles = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
 
 describe("mobile session viewport layout", () => {
+  it("keeps BTW drawer styling free of decorative effects", () => {
+    const btwStart = styles.indexOf(".btw-drawer-backdrop {");
+    const btwEnd = styles.indexOf(".git-workspace-panel {", btwStart);
+    expect(btwStart).toBeGreaterThanOrEqual(0);
+    expect(btwEnd).toBeGreaterThan(btwStart);
+    const btwStyles = styles.slice(btwStart, btwEnd);
+    expect(btwStyles).not.toContain("gradient(");
+    expect(btwStyles).not.toContain("backdrop-filter:");
+    expect(btwStyles).not.toContain("animation:");
+  });
+
   it("sizes the narrow app shell from measured visual viewport variables", () => {
     const mobileStyles = cssBlock(styles, "@media (max-width: 819px)");
     const appRule = cssBlock(mobileStyles, ".app");

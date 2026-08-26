@@ -80,8 +80,7 @@ describe("BtwDrawer", () => {
         onCancel={cancel}
       />
     ));
-    expect(container.textContent).toContain("Checking the session snapshot");
-    expect(container.textContent).toContain("This won’t pause or steer the active task.");
+    expect(container.textContent).toContain("Checking the current session snapshot…");
     await act(async () => {
       (container.querySelector(".btw-exchange-actions button") as HTMLButtonElement).click();
       await Promise.resolve();
@@ -143,15 +142,16 @@ describe("BtwDrawer", () => {
       />
     ));
 
-    expect(container.textContent).toContain("Fresh main-session snapshot every time");
-    expect(container.textContent).toContain("Read-only; earlier BTW questions and answers aren’t included.");
-    expect(container.textContent).toContain("Saved question history");
-    expect(container.textContent).toContain("Visible to you, not carried into the next answer.");
-    expect(container.textContent).toContain("Uses the latest main session—not this BTW history");
+    expect(container.textContent).toContain("Each question is independent.");
+    expect(container.textContent).toContain("fresh, read-only snapshot of the main session");
+    expect(container.textContent).toContain("Saved BTW history is not included in later answers.");
+    expect(container.textContent).toContain("History");
+    expect(container.textContent).toContain("Ask a new independent question");
     expect(container.querySelector(".btw-exchange-list")?.getAttribute("aria-label")).toBe("Saved independent question history");
     expect(container.querySelectorAll(".btw-exchange")).toHaveLength(2);
     expect(container.querySelectorAll(".btw-answer-heading")).toHaveLength(2);
-    expect(container.querySelectorAll(".btw-answer-heading")[0]?.textContent).toContain("Independent answer");
+    expect(container.querySelectorAll(".btw-answer-heading")[0]?.textContent).toContain("Answer");
+    expect(container.querySelector(".btw-answer-heading svg")).toBeNull();
     act(() => root.unmount());
   });
 });
