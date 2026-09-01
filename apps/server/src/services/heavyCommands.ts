@@ -287,14 +287,35 @@ export class HeavyCommandService {
         return current.filter((owner) => owner.state === "reserved" && !owner.resumeSentAt);
       });
 
-      for (const owner of reserved) await this.dispatchResume(owner);
+      for (const owner of reserved) {
+        await this.dispatchOwnerSafely(owner, "resume", () => this.dispatchResume(owner));
+      }
       const currentOwners = await this.readPersistentOwners();
       for (const owner of currentOwners) {
-        if (owner.state === "reporting" && !owner.completionSentAt) await this.dispatchCompletion(owner);
+        if (owner.state === "reporting" && !owner.completionSentAt) {
+          await this.dispatchOwnerSafely(owner, "completion", () => this.dispatchCompletion(owner));
+        }
       }
       await this.syncSessionStatuses(currentOwners);
     } finally {
       this.ticking = false;
+    }
+  }
+
+  private async dispatchOwnerSafely(
+    owner: QueueOwner,
+    phase: "resume" | "completion",
+    dispatch: () => Promise<void>
+  ): Promise<void> {
+    try {
+      await dispatch();
+    } catch (error) {
+      console.error("Muxpilot heavyweight owner dispatch failed", {
+        phase,
+        runId: owner.runId,
+        workspaceId: owner.workspaceId,
+        error
+      });
     }
   }
 

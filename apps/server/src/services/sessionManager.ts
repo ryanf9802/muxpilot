@@ -434,7 +434,13 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     this.deliveringInputSessionIds.add(sessionId);
     try {
-      await this.sendRawInput(ready, message);
+      try {
+        await this.sendRawInput(ready, message);
+      } catch (error) {
+        if (!(error instanceof InputTransportError) || error.reason !== "composer_changed") throw error;
+        const pane = await this.livePane(ready);
+        await this.tmux.submitComposedInput(pane.paneId, codexTerminalUserText(message));
+      }
       const now = nowIso();
       const status = activeInputStatus(ready.inputMode);
       await this.db.setSessionStatus(sessionId, status, now);

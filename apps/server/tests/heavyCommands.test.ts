@@ -2,7 +2,7 @@ import { createConnection, createServer } from "node:net";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
 import { HeavyCommandService, heavyCommandSessionStatus } from "../src/services/heavyCommands.js";
 
@@ -256,6 +256,52 @@ describe("HeavyCommandService", () => {
     }
   });
 
+  it("continues completion delivery and status reconciliation after one owner fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const failed = "mabc123-565656565656";
+    const passed = "mabc123-575757575757";
+    await writeReportingOwner(leases, sessions, failed, 0, "failed delivery", "workspace-failed");
+    await writeReportingOwner(leases, sessions, passed, 0, "passed delivery", "workspace-passed");
+    const delivered: string[] = [];
+    const statuses: Array<{ workspaceId: string; status: string | null }> = [];
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = new HeavyCommandService(leases, sessions, 2, 120_000);
+    await service.start({
+      sessionIdForWorkspace: async (workspaceId) => `session-${workspaceId}`,
+      resumeHeavyCommand: async (_sessionId, message) => {
+        const runId = normalizeHeavyCommandQueueEvent(message)?.event.runId;
+        if (runId === failed) throw new Error("composer changed");
+        if (runId) delivered.push(runId);
+        return true;
+      },
+      syncHeavyCommandSessionStatus: async (workspaceId, status) => {
+        statuses.push({ workspaceId, status });
+      }
+    });
+    try {
+      await waitFor(() => delivered.includes(passed) && statuses.some(({ workspaceId }) => workspaceId === "workspace-failed"));
+      expect(JSON.parse(await readFile(join(leases, "runs", failed, "owner.json"), "utf8"))).toMatchObject({
+        state: "reporting",
+        completionSentAt: null
+      });
+      expect(JSON.parse(await readFile(join(leases, "runs", passed, "owner.json"), "utf8"))).toMatchObject({
+        state: "completed",
+        completionSentAt: expect.any(String)
+      });
+      expect(consoleError).toHaveBeenCalledWith("Muxpilot heavyweight owner dispatch failed", expect.objectContaining({
+        phase: "completion",
+        runId: failed,
+        workspaceId: "workspace-failed"
+      }));
+    } finally {
+      await service.stop();
+      consoleError.mockRestore();
+    }
+  });
+
   it("counts only process-owning states as resource-busy", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);
@@ -483,17 +529,18 @@ async function writeReportingOwner(
   sessions: string,
   runId: string,
   exitCode: number,
-  output: string
+  output: string,
+  workspaceId = "workspace-a"
 ): Promise<void> {
   const runDir = join(leases, "runs", runId);
-  const logDir = join(sessions, "workspace-a", "heavy-commands");
+  const logDir = join(sessions, workspaceId, "heavy-commands");
   const logPath = join(logDir, `${exitCode === 0 ? "passed" : "failed"}.log`);
   await mkdir(runDir, { recursive: true });
   await mkdir(logDir, { recursive: true });
   await writeFile(logPath, output);
   const now = new Date().toISOString();
   await writeFile(join(runDir, "owner.json"), JSON.stringify({
-    ...owner(runId, "workspace-a", logPath),
+    ...owner(runId, workspaceId, logPath),
     version: 4,
     state: "reporting",
     runnerPath: "/skills/muxpilot-git-run.mjs",

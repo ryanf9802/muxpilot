@@ -3457,6 +3457,42 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("submits an exact heavyweight event already staged after a composer race", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const pane = testPane({ cwd: repo, paneId: "%1" });
+    let composer = "";
+    const submittedKeys: string[][] = [];
+    harness.tmux.listPanes = async () => [pane];
+    harness.tmux.capturePane = async () => `› ${composer}`;
+    harness.tmux.sendInput = async () => {
+      throw new InputTransportError("composer changed while the event rendered", "composer_changed", {
+        pasteReplayCount: 0,
+        submitKeyRetryCount: 0
+      });
+    };
+    harness.tmux.sendKeys = async (_paneId, keys) => {
+      submittedKeys.push(keys);
+      composer = "";
+    };
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    const message = "<muxpilot_heavy_command>exact completion</muxpilot_heavy_command>";
+
+    composer = "operator draft";
+    await expect(harness.manager.resumeHeavyCommand(session.id, message)).rejects.toMatchObject({
+      reason: "composer_changed"
+    });
+    expect(submittedKeys).toEqual([]);
+
+    composer = `${message} `;
+    await expect(harness.manager.resumeHeavyCommand(session.id, message)).resolves.toBe(true);
+    expect(submittedKeys).toEqual([["Enter"]]);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("working");
+    harness.db.close();
+  });
+
   it("cancels a deferred heavyweight ticket before interrupting and releases queued input", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
