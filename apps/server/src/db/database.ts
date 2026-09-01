@@ -1,5 +1,6 @@
-import { Worker } from "node:worker_threads";
+import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import type {
   AgentSessionOwnership,
   BtwExchange,
@@ -34,10 +35,13 @@ import {
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
   normalizeGitWorkspaceSummary,
+  normalizeManagedSessionRuntime,
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
   sessionHistoryIdentity,
+  managedSessionCwd,
+  managedSessionName,
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
   withSessionWaitEventPayload
@@ -50,6 +54,8 @@ const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
+const SESSION_RUNTIME_BACKUP_SETTING = "session_runtime_backup_v2";
+export const SESSION_RUNTIME_BACKUP_SUFFIX = ".pre-runtime-v2.sqlite3";
 
 export interface SessionRecoveryRuntimeState {
   runId: string;
@@ -742,7 +748,17 @@ export class SyncAppDatabase {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.migrate();
+    try {
+      const requiresRuntimeBackup = this.requiresRuntimeModelBackup(path);
+      if (requiresRuntimeBackup) this.createOrVerifyRuntimeModelBackup(path);
+      this.migrate();
+      if (path !== ":memory:" && this.getSetting(SESSION_RUNTIME_BACKUP_SETTING) !== "true") {
+        this.setSetting(SESSION_RUNTIME_BACKUP_SETTING, "true", new Date().toISOString());
+      }
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   close(): void {
@@ -753,16 +769,17 @@ export class SyncAppDatabase {
     const existingRow = this.db.prepare("SELECT * FROM managed_sessions WHERE id = ?").get(session.id) as SessionRow | undefined;
     if (rejectIfNewer && existingRow && existingRow.updated_at > updatedAt) return;
     const existing = existingRow ? this.hydrateSession(existingRow) : null;
-    const nextSession = {
+    const nextSession = normalizeManagedSessionRuntime({
       ...session,
       initializing: existing ? existing.initializing === true : session.initializing === true,
       pinned: existing?.pinned ?? session.pinned ?? false,
       contextUsage: existing?.contextUsage ?? session.contextUsage ?? null,
       agentOwnership: existing?.agentOwnership ?? session.agentOwnership ?? null,
       orchestrationAvailable: existing?.orchestrationAvailable ?? session.orchestrationAvailable ?? false,
+      resourceUnit: session.resourceUnit ?? existing?.resourceUnit ?? session.resourceScope ?? existing?.resourceScope ?? null,
       resourceScope: session.resourceScope ?? existing?.resourceScope ?? null,
       documentScopeId: session.documentScopeId ?? existing?.documentScopeId ?? null
-    };
+    });
     this.db
       .prepare(
         `INSERT INTO managed_sessions
@@ -799,16 +816,17 @@ export class SyncAppDatabase {
     if (!oldRow) return null;
 
     const existing = this.hydrateSession(oldRow);
-    const nextSession = {
+    const nextSession = normalizeManagedSessionRuntime({
       ...session,
       pinned: existing.pinned,
       archived: session.archived,
       contextUsage: existing.contextUsage ?? session.contextUsage ?? null,
       agentOwnership: existing.agentOwnership ?? session.agentOwnership ?? null,
       orchestrationAvailable: session.orchestrationAvailable ?? existing.orchestrationAvailable ?? false,
+      resourceUnit: session.resourceUnit ?? existing.resourceUnit ?? session.resourceScope ?? existing.resourceScope ?? null,
       resourceScope: session.resourceScope ?? existing.resourceScope ?? null,
       documentScopeId: session.documentScopeId ?? existing.documentScopeId ?? null
-    };
+    });
     const archived = nextSession.archived ? 1 : 0;
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -908,7 +926,7 @@ export class SyncAppDatabase {
   private rekeyAgentRelationships(oldSessionId: string, newSessionId: string): void {
     const rows = this.db.prepare("SELECT id, data_json FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json">>;
     for (const row of rows) {
-      const session = JSON.parse(row.data_json) as ManagedSession;
+      const session = normalizeManagedSessionRuntime(JSON.parse(row.data_json) as ManagedSession);
       const ownership = session.agentOwnership;
       if (!ownership || (ownership.parentSessionId !== oldSessionId && ownership.rootSessionId !== oldSessionId)) continue;
       session.agentOwnership = {
@@ -1591,7 +1609,7 @@ export class SyncAppDatabase {
 
     const bySession = new Map<string, { row: SessionHistoryMatchRow; prompts: SessionHistoryResult["matchedPrompts"] }>();
     for (const row of rows) {
-      const session = JSON.parse(row.session_data_json) as ManagedSession;
+      const session = normalizeManagedSessionRuntime(JSON.parse(row.session_data_json) as ManagedSession);
       if (!session.codexSessionId) continue;
       const current = bySession.get(row.session_id);
       const prompt = {
@@ -2500,7 +2518,7 @@ export class SyncAppDatabase {
   }
 
   private hydrateSession(row: SessionRow): ManagedSession {
-    const session = JSON.parse(row.data_json) as ManagedSession;
+    const session = normalizeManagedSessionRuntime(JSON.parse(row.data_json) as ManagedSession);
     const gitWorkspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
     const recentUserPrompts = this.recentUserPrompts(row.id);
     const activitySummary = this.getActivitySummary(row.id);
@@ -2793,6 +2811,40 @@ export class SyncAppDatabase {
     this.backfillSessionRepositories();
   }
 
+  private requiresRuntimeModelBackup(path: string): boolean {
+    if (path === ":memory:" || !existsSync(path)) return false;
+    const hasSessions = this.tableExists("managed_sessions");
+    if (!hasSessions) return false;
+    if (!this.tableExists("app_settings")) return true;
+    const marker = this.db.prepare("SELECT value FROM app_settings WHERE key = ?")
+      .get(SESSION_RUNTIME_BACKUP_SETTING) as { value: string } | undefined;
+    return marker?.value !== "true";
+  }
+
+  private createOrVerifyRuntimeModelBackup(path: string): void {
+    const backupPath = `${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`;
+    if (!existsSync(backupPath)) this.db.prepare("VACUUM INTO ?").run(backupPath);
+
+    let backup: DatabaseSync | null = null;
+    try {
+      backup = new DatabaseSync(backupPath, { readOnly: true });
+      const integrity = backup.prepare("PRAGMA integrity_check").get() as Record<string, unknown> | undefined;
+      if (!integrity || !Object.values(integrity).includes("ok")) {
+        throw new Error(`SQLite integrity check failed for ${backupPath}`);
+      }
+      const sessionTable = backup.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'managed_sessions'").get();
+      if (!sessionTable) throw new Error(`Runtime backup does not contain managed_sessions: ${backupPath}`);
+    } catch (error) {
+      throw new Error(`Unable to verify pre-runtime database backup at ${backupPath}`, { cause: error });
+    } finally {
+      backup?.close();
+    }
+  }
+
+  private tableExists(name: string): boolean {
+    return Boolean(this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name));
+  }
+
   private backfillPromptIndexIfNeeded(): void {
     if (this.getSetting(PROMPT_INDEX_BACKFILLED_SETTING) === "true") return;
     this.db.prepare("DELETE FROM session_prompt_index").run();
@@ -2877,9 +2929,9 @@ export class SyncAppDatabase {
        VALUES (?, ?, ?, ?, ?, ?)`
     );
     for (const row of rows) {
-      const session = JSON.parse(row.data_json) as ManagedSession;
+      const session = normalizeManagedSessionRuntime(JSON.parse(row.data_json) as ManagedSession);
       const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
-      const path = session.repo.root ?? session.tmux.cwd;
+      const path = session.repo.root ?? managedSessionCwd(session);
       if (!path) continue;
       insert.run(
         path,
@@ -2965,7 +3017,7 @@ function normalizePreviewText(text: string): string {
 }
 
 function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
-  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const session = normalizeManagedSessionRuntime(JSON.parse(row.session_data_json) as ManagedSession);
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   return {
     id: row.id,
@@ -2973,10 +3025,10 @@ function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
     sequence: row.sequence,
     timestamp: row.timestamp,
     text: row.text,
-    sessionName: session.tmux.windowName || session.tmux.sessionName || row.session_id,
+    sessionName: managedSessionName(session) || row.session_id,
     repoName: session.repo.name,
     repoBranch: workspace?.targetBranch ?? session.repo.branch,
-    cwd: session.tmux.cwd
+    cwd: managedSessionCwd(session)
   };
 }
 
@@ -2998,7 +3050,7 @@ function sessionHistoryResultFromMatchRow(
   row: SessionHistoryMatchRow,
   matchedPrompts: SessionHistoryResult["matchedPrompts"]
 ): SessionHistoryResult {
-  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const session = normalizeManagedSessionRuntime(JSON.parse(row.session_data_json) as ManagedSession);
   const workspace = row.git_workspace_data_json ? (JSON.parse(row.git_workspace_data_json) as StoredGitWorkspace).summary : null;
   return sessionHistoryResultFromSession(
     {
@@ -3024,10 +3076,10 @@ function sessionHistoryResultFromSession(
     codexJsonlPath: session.codexJsonlPath,
     status: session.status,
     archived: session.archived,
-    sessionName: session.tmux.windowName || session.tmux.sessionName || session.id,
+    sessionName: managedSessionName(session),
     repoName: session.repo.name,
     repoBranch: workspace?.targetBranch ?? session.repo.branch,
-    cwd: session.tmux.cwd,
+    cwd: managedSessionCwd(session),
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,
     matchedPrompts,

@@ -111,6 +111,40 @@ export interface TmuxPane {
   size: string;
 }
 
+export type AgentProviderKind = "codex";
+export type SessionDriverKind = "codex_tmux" | "codex_app_server";
+
+export interface AgentProviderRef {
+  kind: AgentProviderKind;
+  threadId: string | null;
+  rolloutPath: string | null;
+}
+
+export type SessionRuntimeRef =
+  | { kind: "tmux"; pane: TmuxPane }
+  | {
+      kind: "app_server";
+      serviceUnit: string;
+      socketPath: string;
+      journalPath: string;
+      protocolVersion: string | null;
+    };
+
+export interface SessionCapabilities {
+  start: boolean;
+  resume: boolean;
+  fork: boolean;
+  verifiedInput: boolean;
+  interrupt: boolean;
+  kill: boolean;
+  approvals: boolean;
+  questions: boolean;
+  planActions: boolean;
+  rawTerminalCapture: boolean;
+  terminalAttach: boolean;
+  hibernate: boolean;
+}
+
 export interface RepoMetadata {
   root: string | null;
   name: string;
@@ -287,6 +321,14 @@ export interface SessionForkOrigin {
 
 export interface ManagedSession {
   id: string;
+  /** Stable display name independent of the process transport. */
+  name?: string;
+  /** Stable working directory independent of the process transport. */
+  cwd?: string;
+  provider?: AgentProviderRef;
+  driverKind?: SessionDriverKind;
+  runtime?: SessionRuntimeRef;
+  capabilities?: SessionCapabilities;
   tmux: TmuxPane;
   repo: RepoMetadata;
   codexSessionId: string | null;
@@ -313,6 +355,8 @@ export interface ManagedSession {
   forkedFrom?: SessionForkOrigin | null;
   gitWorkspace?: GitWorkspaceSummary | null;
   resourceUsage?: SessionResourceUsage | null;
+  /** Provider-neutral service/cgroup unit. `resourceScope` remains as a legacy alias. */
+  resourceUnit?: string | null;
   resourceScope?: string | null;
   contextUsage?: SessionContextUsage | null;
   agentOwnership?: AgentSessionOwnership | null;
