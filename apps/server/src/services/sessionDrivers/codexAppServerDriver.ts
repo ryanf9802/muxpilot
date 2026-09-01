@@ -1,6 +1,8 @@
 import { isAbsolute } from "node:path";
 import type {
+  ApprovalDecision,
   ManagedSession,
+  QuestionAnswerRequest,
   SessionCapabilities
 } from "@muxpilot/core";
 import { CodexAppServerConnectionManager, type AppServerSessionHandlers } from "./codexAppServerConnectionManager.js";
@@ -45,6 +47,13 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
   private readonly subscribers = new Map<string, Set<(event: DriverEvent) => void>>();
   private readonly activeTurns = new Map<string, string>();
+  private readonly pendingRequests = new Map<string, {
+    sessionId: string;
+    id: string | number;
+    method: string;
+    params: unknown;
+    responded: boolean;
+  }>();
   private readonly now: () => Date;
 
   constructor(
@@ -123,15 +132,23 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     }
     await this.connections.close(session.id).catch(() => undefined);
     this.activeTurns.delete(session.id);
+    this.clearPendingRequests(session.id);
     await this.supervisor.stop(runtime);
   }
 
-  async answerApproval(): Promise<void> {
-    throw new Error("App-server approval resolution is unavailable until durable gate records are enabled");
+  async answerApproval(session: ManagedSession, requestId: string, decision: ApprovalDecision): Promise<void> {
+    const pending = this.requirePendingRequest(session, requestId);
+    if (!APPROVAL_METHODS.has(pending.method)) throw new Error(`Server request is not an approval: ${pending.method}`);
+    const response = approvalResponse(pending.method, pending.params, decision);
+    await this.respondPending(session, pending, response);
   }
 
-  async answerQuestion(): Promise<void> {
-    throw new Error("App-server question resolution is unavailable until durable gate records are enabled");
+  async answerQuestion(session: ManagedSession, requestId: string, answer: QuestionAnswerRequest): Promise<void> {
+    const pending = this.requirePendingRequest(session, requestId);
+    if (pending.method !== "item/tool/requestUserInput") {
+      throw new Error(`Server request is not a structured question: ${pending.method}`);
+    }
+    await this.respondPending(session, pending, { answers: answer.answers });
   }
 
   async choosePlanAction(): Promise<void> {
@@ -211,11 +228,23 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           if (turnId) this.activeTurns.set(sessionId, turnId);
         } else if (method === "turn/completed") {
           const turnId = nestedId(params, "turn");
-          if (!turnId || this.activeTurns.get(sessionId) === turnId) this.activeTurns.delete(sessionId);
+          const activeTurnId = this.activeTurns.get(sessionId);
+          if (!turnId || !activeTurnId || activeTurnId === turnId) {
+            this.activeTurns.delete(sessionId);
+            this.clearPendingRequests(sessionId);
+          }
+        } else if (method === "serverRequest/resolved") {
+          const requestId = directId(params, "requestId");
+          if (requestId !== null) this.pendingRequests.delete(pendingKey(sessionId, requestId));
         }
         this.emit(sessionId, method, params);
       },
-      serverRequest: ({ method, params }) => this.emit(sessionId, method, params),
+      serverRequest: ({ id, method, params }) => {
+        const key = pendingKey(sessionId, id);
+        const existing = this.pendingRequests.get(key);
+        this.pendingRequests.set(key, { sessionId, id, method, params, responded: existing?.responded ?? false });
+        this.emit(sessionId, method, { requestId: id, params });
+      },
       error: (error) => this.emit(sessionId, "connection/error", { message: error.message })
     };
   }
@@ -238,7 +267,38 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     if (!connection || connection.threadId !== threadId) throw new Error("App-server session is not reconciled and ready for input");
     return { threadId, protocol: new CodexAppServerProtocol(connection.rpc) };
   }
+
+  private requirePendingRequest(session: ManagedSession, requestId: string) {
+    this.protocolFor(session);
+    const pending = this.pendingRequests.get(pendingKey(session.id, requestId));
+    if (!pending) throw new Error(`Unknown app-server request id: ${requestId}`);
+    if (pending.responded) throw new Error(`App-server request was already answered: ${requestId}`);
+    return pending;
+  }
+
+  private async respondPending(
+    session: ManagedSession,
+    pending: { id: string | number; responded: boolean },
+    response: unknown
+  ): Promise<void> {
+    const connection = this.connections.get(session.id);
+    if (!connection) throw new Error("App-server session is not reconciled and ready for input");
+    await connection.rpc.respond(pending.id, response);
+    pending.responded = true;
+  }
+
+  private clearPendingRequests(sessionId: string): void {
+    for (const [key, pending] of this.pendingRequests) {
+      if (pending.sessionId === sessionId) this.pendingRequests.delete(key);
+    }
+  }
 }
+
+const APPROVAL_METHODS = new Set([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/permissions/requestApproval"
+]);
 
 function requireAppServerSession(session: ManagedSession): SystemdSessionRuntimeRef {
   if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
@@ -284,6 +344,36 @@ function nestedId(value: unknown, key: string): string | null {
   if (!nested || typeof nested !== "object" || Array.isArray(nested)) return null;
   const id = (nested as Record<string, unknown>).id;
   return typeof id === "string" && id ? id : null;
+}
+
+function directId(value: unknown, key: string): string | number | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = (value as Record<string, unknown>)[key];
+  return typeof id === "string" || (typeof id === "number" && Number.isSafeInteger(id)) ? id : null;
+}
+
+function pendingKey(sessionId: string, requestId: string | number): string {
+  return JSON.stringify([sessionId, typeof requestId, requestId]);
+}
+
+function approvalResponse(method: string, params: unknown, decision: ApprovalDecision): unknown {
+  if (method === "item/permissions/requestApproval") {
+    throw new Error("Permission-profile approvals require an explicit granted profile");
+  }
+  if (decision === "approve_once") return { decision: "accept" };
+  if (decision === "approve_for_session") return { decision: "acceptForSession" };
+  if (decision === "deny") return { decision: "decline" };
+  if (decision === "approve_for_prefix" && method === "item/commandExecution/requestApproval") {
+    const amendment = recordArray(params, "proposedExecpolicyAmendment");
+    if (amendment) return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: amendment } } };
+  }
+  throw new Error(`Approval decision is not representable for ${method}: ${decision}`);
+}
+
+function recordArray(value: unknown, key: string): string[] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = (value as Record<string, unknown>)[key];
+  return Array.isArray(candidate) && candidate.every((item) => typeof item === "string") ? candidate : null;
 }
 
 function backgroundProcessIds(value: unknown): string[] {

@@ -73,6 +73,32 @@ describe("CodexAppServerDriver", () => {
     await subscription.close();
   });
 
+  it("resolves replayable approvals and questions exactly once until Codex confirms resolution", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    harness.handlers.serverRequest?.({
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: { proposedExecpolicyAmendment: ["git", "status"] }
+    });
+    harness.handlers.serverRequest?.({ id: "question-1", method: "item/tool/requestUserInput", params: {} });
+
+    await harness.driver.answerApproval(session, "approval-1", "approve_for_prefix");
+    expect(harness.rpc.respond).toHaveBeenCalledWith("approval-1", {
+      decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["git", "status"] } }
+    });
+    await expect(harness.driver.answerApproval(session, "approval-1", "approve_once")).rejects.toThrow("already answered");
+    await harness.driver.answerQuestion(session, "question-1", { answers: { choice: { answers: ["yes"] } } });
+    expect(harness.rpc.respond).toHaveBeenCalledWith("question-1", { answers: { choice: { answers: ["yes"] } } });
+
+    harness.handlers.notification?.({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: "approval-1" }
+    });
+    await expect(harness.driver.answerApproval(session, "approval-1", "approve_once")).rejects.toThrow("Unknown");
+  });
+
   it("interrupts active work, terminates background processes, and stops the service on kill", async () => {
     const harness = createHarness();
     const session = managedSession();
@@ -99,11 +125,12 @@ function createHarness(): {
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   connections: Record<string, ReturnType<typeof vi.fn>>;
   connection: { threadId: string; rpc: JsonRpcConnection };
-  rpc: { request: ReturnType<typeof vi.fn> };
+  rpc: { request: ReturnType<typeof vi.fn>; respond: ReturnType<typeof vi.fn> };
   handlers: AppServerSessionHandlers;
 } {
   const rpc = {
-    request: vi.fn(async (method: string) => method === "turn/start" ? { turn: { id: "turn-1" } } : {})
+    request: vi.fn(async (method: string) => method === "turn/start" ? { turn: { id: "turn-1" } } : {}),
+    respond: vi.fn(async () => undefined)
   };
   const connection = {
     sessionId: "session-1",
