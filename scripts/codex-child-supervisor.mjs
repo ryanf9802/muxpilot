@@ -1,78 +1,103 @@
 #!/usr/bin/env node
 
-import { readFile, readlink } from "node:fs/promises";
+import { readFile, readdir, readlink } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 
-const rootPid = Number.parseInt(process.argv[2] ?? "", 10);
-const observationIntervalMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_OBSERVATION_MS, 250);
-const stableChildMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_STABLE_MS, 2_000);
-const startupLearningMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_LEARNING_MS, 15_000);
-const terminationGraceMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_TERMINATION_GRACE_MS, 2_000);
+async function main() {
+  const rootPid = Number.parseInt(process.argv[2] ?? "", 10);
+  const observationIntervalMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_OBSERVATION_MS, 250);
+  const stableChildMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_STABLE_MS, 2_000);
+  const startupLearningMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_LEARNING_MS, 15_000);
+  const terminationGraceMs = positiveNumber(process.env.MUXPILOT_CODEX_CHILD_TERMINATION_GRACE_MS, 2_000);
 
-if (!Number.isSafeInteger(rootPid) || rootPid <= 1) process.exit(2);
+  if (!Number.isSafeInteger(rootPid) || rootPid <= 1) process.exit(2);
 
-const seenAt = new Map();
-const managedCommands = new Set();
-const managedProcesses = new Map();
-let runtimePid = null;
-let learningStartedAt = null;
-let stopping = false;
+  const state = new ChildSupervisorState();
+  let runtimePid = null;
+  let learningStartedAt = null;
+  let stopping = false;
 
-process.once("SIGTERM", () => { stopping = true; });
-process.once("SIGINT", () => { stopping = true; });
+  process.once("SIGTERM", () => { stopping = true; });
+  process.once("SIGINT", () => { stopping = true; });
 
-while (!stopping && await processExists(rootPid)) {
-  runtimePid ??= await findCodexRuntime(rootPid);
-  if (runtimePid !== null && !await processExists(runtimePid)) break;
-  if (runtimePid === null) {
-    await delay(observationIntervalMs);
-    continue;
-  }
-  learningStartedAt ??= Date.now();
-
-  const now = Date.now();
-  const children = await readChildren(runtimePid);
-  const childRecords = (await Promise.all(children.map(readProcess))).filter(Boolean);
-  const livePids = new Set(childRecords.map((child) => child.pid));
-  for (const pid of seenAt.keys()) {
-    if (!livePids.has(pid)) seenAt.delete(pid);
-  }
-
-  for (const child of childRecords) {
-    seenAt.set(child.pid, seenAt.get(child.pid) ?? now);
-    const firstSeenAt = seenAt.get(child.pid);
-    if (now - firstSeenAt < stableChildMs) continue;
-
-    if (firstSeenAt - learningStartedAt <= startupLearningMs) {
-      managedCommands.add(child.command);
-      managedProcesses.set(child.pid, child);
+  while (!stopping && await processExists(rootPid)) {
+    runtimePid ??= await findCodexRuntime(rootPid);
+    if (runtimePid !== null && !await processExists(runtimePid)) break;
+    if (runtimePid === null) {
+      await delay(observationIntervalMs);
       continue;
     }
+    learningStartedAt ??= Date.now();
 
-    if (!managedCommands.has(child.command) || managedProcesses.has(child.pid)) continue;
-    // Codex starts stdio tool servers as durable direct children. Context
-    // compaction can start an identical replacement without retiring the old
-    // process, so only deduplicate command identities learned during startup.
-    const stale = childRecords.filter((candidate) =>
-      candidate.command === child.command
-      && candidate.pid !== child.pid
-      && isOlder(candidate, child)
-    );
-    if (stale.length === 0) {
-      managedProcesses.set(child.pid, child);
-      continue;
-    }
-
-    managedProcesses.set(child.pid, child);
+    const childRecords = (await Promise.all((await readChildren(runtimePid)).map(readProcess))).filter(Boolean);
+    await state.pruneExited(childRecords, readProcess);
+    const stale = state.reconcile(childRecords, {
+      now: Date.now(),
+      learningStartedAt,
+      stableChildMs,
+      startupLearningMs
+    });
     for (const processRecord of stale) {
-      managedProcesses.delete(processRecord.pid);
-      await terminateTree(processRecord);
+      state.forget(processRecord.pid);
+      await terminateTree(processRecord, terminationGraceMs);
     }
+
+    await delay(observationIntervalMs);
   }
 
-  await delay(observationIntervalMs);
+  for (const processRecord of state.managedProcesses.values()) await terminateTree(processRecord, terminationGraceMs);
 }
 
-for (const processRecord of managedProcesses.values()) await terminateTree(processRecord);
+export class ChildSupervisorState {
+  seenAt = new Map();
+  managedCommands = new Set();
+  managedProcesses = new Map();
+
+  reconcile(childRecords, { now, learningStartedAt, stableChildMs, startupLearningMs }) {
+    for (const child of childRecords) this.seenAt.set(child.pid, this.seenAt.get(child.pid) ?? now);
+    const stable = childRecords.filter((child) => now - this.seenAt.get(child.pid) >= stableChildMs);
+
+    for (const child of stable) {
+      if (this.seenAt.get(child.pid) - learningStartedAt <= startupLearningMs) {
+        this.managedCommands.add(child.command);
+      }
+    }
+
+    const byCommand = new Map();
+    for (const child of stable) {
+      if (!this.managedCommands.has(child.command)) continue;
+      const group = byCommand.get(child.command) ?? [];
+      group.push(child);
+      byCommand.set(child.command, group);
+    }
+
+    const stale = [];
+    for (const group of byCommand.values()) {
+      // Reconcile the whole command group every time so a previously incomplete
+      // /proc snapshot cannot permanently bless two identical tool servers.
+      group.sort((left, right) => isOlder(left, right) ? 1 : isOlder(right, left) ? -1 : 0);
+      const [newest, ...older] = group;
+      this.managedProcesses.set(newest.pid, newest);
+      for (const child of older) {
+        this.managedProcesses.delete(child.pid);
+        stale.push(child);
+      }
+    }
+    return stale;
+  }
+
+  async pruneExited(childRecords, processReader) {
+    const visiblePids = new Set(childRecords.map((child) => child.pid));
+    for (const pid of this.seenAt.keys()) {
+      if (!visiblePids.has(pid) && !await processReader(pid)) this.forget(pid);
+    }
+  }
+
+  forget(pid) {
+    this.seenAt.delete(pid);
+    this.managedProcesses.delete(pid);
+  }
+}
 
 async function findCodexRuntime(pid) {
   const pending = [pid];
@@ -113,15 +138,17 @@ async function readProcess(pid) {
 }
 
 async function readChildren(pid) {
-  try {
-    const value = await readFile(`/proc/${pid}/task/${pid}/children`, "utf8");
-    return value.trim().split(/\s+/).filter(Boolean).map(Number);
-  } catch {
-    return [];
-  }
+  const taskRoot = `/proc/${pid}/task`;
+  // Native Codex worker threads can own child processes independently of the
+  // thread-group leader, so union every task's immediate child list.
+  const tids = await readdir(taskRoot).catch(() => []);
+  const values = await Promise.all(tids.map((tid) =>
+    readFile(`${taskRoot}/${tid}/children`, "utf8").catch(() => "")
+  ));
+  return [...new Set(values.flatMap((value) => value.trim().split(/\s+/).filter(Boolean).map(Number)))];
 }
 
-async function terminateTree(processRecord) {
+async function terminateTree(processRecord, terminationGraceMs) {
   if (!await sameProcess(processRecord)) return;
   const descendants = await collectDescendants(processRecord.pid);
   await signalAll([processRecord, ...descendants], "SIGTERM");
@@ -182,3 +209,5 @@ function isOlder(candidate, replacement) {
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) await main();
