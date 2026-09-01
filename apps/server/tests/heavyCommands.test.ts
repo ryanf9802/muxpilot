@@ -252,6 +252,55 @@ describe("HeavyCommandService", () => {
     expect(await service.runningWorkspaceIds()).toEqual(new Set());
   });
 
+  it("corroborates a stale active owner through its private control socket", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-676767676767";
+    const runDir = join(leases, "runs", runId);
+    const controlSocket = join(runDir, "control.sock");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      resourceUnit: "muxpilot-heavy-mabc123-676767676767-a1b2c3.service",
+      controlSocket,
+      heartbeatAt: "2026-01-01T00:00:00.000Z",
+      lastActivityAt: "2026-01-01T00:00:00.000Z",
+      activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    let reportedRunId = runId;
+    let reportedState = "running";
+    const server = createServer((socket) => socket.once("data", () => socket.end(`${JSON.stringify({
+      ok: true,
+      runId: reportedRunId,
+      state: reportedState
+    })}\n`)));
+    await new Promise<void>((resolve) => server.listen(controlSocket, resolve));
+    await chmod(controlSocket, 0o600);
+    const service = new HeavyCommandService(leases, join(root, "sessions"));
+    try {
+      expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("running");
+      expect(await service.runningWorkspaceIds()).toEqual(new Set(["workspace-a"]));
+      expect(await service.runningResourceUnits()).toEqual([{
+        workspaceId: "workspace-a",
+        unit: "muxpilot-heavy-mabc123-676767676767-a1b2c3.service"
+      }]);
+      reportedState = "reporting";
+      expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("working");
+      expect(await service.runningWorkspaceIds()).toEqual(new Set());
+      reportedState = "running";
+      reportedRunId = "mabc123-000000000000";
+      expect(await service.sessionStatusForWorkspace("workspace-a")).toBeNull();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    expect(await service.sessionStatusForWorkspace("workspace-a")).toBeNull();
+    expect(await service.runningWorkspaceIds()).toEqual(new Set());
+  });
+
   it("durably suppresses completion before cancelling a running worker", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);

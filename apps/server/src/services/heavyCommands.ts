@@ -167,7 +167,7 @@ export class HeavyCommandService {
 
   async runningResourceUnits(): Promise<Array<{ workspaceId: string; unit: string }>> {
     return (await this.runningOwners())
-      .filter((owner): owner is QueueOwner & { resourceUnit: string } => RESOURCE_UNIT.test(owner.resourceUnit ?? ""))
+      .filter((owner): owner is HeavyCommand & { resourceUnit: string } => RESOURCE_UNIT.test(owner.resourceUnit ?? ""))
       .map((owner) => ({ workspaceId: owner.workspaceId, unit: owner.resourceUnit }));
   }
 
@@ -422,10 +422,10 @@ export class HeavyCommandService {
     return owners;
   }
 
-  private async runningOwners(): Promise<QueueOwner[]> {
-    const now = Date.now();
-    return (await this.readPersistentOwners()).filter((owner) => RUNNING_STATES.has(owner.state) &&
-      Number.isFinite(Date.parse(owner.heartbeatAt)) && now - Date.parse(owner.heartbeatAt) <= ACTIVE_OWNER_STALE_MS);
+  private async runningOwners(): Promise<HeavyCommand[]> {
+    const owners = await this.readPersistentOwners();
+    const liveOwners = await Promise.all(owners.map((owner) => this.readOwner(owner.runId, owner.workspaceId)));
+    return liveOwners.filter((owner): owner is HeavyCommand => owner !== null && RUNNING_STATES.has(owner.state));
   }
 
   private async readQueueOwner(runId: string): Promise<QueueOwner | null> {
@@ -473,10 +473,10 @@ export class HeavyCommandService {
       const owner = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
       if (![2, 3, 4].includes(Number(owner.version)) || owner.runId !== runId || owner.workspaceId !== workspaceId) return null;
       if (typeof owner.state !== "string" || !Array.isArray(owner.command) || !owner.command.every((part) => typeof part === "string")) return null;
+      const recordedState = owner.state;
       if (typeof owner.cwd !== "string" || typeof owner.commandDisplay !== "string" || typeof owner.queuedAt !== "string" || typeof owner.heartbeatAt !== "string") return null;
       const heartbeatAt = Date.parse(owner.heartbeatAt);
       if (!Number.isFinite(heartbeatAt) || !Number.isFinite(Date.parse(owner.queuedAt))) return null;
-      if (ACTIVE_STATES.has(String(owner.state)) && Date.now() - heartbeatAt > ACTIVE_OWNER_STALE_MS) return null;
       if (owner.startedAt !== null && typeof owner.startedAt !== "string") return null;
       if (owner.lastOutputAt !== null && typeof owner.lastOutputAt !== "string") return null;
       if (Number(owner.version) >= 3 && ((owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string") || !validActivity(owner.activity))) return null;
@@ -486,7 +486,12 @@ export class HeavyCommandService {
       if (!validDeadlines(owner.deadlines) || (owner.packageDiagnostics !== null && !validPackageDiagnostics(owner.packageDiagnostics))) return null;
       if (owner.terminationReason !== null && typeof owner.terminationReason !== "string") return null;
       if (owner.resourceUnit !== null && owner.resourceUnit !== undefined && !RESOURCE_UNIT.test(String(owner.resourceUnit))) return null;
-      if (owner.state === "reporting") {
+      if (ACTIVE_STATES.has(String(owner.state)) && Date.now() - heartbeatAt > ACTIVE_OWNER_STALE_MS) {
+        const liveState = await this.liveStaleOwnerState(runPath, owner);
+        if (!liveState) return null;
+        owner.state = liveState;
+      }
+      if (recordedState === "reporting") {
         if (!Number.isInteger(owner.exitCode) && owner.exitCode !== null) return null;
         if (owner.signal !== null && typeof owner.signal !== "string") return null;
         if (typeof owner.finishedAt !== "string" || !Number.isFinite(Date.parse(owner.finishedAt))) return null;
@@ -495,6 +500,17 @@ export class HeavyCommandService {
     } catch {
       return null;
     }
+  }
+
+  private async liveStaleOwnerState(runPath: string, owner: Record<string, unknown>): Promise<HeavyCommand["state"] | null> {
+    if (typeof owner.controlSocket !== "string") return null;
+    const socketPath = resolve(owner.controlSocket);
+    if (socketPath !== resolve(runPath, "control.sock")) return null;
+    const details = await lstat(socketPath).catch(() => null);
+    if (!details?.isSocket() || details.isSymbolicLink()) return null;
+    const response = await sendControl(socketPath, { action: "probe" }).catch(() => null);
+    if (!response?.ok || response.runId !== owner.runId || !ACTIVE_STATES.has(response.state ?? "")) return null;
+    return response.state as HeavyCommand["state"];
   }
 }
 
@@ -542,7 +558,7 @@ function validPackageDiagnostics(value: unknown): boolean {
   });
 }
 
-function sendControl(path: string, payload: object): Promise<{ ok?: boolean; accepted?: boolean }> {
+function sendControl(path: string, payload: object): Promise<{ ok?: boolean; accepted?: boolean; runId?: string; state?: string }> {
   return new Promise((resolveResponse, reject) => {
     const socket = createConnection(path);
     let input = "";
