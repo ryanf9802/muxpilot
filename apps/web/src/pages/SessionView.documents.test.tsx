@@ -4,13 +4,17 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client.js";
-import { DocumentsButton, DocumentsModal } from "./SessionView.js";
+import { DocumentsButton, DocumentsModal, fileAwareMarkdownComponents, MarkdownBlock } from "./SessionView.js";
+
+const copyTextMock = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../utils/clipboard.js", () => ({ copyText: copyTextMock }));
 
 beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
 afterEach(() => {
+  copyTextMock.mockClear();
   vi.restoreAllMocks();
   vi.useRealTimers();
   document.body.innerHTML = "";
@@ -128,6 +132,111 @@ describe("DocumentsModal", () => {
     expect(viewer?.scrollTop).toBe(0);
     expect(container.querySelector(".documents-viewer h2")?.textContent).toBe("Current plan");
     expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
+    act(() => root.unmount());
+  });
+
+  it("shows cross-session context in the same modal and returns to current documents", async () => {
+    const documents = [{ name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-01T00:00:00.000Z" }];
+    vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: { ...documents[0]!, content: "# Remote plan" }
+    });
+    const onReturnToCurrent = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <DocumentsModal
+          open
+          sessionId="remote-session"
+          sourceSessionName="performance"
+          currentSession={false}
+          documents={documents}
+          requestedDocument="plan.md"
+          listLoading={false}
+          listError=""
+          onReturnToCurrent={onReturnToCurrent}
+          onClose={() => undefined}
+        />
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector(".documents-source-context")?.textContent).toContain("Viewing documents from performance");
+    act(() => container.querySelector<HTMLButtonElement>(".documents-source-context button")?.click());
+    expect(onReturnToCurrent).toHaveBeenCalledOnce();
+    expect(container.querySelector(".documents-viewer h1")?.textContent).toBe("Remote plan");
+    act(() => root.unmount());
+  });
+
+  it("reloads the same document identity when the source session changes", async () => {
+    const summary = { name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-01T00:00:00.000Z" };
+    const read = vi.spyOn(api, "sessionDocument").mockImplementation(async (sessionId) => ({
+      document: { ...summary, content: sessionId === "session-a" ? "# Session A" : "# Session B" }
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-a" documents={[summary]} requestedDocument="plan.md" listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector(".documents-viewer h1")?.textContent).toBe("Session A");
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-b" documents={[summary]} requestedDocument="plan.md" listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(read).toHaveBeenLastCalledWith("session-b", "plan.md");
+    expect(container.querySelector(".documents-viewer h1")?.textContent).toBe("Session B");
+    act(() => root.unmount());
+  });
+
+  it("opens muxpilot document paths and copies other file paths without source locations", async () => {
+    const openDocument = vi.fn(async () => true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <MarkdownBlock
+          text={'[Document](/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md:1) [Source](/workspace/My%20Project/app.ts:42:7) [Web](https://example.com)'}
+          components={fileAwareMarkdownComponents(openDocument)}
+        />
+      );
+    });
+
+    const documentLink = container.querySelector<HTMLAnchorElement>('a[href*="tw-1352-orchestrator"]');
+    const sourceLink = container.querySelector<HTMLAnchorElement>('a[href*="app.ts"]');
+    const webLink = container.querySelector<HTMLAnchorElement>('a[href="https://example.com"]');
+    expect(sourceLink?.title).toBe("/workspace/My Project/app.ts");
+    expect(webLink?.target).toBe("_blank");
+
+    await act(async () => {
+      documentLink?.click();
+      await Promise.resolve();
+    });
+    expect(openDocument).toHaveBeenCalledWith({
+      scopeId: "cgZiXQrkbVYonDQ5",
+      name: "tw-1352-orchestrator-handoff-prompt.md",
+      path: "/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md"
+    });
+    expect(copyTextMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      sourceLink?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(copyTextMock).toHaveBeenCalledWith("/workspace/My Project/app.ts");
+    expect(sourceLink?.dataset.copied).toBe("true");
     act(() => root.unmount());
   });
 

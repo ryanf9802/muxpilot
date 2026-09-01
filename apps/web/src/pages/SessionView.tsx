@@ -44,6 +44,7 @@ import {
 } from "@codemirror/view";
 import {
   Children,
+  type ComponentPropsWithoutRef,
   FormEvent,
   KeyboardEvent,
   cloneElement,
@@ -129,6 +130,7 @@ export const SESSION_BOOTSTRAP_TIMEOUT_MS = 10_000;
 export const SESSION_BOOTSTRAP_NOTICE_MS = 5_000;
 export const SESSION_BOOTSTRAP_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
 const SESSION_DOCUMENTS_RECONCILE_INTERVAL_MS = 5_000;
+const COPIED_PATH_FEEDBACK_MS = 1_600;
 const SKILL_REFRESH_INTERVAL_MS = 60_000;
 const SKILL_REFRESH_STALE_MS = 10_000;
 // "none" explicitly preserves the viewport; "idle" means there is no pending transcript scroll request.
@@ -137,6 +139,15 @@ export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live"
 export type PlanAction = PlanActionChoice;
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
+export interface SessionDocumentReference { scopeId: string; name: string; path: string }
+export type MarkdownLinkTarget =
+  | { kind: "link" }
+  | { kind: "file"; path: string; document: SessionDocumentReference | null };
+interface ReferencedDocumentSource {
+  sessionId: string;
+  sessionName: string;
+  documents: SessionDocumentSummary[];
+}
 export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
 export type PendingActionRefresh = "approval" | "question" | null;
 export interface PendingUserMessage {
@@ -822,18 +833,26 @@ export function HeavyCommandsModal({
 export function DocumentsModal({
   open,
   sessionId,
+  sourceSessionName,
+  currentSession = true,
   documents,
   requestedDocument,
   listLoading,
   listError,
+  onOpenDocument,
+  onReturnToCurrent,
   onClose
 }: {
   open: boolean;
   sessionId: string;
+  sourceSessionName?: string | null;
+  currentSession?: boolean;
   documents: SessionDocumentSummary[];
   requestedDocument?: string | null;
   listLoading: boolean;
   listError: string;
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
+  onReturnToCurrent?: () => void;
   onClose: () => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
@@ -854,7 +873,7 @@ export function DocumentsModal({
   }, [documents, open, requestedDocument]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
-  const selectedContentKey = selected ? `${selected}\u0000${selectedVersion}` : null;
+  const selectedContentKey = selected ? `${sessionId}\u0000${selected}\u0000${selectedVersion}` : null;
   const documentMarkdownComponents = useMemo<Components>(() => ({
     ...markdownComponents,
     a({ href, children, node: _node, ...props }) {
@@ -864,7 +883,9 @@ export function DocumentsModal({
       const pathname = relativeHref?.split("#", 1)[0]?.split("?", 1)[0];
       const candidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
       const linkedDocument = documents.find((document) => document.name === candidate);
-      if (!linkedDocument) return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+      if (!linkedDocument) {
+        return <FileAwareMarkdownLink {...props} href={href} onOpenDocument={onOpenDocument}>{children}</FileAwareMarkdownLink>;
+      }
       return (
         <a
           {...props}
@@ -879,7 +900,7 @@ export function DocumentsModal({
         </a>
       );
     }
-  }), [documents]);
+  }), [documents, onOpenDocument]);
   useEffect(() => {
     if (!open || !selected) {
       setContent("");
@@ -915,13 +936,18 @@ export function DocumentsModal({
 
   useLayoutEffect(() => {
     if (!loadedContentKey || !viewerRef.current) return;
-    const loadedDocument = loadedContentKey.split("\u0000", 1)[0] ?? null;
-    if (loadedDocument !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
-    displayedDocumentRef.current = loadedDocument;
+    if (loadedContentKey !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
+    displayedDocumentRef.current = loadedContentKey;
   }, [loadedContentKey]);
 
   return (
     <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
+      {!currentSession ? (
+        <div className="documents-source-context">
+          <span>Viewing documents from <strong>{sourceSessionName ?? "another session"}</strong></span>
+          {onReturnToCurrent ? <button type="button" onClick={onReturnToCurrent}>Back to current session</button> : null}
+        </div>
+      ) : null}
       {listError ? <p className="error-text" role="alert">{listError}</p> : null}
       {listLoading && documents.length === 0 ? <p className="muted">Loading documents…</p> : documents.length === 0 && !listError ? <p className="muted">This session has no documents yet.</p> : (
         <div className="documents-layout">
@@ -1137,6 +1163,30 @@ function cssPixels(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export async function resolveSessionDocumentReference(
+  reference: SessionDocumentReference,
+  currentSession: ManagedSession,
+  currentDocuments: SessionDocumentSummary[],
+  visibleSessions: ManagedSession[],
+  loadAllSessions: () => Promise<ManagedSession[]>,
+  loadDocuments: (sessionId: string) => Promise<SessionDocumentSummary[]>
+): Promise<{ session: ManagedSession; documents: SessionDocumentSummary[] } | null> {
+  const visible = [currentSession, ...visibleSessions.filter((candidate) => candidate.id !== currentSession.id)];
+  let owner = visible.find((candidate) => candidate.documentScopeId === reference.scopeId) ?? null;
+  if (!owner) {
+    owner = (await loadAllSessions()).find((candidate) => candidate.documentScopeId === reference.scopeId) ?? null;
+  }
+  if (!owner) return null;
+
+  let ownerDocuments = owner.id === currentSession.id ? currentDocuments : [];
+  if (!ownerDocuments.some((document) => document.name === reference.name)) {
+    ownerDocuments = await loadDocuments(owner.id);
+  }
+  return ownerDocuments.some((document) => document.name === reference.name)
+    ? { session: owner, documents: ownerDocuments }
+    : null;
+}
+
 export function SessionView() {
   const { id = "" } = useParams();
   const location = useLocation();
@@ -1182,6 +1232,7 @@ export function SessionView() {
   const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
+  const [referencedDocumentSource, setReferencedDocumentSource] = useState<ReferencedDocumentSource | null>(null);
   const [btwOpen, setBtwOpen] = useState(false);
   const [btwExchanges, setBtwExchanges] = useState<BtwExchange[]>([]);
   const [btwLoading, setBtwLoading] = useState(true);
@@ -1258,11 +1309,14 @@ export function SessionView() {
   const btwOpenRef = useRef(false);
   const transcriptFindInputRef = useRef<HTMLInputElement>(null);
   const transcriptFindRequestRef = useRef(0);
+  const documentReferenceRequestRef = useRef(0);
+  const referencedDocumentSourceRef = useRef<ReferencedDocumentSource | null>(null);
   const vimPendingGRef = useRef(false);
   const vimPendingGTimerRef = useRef<number | null>(null);
   const promptHistoryPrefillTextRef = useRef(text);
   activeIdRef.current = id;
   btwOpenRef.current = btwOpen;
+  referencedDocumentSourceRef.current = referencedDocumentSource;
   promptHistoryPrefillTextRef.current = text;
 
   const closeGitPanel = useCallback(() => {
@@ -1526,6 +1580,55 @@ export function SessionView() {
     });
   }
 
+  async function openDocumentReference(reference: SessionDocumentReference): Promise<boolean> {
+    if (!session) return false;
+    const request = documentReferenceRequestRef.current + 1;
+    documentReferenceRequestRef.current = request;
+    try {
+      const resolved = await resolveSessionDocumentReference(
+        reference,
+        session,
+        documents,
+        shellSessions,
+        async () => (await api.transferableSessions()).sessions,
+        async (sessionId) => (await api.sessionDocuments(sessionId)).documents
+      );
+      if (documentReferenceRequestRef.current !== request) return true;
+      if (!resolved) return false;
+
+      if (resolved.session.id === session.id) {
+        setDocuments(resolved.documents);
+        setReferencedDocumentSource(null);
+      } else {
+        setReferencedDocumentSource({
+          sessionId: resolved.session.id,
+          sessionName: sessionDisplayName(resolved.session),
+          documents: resolved.documents
+        });
+      }
+      setRequestedDocument(reference.name);
+      setDocumentsOpen(true);
+      return true;
+    } catch (error) {
+      console.error("Unable to open referenced session document", error);
+      return false;
+    }
+  }
+
+  function closeDocuments() {
+    documentReferenceRequestRef.current += 1;
+    setDocumentsOpen(false);
+    setRequestedDocument(null);
+    setReferencedDocumentSource(null);
+  }
+
+  function showCurrentDocuments(requested: string | null = null) {
+    documentReferenceRequestRef.current += 1;
+    setReferencedDocumentSource(null);
+    setRequestedDocument(requested);
+    setDocumentsOpen(true);
+  }
+
   function renderTranscriptItem(item: CoreTranscriptItem): ReactNode {
     if (item.type === "message") {
       return (
@@ -1533,6 +1636,7 @@ export function SessionView() {
           key={item.message.id}
           itemId={item.id}
           message={item.message}
+          onOpenDocument={openDocumentReference}
           onOpenMenu={openMessageMenu}
           planAction={
             pendingPlan?.id === item.message.id ? (
@@ -1608,6 +1712,8 @@ export function SessionView() {
       setDocuments([]);
       setDocumentsLoading(true);
       setDocumentsError("");
+      setReferencedDocumentSource(null);
+      documentReferenceRequestRef.current += 1;
       setHeavyCommands([]);
       setHeavyCommandsOpen(false);
       setHeavyOutputs({});
@@ -1729,7 +1835,7 @@ export function SessionView() {
         if (cancelled) return;
         setDocuments(response.documents);
         setDocumentsError("");
-        if (response.documents.length === 0) setDocumentsOpen(false);
+        if (response.documents.length === 0 && !referencedDocumentSourceRef.current) setDocumentsOpen(false);
       } catch (error) {
         if (!cancelled) setDocumentsError(error instanceof Error ? error.message : "Unable to load documents");
       } finally {
@@ -2689,12 +2795,16 @@ export function SessionView() {
       />
       <DocumentsModal
         open={documentsOpen}
-        sessionId={readySession.id}
-        documents={documents}
+        sessionId={referencedDocumentSource?.sessionId ?? readySession.id}
+        sourceSessionName={referencedDocumentSource?.sessionName}
+        currentSession={!referencedDocumentSource}
+        documents={referencedDocumentSource?.documents ?? documents}
         requestedDocument={requestedDocument}
-        listLoading={documentsLoading}
-        listError={documentsError}
-        onClose={() => setDocumentsOpen(false)}
+        listLoading={referencedDocumentSource ? false : documentsLoading}
+        listError={referencedDocumentSource ? "" : documentsError}
+        onOpenDocument={openDocumentReference}
+        onReturnToCurrent={() => showCurrentDocuments()}
+        onClose={closeDocuments}
       />
       <BtwDrawer
         open={btwOpen}
@@ -2706,9 +2816,8 @@ export function SessionView() {
         onAsk={askBtwQuestion}
         onCancel={cancelBtwQuestion}
         onOpenDocument={(name) => {
-          setRequestedDocument(name);
           setBtwOpen(false);
-          setDocumentsOpen(true);
+          showCurrentDocuments(name);
         }}
       />
 
@@ -2725,8 +2834,7 @@ export function SessionView() {
             <span className="session-new-session-button-label">New session</span>
           </button>
           <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => {
-            setRequestedDocument(null);
-            setDocumentsOpen(true);
+            showCurrentDocuments();
           }} />
           <button
             type="button"
@@ -4975,6 +5083,7 @@ export function MessageBubble({
   pending = false,
   planAction = null,
   questionAction = null,
+  onOpenDocument,
   onOpenMenu
 }: {
   message: ChatMessage;
@@ -4982,6 +5091,7 @@ export function MessageBubble({
   pending?: boolean;
   planAction?: ReactNode;
   questionAction?: ReactNode;
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
@@ -5000,7 +5110,7 @@ export function MessageBubble({
         </span>
         <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
       </div>
-      <MessageContent message={message} planAction={planAction} />
+      <MessageContent message={message} planAction={planAction} onOpenDocument={onOpenDocument} />
       {questionAction}
     </article>
   );
@@ -5152,7 +5262,15 @@ function delegatedSessionId(message: ChatMessage): string | null {
   return record.kind === "session" && typeof record.sessionId === "string" ? record.sessionId : null;
 }
 
-function MessageContent({ message, planAction = null }: { message: ChatMessage; planAction?: ReactNode }) {
+function MessageContent({
+  message,
+  planAction = null,
+  onOpenDocument
+}: {
+  message: ChatMessage;
+  planAction?: ReactNode;
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
+}) {
   if (isToolOutput(message)) {
     return (
       <details className="tool-output">
@@ -5168,13 +5286,14 @@ function MessageContent({ message, planAction = null }: { message: ChatMessage; 
   if (message.role === "assistant") {
     const segments = parseProposedPlanSegments(displayText(message) ?? "");
     const lastPlanSegmentIndex = lastSegmentIndex(segments, "plan");
+    const components = fileAwareMarkdownComponents(onOpenDocument);
     return (
       <div className="rendered assistant-content">
         {segments.map((segment, index) => {
           if (segment.type === "plan") {
-            return <ProposedPlanBlock key={index} text={segment.text} action={index === lastPlanSegmentIndex ? planAction : null} />;
+            return <ProposedPlanBlock key={index} text={segment.text} components={components} action={index === lastPlanSegmentIndex ? planAction : null} />;
           }
-          return <MarkdownBlock key={index} text={segment.text} />;
+          return <MarkdownBlock key={index} text={segment.text} components={components} />;
         })}
       </div>
     );
@@ -5213,6 +5332,117 @@ export function copyableMessageText(message: ChatMessage): string {
   return displayText(message) ?? "";
 }
 
+const SESSION_DOCUMENT_SCOPE = /^[A-Za-z0-9_-]{8,128}$/;
+const SESSION_DOCUMENT_NAME = /^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*\.md$/i;
+const MUXPILOT_APP_PATH = /^\/(?:$|access(?:\/|$)|api(?:\/|$)|sessions(?:\/|$))/;
+
+export function markdownLinkTarget(href: string | null | undefined): MarkdownLinkTarget {
+  const value = href?.trim();
+  if (!value || value.startsWith("#") || value.startsWith("?") || value.startsWith("//")) return { kind: "link" };
+  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(value)?.[1]?.toLowerCase() ?? null;
+  if (scheme && scheme !== "file" && !/^[a-z]:[\\/]/i.test(value)) return { kind: "link" };
+  if (value.startsWith("/") && MUXPILOT_APP_PATH.test(value)) return { kind: "link" };
+
+  const path = filesystemPathFromHref(value);
+  if (!path) return { kind: "link" };
+  const normalized = path.replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  const documentIndex = segments.length - 2;
+  const scopeId = documentIndex > 0 ? segments[documentIndex - 1] : null;
+  const name = segments.at(-1) ?? null;
+  const document = segments[documentIndex] === "documents" && scopeId && name
+    && SESSION_DOCUMENT_SCOPE.test(scopeId) && SESSION_DOCUMENT_NAME.test(name)
+    ? { scopeId, name, path }
+    : null;
+  return { kind: "file", path, document };
+}
+
+function filesystemPathFromHref(href: string): string | null {
+  let raw = href;
+  if (/^file:/i.test(raw)) {
+    try {
+      const url = new URL(raw);
+      raw = `${url.host ? `//${url.host}` : ""}${url.pathname}`;
+    } catch {
+      raw = raw.replace(/^file:\/\//i, "");
+    }
+  } else {
+    const boundary = [raw.indexOf("?"), raw.indexOf("#")].filter((index) => index >= 0).sort((first, second) => first - second)[0];
+    if (boundary !== undefined) raw = raw.slice(0, boundary);
+  }
+  try {
+    raw = decodeURIComponent(raw);
+  } catch {
+    // Preserve a malformed-but-usable path exactly as authored.
+  }
+  return raw.replace(/(?::\d+){1,2}$/, "") || null;
+}
+
+type FileAwareMarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
+};
+
+function FileAwareMarkdownLink({ href, children, onOpenDocument, ...props }: FileAwareMarkdownLinkProps) {
+  const target = markdownLinkTarget(href);
+  const [copied, setCopied] = useState(false);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+  }, []);
+
+  if (target.kind === "link") {
+    return <a {...props} href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+  }
+
+  async function activate() {
+    if (target.kind !== "file") return;
+    try {
+      const opened = target.document && onOpenDocument ? await onOpenDocument(target.document) : false;
+      if (opened) return;
+      await copyText(target.path);
+      setCopied(true);
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+      copiedTimerRef.current = setTimeout(() => {
+        copiedTimerRef.current = null;
+        setCopied(false);
+      }, COPIED_PATH_FEEDBACK_MS);
+    } catch (error) {
+      console.error("Unable to copy file path", error);
+      setCopied(false);
+    }
+  }
+
+  return (
+    <a
+      {...props}
+      href={href}
+      title={copied ? `Copied: ${target.path}` : target.path}
+      aria-label={copied ? `Copied path: ${target.path}` : `Copy path: ${target.path}`}
+      data-file-path="true"
+      data-copied={copied || undefined}
+      onClick={(event) => {
+        event.preventDefault();
+        event.currentTarget.blur();
+        void activate();
+      }}
+    >
+      {children}
+      {copied ? <span className="file-path-copied" aria-hidden="true">Copied</span> : null}
+    </a>
+  );
+}
+
+export function fileAwareMarkdownComponents(
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean
+): Components {
+  return {
+    ...markdownComponents,
+    a({ node: _node, ...props }) {
+      return <FileAwareMarkdownLink {...props} onOpenDocument={onOpenDocument} />;
+    }
+  };
+}
+
 const markdownComponents: Components = {
   a({ node: _node, ...props }) {
     return <a {...props} target="_blank" rel="noopener noreferrer" />;
@@ -5241,12 +5471,12 @@ export function MarkdownBlock({ text, components = markdownComponents }: { text:
   );
 }
 
-function ProposedPlanBlock({ text, action = null }: { text: string; action?: ReactNode }) {
+function ProposedPlanBlock({ text, components = markdownComponents, action = null }: { text: string; components?: Components; action?: ReactNode }) {
   return (
     <section className="proposed-plan">
       <div className="proposed-plan-head">Proposed plan</div>
       <div className="markdown proposed-plan-body">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
           {text}
         </ReactMarkdown>
       </div>

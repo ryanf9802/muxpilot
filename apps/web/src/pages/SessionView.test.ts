@@ -48,6 +48,7 @@ import {
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
   loadingSessionFromLocationState,
+  markdownLinkTarget,
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
@@ -66,6 +67,7 @@ import {
   queuedInputHasLineBreaks,
   queuedInputRemovable,
   relativeLineNumber,
+  resolveSessionDocumentReference,
   retainLatestSentQueuedUserMessage,
   replaceTranscriptTail,
   loadComposerDraft,
@@ -2329,6 +2331,21 @@ describe("MessageBubble", () => {
     expect(html).toContain("message-copyable");
     expect(html).toContain('data-context-menu-trigger=""');
   });
+
+  it("renders assistant filesystem links as copy actions in the transcript", () => {
+    const assistant = message(
+      "session-a",
+      1,
+      "[Source](/workspace/app.ts:42)",
+      "assistant",
+      "assistant"
+    );
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: assistant, onOpenDocument: async () => true }));
+
+    expect(html).toContain('data-file-path="true"');
+    expect(html).toContain('title="/workspace/app.ts"');
+    expect(html).not.toContain('target="_blank"');
+  });
 });
 
 describe("heavyweight queue automation events", () => {
@@ -2839,6 +2856,61 @@ describe("MarkdownBlock", () => {
 
     expect(html).toContain("<code>const answer = 42</code>");
     expect(html).not.toContain('class="code-block"');
+  });
+
+  it("classifies the observed muxpilot document link without its source line", () => {
+    expect(markdownLinkTarget("/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md:1")).toEqual({
+      kind: "file",
+      path: "/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md",
+      document: {
+        scopeId: "cgZiXQrkbVYonDQ5",
+        name: "tw-1352-orchestrator-handoff-prompt.md",
+        path: "/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md"
+      }
+    });
+  });
+
+  it("keeps web and muxpilot app routes as links while decoding file paths", () => {
+    expect(markdownLinkTarget("https://example.com/file.ts")).toEqual({ kind: "link" });
+    expect(markdownLinkTarget("/sessions/session-1")).toEqual({ kind: "link" });
+    expect(markdownLinkTarget("/workspace/My%20Project/app.ts:42:7")).toEqual({
+      kind: "file",
+      path: "/workspace/My Project/app.ts",
+      document: null
+    });
+  });
+
+  it("resolves an archived cross-session document from the lazy complete inventory", async () => {
+    const current = managedSession({ id: "current", documentScopeId: "currentScope" });
+    const remote = managedSession({ id: "remote", archived: true, documentScopeId: "remoteScope", tmux: { ...managedSession().tmux, windowName: "performance" } });
+    const loadAllSessions = vi.fn(async () => [remote]);
+    const loadDocuments = vi.fn(async () => [{ name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-01T00:00:00.000Z" }]);
+
+    const resolved = await resolveSessionDocumentReference(
+      { scopeId: "remoteScope", name: "plan.md", path: "/sessions/remoteScope/documents/plan.md" },
+      current,
+      [],
+      [],
+      loadAllSessions,
+      loadDocuments
+    );
+
+    expect(resolved?.session.id).toBe("remote");
+    expect(resolved?.documents[0]?.name).toBe("plan.md");
+    expect(loadAllSessions).toHaveBeenCalledOnce();
+    expect(loadDocuments).toHaveBeenCalledWith("remote");
+  });
+
+  it("does not resolve a muxpilot-looking path when the document does not exist", async () => {
+    const current = managedSession({ id: "current", documentScopeId: "currentScope" });
+    await expect(resolveSessionDocumentReference(
+      { scopeId: "currentScope", name: "missing.md", path: "/sessions/currentScope/documents/missing.md" },
+      current,
+      [],
+      [],
+      async () => [],
+      async () => []
+    )).resolves.toBeNull();
   });
 });
 
