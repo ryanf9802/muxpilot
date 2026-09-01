@@ -214,6 +214,7 @@ export interface AppServerReconciliationState {
 export interface AppServerProjectionResult {
   message: ChatMessage | null;
   messageInserted: boolean;
+  messageChanged: boolean;
   statusChanged: boolean;
   state: AppServerReconciliationState;
 }
@@ -228,6 +229,30 @@ interface AppServerReconciliationRow {
   status: SessionStatus | null;
   evidence_json: string;
   observed_at: string;
+}
+
+interface CodexItemMessageRow {
+  session_id: string;
+  thread_id: string;
+  turn_id: string;
+  item_id: string;
+  message_id: string;
+  app_server_message_id: string | null;
+  rollout_message_id: string | null;
+  app_server_observed_at: string | null;
+  rollout_observed_at: string | null;
+}
+
+interface CodexItemMessageIdentity {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+}
+
+interface MessageWriteResult {
+  message: ChatMessage | null;
+  inserted: boolean;
+  changed: boolean;
 }
 
 const APP_SERVER_SESSION_STATUSES = new Set<SessionStatus>([
@@ -1022,6 +1047,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_requests SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_reconciliation SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE codex_item_messages SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE btw_exchanges SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     const waitRows = this.db.prepare("SELECT actor_session_id, wait_json FROM agent_session_waits")
@@ -1443,9 +1469,24 @@ export class SyncAppDatabase {
   }
 
   appendMessage(message: ChatMessage): boolean {
-    if (this.reconcileMuxpilotSubmissionEcho(message)) return false;
-    if (!isMuxpilotSubmissionMessage(message) && this.isDuplicateUserEcho(message)) return false;
-    if (this.isDuplicateSessionWaitEvent(message)) return false;
+    return this.writeMessage(message).changed;
+  }
+
+  private writeMessage(message: ChatMessage): MessageWriteResult {
+    if (this.reconcileMuxpilotSubmissionEcho(message)) return { message: null, inserted: false, changed: false };
+    if (!isMuxpilotSubmissionMessage(message) && this.isDuplicateUserEcho(message)) {
+      return { message: null, inserted: false, changed: false };
+    }
+    if (this.isDuplicateSessionWaitEvent(message)) return { message: null, inserted: false, changed: false };
+
+    const itemIdentity = this.codexItemMessageIdentity(message);
+    if (itemIdentity) return this.writeCodexItemMessage(message, itemIdentity);
+
+    const inserted = this.insertMessage(message);
+    return { message: inserted ? message : null, inserted, changed: inserted };
+  }
+
+  private insertMessage(message: ChatMessage): boolean {
 
     const result = this.db
       .prepare(
@@ -1482,6 +1523,124 @@ export class SyncAppDatabase {
     }
 
     return false;
+  }
+
+  private writeCodexItemMessage(
+    incoming: ChatMessage,
+    identity: CodexItemMessageIdentity
+  ): MessageWriteResult {
+    const source = incoming.payload.source === "codex_app_server" ? "app_server" : "rollout";
+    const existing = this.db.prepare(
+      `SELECT * FROM codex_item_messages
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+    ).get(incoming.sessionId, identity.threadId, identity.turnId, identity.itemId) as CodexItemMessageRow | undefined;
+
+    if (!existing) {
+      const inserted = this.insertMessage(incoming);
+      if (!inserted) return { message: null, inserted: false, changed: false };
+      this.db.prepare(
+        `INSERT INTO codex_item_messages
+          (session_id, thread_id, turn_id, item_id, message_id,
+           app_server_message_id, rollout_message_id, app_server_observed_at, rollout_observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        incoming.sessionId,
+        identity.threadId,
+        identity.turnId,
+        identity.itemId,
+        incoming.id,
+        source === "app_server" ? incoming.id : null,
+        source === "rollout" ? incoming.id : null,
+        source === "app_server" ? incoming.timestamp : null,
+        source === "rollout" ? incoming.timestamp : null
+      );
+      return { message: incoming, inserted: true, changed: true };
+    }
+
+    this.db.prepare(
+      `UPDATE codex_item_messages SET
+        app_server_message_id = CASE WHEN ? = 'app_server' THEN ? ELSE app_server_message_id END,
+        rollout_message_id = CASE WHEN ? = 'rollout' THEN ? ELSE rollout_message_id END,
+        app_server_observed_at = CASE WHEN ? = 'app_server' THEN ? ELSE app_server_observed_at END,
+        rollout_observed_at = CASE WHEN ? = 'rollout' THEN ? ELSE rollout_observed_at END
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+    ).run(
+      source, incoming.id,
+      source, incoming.id,
+      source, incoming.timestamp,
+      source, incoming.timestamp,
+      incoming.sessionId, identity.threadId, identity.turnId, identity.itemId
+    );
+
+    if (source === "rollout" || existing.app_server_message_id !== null) {
+      return { message: null, inserted: false, changed: false };
+    }
+
+    const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
+      .get(existing.message_id, incoming.sessionId) as MessageRow | undefined;
+    if (!row) throw new Error(`Codex item message disappeared: ${incoming.sessionId}:${existing.message_id}`);
+    const authoritative: ChatMessage = {
+      ...incoming,
+      id: row.id,
+      sessionId: row.session_id,
+      sequence: row.sequence
+    };
+    this.deletePromptIndexMessage(row.id);
+    this.db.prepare(
+      `UPDATE messages
+       SET type = ?, role = ?, timestamp = ?, text = ?, payload_json = ?
+       WHERE id = ? AND session_id = ?`
+    ).run(
+      authoritative.type,
+      authoritative.role,
+      authoritative.timestamp,
+      authoritative.text,
+      JSON.stringify(authoritative.payload),
+      authoritative.id,
+      authoritative.sessionId
+    );
+    this.upsertPromptIndexMessage(authoritative);
+    if (authoritative.role === "user") this.recentUserPromptsCache.delete(authoritative.sessionId);
+    this.db.prepare(
+      `UPDATE managed_sessions
+       SET last_activity_at = CASE
+             WHEN last_activity_at IS NULL OR ? > last_activity_at THEN ?
+             ELSE last_activity_at
+           END,
+           preview = CASE
+             WHEN ? = 'user' AND (last_activity_at IS NULL OR ? >= last_activity_at) THEN ?
+             ELSE preview
+           END
+       WHERE id = ?`
+    ).run(
+      authoritative.timestamp,
+      authoritative.timestamp,
+      authoritative.role,
+      authoritative.timestamp,
+      authoritative.text.slice(0, 280),
+      authoritative.sessionId
+    );
+    return { message: authoritative, inserted: false, changed: true };
+  }
+
+  private codexItemMessageIdentity(message: ChatMessage): CodexItemMessageIdentity | null {
+    const marker = recordValue(message.payload.codexItemIdentity);
+    const turnId = nonemptyStringValue(marker?.turnId);
+    const itemId = nonemptyStringValue(marker?.itemId);
+    if (!turnId || !itemId) return null;
+    const explicitThreadId = nonemptyStringValue(marker?.threadId);
+    if (explicitThreadId) return { threadId: explicitThreadId, turnId, itemId };
+    const row = this.db.prepare("SELECT data_json FROM managed_sessions WHERE id = ?")
+      .get(message.sessionId) as Pick<SessionRow, "data_json"> | undefined;
+    if (!row) return null;
+    try {
+      const session = recordValue(JSON.parse(row.data_json));
+      const provider = recordValue(session?.provider);
+      const threadId = nonemptyStringValue(provider?.threadId) ?? nonemptyStringValue(session?.codexSessionId);
+      return threadId ? { threadId, turnId, itemId } : null;
+    } catch {
+      return null;
+    }
   }
 
   private isDuplicateSessionWaitEvent(message: ChatMessage): boolean {
@@ -2560,17 +2719,20 @@ export class SyncAppDatabase {
     const evidenceJson = serializeAppServerJson(projection.evidence, "projection evidence");
     let message: ChatMessage | null = null;
     let messageInserted = false;
+    let messageChanged = false;
     const statusChanged = projection.status !== null && existingSession.status !== projection.status;
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (projection.message) {
-        message = {
+        const write = this.writeMessage({
           ...projection.message,
           sessionId: projection.sessionId,
           sequence: this.nextSequence(projection.sessionId)
-        };
-        messageInserted = this.appendMessage(message);
+        });
+        message = write.message;
+        messageInserted = write.inserted;
+        messageChanged = write.changed;
       }
       if (projection.status !== null) {
         const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
@@ -2615,7 +2777,7 @@ export class SyncAppDatabase {
 
     const state = this.getAppServerReconciliationState(projection.sessionId);
     if (!state) throw new Error(`App-server projection state was not persisted: ${projection.sessionId}`);
-    return { message: messageInserted ? message : null, messageInserted, statusChanged, state };
+    return { message: messageChanged ? message : null, messageInserted, messageChanged, statusChanged, state };
   }
 
   getAppServerReconciliationState(sessionId: string): AppServerReconciliationState | null {
@@ -2997,6 +3159,22 @@ export class SyncAppDatabase {
         evidence_json TEXT NOT NULL,
         observed_at TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS codex_item_messages (
+        session_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        app_server_message_id TEXT,
+        rollout_message_id TEXT,
+        app_server_observed_at TEXT,
+        rollout_observed_at TEXT,
+        PRIMARY KEY(session_id, thread_id, turn_id, item_id),
+        UNIQUE(message_id),
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS btw_exchanges (
@@ -3719,6 +3897,10 @@ function parseJsonObject(text: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function nonemptyStringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function transcriptItemsPage(

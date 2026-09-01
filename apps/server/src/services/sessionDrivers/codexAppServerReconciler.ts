@@ -27,10 +27,10 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     if (!projection || projection.transient) return;
     const current = await this.store.getAppServerReconciliationState(sessionId);
     const applied = await this.store.applyAppServerProjection(input(sessionId, preservePlanReady(projection, current), event.receivedAt));
-    const session = applied.messageInserted || applied.statusChanged
+    const session = applied.messageChanged || applied.statusChanged
       ? await this.requireSession(sessionId)
       : null;
-    if (applied.messageInserted && applied.message) this.publish("message.appended", sessionId, applied.message, event.receivedAt);
+    if (applied.messageChanged && applied.message) this.publish("message.appended", sessionId, applied.message, event.receivedAt);
     if (applied.statusChanged && applied.state.status) {
       this.publish("status.changed", sessionId, { status: applied.state.status }, event.receivedAt);
     }

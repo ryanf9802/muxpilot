@@ -22,7 +22,11 @@ describe("app-server projection persistence", () => {
         role: "assistant" as const,
         timestamp: "2026-09-01T00:00:01.000Z",
         text: "Authoritative answer",
-        payload: { appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" } }
+        payload: {
+          source: "codex_app_server",
+          codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" },
+          appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" }
+        }
       },
       evidence: { item: { id: "agent-1", type: "agentMessage" } },
       observedAt: "2026-09-01T00:00:02.000Z"
@@ -30,6 +34,7 @@ describe("app-server projection persistence", () => {
 
     expect(await db.applyAppServerProjection(projection)).toMatchObject({
       messageInserted: true,
+      messageChanged: true,
       statusChanged: true,
       message: { id: "stable-agent-1", sequence: 1 },
       state: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1", status: "generating" }
@@ -42,6 +47,7 @@ describe("app-server projection persistence", () => {
       observedAt: "2026-09-01T00:00:03.000Z"
     })).toMatchObject({
       messageInserted: false,
+      messageChanged: false,
       statusChanged: false,
       message: null,
       state: {
@@ -64,6 +70,107 @@ describe("app-server projection persistence", () => {
       observed_at: "2026-09-01T00:00:03.000Z"
     });
     expect(raw.prepare("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?").get(sessionId)).toEqual({ count: 1 });
+    raw.close();
+  });
+
+  it("upgrades a rollout row in place when authoritative app-server content arrives", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    const rolloutPayload = {
+      type: "response_item",
+      payload: { id: "agent-1", type: "message", role: "assistant" },
+      codexItemIdentity: { turnId: "turn-1", itemId: "agent-1", clientMessageId: null }
+    };
+    expect(await db.appendMessage({
+      id: "rollout-message-1",
+      sessionId,
+      sequence: 1,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "rollout copy",
+      payload: rolloutPayload
+    })).toBe(true);
+
+    expect(await db.applyAppServerProjection(projectionInput(sessionId))).toMatchObject({
+      messageInserted: false,
+      messageChanged: true,
+      message: {
+        id: "rollout-message-1",
+        sequence: 1,
+        text: "Authoritative answer",
+        payload: { source: "codex_app_server" }
+      }
+    });
+    expect(await db.listMessages(sessionId)).toMatchObject([
+      { id: "rollout-message-1", sequence: 1, text: "Authoritative answer" }
+    ]);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    const item = raw.prepare(
+      `SELECT message_id, app_server_message_id, rollout_message_id
+       FROM codex_item_messages WHERE session_id = ?`
+    ).get(sessionId);
+    expect(item).toEqual({
+      message_id: "rollout-message-1",
+      app_server_message_id: "stable-agent-1",
+      rollout_message_id: "rollout-message-1"
+    });
+    raw.close();
+  });
+
+  it("durably retains late rollout evidence without duplicating an app-server message", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    expect(await db.applyAppServerProjection(projectionInput(sessionId))).toMatchObject({
+      messageInserted: true,
+      messageChanged: true
+    });
+    expect(await db.appendMessage({
+      id: "late-rollout-message",
+      sessionId,
+      sequence: 2,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T00:00:03.000Z",
+      text: "late rollout copy",
+      payload: {
+        type: "response_item",
+        codexItemIdentity: { turnId: "turn-1", itemId: "agent-1", clientMessageId: null }
+      }
+    })).toBe(false);
+    expect((await db.listRecentMessages(sessionId, 10)).items).toHaveLength(1);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare(
+      `SELECT COUNT(*) AS count FROM codex_item_messages
+       WHERE session_id = ? AND app_server_message_id IS NOT NULL AND rollout_message_id IS NOT NULL`
+    ).get(sessionId)).toEqual({ count: 1 });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?").get(sessionId)).toEqual({ count: 1 });
+    raw.close();
+  });
+
+  it("keeps item ownership through a session rekey and removes it with transcript history", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    await db.applyAppServerProjection(projectionInput(sessionId));
+    const session = await db.getSession(sessionId);
+    expect(session).not.toBeNull();
+    const rekeyedId = "session-projection-rekeyed";
+    await db.rekeySession(
+      sessionId,
+      { ...session!, id: rekeyedId },
+      null,
+      "2026-09-01T00:00:03.000Z"
+    );
+
+    let raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare("SELECT session_id FROM codex_item_messages").get()).toEqual({ session_id: rekeyedId });
+    raw.close();
+
+    await db.clearSessionTranscript(rekeyedId);
+    await db.close();
+    raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM codex_item_messages").get()).toEqual({ count: 0 });
     raw.close();
   });
 
@@ -96,6 +203,36 @@ describe("app-server projection persistence", () => {
     raw.close();
   });
 });
+
+function projectionInput(sessionId: string) {
+  return {
+    sessionId,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "agent-1",
+    clientMessageId: null,
+    method: "item/completed",
+    status: "generating" as const,
+    message: {
+      id: "stable-agent-1",
+      type: "assistant" as const,
+      role: "assistant" as const,
+      timestamp: "2026-09-01T00:00:02.000Z",
+      text: "Authoritative answer",
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "agent-1",
+          clientMessageId: null
+        }
+      }
+    },
+    evidence: { item: { id: "agent-1", type: "agentMessage" } },
+    observedAt: "2026-09-01T00:00:02.000Z"
+  };
+}
 
 async function projectionDb(): Promise<{ db: AppDatabase; path: string; sessionId: string }> {
   const directory = await mkdtemp(join(tmpdir(), "muxpilot-app-server-projection-"));

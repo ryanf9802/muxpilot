@@ -84,6 +84,7 @@ function projectionStore(order: string[]) {
       return {
         message: projection.message ? { ...projection.message, sessionId: projection.sessionId, sequence: 1 } : null,
         messageInserted: Boolean(projection.message),
+        messageChanged: Boolean(projection.message),
         statusChanged: Boolean(projection.status),
         state: { ...reconciliationState(projection.status), ...projection, evidence: projection.evidence }
       };
