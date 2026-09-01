@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
-import { CodexAppServerDriver, type AppServerRequestStore } from "../src/services/sessionDrivers/codexAppServerDriver.js";
+import {
+  CodexAppServerDriver,
+  type AppServerDriverEventSink,
+  type AppServerRequestStore
+} from "../src/services/sessionDrivers/codexAppServerDriver.js";
 import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
 import type { JsonRpcConnection } from "../src/services/sessionDrivers/jsonRpcConnection.js";
 import type { RuntimeStartSpec, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
@@ -78,6 +82,35 @@ describe("CodexAppServerDriver", () => {
     });
     expect(observed).toEqual(["turn/started", "item/fileChange/requestApproval"]);
     await subscription.close();
+  });
+
+  it("awaits durable event reconciliation before subscriber delivery and restores resume state", async () => {
+    const order: string[] = [];
+    const sink = {
+      handle: vi.fn(async () => { order.push("persisted"); }),
+      restore: vi.fn(async () => { order.push("restored"); })
+    } satisfies AppServerDriverEventSink;
+    const harness = createHarness(undefined, sink);
+    await harness.driver.start(launchSpec());
+    await harness.driver.subscribe(managedSession(), () => { order.push("subscriber"); });
+    await harness.handlers.notification?.({
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-1" } }
+    });
+    expect(order).toEqual(["persisted", "subscriber"]);
+    expect(sink.handle).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      method: "turn/started",
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    }));
+
+    await harness.driver.resume(launchSpec("thread-1"));
+    expect(sink.restore).toHaveBeenCalledWith("session-1", "thread-1", "2026-09-01T12:00:00.000Z");
+    expect(order).toContain("restored");
+
+    sink.restore.mockRejectedValueOnce(new Error("checkpoint mismatch"));
+    await expect(harness.driver.resume(launchSpec("thread-1"))).rejects.toThrow("checkpoint mismatch");
+    expect(harness.connections.close).toHaveBeenCalledWith("session-1");
+    expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
   });
 
   it("resolves replayable approvals and questions exactly once until Codex confirms resolution", async () => {
@@ -206,7 +239,7 @@ describe("CodexAppServerDriver", () => {
   });
 });
 
-function createHarness(requestStore?: AppServerRequestStore): {
+function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServerDriverEventSink): {
   driver: CodexAppServerDriver;
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   connections: Record<string, ReturnType<typeof vi.fn>>;
@@ -255,6 +288,7 @@ function createHarness(requestStore?: AppServerRequestStore): {
         environment: {}
       } satisfies RuntimeStartSpec),
       requestStore,
+      eventSink,
       now: () => new Date("2026-09-01T12:00:00.000Z")
     }
   );

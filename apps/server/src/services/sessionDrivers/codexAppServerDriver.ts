@@ -40,7 +40,13 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
 export interface CodexAppServerDriverOptions {
   runtimeSpec(spec: AgentSessionLaunchSpec): RuntimeStartSpec | Promise<RuntimeStartSpec>;
   requestStore?: AppServerRequestStore;
+  eventSink?: AppServerDriverEventSink;
   now?(): Date;
+}
+
+export interface AppServerDriverEventSink {
+  handle(sessionId: string, event: DriverEvent): Promise<void>;
+  restore(sessionId: string, threadId: string, restoredAt: string): Promise<void>;
 }
 
 export interface AppServerRequestStore {
@@ -82,6 +88,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   }>();
   private readonly now: () => Date;
   private readonly requestStore: AppServerRequestStore | null;
+  private readonly eventSink: AppServerDriverEventSink | null;
 
   constructor(
     private readonly supervisor: RuntimeSupervisor,
@@ -90,6 +97,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   ) {
     this.now = options.now ?? (() => new Date());
     this.requestStore = options.requestStore ?? null;
+    this.eventSink = options.eventSink ?? null;
   }
 
   async start(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult> {
@@ -239,6 +247,9 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               expectedPendingRequestIds: unresolved.map((request) => request.requestId),
               handlers
             });
+      if (operation === "resume") {
+        await this.eventSink?.restore(spec.sessionId, connection.threadId, this.now().toISOString());
+      }
       return {
         sessionId: spec.sessionId,
         provider: { kind: "codex", threadId: connection.threadId, rolloutPath: null },
@@ -247,6 +258,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         ready: Promise.resolve()
       };
     } catch (error) {
+      await this.connections.close(spec.sessionId).catch(() => undefined);
       await this.supervisor.stop(runtime).catch(() => undefined);
       throw error;
     }
@@ -255,6 +267,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   private handlers(sessionId: string): AppServerSessionHandlers {
     return {
       notification: async ({ method, params }) => {
+        const receivedAt = this.now().toISOString();
         if (method === "turn/started") {
           const turnId = nestedId(params, "turn");
           if (turnId) this.activeTurns.set(sessionId, turnId);
@@ -267,7 +280,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               if (!threadId || !turnId) {
                 throw new Error("App-server turn completion is missing thread/turn identity");
               }
-              await this.requestStore.resolveAppServerTurnRequests(sessionId, threadId, turnId, this.now().toISOString());
+              await this.requestStore.resolveAppServerTurnRequests(sessionId, threadId, turnId, receivedAt);
             }
             this.activeTurns.delete(sessionId);
             this.clearPendingRequests(sessionId);
@@ -275,11 +288,13 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         } else if (method === "serverRequest/resolved") {
           const requestId = directId(params, "requestId");
           if (requestId !== null) {
-            await this.requestStore?.resolveAppServerRequest(sessionId, requestId, this.now().toISOString());
+            await this.requestStore?.resolveAppServerRequest(sessionId, requestId, receivedAt);
             this.pendingRequests.delete(pendingKey(sessionId, requestId));
           }
         }
-        this.emit(sessionId, method, params);
+        const event = { method, params, receivedAt };
+        await this.eventSink?.handle(sessionId, event);
+        this.emit(sessionId, event);
       },
       serverRequest: async ({ id, method, params }) => {
         const threadId = directString(params, "threadId");
@@ -299,14 +314,17 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         const key = pendingKey(sessionId, id);
         const existing = this.pendingRequests.get(key);
         this.pendingRequests.set(key, { sessionId, id, method, params, responded: existing?.responded ?? false });
-        this.emit(sessionId, method, { requestId: id, params });
+        this.emit(sessionId, { method, params: { requestId: id, params }, receivedAt });
       },
-      error: (error) => this.emit(sessionId, "connection/error", { message: error.message })
+      error: (error) => this.emit(sessionId, {
+        method: "connection/error",
+        params: { message: error.message },
+        receivedAt: this.now().toISOString()
+      })
     };
   }
 
-  private emit(sessionId: string, method: string, params: unknown): void {
-    const event = { method, params, receivedAt: this.now().toISOString() };
+  private emit(sessionId: string, event: DriverEvent): void {
     for (const listener of this.subscribers.get(sessionId) ?? []) {
       try {
         listener(event);
