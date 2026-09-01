@@ -186,6 +186,55 @@ interface AppServerRequestRow {
   resolved_at: string | null;
 }
 
+export interface AppServerProjectionInput {
+  sessionId: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  clientMessageId: string | null;
+  method: string;
+  status: SessionStatus | null;
+  message: Omit<ChatMessage, "sessionId" | "sequence"> | null;
+  evidence: unknown;
+  observedAt: string;
+}
+
+export interface AppServerReconciliationState {
+  sessionId: string;
+  threadId: string;
+  turnId: string | null;
+  itemId: string | null;
+  clientMessageId: string | null;
+  method: string;
+  status: SessionStatus | null;
+  evidence: unknown;
+  observedAt: string;
+}
+
+export interface AppServerProjectionResult {
+  message: ChatMessage | null;
+  messageInserted: boolean;
+  statusChanged: boolean;
+  state: AppServerReconciliationState;
+}
+
+interface AppServerReconciliationRow {
+  session_id: string;
+  thread_id: string;
+  turn_id: string | null;
+  item_id: string | null;
+  client_message_id: string | null;
+  method: string;
+  status: SessionStatus | null;
+  evidence_json: string;
+  observed_at: string;
+}
+
+const APP_SERVER_SESSION_STATUSES = new Set<SessionStatus>([
+  "idle", "generating", "executing", "working", "running", "planning", "queued", "waiting",
+  "approval", "question", "plan_ready", "blocked", "input_failed", "startup_failed", "missing", "unknown"
+]);
+
 interface BtwExchangeRow {
   id: string;
   session_id: string;
@@ -733,6 +782,14 @@ export class AppDatabase {
     return this.call("resolveAppServerTurnRequests", sessionId, threadId, turnId, resolvedAt) as Promise<number>;
   }
 
+  applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult> {
+    return this.call("applyAppServerProjection", projection) as Promise<AppServerProjectionResult>;
+  }
+
+  getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null> {
+    return this.call("getAppServerReconciliationState", sessionId) as Promise<AppServerReconciliationState | null>;
+  }
+
   updateQueuedInput(input: QueuedInput): Promise<void> {
     return this.call("updateQueuedInput", input) as Promise<void>;
   }
@@ -964,6 +1021,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_requests SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE app_server_reconciliation SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE btw_exchanges SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     const waitRows = this.db.prepare("SELECT actor_session_id, wait_json FROM agent_session_waits")
@@ -2494,6 +2552,78 @@ export class SyncAppDatabase {
     return Number(result.changes);
   }
 
+  applyAppServerProjection(projection: AppServerProjectionInput): AppServerProjectionResult {
+    validateAppServerProjection(projection);
+    const existingSession = this.db.prepare("SELECT status, data_json FROM managed_sessions WHERE id = ?")
+      .get(projection.sessionId) as Pick<SessionRow, "status" | "data_json"> | undefined;
+    if (!existingSession) throw new Error(`App-server projection session does not exist: ${projection.sessionId}`);
+    const evidenceJson = serializeAppServerJson(projection.evidence, "projection evidence");
+    let message: ChatMessage | null = null;
+    let messageInserted = false;
+    const statusChanged = projection.status !== null && existingSession.status !== projection.status;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (projection.message) {
+        message = {
+          ...projection.message,
+          sessionId: projection.sessionId,
+          sequence: this.nextSequence(projection.sessionId)
+        };
+        messageInserted = this.appendMessage(message);
+      }
+      if (projection.status !== null) {
+        const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
+        this.db.prepare(
+          "UPDATE managed_sessions SET status = ?, data_json = ?, updated_at = ? WHERE id = ?"
+        ).run(
+          projection.status,
+          JSON.stringify({ ...sessionData, status: projection.status }),
+          projection.observedAt,
+          projection.sessionId
+        );
+      }
+      this.db.prepare(
+        `INSERT INTO app_server_reconciliation
+          (session_id, thread_id, turn_id, item_id, client_message_id, method, status, evidence_json, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET
+          thread_id=excluded.thread_id,
+          turn_id=excluded.turn_id,
+          item_id=excluded.item_id,
+          client_message_id=excluded.client_message_id,
+          method=excluded.method,
+          status=COALESCE(excluded.status, app_server_reconciliation.status),
+          evidence_json=excluded.evidence_json,
+          observed_at=excluded.observed_at`
+      ).run(
+        projection.sessionId,
+        projection.threadId,
+        projection.turnId,
+        projection.itemId,
+        projection.clientMessageId,
+        projection.method,
+        projection.status,
+        evidenceJson,
+        projection.observedAt
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+
+    const state = this.getAppServerReconciliationState(projection.sessionId);
+    if (!state) throw new Error(`App-server projection state was not persisted: ${projection.sessionId}`);
+    return { message: messageInserted ? message : null, messageInserted, statusChanged, state };
+  }
+
+  getAppServerReconciliationState(sessionId: string): AppServerReconciliationState | null {
+    const row = this.db.prepare("SELECT * FROM app_server_reconciliation WHERE session_id = ?")
+      .get(sessionId) as AppServerReconciliationRow | undefined;
+    return row ? hydrateAppServerReconciliation(row) : null;
+  }
+
   private requireAppServerRequest(sessionId: string, requestId: string | number): PersistedAppServerRequest {
     const row = this.db.prepare(
       "SELECT * FROM app_server_requests WHERE session_id = ? AND request_id_json = ?"
@@ -2853,6 +2983,19 @@ export class SyncAppDatabase {
         responded_at TEXT,
         resolved_at TEXT,
         PRIMARY KEY(session_id, request_id_json),
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS app_server_reconciliation (
+        session_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT,
+        item_id TEXT,
+        client_message_id TEXT,
+        method TEXT NOT NULL,
+        status TEXT,
+        evidence_json TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
@@ -3429,6 +3572,20 @@ function hydrateAppServerRequest(row: AppServerRequestRow): PersistedAppServerRe
   };
 }
 
+function hydrateAppServerReconciliation(row: AppServerReconciliationRow): AppServerReconciliationState {
+  return {
+    sessionId: row.session_id,
+    threadId: row.thread_id,
+    turnId: row.turn_id,
+    itemId: row.item_id,
+    clientMessageId: row.client_message_id,
+    method: row.method,
+    status: row.status,
+    evidence: JSON.parse(row.evidence_json) as unknown,
+    observedAt: row.observed_at
+  };
+}
+
 function validateAppServerRequest(request: ReceivedAppServerRequest): void {
   for (const [name, value] of [
     ["sessionId", request.sessionId],
@@ -3444,6 +3601,28 @@ function validateAppServerRequest(request: ReceivedAppServerRequest): void {
   serializeAppServerJson(request.params, "params");
 }
 
+function validateAppServerProjection(projection: AppServerProjectionInput): void {
+  for (const [name, value] of [
+    ["sessionId", projection.sessionId],
+    ["threadId", projection.threadId],
+    ["method", projection.method],
+    ["observedAt", projection.observedAt]
+  ] as const) {
+    if (!value.trim()) throw new Error(`App-server projection ${name} must not be empty`);
+  }
+  for (const [name, value] of [
+    ["turnId", projection.turnId],
+    ["itemId", projection.itemId],
+    ["clientMessageId", projection.clientMessageId]
+  ] as const) {
+    if (value !== null && !value.trim()) throw new Error(`App-server projection ${name} must not be empty`);
+  }
+  if (projection.status !== null && !APP_SERVER_SESSION_STATUSES.has(projection.status)) {
+    throw new Error(`App-server projection status is invalid: ${String(projection.status)}`);
+  }
+  if (projection.message) serializeAppServerJson(projection.message.payload, "projection message payload");
+}
+
 function appServerRequestIdJson(requestId: string | number): string {
   if (typeof requestId === "string") return JSON.stringify(requestId);
   if (typeof requestId === "number" && Number.isSafeInteger(requestId)) return JSON.stringify(requestId);
@@ -3451,9 +3630,13 @@ function appServerRequestIdJson(requestId: string | number): string {
 }
 
 function serializeAppServerJson(value: unknown, name: string): string {
-  const serialized = JSON.stringify(value);
-  if (serialized === undefined) throw new Error(`App-server request ${name} must be JSON serializable`);
-  return serialized;
+  try {
+    const serialized = JSON.stringify(value);
+    if (serialized === undefined) throw new Error("undefined JSON result");
+    return serialized;
+  } catch {
+    throw new Error(`App-server request ${name} must be JSON serializable`);
+  }
 }
 
 function hydrateBtwExchange(row: BtwExchangeRow): BtwExchange {
