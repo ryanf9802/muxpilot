@@ -862,18 +862,27 @@ export function DocumentsModal({
   const [contentError, setContentError] = useState("");
   const viewerRef = useRef<HTMLElement>(null);
   const displayedDocumentRef = useRef<string | null>(null);
+  const appliedRequestedDocumentRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!open) return;
-    setSelected((current) => documents.find((document) => document.name === requestedDocument)?.name
+    if (!open) {
+      appliedRequestedDocumentRef.current = null;
+      return;
+    }
+    const requestedMatch = documents.find((document) => document.name === requestedDocument)?.name ?? null;
+    const requestKey = requestedMatch ? `${sessionId}\u0000${requestedMatch}` : null;
+    const applyRequestedDocument = requestKey !== null && appliedRequestedDocumentRef.current !== requestKey;
+    if (applyRequestedDocument) appliedRequestedDocumentRef.current = requestKey;
+    setSelected((current) => (applyRequestedDocument ? requestedMatch : null)
       ?? (documents.some((document) => document.name === current) ? current : null)
       ?? documents.find((document) => document.name.toLowerCase() === "index.md")?.name
       ?? documents[0]?.name
       ?? null);
-  }, [documents, open, requestedDocument]);
+  }, [documents, open, requestedDocument, sessionId]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
-  const selectedContentKey = selected ? `${sessionId}\u0000${selected}\u0000${selectedVersion}` : null;
+  const selectedDocumentKey = selected ? `${sessionId}\u0000${selected}` : null;
+  const selectedContentKey = selectedDocumentKey ? `${selectedDocumentKey}\u0000${selectedVersion}` : null;
   const documentMarkdownComponents = useMemo<Components>(() => ({
     ...markdownComponents,
     a({ href, children, node: _node, ...props }) {
@@ -935,10 +944,10 @@ export function DocumentsModal({
   const viewerBusy = Boolean(selected && !contentError && (contentLoading || !contentReady));
 
   useLayoutEffect(() => {
-    if (!loadedContentKey || !viewerRef.current) return;
-    if (loadedContentKey !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
-    displayedDocumentRef.current = loadedContentKey;
-  }, [loadedContentKey]);
+    if (!contentReady || !selectedDocumentKey || !viewerRef.current) return;
+    if (selectedDocumentKey !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
+    displayedDocumentRef.current = selectedDocumentKey;
+  }, [contentReady, loadedContentKey, selectedDocumentKey]);
 
   return (
     <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">

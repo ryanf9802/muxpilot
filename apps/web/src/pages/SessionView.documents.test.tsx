@@ -44,6 +44,72 @@ describe("DocumentsModal", () => {
     act(() => root.unmount());
   });
 
+  it("does not reapply a requested document after the user selects another document", async () => {
+    const documents = [
+      { name: "INDEX.md", sizeBytes: 10, updatedAt: "2026-08-25T00:00:00.000Z" },
+      { name: "plan.md", sizeBytes: 12, updatedAt: "2026-08-25T00:00:00.000Z" }
+    ];
+    const read = vi.spyOn(api, "sessionDocument").mockImplementation(async (_sessionId, name) => ({
+      document: { ...documents.find((document) => document.name === name)!, content: `# ${name}` }
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents} requestedDocument="plan.md" listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>(".documents-list button")?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("INDEX.md");
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents.map((document) => ({ ...document }))} requestedDocument="plan.md" listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+    });
+
+    expect(read).toHaveBeenLastCalledWith("session-1", "INDEX.md");
+    expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("INDEX.md");
+    act(() => root.unmount());
+  });
+
+  it("preserves viewer scroll when the selected document content refreshes", async () => {
+    const initial = { name: "plan.md", sizeBytes: 12, updatedAt: "2026-08-25T00:00:00.000Z" };
+    let readCount = 0;
+    vi.spyOn(api, "sessionDocument").mockImplementation(async () => {
+      readCount += 1;
+      return { document: { ...initial, content: `# Revision ${readCount}` } };
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[initial]} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const viewer = container.querySelector<HTMLElement>(".documents-viewer");
+    if (viewer) viewer.scrollTop = 180;
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[{ ...initial, updatedAt: "2026-08-25T00:01:00.000Z" }]} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(readCount).toBe(2);
+    expect(container.querySelector(".documents-viewer h1")?.textContent).toBe("Revision 2");
+    expect(viewer?.scrollTop).toBe(180);
+    act(() => root.unmount());
+  });
+
   it("prefers INDEX.md and renders its Markdown read-only", async () => {
     const documents = [
       { name: "tasks.md", sizeBytes: 8, updatedAt: "2026-08-25T00:00:00.000Z" },
