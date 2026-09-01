@@ -39,7 +39,33 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
 
 export interface CodexAppServerDriverOptions {
   runtimeSpec(spec: AgentSessionLaunchSpec): RuntimeStartSpec | Promise<RuntimeStartSpec>;
+  requestStore?: AppServerRequestStore;
   now?(): Date;
+}
+
+export interface AppServerRequestStore {
+  upsertAppServerRequest(request: {
+    sessionId: string;
+    requestId: string | number;
+    method: string;
+    params: unknown;
+    threadId: string;
+    turnId: string;
+    receivedAt: string;
+    lastSeenAt: string;
+  }): Promise<unknown>;
+  listUnresolvedAppServerRequests(sessionId: string): Promise<Array<{
+    requestId: string | number;
+    state: "pending" | "responded" | "resolved";
+  }>>;
+  claimAppServerRequestResponse(
+    sessionId: string,
+    requestId: string | number,
+    response: unknown,
+    respondedAt: string
+  ): Promise<unknown | null>;
+  resolveAppServerRequest(sessionId: string, requestId: string | number, resolvedAt: string): Promise<boolean>;
+  resolveAppServerTurnRequests(sessionId: string, threadId: string, turnId: string, resolvedAt: string): Promise<number>;
 }
 
 export class CodexAppServerDriver implements AgentSessionDriver {
@@ -55,6 +81,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     responded: boolean;
   }>();
   private readonly now: () => Date;
+  private readonly requestStore: AppServerRequestStore | null;
 
   constructor(
     private readonly supervisor: RuntimeSupervisor,
@@ -62,6 +89,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     private readonly options: CodexAppServerDriverOptions
   ) {
     this.now = options.now ?? (() => new Date());
+    this.requestStore = options.requestStore ?? null;
   }
 
   async start(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult> {
@@ -140,7 +168,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const pending = this.requirePendingRequest(session, requestId);
     if (!APPROVAL_METHODS.has(pending.method)) throw new Error(`Server request is not an approval: ${pending.method}`);
     const response = approvalResponse(pending.method, pending.params, decision);
-    await this.respondPending(session, pending, response);
+    await this.respondPending(session, requestId, pending, response);
   }
 
   async answerQuestion(session: ManagedSession, requestId: string, answer: QuestionAnswerRequest): Promise<void> {
@@ -148,7 +176,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     if (pending.method !== "item/tool/requestUserInput") {
       throw new Error(`Server request is not a structured question: ${pending.method}`);
     }
-    await this.respondPending(session, pending, { answers: answer.answers });
+    await this.respondPending(session, requestId, pending, { answers: answer.answers });
   }
 
   async choosePlanAction(): Promise<void> {
@@ -191,6 +219,9 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         developerInstructions: spec.options.developerInstructions,
         runtimeWorkspaceRoots: spec.options.writableRoots
       };
+      const unresolved = operation === "resume" && this.requestStore
+        ? await this.requestStore.listUnresolvedAppServerRequests(spec.sessionId)
+        : [];
       const connection = operation === "start"
         ? await this.connections.start({ sessionId: spec.sessionId, runtime, settings, handlers })
         : operation === "fork"
@@ -205,6 +236,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               sessionId: spec.sessionId,
               runtime,
               threadId: requireSourceThread(spec),
+              expectedPendingRequestIds: unresolved.map((request) => request.requestId),
               handlers
             });
       return {
@@ -222,7 +254,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
 
   private handlers(sessionId: string): AppServerSessionHandlers {
     return {
-      notification: ({ method, params }) => {
+      notification: async ({ method, params }) => {
         if (method === "turn/started") {
           const turnId = nestedId(params, "turn");
           if (turnId) this.activeTurns.set(sessionId, turnId);
@@ -230,16 +262,40 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           const turnId = nestedId(params, "turn");
           const activeTurnId = this.activeTurns.get(sessionId);
           if (!turnId || !activeTurnId || activeTurnId === turnId) {
+            const threadId = directString(params, "threadId");
+            if (this.requestStore) {
+              if (!threadId || !turnId) {
+                throw new Error("App-server turn completion is missing thread/turn identity");
+              }
+              await this.requestStore.resolveAppServerTurnRequests(sessionId, threadId, turnId, this.now().toISOString());
+            }
             this.activeTurns.delete(sessionId);
             this.clearPendingRequests(sessionId);
           }
         } else if (method === "serverRequest/resolved") {
           const requestId = directId(params, "requestId");
-          if (requestId !== null) this.pendingRequests.delete(pendingKey(sessionId, requestId));
+          if (requestId !== null) {
+            await this.requestStore?.resolveAppServerRequest(sessionId, requestId, this.now().toISOString());
+            this.pendingRequests.delete(pendingKey(sessionId, requestId));
+          }
         }
         this.emit(sessionId, method, params);
       },
-      serverRequest: ({ id, method, params }) => {
+      serverRequest: async ({ id, method, params }) => {
+        const threadId = directString(params, "threadId");
+        const turnId = directString(params, "turnId");
+        if (!threadId || !turnId) throw new Error(`App-server request is missing thread/turn identity: ${method}`);
+        const receivedAt = this.now().toISOString();
+        await this.requestStore?.upsertAppServerRequest({
+          sessionId,
+          requestId: id,
+          method,
+          params,
+          threadId,
+          turnId,
+          receivedAt,
+          lastSeenAt: receivedAt
+        });
         const key = pendingKey(sessionId, id);
         const existing = this.pendingRequests.get(key);
         this.pendingRequests.set(key, { sessionId, id, method, params, responded: existing?.responded ?? false });
@@ -278,13 +334,24 @@ export class CodexAppServerDriver implements AgentSessionDriver {
 
   private async respondPending(
     session: ManagedSession,
+    requestId: string,
     pending: { id: string | number; responded: boolean },
     response: unknown
   ): Promise<void> {
     const connection = this.connections.get(session.id);
     if (!connection) throw new Error("App-server session is not reconciled and ready for input");
+    if (this.requestStore) {
+      const claimed = await this.requestStore.claimAppServerRequestResponse(
+        session.id,
+        pending.id,
+        response,
+        this.now().toISOString()
+      );
+      if (!claimed) throw new Error(`App-server request was already answered: ${requestId}`);
+      pending.responded = true;
+    }
     await connection.rpc.respond(pending.id, response);
-    pending.responded = true;
+    if (!this.requestStore) pending.responded = true;
   }
 
   private clearPendingRequests(sessionId: string): void {
@@ -350,6 +417,12 @@ function directId(value: unknown, key: string): string | number | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const id = (value as Record<string, unknown>)[key];
   return typeof id === "string" || (typeof id === "number" && Number.isSafeInteger(id)) ? id : null;
+}
+
+function directString(value: unknown, key: string): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = (value as Record<string, unknown>)[key];
+  return typeof result === "string" && result ? result : null;
 }
 
 function pendingKey(sessionId: string, requestId: string | number): string {

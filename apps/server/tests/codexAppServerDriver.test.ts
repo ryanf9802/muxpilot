@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
-import { CodexAppServerDriver } from "../src/services/sessionDrivers/codexAppServerDriver.js";
+import { CodexAppServerDriver, type AppServerRequestStore } from "../src/services/sessionDrivers/codexAppServerDriver.js";
 import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
 import type { JsonRpcConnection } from "../src/services/sessionDrivers/jsonRpcConnection.js";
 import type { RuntimeStartSpec, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
@@ -67,8 +67,15 @@ describe("CodexAppServerDriver", () => {
     await harness.driver.start(launchSpec());
     await harness.driver.subscribe(managedSession(), () => { throw new Error("UI failed"); });
     const subscription = await harness.driver.subscribe(managedSession(), (event) => observed.push(event.method));
-    expect(() => harness.handlers.notification?.({ method: "turn/started", params: { turn: { id: "turn-9" } } })).not.toThrow();
-    harness.handlers.serverRequest?.({ id: "approval-1", method: "item/fileChange/requestApproval", params: {} });
+    await expect(harness.handlers.notification?.({
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-9" } }
+    })).resolves.toBeUndefined();
+    await harness.handlers.serverRequest?.({
+      id: "approval-1",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-9" }
+    });
     expect(observed).toEqual(["turn/started", "item/fileChange/requestApproval"]);
     await subscription.close();
   });
@@ -77,12 +84,16 @@ describe("CodexAppServerDriver", () => {
     const harness = createHarness();
     const session = managedSession();
     await harness.driver.start(launchSpec());
-    harness.handlers.serverRequest?.({
+    await harness.handlers.serverRequest?.({
       id: "approval-1",
       method: "item/commandExecution/requestApproval",
-      params: { proposedExecpolicyAmendment: ["git", "status"] }
+      params: { threadId: "thread-1", turnId: "turn-1", proposedExecpolicyAmendment: ["git", "status"] }
     });
-    harness.handlers.serverRequest?.({ id: "question-1", method: "item/tool/requestUserInput", params: {} });
+    await harness.handlers.serverRequest?.({
+      id: "question-1",
+      method: "item/tool/requestUserInput",
+      params: { threadId: "thread-1", turnId: "turn-1" }
+    });
 
     await harness.driver.answerApproval(session, "approval-1", "approve_for_prefix");
     expect(harness.rpc.respond).toHaveBeenCalledWith("approval-1", {
@@ -92,11 +103,86 @@ describe("CodexAppServerDriver", () => {
     await harness.driver.answerQuestion(session, "question-1", { answers: { choice: { answers: ["yes"] } } });
     expect(harness.rpc.respond).toHaveBeenCalledWith("question-1", { answers: { choice: { answers: ["yes"] } } });
 
-    harness.handlers.notification?.({
+    await harness.handlers.notification?.({
       method: "serverRequest/resolved",
       params: { threadId: "thread-1", requestId: "approval-1" }
     });
     await expect(harness.driver.answerApproval(session, "approval-1", "approve_once")).rejects.toThrow("Unknown");
+  });
+
+  it("persists gates before delivery and seeds reconnect replay from durable state", async () => {
+    const store = requestStore();
+    store.listUnresolvedAppServerRequests.mockResolvedValue([
+      { requestId: "approval-1", state: "pending" },
+      { requestId: 2, state: "responded" }
+    ]);
+    const harness = createHarness(store as unknown as AppServerRequestStore);
+    await harness.driver.resume(launchSpec("thread-1"));
+    expect(harness.connections.reconnect).toHaveBeenCalledWith(expect.objectContaining({
+      expectedPendingRequestIds: ["approval-1", 2]
+    }));
+
+    await harness.handlers.serverRequest?.({
+      id: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1" }
+    });
+    expect(store.upsertAppServerRequest).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "session-1",
+      requestId: "approval-1",
+      threadId: "thread-1",
+      turnId: "turn-1"
+    }));
+    await harness.driver.answerApproval(managedSession(), "approval-1", "approve_once");
+    expect(store.claimAppServerRequestResponse).toHaveBeenCalledWith(
+      "session-1",
+      "approval-1",
+      { decision: "accept" },
+      "2026-09-01T12:00:00.000Z"
+    );
+    expect(store.claimAppServerRequestResponse.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.rpc.respond.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
+    );
+    await harness.handlers.notification?.({
+      method: "serverRequest/resolved",
+      params: { threadId: "thread-1", requestId: "approval-1" }
+    });
+    expect(store.resolveAppServerRequest).toHaveBeenCalledWith(
+      "session-1",
+      "approval-1",
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    await harness.handlers.serverRequest?.({
+      id: "terminal-approval",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-2" }
+    });
+    store.resolveAppServerTurnRequests.mockRejectedValueOnce(new Error("database unavailable"));
+    await expect(harness.handlers.notification?.({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-2" } }
+    })).rejects.toThrow("database unavailable");
+    await expect(harness.driver.answerApproval(
+      managedSession(),
+      "terminal-approval",
+      "approve_once"
+    )).resolves.toBeUndefined();
+    await expect(harness.handlers.notification?.({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-2" } }
+    })).resolves.toBeUndefined();
+    expect(store.resolveAppServerTurnRequests).toHaveBeenLastCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-2",
+      "2026-09-01T12:00:00.000Z"
+    );
+    await expect(harness.driver.answerApproval(
+      managedSession(),
+      "terminal-approval",
+      "approve_once"
+    )).rejects.toThrow("Unknown");
   });
 
   it("interrupts active work, terminates background processes, and stops the service on kill", async () => {
@@ -120,7 +206,7 @@ describe("CodexAppServerDriver", () => {
   });
 });
 
-function createHarness(): {
+function createHarness(requestStore?: AppServerRequestStore): {
   driver: CodexAppServerDriver;
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   connections: Record<string, ReturnType<typeof vi.fn>>;
@@ -168,10 +254,24 @@ function createHarness(): {
         codexVersion: "0.152.0",
         environment: {}
       } satisfies RuntimeStartSpec),
+      requestStore,
       now: () => new Date("2026-09-01T12:00:00.000Z")
     }
   );
   return { driver, supervisor, connections, connection, rpc, get handlers() { return handlers; } };
+}
+
+function requestStore() {
+  return {
+    upsertAppServerRequest: vi.fn(async () => ({})),
+    listUnresolvedAppServerRequests: vi.fn(async () => [] as Array<{
+      requestId: string | number;
+      state: "pending" | "responded" | "resolved";
+    }>),
+    claimAppServerRequestResponse: vi.fn(async () => ({})),
+    resolveAppServerRequest: vi.fn(async () => true),
+    resolveAppServerTurnRequests: vi.fn(async () => 0)
+  };
 }
 
 function launchSpec(sourceThreadId?: string) {
