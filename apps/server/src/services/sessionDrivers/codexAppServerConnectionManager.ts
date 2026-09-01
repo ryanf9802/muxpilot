@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { CodexAppServerProtocol, type InitializeResponse, type ThreadIdentityResponse } from "./codexAppServerProtocol.js";
+import {
+  CodexAppServerProtocol,
+  type InitializeResponse,
+  type ThreadIdentityResponse,
+  type ThreadLaunchSettings
+} from "./codexAppServerProtocol.js";
 import {
   JsonRpcConnection,
   type JsonRpcConnectionHandlers,
@@ -23,9 +28,20 @@ export interface AppServerReconnectSpec {
   handlers?: AppServerSessionHandlers;
 }
 
+export interface AppServerOpenSpec {
+  sessionId: string;
+  runtime: SystemdSessionRuntimeRef;
+  settings: ThreadLaunchSettings;
+  handlers?: AppServerSessionHandlers;
+}
+
+export interface AppServerForkSpec extends AppServerOpenSpec {
+  sourceThreadId: string;
+}
+
 export interface AppServerReconciliation {
   initialize: InitializeResponse;
-  resumed: ThreadIdentityResponse;
+  established: ThreadIdentityResponse;
   current: ThreadIdentityResponse;
   replayedRequestIds: readonly (string | number)[];
 }
@@ -73,7 +89,40 @@ export class CodexAppServerConnectionManager {
   }
 
   reconnect(spec: AppServerReconnectSpec): Promise<AppServerSessionConnection> {
-    return this.serialize(spec.sessionId, () => this.reconnectExclusive(spec));
+    return this.serialize(spec.sessionId, () => this.connectExclusive(
+      spec.sessionId,
+      spec.runtime,
+      spec.handlers,
+      spec.expectedPendingRequestIds ?? [],
+      async (protocol) => {
+        const established = await protocol.resumeThread(spec.threadId);
+        requireMatchingThread(spec.threadId, established, "resume");
+        return established;
+      }
+    ));
+  }
+
+  start(spec: AppServerOpenSpec): Promise<AppServerSessionConnection> {
+    return this.serialize(spec.sessionId, () => this.connectExclusive(
+      spec.sessionId,
+      spec.runtime,
+      spec.handlers,
+      [],
+      (protocol) => protocol.startThread(spec.settings)
+    ));
+  }
+
+  fork(spec: AppServerForkSpec): Promise<AppServerSessionConnection> {
+    return this.serialize(spec.sessionId, async () => {
+      requireIdentity(spec.sourceThreadId, "sourceThreadId");
+      return this.connectExclusive(
+        spec.sessionId,
+        spec.runtime,
+        spec.handlers,
+        [],
+        (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings)
+      );
+    });
   }
 
   close(sessionId: string): Promise<void> {
@@ -89,12 +138,17 @@ export class CodexAppServerConnectionManager {
     return this.active.get(sessionId) ?? null;
   }
 
-  private async reconnectExclusive(spec: AppServerReconnectSpec): Promise<AppServerSessionConnection> {
-    requireIdentity(spec.sessionId, "sessionId");
-    requireIdentity(spec.threadId, "threadId");
-    const previous = this.active.get(spec.sessionId);
+  private async connectExclusive(
+    sessionId: string,
+    runtime: SystemdSessionRuntimeRef,
+    sessionHandlers: AppServerSessionHandlers | undefined,
+    expectedPendingRequestIds: readonly (string | number)[],
+    establish: (protocol: CodexAppServerProtocol) => Promise<ThreadIdentityResponse>
+  ): Promise<AppServerSessionConnection> {
+    requireIdentity(sessionId, "sessionId");
+    const previous = this.active.get(sessionId);
     if (previous) {
-      this.active.delete(spec.sessionId);
+      this.active.delete(sessionId);
       await previous.rpc.close();
     }
 
@@ -103,49 +157,49 @@ export class CodexAppServerConnectionManager {
     let connection: JsonRpcConnection | null = null;
     let proxy: Awaited<ReturnType<RuntimeSupervisor["reconnect"]>> | null = null;
     const handlers: JsonRpcConnectionHandlers = {
-      notification: (notification) => spec.handlers?.notification?.(notification),
+      notification: (notification) => sessionHandlers?.notification?.(notification),
       serverRequest: async (request) => {
         replayedRequestIds.add(request.id);
-        await spec.handlers?.serverRequest?.(request);
+        await sessionHandlers?.serverRequest?.(request);
       },
       error: (error) => {
-        if (this.active.get(spec.sessionId)?.connectionId === connectionId) this.active.delete(spec.sessionId);
-        spec.handlers?.error?.(error);
+        if (this.active.get(sessionId)?.connectionId === connectionId) this.active.delete(sessionId);
+        sessionHandlers?.error?.(error);
       }
     };
 
     try {
-      proxy = await this.supervisor.reconnect(spec.runtime);
+      proxy = await this.supervisor.reconnect(runtime);
       connection = await this.dependencies.createConnection(
         connectionId,
         proxy,
-        this.journalForSession(spec.sessionId),
+        this.journalForSession(sessionId),
         handlers
       );
       const protocol = new CodexAppServerProtocol(connection);
       const initialize = await protocol.initialize(this.clientVersion);
-      const resumed = await protocol.resumeThread(spec.threadId);
-      requireMatchingThread(spec.threadId, resumed, "resume");
-      const current = await protocol.readThread(spec.threadId, true);
-      requireMatchingThread(spec.threadId, current, "read");
-      const missing = (spec.expectedPendingRequestIds ?? []).filter((id) => !replayedRequestIds.has(id));
+      const established = await establish(protocol);
+      const threadId = established.thread.id;
+      const current = await protocol.readThread(threadId, true);
+      requireMatchingThread(threadId, current, "read");
+      const missing = expectedPendingRequestIds.filter((id) => !replayedRequestIds.has(id));
       if (missing.length > 0) {
         throw new Error(`Codex did not replay pending server requests during reconnect: ${missing.join(", ")}`);
       }
       const managed: AppServerSessionConnection = {
-        sessionId: spec.sessionId,
-        threadId: spec.threadId,
+        sessionId,
+        threadId,
         connectionId,
         rpc: connection,
         reconciliation: {
           initialize,
-          resumed,
+          established,
           current,
           replayedRequestIds: [...replayedRequestIds]
         },
-        close: () => this.closeIfCurrent(spec.sessionId, connectionId)
+        close: () => this.closeIfCurrent(sessionId, connectionId)
       };
-      this.active.set(spec.sessionId, managed);
+      this.active.set(sessionId, managed);
       return managed;
     } catch (error) {
       if (connection) await connection.close().catch(() => undefined);

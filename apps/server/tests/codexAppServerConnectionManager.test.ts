@@ -25,6 +25,29 @@ describe("CodexAppServerConnectionManager", () => {
     expect(manager.get("session-1")).toBe(connected);
   });
 
+  it("establishes new and forked threads through the same read barrier", async () => {
+    const started = new FakeProtocolProxy([], "new-thread");
+    const forked = new FakeProtocolProxy([], "forked-thread");
+    const manager = createManager([started, forked]);
+
+    const newConnection = await manager.start({
+      sessionId: "new-session",
+      runtime,
+      settings: { cwd: "/repo", model: "gpt-5.6" }
+    });
+    const forkConnection = await manager.fork({
+      sessionId: "fork-session",
+      runtime,
+      sourceThreadId: "source-thread",
+      settings: { cwd: "/fork" }
+    });
+
+    expect(started.methods).toEqual(["initialize", "thread/start", "thread/read"]);
+    expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/read"]);
+    expect(newConnection.threadId).toBe("new-thread");
+    expect(forkConnection.threadId).toBe("forked-thread");
+  });
+
   it("requires every persisted pending request to replay before accepting input", async () => {
     const request = {
       id: "approval-7",
@@ -135,6 +158,8 @@ class FakeProtocolProxy {
           } });
         } else if (frame.method === "thread/resume") {
           for (const request of this.replayRequests) this.emit(request);
+          this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
+        } else if (frame.method === "thread/start" || frame.method === "thread/fork") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/read") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId, turns: [] } } });
