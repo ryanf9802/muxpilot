@@ -137,11 +137,9 @@ export class BtwService {
       await this.db.failBtwExchange(exchange.sessionId, exchange.id, BTW_RESTART_ERROR, this.now());
       await this.documents?.cleanupBtwDocumentStaging(exchange.sessionId, exchange.id).catch(() => undefined);
     }
-    try {
-      await this.client.initialize();
-    } catch (error) {
+    void this.client.initialize().catch((error) => {
       this.logger?.warn({ err: error }, "BTW Codex app-server warmup failed; the next question will retry");
-    }
+    });
   }
 
   async stop(): Promise<void> {

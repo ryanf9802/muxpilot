@@ -1,7 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession, SessionEvent } from "@muxpilot/core";
 import { AppDatabase } from "../src/db/database.js";
 import { BtwService, type BtwError } from "../src/services/btwService.js";
@@ -286,15 +286,51 @@ describe("BtwService", () => {
     await service.stop();
     await db.close();
   });
+
+  it("does not block startup on the optional Codex app-server warmup", async () => {
+    const db = await tempDb();
+    const client = new FakeAppServerClient();
+    const warmupError = new Error("warmup timed out");
+    let rejectWarmup!: (error: Error) => void;
+    client.initializeResult = new Promise<void>((_resolve, reject) => {
+      rejectWarmup = reject;
+    });
+    const logger = { warn: vi.fn(), debug: vi.fn() };
+    const service = new BtwService({ db, events: new EventBus(), client, logger });
+    let started = false;
+
+    const start = service.start().then(() => {
+      started = true;
+    });
+    await eventually(() => client.initializeCalls === 1);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(started).toBe(true);
+    rejectWarmup(warmupError);
+    await start;
+    await eventually(() => logger.warn.mock.calls.length === 1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { err: warmupError },
+      "BTW Codex app-server warmup failed; the next question will retry"
+    );
+
+    await service.stop();
+    await db.close();
+  });
 });
 
 class FakeAppServerClient {
   readonly requests: Array<{ method: string; params: unknown }> = [];
   readonly responses: Array<{ id: string | number; result?: unknown; error?: unknown }> = [];
+  initializeCalls = 0;
+  initializeResult: Promise<void> = Promise.resolve();
   private readonly listeners = new Set<(message: CodexAppServerMessage) => void>();
   private readonly closeListeners = new Set<(error: Error) => void>();
 
-  async initialize(): Promise<void> {}
+  initialize(): Promise<void> {
+    this.initializeCalls += 1;
+    return this.initializeResult;
+  }
 
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.requests.push({ method, params });
