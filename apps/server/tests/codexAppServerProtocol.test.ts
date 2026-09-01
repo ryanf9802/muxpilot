@@ -30,6 +30,50 @@ describe("CodexAppServerProtocol", () => {
     expect(request).toHaveBeenNthCalledWith(2, "thread/read", { threadId: "thread-1", includeTurns: false });
   });
 
+  it("uses structured thread lifecycle and turn input shapes", async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === "turn/start") return { turn: { id: "turn-1" } };
+      if (method === "turn/steer") return { turnId: "turn-1" };
+      if (method.startsWith("thread/") && !method.includes("settings") && !method.includes("name")) {
+        return { thread: { id: method === "thread/fork" ? "thread-2" : "thread-1" } };
+      }
+      return {};
+    });
+    const protocol = new CodexAppServerProtocol({ request } as ProtocolRequester);
+
+    await protocol.startThread({ cwd: "/repo", model: "gpt-5.6" });
+    await protocol.forkThread("thread-1", { cwd: "/fork" });
+    await protocol.startTurn("thread-1", "hello", "client-1", { collaborationMode: { mode: "default" } });
+    await protocol.steerTurn("thread-1", "turn-1", "one more thing", "client-2");
+    await protocol.interruptTurn("thread-1", "turn-1");
+    await protocol.renameThread("thread-1", "New name");
+    await protocol.updateThreadSettings("thread-1", { model: "gpt-5.6" });
+
+    expect(request).toHaveBeenCalledWith("thread/start", { cwd: "/repo", model: "gpt-5.6" });
+    expect(request).toHaveBeenCalledWith("thread/fork", { threadId: "thread-1", cwd: "/fork" });
+    expect(request).toHaveBeenCalledWith("turn/start", {
+      threadId: "thread-1",
+      input: [{ type: "text", text: "hello" }],
+      clientUserMessageId: "client-1",
+      collaborationMode: { mode: "default" }
+    });
+    expect(request).toHaveBeenCalledWith("turn/steer", {
+      threadId: "thread-1",
+      expectedTurnId: "turn-1",
+      input: [{ type: "text", text: "one more thing" }],
+      clientUserMessageId: "client-2"
+    });
+    expect(request).toHaveBeenCalledWith("turn/interrupt", { threadId: "thread-1", turnId: "turn-1" });
+  });
+
+  it("fails closed on malformed turn responses and unsafe empty identifiers", async () => {
+    const protocol = new CodexAppServerProtocol({ request: async () => ({}) });
+    await expect(protocol.startTurn("thread-1", "message", "client-1")).rejects.toThrow("missing turn.id");
+    await expect(protocol.steerTurn("thread-1", "turn-1", "message", "client-1")).rejects.toThrow("missing turnId");
+    await expect(protocol.startTurn("thread-1", " ", "client-1")).rejects.toThrow("text must not be empty");
+    await expect(protocol.interruptTurn("thread-1", "")).rejects.toThrow("turnId must not be empty");
+  });
+
   it("fails closed on malformed identity responses", async () => {
     const protocol = new CodexAppServerProtocol({ request: async () => ({}) });
     await expect(protocol.initialize("0.1.0")).rejects.toThrow("missing required identity fields");

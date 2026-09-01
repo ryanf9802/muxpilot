@@ -69,6 +69,24 @@ export interface ThreadIdentityResponse {
   [key: string]: unknown;
 }
 
+export interface ThreadLaunchSettings {
+  cwd: string;
+  model?: string | null;
+  developerInstructions?: string | null;
+  runtimeWorkspaceRoots?: string[] | null;
+  serviceTier?: string | null;
+}
+
+export interface TurnIdentityResponse {
+  turn: { id: string; [key: string]: unknown };
+  [key: string]: unknown;
+}
+
+export interface TurnSteerResponse {
+  turnId: string;
+  [key: string]: unknown;
+}
+
 export interface ProtocolRequester {
   request<T>(method: string, params: unknown): Promise<T>;
 }
@@ -84,12 +102,89 @@ export class CodexAppServerProtocol {
     return requireInitializeResponse(response);
   }
 
-  async resumeThread(threadId: string): Promise<ThreadIdentityResponse> {
-    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/resume", { threadId }));
+  async startThread(settings: ThreadLaunchSettings): Promise<ThreadIdentityResponse> {
+    validateThreadSettings(settings);
+    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/start", settings));
+  }
+
+  async resumeThread(threadId: string, settings: Partial<ThreadLaunchSettings> = {}): Promise<ThreadIdentityResponse> {
+    requireNonEmpty(threadId, "threadId");
+    validateThreadSettings(settings);
+    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/resume", { ...settings, threadId }));
+  }
+
+  async forkThread(threadId: string, settings: Partial<ThreadLaunchSettings> = {}): Promise<ThreadIdentityResponse> {
+    requireNonEmpty(threadId, "threadId");
+    validateThreadSettings(settings);
+    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/fork", { ...settings, threadId }));
   }
 
   async readThread(threadId: string, includeTurns = true): Promise<ThreadIdentityResponse> {
+    requireNonEmpty(threadId, "threadId");
     return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns }));
+  }
+
+  async startTurn(
+    threadId: string,
+    text: string,
+    clientUserMessageId: string,
+    options: Record<string, unknown> = {}
+  ): Promise<TurnIdentityResponse> {
+    requireNonEmpty(threadId, "threadId");
+    requireNonEmpty(text, "text");
+    requireNonEmpty(clientUserMessageId, "clientUserMessageId");
+    return requireTurnIdentityResponse(await this.rpc.request<unknown>("turn/start", {
+      ...options,
+      threadId,
+      input: [{ type: "text", text }],
+      clientUserMessageId
+    }));
+  }
+
+  async steerTurn(
+    threadId: string,
+    expectedTurnId: string,
+    text: string,
+    clientUserMessageId: string
+  ): Promise<TurnSteerResponse> {
+    requireNonEmpty(threadId, "threadId");
+    requireNonEmpty(expectedTurnId, "expectedTurnId");
+    requireNonEmpty(text, "text");
+    requireNonEmpty(clientUserMessageId, "clientUserMessageId");
+    return requireTurnSteerResponse(await this.rpc.request<unknown>("turn/steer", {
+      threadId,
+      expectedTurnId,
+      input: [{ type: "text", text }],
+      clientUserMessageId
+    }));
+  }
+
+  async interruptTurn(threadId: string, turnId: string): Promise<void> {
+    requireNonEmpty(threadId, "threadId");
+    requireNonEmpty(turnId, "turnId");
+    await this.rpc.request<unknown>("turn/interrupt", { threadId, turnId });
+  }
+
+  async renameThread(threadId: string, name: string): Promise<void> {
+    requireNonEmpty(threadId, "threadId");
+    requireNonEmpty(name, "name");
+    await this.rpc.request<unknown>("thread/name/set", { threadId, name });
+  }
+
+  async updateThreadSettings(threadId: string, settings: Record<string, unknown>): Promise<void> {
+    requireNonEmpty(threadId, "threadId");
+    await this.rpc.request<unknown>("thread/settings/update", { ...settings, threadId });
+  }
+
+  async listBackgroundTerminals(threadId: string): Promise<unknown> {
+    requireNonEmpty(threadId, "threadId");
+    return this.rpc.request<unknown>("thread/backgroundTerminals/list", { threadId });
+  }
+
+  async terminateBackgroundTerminal(threadId: string, processId: string): Promise<void> {
+    requireNonEmpty(threadId, "threadId");
+    requireNonEmpty(processId, "processId");
+    await this.rpc.request<unknown>("thread/backgroundTerminals/terminate", { threadId, processId });
   }
 }
 
@@ -130,6 +225,31 @@ function requireThreadIdentityResponse(value: unknown): ThreadIdentityResponse {
     throw new Error("Codex thread response is missing thread.id");
   }
   return value as ThreadIdentityResponse;
+}
+
+function requireTurnIdentityResponse(value: unknown): TurnIdentityResponse {
+  if (!isRecord(value) || !isRecord(value.turn) || typeof value.turn.id !== "string" || !value.turn.id) {
+    throw new Error("Codex turn response is missing turn.id");
+  }
+  return value as TurnIdentityResponse;
+}
+
+function requireTurnSteerResponse(value: unknown): TurnSteerResponse {
+  if (!isRecord(value) || typeof value.turnId !== "string" || !value.turnId) {
+    throw new Error("Codex steer response is missing turnId");
+  }
+  return value as TurnSteerResponse;
+}
+
+function requireNonEmpty(value: string, name: string): void {
+  if (!value.trim()) throw new Error(`${name} must not be empty`);
+}
+
+function validateThreadSettings(settings: Partial<ThreadLaunchSettings>): void {
+  if (settings.cwd != null && !isAbsolute(settings.cwd)) throw new Error("cwd must be absolute");
+  if (settings.runtimeWorkspaceRoots?.some((root) => !isAbsolute(root))) {
+    throw new Error("runtimeWorkspaceRoots must be absolute");
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
