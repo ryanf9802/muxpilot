@@ -22,7 +22,8 @@ import {
   transcriptOverlapScore,
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
-import { InputTransportError, TmuxAdapter, type CodexLaunchOptions } from "../src/tmux/tmuxAdapter.js";
+import { InputTransportError, TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
+import type { AgentSessionLaunchOptions } from "../src/services/sessionDrivers/types.js";
 
 describe("Codex pane model settings", () => {
   it("reads the persistent status line", () => {
@@ -5334,7 +5335,7 @@ describe("SessionManager transcript isolation", () => {
     const otherRepo = join(harness.dir, "other-repo");
     await mkdir(otherRepo);
     let panes = [testPane({ cwd: otherRepo, paneId: "%1", windowId: "@1" })];
-    const createCalls: Array<{ cwd: string; name: string; options: CodexLaunchOptions }> = [];
+    const createCalls: Array<{ cwd: string; name: string; options: AgentSessionLaunchOptions }> = [];
     const bindCapability = vi.fn(async () => undefined);
     harness.manager.setOrchestrationProvider({
       prepareLaunch: async () => ({
@@ -5355,7 +5356,7 @@ describe("SessionManager transcript isolation", () => {
     const created = await harness.manager.createSessionInDirectory(repo, "new-work");
 
     expect(createCalls).toEqual([{ cwd: repo, name: "new-work", options: expect.objectContaining({
-      resourceScopeName: "muxpilot-session-0123456789abcdef01234567.scope"
+      resourceUnitName: "muxpilot-session-0123456789abcdef01234567.scope"
     }) }]);
     expect(createCalls[0]?.options.developerInstructions).toContain("Use built-in Codex subagents for routine bounded delegation");
     expect(createCalls[0]?.options.developerInstructions).toContain("especially standard code-review passes");

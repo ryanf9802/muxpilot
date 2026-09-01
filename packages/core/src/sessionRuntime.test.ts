@@ -43,11 +43,11 @@ describe("session runtime compatibility", () => {
       cwd: "/repo/worktree",
       driverKind: "codex_app_server" as const,
       runtime: {
-        kind: "app_server" as const,
-        serviceUnit: "muxpilot-session-1.service",
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-1.service",
         socketPath: "/run/user/1000/muxpilot/1.sock",
-        journalPath: "/state/1/events.jsonl",
-        protocolVersion: "1"
+        state: "connected" as const,
+        codexVersion: "0.152.0"
       }
     };
 

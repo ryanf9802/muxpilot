@@ -49,12 +49,11 @@ import {
   composerHasInput,
   inputVerificationCaptureLines,
   InputTransportError,
-  type CodexMcpServerConfig,
-  type CodexLaunchOptions,
   type InputTransportResult,
   isCodexStartupFailureCapture,
   TmuxAdapter
 } from "../tmux/tmuxAdapter.js";
+import type { AgentSessionLaunchOptions, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -105,7 +104,7 @@ interface HeavyCommandQueueLookup {
 }
 
 interface SessionOrchestrationProvider {
-  prepareLaunch(): Promise<{ capabilityId: string; server: CodexMcpServerConfig }>;
+  prepareLaunch(): Promise<{ capabilityId: string; server: McpServerLaunchConfig }>;
   bindCapability(capabilityId: string, sessionId: string): Promise<void>;
 }
 
@@ -341,7 +340,7 @@ export class SessionManager {
     return scopeId;
   }
 
-  private async withDocumentLaunchOptions(options: CodexLaunchOptions, scopeId: string): Promise<CodexLaunchOptions> {
+  private async withDocumentLaunchOptions(options: AgentSessionLaunchOptions, scopeId: string): Promise<AgentSessionLaunchOptions> {
     const root = await this.requireDocuments().ensureScope(scopeId);
     const documentsRoot = join(root, "documents");
     const instruction = [
@@ -365,7 +364,7 @@ export class SessionManager {
     };
   }
 
-  private async prepareOrchestratedLaunch(options: CodexLaunchOptions): Promise<{ options: CodexLaunchOptions; capabilityId: string | null }> {
+  private async prepareOrchestratedLaunch(options: AgentSessionLaunchOptions): Promise<{ options: AgentSessionLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
     const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with the raw tmux, process, and Codex file tools; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
@@ -373,12 +372,12 @@ export class SessionManager {
       capabilityId: capability.capabilityId,
       options: {
         ...options,
-        resourceScopeName: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
+        resourceUnitName: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
           ? sessionScopeName(capability.capabilityId)
-          : options.resourceScopeName,
-        resourceScopeEnvironment: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
+          : options.resourceUnitName,
+        resourceUnitEnvironment: this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1"
           ? userSystemdLaunchEnvironment(this.managedEnvironment)
-          : options.resourceScopeEnvironment,
+          : options.resourceUnitEnvironment,
         mcpServers: [...(options.mcpServers ?? []), capability.server],
         developerInstructions: [options.developerInstructions, instruction].filter(Boolean).join(" ")
       }

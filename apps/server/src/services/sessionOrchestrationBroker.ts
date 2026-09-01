@@ -10,7 +10,7 @@ import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionScope } from "./sessionScopes.js";
 import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 import { agentWorkTokensUsed } from "./agentUsage.js";
-import type { CodexMcpServerConfig } from "../tmux/tmuxAdapter.js";
+import type { McpServerLaunchConfig } from "./sessionDrivers/types.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TERMINAL_OR_ATTENTION = new Set(["idle", "waiting", "question", "approval", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);
@@ -88,7 +88,7 @@ export class SessionOrchestrationBroker {
     await rm(this.socketPath, { force: true });
   }
 
-  async prepareLaunch(): Promise<{ capabilityId: string; server: CodexMcpServerConfig }> {
+  async prepareLaunch(): Promise<{ capabilityId: string; server: McpServerLaunchConfig }> {
     const id = randomBytes(12).toString("hex");
     const capability: Capability = { version: 1, id, token: randomBytes(32).toString("hex"), socketPath: this.socketPath, actorSessionId: null };
     this.capabilities.set(capability.token, capability);

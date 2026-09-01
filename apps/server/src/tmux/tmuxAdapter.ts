@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { TmuxPane } from "@muxpilot/core";
+import type { AgentSessionLaunchOptions, McpServerLaunchConfig } from "../services/sessionDrivers/types.js";
 
 const execFileAsync = promisify(execFile);
 const SEP = "\t";
@@ -33,25 +34,9 @@ const PANE_FORMAT = [
   "#{session_created}"
 ].join(SEP);
 
-export interface CodexLaunchOptions {
-  isolatedWorkspace?: boolean;
-  writableRoots?: string[];
-  developerInstructions?: string;
-  environment?: Record<string, string>;
-  mcpServers?: CodexMcpServerConfig[];
-  resourceScopeName?: string;
-  resourceScopeEnvironment?: Record<string, string>;
-  model?: string | null;
-  reasoningEffort?: string | null;
-  fastMode?: boolean | null;
-}
+export type CodexLaunchOptions = AgentSessionLaunchOptions;
 
-export interface CodexMcpServerConfig {
-  name: string;
-  command: string;
-  args: string[];
-  defaultToolsApprovalMode?: "auto" | "prompt" | "approve";
-}
+export type CodexMcpServerConfig = McpServerLaunchConfig;
 
 export interface CodexPaneLaunch {
   pane: TmuxPane;
@@ -565,11 +550,11 @@ export function codexCommandArgs(cwd: string, options: CodexLaunchOptions = {}, 
   }
   if (continuation) codexArgs.push(continuation.mode, continuation.sessionId);
   const command = ["bash", CODEX_LAUNCHER_PATH, "--", ...codexArgs];
-  return options.resourceScopeName
+  return options.resourceUnitName
     ? [
         "env",
-        ...Object.entries(options.resourceScopeEnvironment ?? {}).map(([key, value]) => `${key}=${value}`),
-        "systemd-run", "--user", "--scope", "--quiet", "--collect", `--unit=${options.resourceScopeName}`,
+        ...Object.entries(options.resourceUnitEnvironment ?? {}).map(([key, value]) => `${key}=${value}`),
+        "systemd-run", "--user", "--scope", "--quiet", "--collect", `--unit=${options.resourceUnitName}`,
         ...command
       ]
     : command;

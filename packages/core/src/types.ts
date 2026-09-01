@@ -123,15 +123,17 @@ export interface AgentProviderRef {
 export type SessionRuntimeRef =
   | { kind: "tmux"; pane: TmuxPane }
   | {
-      kind: "app_server";
-      serviceUnit: string;
+      kind: "systemd_service";
+      unit: string;
       socketPath: string;
-      journalPath: string;
-      protocolVersion: string | null;
+      state: "starting" | "connected" | "hibernated" | "stopped" | "failed";
+      codexVersion: string | null;
     };
 
 export interface SessionCapabilities {
   start: boolean;
+  sendMessage: boolean;
+  steer: boolean;
   resume: boolean;
   fork: boolean;
   verifiedInput: boolean;
@@ -140,6 +142,7 @@ export interface SessionCapabilities {
   approvals: boolean;
   questions: boolean;
   planActions: boolean;
+  fastMode: boolean;
   rawTerminalCapture: boolean;
   terminalAttach: boolean;
   hibernate: boolean;

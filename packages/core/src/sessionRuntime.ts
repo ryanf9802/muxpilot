@@ -2,6 +2,8 @@ import type { ManagedSession, SessionCapabilities } from "./types.js";
 
 const LEGACY_TMUX_CAPABILITIES: SessionCapabilities = {
   start: true,
+  sendMessage: true,
+  steer: true,
   resume: true,
   fork: true,
   verifiedInput: true,
@@ -10,6 +12,7 @@ const LEGACY_TMUX_CAPABILITIES: SessionCapabilities = {
   approvals: true,
   questions: true,
   planActions: true,
+  fastMode: true,
   rawTerminalCapture: true,
   terminalAttach: true,
   hibernate: false
@@ -35,7 +38,7 @@ export function normalizeManagedSessionRuntime(session: ManagedSession): Managed
     name,
     cwd,
     provider,
-    driverKind: session.driverKind ?? (runtime.kind === "app_server" ? "codex_app_server" : "codex_tmux"),
+    driverKind: session.driverKind ?? (runtime.kind === "systemd_service" ? "codex_app_server" : "codex_tmux"),
     runtime,
     capabilities: session.capabilities ?? { ...LEGACY_TMUX_CAPABILITIES },
     resourceUnit: session.resourceUnit ?? session.resourceScope ?? null

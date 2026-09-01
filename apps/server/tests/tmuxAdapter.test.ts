@@ -35,8 +35,8 @@ describe("parsePaneLine", () => {
 describe("codexCommandArgs", () => {
   it("launches session tooling inside its own resource scope", () => {
     expect(codexCommandArgs("/tmp/control", {
-      resourceScopeName: "muxpilot-session-child.scope",
-      resourceScopeEnvironment: {
+      resourceUnitName: "muxpilot-session-child.scope",
+      resourceUnitEnvironment: {
         XDG_RUNTIME_DIR: "/run/user/1000",
         DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus"
       },
