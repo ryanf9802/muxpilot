@@ -2847,7 +2847,7 @@ select:focus-visible {
 .documents-source-context strong { color: var(--color-text); }
 .documents-source-context button { flex: 0 0 auto; padding: 6px 9px; font-size: 12px; }
 
-.markdown a[data-file-path="true"] { cursor: copy; }
+.markdown a[data-file-path="true"] { cursor: pointer; }
 .file-path-copied {
   margin-left: 5px;
   color: var(--color-success);
