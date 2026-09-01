@@ -53,7 +53,8 @@ import {
   isCodexStartupFailureCapture,
   TmuxAdapter
 } from "../tmux/tmuxAdapter.js";
-import type { AgentSessionLaunchOptions, McpServerLaunchConfig } from "./sessionDrivers/types.js";
+import type { AgentSessionDriver, AgentSessionLaunchOptions, McpServerLaunchConfig } from "./sessionDrivers/types.js";
+import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -136,6 +137,7 @@ type InputDeliveryFailureCode =
   | "composer_changed"
   | "unverified_legacy_submission"
   | "session_unavailable"
+  | "app_server_rejected"
   | "tmux_failed";
 
 export class SessionManager {
@@ -178,7 +180,8 @@ export class SessionManager {
     private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
     private readonly gitWorktreeRoot: string | null = null,
     private readonly managedEnvironment: Record<string, string> = {},
-    private readonly codexMetadata: CodexMetadataLookup | null = null
+    private readonly codexMetadata: CodexMetadataLookup | null = null,
+    private readonly sessionDrivers: SessionDriverRegistry | null = null
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -1933,6 +1936,34 @@ export class SessionManager {
     let current = message;
     try {
       current = await this.updateInputDelivery(current, { deliveryPhase: "delivering" });
+      const appServerDriver = this.appServerDriver(session);
+      if (appServerDriver) {
+        const receipt = await appServerDriver.sendMessage(
+          { ...session, inputMode: mode },
+          message.text,
+          message.id
+        );
+        const latest = await this.db.latestUserMessage(session.id);
+        if (latest?.id === current.id) current = latest;
+        current = await this.updateInputDelivery(current, {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          acknowledgedBy: "app_server_receipt",
+          clientMessageId: receipt.clientMessageId,
+          threadId: receipt.threadId,
+          turnId: receipt.turnId,
+          acceptedAt: receipt.acceptedAt,
+          failureReason: null
+        });
+        await this.db.addAudit("local", "input_delivery_app_server", session.id, JSON.stringify({
+          promptHash: inputPromptHash(session.id, message.text),
+          promptLength: message.text.length,
+          clientMessageId: receipt.clientMessageId,
+          threadId: receipt.threadId,
+          turnId: receipt.turnId
+        }), receipt.acceptedAt);
+        return current;
+      }
       const liveSession = await this.ensureInputMode(session, mode);
       const result = await this.sendRawInput(liveSession, message.text);
       current = await this.updateInputDelivery(current, {
@@ -1949,7 +1980,9 @@ export class SessionManager {
       }), nowIso());
       return current;
     } catch (error) {
-      const reason = error instanceof InputTransportError ? error.reason : "tmux_failed";
+      const reason = error instanceof InputTransportError
+        ? error.reason
+        : session.driverKind === "codex_app_server" ? "app_server_rejected" : "tmux_failed";
       const failureReason = inputDeliveryFailureMessage(reason);
       current = await this.updateInputDelivery(current, {
         state: "failed",
@@ -2326,7 +2359,9 @@ export class SessionManager {
     }
     if (action.type === "interrupt") {
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
-      await this.tmux.interrupt(session.tmux.paneId);
+      const driver = this.appServerDriver(session);
+      if (driver) await driver.interrupt(session, null);
+      else await this.tmux.interrupt(session.tmux.paneId);
       const now = nowIso();
       await this.db.setSessionStatus(sessionId, "waiting", now);
       this.publish("status.changed", sessionId, { status: "waiting" });
@@ -2358,15 +2393,34 @@ export class SessionManager {
       this.publish("status.changed", sessionId, { status });
     }
     if (action.type === "rename") {
-      await this.tmux.renameWindow(session.tmux.paneId, requireSessionName(action.name));
-      await this.refreshRenamedSession(session);
+      const name = requireSessionName(action.name);
+      const driver = this.appServerDriver(session);
+      if (driver) await driver.rename(session, name);
+      else await this.tmux.renameWindow(session.tmux.paneId, name);
+      if (driver) {
+        const current = requireSession(await this.db.getSession(sessionId));
+        await this.db.upsertSession({ ...current, name }, nowIso());
+      } else await this.refreshRenamedSession(session);
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
     if (action.type === "kill") {
       this.readySessionDiscoveryGeneration.delete(sessionId);
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session was killed");
-      await this.tmux.killPane(session.tmux.paneId);
+      const driver = this.appServerDriver(session);
+      if (driver) {
+        await driver.kill(session);
+        const current = requireSession(await this.db.getSession(sessionId));
+        await this.db.upsertSession({
+          ...current,
+          status: "missing",
+          runtime: current.runtime?.kind === "systemd_service"
+            ? { ...current.runtime, state: "stopped" }
+            : current.runtime
+        }, nowIso());
+      } else {
+        await this.tmux.killPane(session.tmux.paneId);
+      }
     }
     if (action.type === "archiveTranscript") {
       this.readySessionDiscoveryGeneration.delete(sessionId);
@@ -2405,7 +2459,7 @@ export class SessionManager {
     if (action.type === "detach") {
       this.publish("notification.created", sessionId, { title: "Detach requested", body: "Detach is managed by tmux clients." });
     }
-    if (action.type === "kill") await this.discover();
+    if (action.type === "kill" && session.driverKind !== "codex_app_server") await this.discover();
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
@@ -2539,6 +2593,9 @@ export class SessionManager {
   }
 
   private async retryInputDelivery(session: ManagedSession): Promise<void> {
+    if (session.driverKind === "codex_app_server") {
+      throw new InputDeliveryError("App-server input is not replayed without a reconciled client-message identity");
+    }
     if (this.deliveringInputSessionIds.has(session.id)) {
       throw new InputDeliveryError("Another input delivery is already in progress for this session");
     }
@@ -2668,6 +2725,12 @@ export class SessionManager {
     });
     if (!updated) throw new Error("Could not persist input delivery state");
     return updated;
+  }
+
+  private appServerDriver(session: ManagedSession): AgentSessionDriver | null {
+    if (session.driverKind !== "codex_app_server") return null;
+    if (!this.sessionDrivers) throw new Error("App-server session driver registry is unavailable");
+    return this.sessionDrivers.require("codex_app_server");
   }
 
   private pendingPlanActionStatus(sessionId: string): SessionStatus | null {
@@ -3277,6 +3340,7 @@ function inputDeliveryFailureMessage(reason: InputDeliveryFailureCode): string {
   if (reason === "composer_changed") return "The Codex composer changed before the input could be safely replayed.";
   if (reason === "unverified_legacy_submission") return "Codex remained ready and did not acknowledge the submitted input.";
   if (reason === "session_unavailable") return "The session became unavailable before the input could be replayed.";
+  if (reason === "app_server_rejected") return "Codex app-server did not accept the input.";
   if (reason === "tmux_failed") return "Muxpilot could not deliver the input through tmux.";
   return "Codex remained ready and did not acknowledge the submitted input after one safe replay.";
 }

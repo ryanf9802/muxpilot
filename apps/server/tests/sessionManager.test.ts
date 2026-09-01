@@ -23,7 +23,8 @@ import {
   tmuxPaneSessionId
 } from "../src/services/sessionManager.js";
 import { InputTransportError, TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
-import type { AgentSessionLaunchOptions } from "../src/services/sessionDrivers/types.js";
+import type { AgentSessionDriver, AgentSessionLaunchOptions } from "../src/services/sessionDrivers/types.js";
+import { SessionDriverRegistry } from "../src/services/sessionDrivers/registry.js";
 
 describe("Codex pane model settings", () => {
   it("reads the persistent status line", () => {
@@ -2688,6 +2689,90 @@ describe("SessionManager transcript isolation", () => {
     }]);
     expect(harness.manager.getSession(session.id)).toMatchObject({ status: "input_failed", preview: "do not persist" });
     harness.db.close();
+  });
+
+  it("routes verified input and lifecycle actions through the app-server driver", async () => {
+    let appDb: AppDatabase | null = null;
+    const sendMessage = vi.fn(async (appSession: ManagedSession, _text: string, clientMessageId: string) => {
+      const latest = await appDb?.latestUserMessage(appSession.id);
+      if (latest) {
+        await appDb?.updateMessagePayload(latest, {
+          ...latest.payload,
+          codexItemIdentity: { threadId: "thread-app", turnId: "turn-app", itemId: "user-app" }
+        });
+      }
+      return {
+        clientMessageId,
+        threadId: "thread-app",
+        turnId: "turn-app",
+        acceptedAt: "2026-09-01T12:00:00.000Z"
+      };
+    });
+    const interrupt = vi.fn(async () => undefined);
+    const rename = vi.fn(async () => undefined);
+    const kill = vi.fn(async () => undefined);
+    const driver = {
+      kind: "codex_app_server",
+      sendMessage,
+      interrupt,
+      rename,
+      kill
+    } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    appDb = harness.db;
+    const session: ManagedSession = {
+      ...agentHierarchySession("app-server-routing"),
+      name: "App server routing",
+      cwd: "/repo",
+      driverKind: "codex_app_server",
+      provider: { kind: "codex", threadId: "thread-app", rolloutPath: null },
+      runtime: {
+        kind: "systemd_service",
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: "/tmp/app-server.sock",
+        state: "connected",
+        codexVersion: "0.152.0"
+      }
+    };
+    await harness.db.upsertSession(session, "2026-09-01T11:59:00.000Z");
+    harness.tmux.sendInput = async () => { throw new Error("tmux input must not be used"); };
+    harness.tmux.interrupt = async () => { throw new Error("tmux interrupt must not be used"); };
+    harness.tmux.renameWindow = async () => { throw new Error("tmux rename must not be used"); };
+    harness.tmux.killPane = async () => { throw new Error("tmux kill must not be used"); };
+
+    const result = await harness.manager.sendInput(session.id, "structured prompt", "plan");
+    expect(result).toMatchObject({ session: { status: "planning", inputMode: "plan" } });
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, inputMode: "plan" }),
+      "structured prompt",
+      expect.any(String)
+    );
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      codexItemIdentity: { threadId: "thread-app", turnId: "turn-app", itemId: "user-app" },
+      muxpilotSubmission: {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: "app_server_receipt",
+        threadId: "thread-app",
+        turnId: "turn-app"
+      }
+    });
+    await expect(harness.manager.act(session.id, { type: "retryInputDelivery" }))
+      .rejects.toThrow("not replayed without a reconciled client-message identity");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    await harness.manager.act(session.id, { type: "interrupt" });
+    expect(interrupt).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), null);
+    await harness.manager.act(session.id, { type: "rename", name: "Renamed app server" });
+    expect(rename).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), "Renamed-app-server");
+    expect((await harness.db.getSession(session.id))?.name).toBe("Renamed-app-server");
+    await harness.manager.act(session.id, { type: "kill" });
+    expect(kill).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }));
+    expect(await harness.db.getSession(session.id)).toMatchObject({
+      status: "missing",
+      runtime: { kind: "systemd_service", state: "stopped" }
+    });
+    await harness.db.close();
   });
 
   it("returns the updated session and sends cycle keys for normal mode", async () => {
@@ -6354,7 +6439,10 @@ describe("agent-managed session hierarchy", () => {
   });
 });
 
-async function createHarness(options: { sessionScopesAvailable?: boolean } = {}): Promise<{
+async function createHarness(options: {
+  sessionScopesAvailable?: boolean;
+  sessionDrivers?: SessionDriverRegistry;
+} = {}): Promise<{
   dir: string;
   codexHome: string;
   db: AppDatabase;
@@ -6391,7 +6479,9 @@ async function createHarness(options: { sessionScopesAvailable?: boolean } = {})
     null,
     codexHome,
     null,
-    { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" }
+    { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" },
+    null,
+    options.sessionDrivers ?? null
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
 }

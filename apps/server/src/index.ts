@@ -32,6 +32,7 @@ import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
 import { probeAppServerCompatibility } from "./services/appServerCompatibility.js";
 import { randomBytes } from "node:crypto";
+import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -131,6 +132,14 @@ if (config.resourceGovernor !== "off") {
   }
 }
 const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
+const sessionDrivers = createSessionDriverRegistry({
+  compatibility: appServerCompatibility,
+  dataDir: config.dataDir,
+  codexHome: config.codexHome,
+  environment: managedEnvironment,
+  db,
+  events
+});
 const manager = new SessionManager(
   db,
   tmux,
@@ -147,7 +156,8 @@ const manager = new SessionManager(
   config.codexHome,
   config.gitWorktreeRoot,
   managedEnvironment,
-  codexModels
+  codexModels,
+  sessionDrivers
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(
