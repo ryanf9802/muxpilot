@@ -23,6 +23,7 @@ const COMPLETION_SUPPRESSION_FILE = "completion-suppressed";
 export interface HeavyCommandSessionCoordinator {
   sessionIdForWorkspace(workspaceId: string): Promise<string | null>;
   resumeHeavyCommand(sessionId: string, message: string): Promise<boolean>;
+  syncHeavyCommandSessionStatus(workspaceId: string, status: HeavyCommandSessionStatus): Promise<void>;
 }
 
 export interface HeavyCommandLaunchBrokerOptions {
@@ -39,6 +40,7 @@ export class HeavyCommandService {
   private ticking = false;
   private coordinator: HeavyCommandSessionCoordinator | null = null;
   private brokerServer: Server | null = null;
+  private activeStatusWorkspaces = new Set<string>();
 
   constructor(
     private readonly leaseRoot: string,
@@ -286,12 +288,35 @@ export class HeavyCommandService {
       });
 
       for (const owner of reserved) await this.dispatchResume(owner);
-      for (const owner of await this.readPersistentOwners()) {
+      const currentOwners = await this.readPersistentOwners();
+      for (const owner of currentOwners) {
         if (owner.state === "reporting" && !owner.completionSentAt) await this.dispatchCompletion(owner);
       }
+      await this.syncSessionStatuses(currentOwners);
     } finally {
       this.ticking = false;
     }
+  }
+
+  private async syncSessionStatuses(owners: QueueOwner[]): Promise<void> {
+    if (!this.coordinator) return;
+    const persisted = owners.filter((owner) => ACTIVE_STATES.has(owner.state));
+    const live = (await Promise.all(persisted.map((owner) => this.readOwner(owner.runId, owner.workspaceId))))
+      .filter((owner): owner is HeavyCommand => owner !== null && ACTIVE_STATES.has(owner.state));
+    const byWorkspace = new Map<string, HeavyCommand[]>();
+    for (const owner of live) {
+      const commands = byWorkspace.get(owner.workspaceId) ?? [];
+      commands.push(owner);
+      byWorkspace.set(owner.workspaceId, commands);
+    }
+    const inactive = [...this.activeStatusWorkspaces].filter((workspaceId) => !byWorkspace.has(workspaceId));
+    for (const [workspaceId, commands] of byWorkspace) {
+      await this.coordinator.syncHeavyCommandSessionStatus(workspaceId, heavyCommandSessionStatus(commands));
+    }
+    for (const workspaceId of inactive) {
+      await this.coordinator.syncHeavyCommandSessionStatus(workspaceId, null);
+    }
+    this.activeStatusWorkspaces = new Set(byWorkspace.keys());
   }
 
   private async dispatchCompletion(owner: QueueOwner): Promise<void> {

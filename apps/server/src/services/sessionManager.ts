@@ -120,6 +120,16 @@ const INPUT_DELIVERY_ACK_TIMEOUT_MS = 30_000;
 const AGENT_DESCENDANT_LIMIT = 2;
 const DEFAULT_AGENT_WORK_TOKEN_BUDGET = 1_000_000;
 const AGENT_SCOPE_UNAVAILABLE_MESSAGE = "Independent agent-session resource scopes are unavailable. Run sudo loginctl enable-linger $USER, restart muxpilot, and restore the session before retrying.";
+const HEAVY_COMMAND_STATUS_BLOCKERS = new Set<SessionStatus>([
+  "approval",
+  "question",
+  "plan_ready",
+  "blocked",
+  "input_failed",
+  "startup_failed",
+  "missing",
+  "unknown"
+]);
 type InputDeliveryFailureCode =
   | "paste_not_observed"
   | "submit_not_accepted"
@@ -387,6 +397,32 @@ export class SessionManager {
 
   async sessionIdForWorkspace(workspaceId: string): Promise<string | null> {
     return (await this.gitWorkspaces?.get(workspaceId))?.sessionId ?? null;
+  }
+
+  async syncHeavyCommandSessionStatus(
+    workspaceId: string,
+    status: "queued" | "running" | "working" | null
+  ): Promise<void> {
+    const sessionId = await this.sessionIdForWorkspace(workspaceId) ??
+      (await this.db.listSessions(true)).find((session) => session.gitWorkspace?.id === workspaceId)?.id ?? null;
+    if (!sessionId) return;
+    const session = await this.db.getSession(sessionId);
+    if (status === null) {
+      if (session?.status === "queued" || session?.status === "running") await this.runDiscoverTick();
+      return;
+    }
+    if (
+      !session ||
+      session.archived ||
+      session.initializing ||
+      session.startupError ||
+      HEAVY_COMMAND_STATUS_BLOCKERS.has(session.status) ||
+      session.status === status
+    ) return;
+    const now = nowIso();
+    await this.db.setSessionStatus(sessionId, status, now);
+    this.publish("status.changed", sessionId, { status });
+    this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
   }
 
   async resumeHeavyCommand(sessionId: string, message: string): Promise<boolean> {

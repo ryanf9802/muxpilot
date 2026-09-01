@@ -24,6 +24,44 @@ describe("HeavyCommandService", () => {
     expect(heavyCommandSessionStatus([{ state: "waiting" }, { state: "reporting" }, { state: "running" }])).toBe("running");
   });
 
+  it("repeatedly synchronizes active status and clears it after the owner finishes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-abababababab";
+    const runDir = join(leases, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-a", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      lastActivityAt: new Date().toISOString(),
+      activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    const statuses: Array<string | null> = [];
+    const service = new HeavyCommandService(leases, join(root, "sessions"));
+    await service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async () => false,
+      syncHeavyCommandSessionStatus: async (_workspaceId, status) => { statuses.push(status); }
+    });
+    try {
+      await waitFor(() => statuses.filter((status) => status === "running").length >= 2);
+      const current = JSON.parse(await readFile(join(runDir, "owner.json"), "utf8"));
+      await writeFile(join(runDir, "owner.json"), JSON.stringify({
+        ...current,
+        state: "completed",
+        heartbeatAt: new Date().toISOString()
+      }));
+      await waitFor(() => statuses.includes(null));
+      expect(statuses.slice(0, 2)).toEqual(["running", "running"]);
+      expect(statuses.at(-1)).toBeNull();
+    } finally {
+      await service.stop();
+    }
+  });
+
   it("ignores wrapper-owned acquiring records until they become queue eligible", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);
@@ -38,7 +76,8 @@ describe("HeavyCommandService", () => {
     const service = new HeavyCommandService(leases, sessions, 1, 120_000);
     await service.start({
       sessionIdForWorkspace: async () => "session-a",
-      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
     });
     try {
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
@@ -124,7 +163,8 @@ describe("HeavyCommandService", () => {
     const service = new HeavyCommandService(leases, sessions, 1, 120_000);
     await service.start({
       sessionIdForWorkspace: async () => "session-a",
-      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
     });
     try {
       await waitFor(async () => messages.length === 1);
@@ -157,7 +197,11 @@ describe("HeavyCommandService", () => {
     const runId = "mabc123-333333333333";
     await writeQueueOwner(leases, runId, new Date().toISOString());
     const service = new HeavyCommandService(leases, join(root, "sessions"), 1, 40);
-    await service.start({ sessionIdForWorkspace: async () => "session-a", resumeHeavyCommand: async () => true });
+    await service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async () => true,
+      syncHeavyCommandSessionStatus: async () => undefined
+    });
     try {
       await waitFor(async () => {
         const current = JSON.parse(await readFile(join(leases, "runs", runId, "owner.json"), "utf8"));
@@ -184,7 +228,8 @@ describe("HeavyCommandService", () => {
     const service = new HeavyCommandService(leases, sessions, 2, 120_000);
     await service.start({
       sessionIdForWorkspace: async () => "session-a",
-      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
     });
     try {
       await waitFor(async () => messages.length === 2);
@@ -345,7 +390,8 @@ describe("HeavyCommandService", () => {
     const messages: string[] = [];
     await service.start({
       sessionIdForWorkspace: async () => "session-a",
-      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; }
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
     });
     try {
       await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
@@ -378,7 +424,11 @@ describe("HeavyCommandService", () => {
       logger: { warn: () => undefined },
       runCommand: async (command, args) => { commands.push({ command, args }); }
     });
-    await service.start({ sessionIdForWorkspace: async () => null, resumeHeavyCommand: async () => false });
+    await service.start({
+      sessionIdForWorkspace: async () => null,
+      resumeHeavyCommand: async () => false,
+      syncHeavyCommandSessionStatus: async () => undefined
+    });
     const brokerSocket = service.brokerSocketPath()!;
     try {
       expect((await stat(brokerSocket)).mode & 0o777).toBe(0o600);

@@ -3375,6 +3375,54 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("repairs stale heavyweight labels without overwriting attention states", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...session,
+      status: "waiting",
+      gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
+    }, new Date().toISOString());
+    const statusEvents: string[] = [];
+    const sessionUpdates: string[] = [];
+    const unsubscribe = harness.events.subscribe((event) => {
+      if (event.sessionId !== session.id) return;
+      if (event.type === "status.changed") statusEvents.push((event.payload as { status: string }).status);
+      if (event.type === "session.updated") sessionUpdates.push((event.payload as ManagedSession).status);
+    });
+
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", "running");
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", "running");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("running");
+    expect(statusEvents).toEqual(["running"]);
+    expect(sessionUpdates).toEqual(["running"]);
+
+    await harness.db.setSessionStatus(session.id, "approval", new Date().toISOString());
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", "running");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    expect(statusEvents).toEqual(["running"]);
+
+    await harness.db.setSessionStatus(session.id, "waiting", new Date().toISOString());
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", "working");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("working");
+    expect(statusEvents).toEqual(["running", "working"]);
+
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", null);
+    expect((await harness.manager.getSession(session.id))?.status).toBe("working");
+
+    await harness.db.setSessionStatus(session.id, "running", new Date().toISOString());
+    await harness.manager.syncHeavyCommandSessionStatus("workspace-a", null);
+    unsubscribe();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(sessionUpdates.at(-1)).toBe("waiting");
+    harness.db.close();
+  });
+
   it("reports a managed session's target branch as its canonical repository branch", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
