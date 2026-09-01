@@ -98,6 +98,44 @@ export class SessionDocumentService {
     return snapshotDirectory(root);
   }
 
+  async persistApprovedPlan(scopeId: string, messageSequence: number, plan: string): Promise<BtwDocumentChanges> {
+    if (!Number.isSafeInteger(messageSequence) || messageSequence < 1) {
+      throw new SessionDocumentError("Invalid approved plan message sequence", 400);
+    }
+    const name = `plan-${messageSequence}.md`;
+    const documents = await this.snapshot(scopeId);
+    const existingPlan = documents.find((document) => document.name.toLowerCase() === name.toLowerCase());
+    const contents = Buffer.from(`${plan.replace(/\s+$/, "")}\n`, "utf8");
+    if (existingPlan && (existingPlan.name !== name || !existingPlan.contents.equals(contents))) {
+      throw new SessionDocumentError(`Approved plan document '${name}' already exists with different content`, 409);
+    }
+
+    const index = documents.find((document) => document.name.toLowerCase() === "index.md");
+    const indexName = index?.name ?? "INDEX.md";
+    const link = `- [${name}](${name}) — Approved plan from message ${messageSequence}.`;
+    const currentIndex = index ? decodeDocument(index.contents) : "# Session documents\n";
+    const nextIndex = currentIndex.includes(`](${name})`)
+      ? currentIndex
+      : `${currentIndex.trimEnd()}\n\n${link}\n`;
+
+    const created: string[] = [];
+    const updated: string[] = [];
+    if (!existingPlan) created.push(name);
+    if (!index) created.push(indexName);
+    else if (nextIndex !== currentIndex) updated.push(indexName);
+    if (created.length === 0 && updated.length === 0) return { created, updated };
+
+    const replacements = new Map<string, SessionDocumentSnapshot>([
+      [name.toLowerCase(), { name, contents, updatedAt: new Date().toISOString() }],
+      [indexName.toLowerCase(), { name: indexName, contents: Buffer.from(nextIndex, "utf8"), updatedAt: new Date().toISOString() }]
+    ]);
+    await this.replace(scopeId, [
+      ...documents.filter((document) => !replacements.has(document.name.toLowerCase())),
+      ...replacements.values()
+    ]);
+    return { created, updated };
+  }
+
   async prepareBtwStaging(scopeId: string, exchangeId: string): Promise<string> {
     const source = await this.snapshot(scopeId);
     const root = this.btwStagingRoot(scopeId, exchangeId);

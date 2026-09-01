@@ -55,6 +55,9 @@ describe("production bundled skill startup", () => {
       expect(installedDocumentsSkill).toContain("The session working directory is not the documents directory");
       expect(installedDocumentsSkill).toContain("Never attempt a cross-session document write");
       expect(installedDocumentsSkill).toContain("The muxpilot BTW flow is a controlled exception");
+      expect(installedDocumentsSkill).toContain("Plan mode does not make the session's documents read-only");
+      expect(installedDocumentsSkill).toContain("may autonomously create, edit, rename, and delete documents");
+      expect(installedDocumentsSkill).toContain("only after the operator selects **Implement** or **Clear context and implement**");
 
       await writeFile(join(home, "skills", "muxpilot-heavy-command-queue", "SKILL.md"), "outdated");
       expect(await syncBundledSkillForMode("prod", home)).toMatchObject({ status: "current", action: "updated" });

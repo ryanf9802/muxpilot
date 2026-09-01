@@ -2008,7 +2008,10 @@ describe("SessionManager transcript isolation", () => {
           payload: {
             type: "message",
             role: "assistant",
-            content: [{ type: "output_text", text: "<proposed_plan>\nDo it.\n</proposed_plan>" }]
+            content: [{
+              type: "output_text",
+              text: "Before\n<proposed_plan>\nDo it.\n</proposed_plan>\n<oai-mem-citation>private</oai-mem-citation>"
+            }]
           }
         }),
         JSON.stringify({
@@ -2022,8 +2025,13 @@ describe("SessionManager transcript isolation", () => {
     await utimes(path, new Date("2026-07-07T00:00:00.000Z"), new Date("2026-07-07T00:00:00.000Z"));
     harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
     harness.tmux.capturePane = async () => "› ";
+    let planNameAtSend: string | null = null;
+    let planVisibleAtSend = false;
     harness.tmux.sendKeys = async (_paneId, keys) => {
       sentKeys.push(keys);
+      if (planNameAtSend) {
+        planVisibleAtSend = (await harness.manager.readDocument(session.id, planNameAtSend)).document.content === "Do it.\n";
+      }
     };
 
     await harness.manager.discover();
@@ -2040,10 +2048,24 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.discover();
     expect(harness.manager.getSession(session.id)?.status).toBe("plan_ready");
 
+    const planMessage = await harness.db.latestPlanReadyMessage(session.id);
+    expect(planMessage).not.toBeNull();
+    planNameAtSend = `plan-${planMessage!.sequence}.md`;
+    const documentEvents: unknown[] = [];
+    const unsubscribeDocuments = harness.events.subscribe((event) => {
+      if (event.sessionId === session.id && event.type === "documents.updated") documentEvents.push(event.payload);
+    });
     const actionSession = await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
+    unsubscribeDocuments();
     expect(sentKeys).toEqual([["Down", "Enter"]]);
     expect(actionSession?.status).toBe("working");
     expect(harness.manager.getSession(session.id)?.status).toBe("working");
+    const planName = `plan-${planMessage!.sequence}.md`;
+    expect(planVisibleAtSend).toBe(true);
+    expect((await harness.manager.listDocuments(session.id)).documents.map((document) => document.name)).toEqual(["INDEX.md", planName]);
+    expect((await harness.manager.readDocument(session.id, planName)).document.content).toBe("Do it.\n");
+    expect((await harness.manager.readDocument(session.id, "INDEX.md")).document.content).toContain(`](${planName})`);
+    expect(documentEvents).toEqual([{ created: [planName, "INDEX.md"], updated: [] }]);
 
     await harness.manager.discover();
     expect(harness.manager.getSession(session.id)?.status).toBe("working");
@@ -2156,6 +2178,89 @@ describe("SessionManager transcript isolation", () => {
 
     expect(harness.manager.getSession(session.id)).toMatchObject({ status: "plan_ready", inputMode: "default" });
     expect(publishedStatuses).toEqual([]);
+    const planMessage = await harness.db.latestPlanReadyMessage(session.id);
+    expect((await harness.manager.readDocument(session.id, `plan-${planMessage!.sequence}.md`)).document.content).toBe("Do it.\n");
+    harness.db.close();
+  });
+
+  it("does not persist a proposed plan when staying in Plan mode", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "stay-in-plan-without-document.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "<proposed_plan>\nDo it.\n</proposed_plan>" }]
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.sendKeys = async () => undefined;
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
+
+    expect((await harness.manager.listDocuments(session.id)).documents).toEqual([]);
+    harness.db.close();
+  });
+
+  it("does not begin implementation when approved-plan persistence fails", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "approved-plan-persistence-failure.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-07T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "<proposed_plan>\nDo it.\n</proposed_plan>" }]
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    const sentKeys: string[][] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.sendKeys = async (_paneId, keys) => { sentKeys.push(keys); };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    const planMessage = await harness.db.latestPlanReadyMessage(session.id);
+    await harness.manager.listDocuments(session.id);
+    const scopeId = harness.manager.getSession(session.id)!.documentScopeId!;
+    await writeFile(join(harness.dir, "sessions", scopeId, "documents", `plan-${planMessage!.sequence}.md`), "# Existing\n");
+
+    await expect(harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" }))
+      .rejects.toThrow("already exists with different content");
+    expect(sentKeys).toEqual([]);
+    expect(harness.manager.getSession(session.id)?.status).toBe("plan_ready");
     harness.db.close();
   });
 
@@ -5179,6 +5284,8 @@ describe("SessionManager transcript isolation", () => {
     expect(createCalls[0]?.options.developerInstructions).toContain("agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR");
     expect(createCalls[0]?.options.developerInstructions).toContain("built-in Codex subagents share this session's scope and must not edit documents");
     expect(createCalls[0]?.options.developerInstructions).toContain("only the main parent agent verifies and updates canonical documents");
+    expect(createCalls[0]?.options.developerInstructions).toContain("As an explicit scoped exception to Plan mode's general non-mutation rule");
+    expect(createCalls[0]?.options.developerInstructions).toContain("Do not persist the current formal <proposed_plan> before operator approval");
     expect(createCalls[0]?.options.developerInstructions).toContain("A muxpilot BTW document notice inside <environment_context> is internal additive context");
     expect(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR).toMatch(/sessions\/documents-[^/]+\/documents$/);
     expect(createCalls[0]?.options.writableRoots).toContain(createCalls[0]?.options.environment?.MUXPILOT_DOCUMENTS_DIR);

@@ -340,6 +340,9 @@ export class SessionManager {
       "Use $muxpilot-documents whenever durable plans, checklists, reminders, requirements, decisions, or acceptance criteria would help.",
       "Before substantive work on each turn, and after resume or context compaction, inspect the existing documents and read INDEX.md first when present.",
       "Keep relevant documents current after material progress or decisions and before asking a question or giving a final answer.",
+      "As an explicit scoped exception to Plan mode's general non-mutation rule, the main agent may autonomously create, edit, rename, and delete files inside $MUXPILOT_DOCUMENTS_DIR whenever durable state is genuinely useful; this permission is not limited to particular document contents and does not require document work every turn.",
+      "Do not persist the current formal <proposed_plan> before operator approval; muxpilot creates a separate indexed plan document when the operator selects Implement or Clear context and implement.",
+      "Plan-mode document permission does not authorize repository changes, writes outside $MUXPILOT_DOCUMENTS_DIR, or other implementation side effects.",
       "A muxpilot BTW document notice inside <environment_context> is internal additive context, not a replacement operator request: read the named documents, reconcile them with newer user instructions, maintain INDEX.md, continue unfinished work, and do not emit a standalone acknowledgement.",
       "Document scopes are private: agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR and return structured proposed updates; built-in Codex subagents share this session's scope and must not edit documents; only the main parent agent verifies and updates canonical documents, and cross-session document writes are forbidden.",
       "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; do not store secrets or raw transcripts."
@@ -2291,6 +2294,18 @@ export class SessionManager {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
       const pane = await this.livePane(session);
+      if (action.action !== "stay_in_plan") {
+        const plan = extractLastCompleteProposedPlan(latestPlanMessage.text);
+        if (plan === null) throw new InputModeSwitchError("Pending proposed plan is incomplete");
+        const changes = await this.requireDocuments().persistApprovedPlan(
+          await this.ensureDocumentScope(session),
+          latestPlanMessage.sequence,
+          plan
+        );
+        if (changes.created.length > 0 || changes.updated.length > 0) {
+          this.publishDocumentsUpdated(sessionId, changes);
+        }
+      }
       await this.tmux.sendKeys(pane.paneId, keysForPlanAction(action.action));
       this.answeredPlanMessageIds.add(latestPlanMessage.id);
       const now = nowIso();
@@ -3482,6 +3497,25 @@ function collaborationModeFromMessage(message: ChatMessage): CollaborationMode |
 
 function isPlanReadyMessage(message: ChatMessage): boolean {
   return message.role === "assistant" && message.type === "assistant" && hasCompleteProposedPlan(message.text);
+}
+
+function extractLastCompleteProposedPlan(text: string): string | null {
+  const openTag = "<proposed_plan>";
+  const closeTag = "</proposed_plan>";
+  let cursor = 0;
+  let plan: string | null = null;
+  while (cursor < text.length) {
+    const openIndex = text.indexOf(openTag, cursor);
+    if (openIndex === -1) break;
+    const contentStart = openIndex + openTag.length;
+    const closeIndex = text.indexOf(closeTag, contentStart);
+    if (closeIndex === -1) break;
+    plan = text.slice(contentStart, closeIndex)
+      .replace(/^(?:[ \t]*\r?\n)+/, "")
+      .replace(/(?:\r?\n[ \t]*)+$/, "");
+    cursor = closeIndex + closeTag.length;
+  }
+  return plan;
 }
 
 function isPlanActionInput(text: string): boolean {

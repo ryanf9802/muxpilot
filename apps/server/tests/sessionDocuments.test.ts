@@ -42,6 +42,40 @@ describe("SessionDocumentService", () => {
     await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 413 });
   });
 
+  it("atomically persists separate approved plans and indexes them idempotently", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-approved-plan");
+    await writeFile(join(root, "documents", "notes.md"), "# Notes\n");
+
+    expect(await service.persistApprovedPlan("documents-approved-plan", 7, "# Approved\n\n- Ship")).toEqual({
+      created: ["plan-7.md", "INDEX.md"],
+      updated: []
+    });
+    expect(await service.persistApprovedPlan("documents-approved-plan", 7, "# Approved\n\n- Ship")).toEqual({
+      created: [],
+      updated: []
+    });
+    expect(await service.persistApprovedPlan("documents-approved-plan", 12, "# Next plan")).toEqual({
+      created: ["plan-12.md"],
+      updated: ["INDEX.md"]
+    });
+
+    expect((await service.read("documents-approved-plan", "plan-7.md")).document.content).toBe("# Approved\n\n- Ship\n");
+    expect((await service.read("documents-approved-plan", "notes.md")).document.content).toBe("# Notes\n");
+    expect((await service.read("documents-approved-plan", "INDEX.md")).document.content).toBe(
+      "# Session documents\n\n- [plan-7.md](plan-7.md) — Approved plan from message 7.\n\n- [plan-12.md](plan-12.md) — Approved plan from message 12.\n"
+    );
+  });
+
+  it("does not overwrite a conflicting approved-plan document", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-approved-plan-conflict");
+    await writeFile(join(root, "documents", "plan-7.md"), "# Different\n");
+
+    await expect(service.persistApprovedPlan("documents-approved-plan-conflict", 7, "# Approved"))
+      .rejects.toMatchObject({ statusCode: 409 });
+  });
+
   it("applies created and updated BTW documents without replacing concurrent untouched files", async () => {
     const service = await fixture();
     const root = await service.ensureScope("documents-btw");
