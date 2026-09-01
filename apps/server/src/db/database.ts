@@ -149,6 +149,43 @@ interface QueuedInputRow {
   sent_at: string | null;
 }
 
+export type AppServerRequestState = "pending" | "responded" | "resolved";
+
+export interface PersistedAppServerRequest {
+  sessionId: string;
+  requestId: string | number;
+  method: string;
+  params: unknown;
+  threadId: string;
+  turnId: string;
+  state: AppServerRequestState;
+  response: unknown | null;
+  receivedAt: string;
+  lastSeenAt: string;
+  respondedAt: string | null;
+  resolvedAt: string | null;
+}
+
+export type ReceivedAppServerRequest = Pick<
+  PersistedAppServerRequest,
+  "sessionId" | "requestId" | "method" | "params" | "threadId" | "turnId" | "receivedAt" | "lastSeenAt"
+>;
+
+interface AppServerRequestRow {
+  session_id: string;
+  request_id_json: string;
+  method: string;
+  params_json: string;
+  thread_id: string;
+  turn_id: string;
+  state: AppServerRequestState;
+  response_json: string | null;
+  received_at: string;
+  last_seen_at: string;
+  responded_at: string | null;
+  resolved_at: string | null;
+}
+
 interface BtwExchangeRow {
   id: string;
   session_id: string;
@@ -671,6 +708,31 @@ export class AppDatabase {
     return this.call("appendQueuedInput", input) as Promise<void>;
   }
 
+  upsertAppServerRequest(request: ReceivedAppServerRequest): Promise<PersistedAppServerRequest> {
+    return this.call("upsertAppServerRequest", request) as Promise<PersistedAppServerRequest>;
+  }
+
+  listUnresolvedAppServerRequests(sessionId: string): Promise<PersistedAppServerRequest[]> {
+    return this.call("listUnresolvedAppServerRequests", sessionId) as Promise<PersistedAppServerRequest[]>;
+  }
+
+  claimAppServerRequestResponse(
+    sessionId: string,
+    requestId: string | number,
+    response: unknown,
+    respondedAt: string
+  ): Promise<PersistedAppServerRequest | null> {
+    return this.call("claimAppServerRequestResponse", sessionId, requestId, response, respondedAt) as Promise<PersistedAppServerRequest | null>;
+  }
+
+  resolveAppServerRequest(sessionId: string, requestId: string | number, resolvedAt: string): Promise<boolean> {
+    return this.call("resolveAppServerRequest", sessionId, requestId, resolvedAt) as Promise<boolean>;
+  }
+
+  resolveAppServerTurnRequests(sessionId: string, threadId: string, turnId: string, resolvedAt: string): Promise<number> {
+    return this.call("resolveAppServerTurnRequests", sessionId, threadId, turnId, resolvedAt) as Promise<number>;
+  }
+
   updateQueuedInput(input: QueuedInput): Promise<void> {
     return this.call("updateQueuedInput", input) as Promise<void>;
   }
@@ -901,6 +963,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE app_server_requests SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE btw_exchanges SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     const waitRows = this.db.prepare("SELECT actor_session_id, wait_json FROM agent_session_waits")
@@ -2363,6 +2426,82 @@ export class SyncAppDatabase {
       );
   }
 
+  upsertAppServerRequest(request: ReceivedAppServerRequest): PersistedAppServerRequest {
+    validateAppServerRequest(request);
+    const requestIdJson = appServerRequestIdJson(request.requestId);
+    this.db.prepare(
+      `INSERT INTO app_server_requests
+        (session_id, request_id_json, method, params_json, thread_id, turn_id, state, response_json,
+         received_at, last_seen_at, responded_at, resolved_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?, NULL, NULL)
+       ON CONFLICT(session_id, request_id_json) DO UPDATE SET
+        method=excluded.method,
+        params_json=excluded.params_json,
+        thread_id=excluded.thread_id,
+        turn_id=excluded.turn_id,
+        last_seen_at=excluded.last_seen_at`
+    ).run(
+      request.sessionId,
+      requestIdJson,
+      request.method,
+      serializeAppServerJson(request.params, "params"),
+      request.threadId,
+      request.turnId,
+      request.receivedAt,
+      request.lastSeenAt
+    );
+    return this.requireAppServerRequest(request.sessionId, request.requestId);
+  }
+
+  listUnresolvedAppServerRequests(sessionId: string): PersistedAppServerRequest[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM app_server_requests
+       WHERE session_id = ? AND state != 'resolved'
+       ORDER BY received_at ASC, request_id_json ASC`
+    ).all(sessionId) as unknown as AppServerRequestRow[];
+    return rows.map(hydrateAppServerRequest);
+  }
+
+  claimAppServerRequestResponse(
+    sessionId: string,
+    requestId: string | number,
+    response: unknown,
+    respondedAt: string
+  ): PersistedAppServerRequest | null {
+    const result = this.db.prepare(
+      `UPDATE app_server_requests
+       SET state = 'responded', response_json = ?, responded_at = ?
+       WHERE session_id = ? AND request_id_json = ? AND state = 'pending'`
+    ).run(serializeAppServerJson(response, "response"), respondedAt, sessionId, appServerRequestIdJson(requestId));
+    return result.changes === 1 ? this.requireAppServerRequest(sessionId, requestId) : null;
+  }
+
+  resolveAppServerRequest(sessionId: string, requestId: string | number, resolvedAt: string): boolean {
+    const result = this.db.prepare(
+      `UPDATE app_server_requests
+       SET state = 'resolved', resolved_at = ?
+       WHERE session_id = ? AND request_id_json = ? AND state != 'resolved'`
+    ).run(resolvedAt, sessionId, appServerRequestIdJson(requestId));
+    return result.changes === 1;
+  }
+
+  resolveAppServerTurnRequests(sessionId: string, threadId: string, turnId: string, resolvedAt: string): number {
+    const result = this.db.prepare(
+      `UPDATE app_server_requests
+       SET state = 'resolved', resolved_at = ?
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND state != 'resolved'`
+    ).run(resolvedAt, sessionId, threadId, turnId);
+    return Number(result.changes);
+  }
+
+  private requireAppServerRequest(sessionId: string, requestId: string | number): PersistedAppServerRequest {
+    const row = this.db.prepare(
+      "SELECT * FROM app_server_requests WHERE session_id = ? AND request_id_json = ?"
+    ).get(sessionId, appServerRequestIdJson(requestId)) as AppServerRequestRow | undefined;
+    if (!row) throw new Error(`App-server request was not persisted: ${sessionId}`);
+    return hydrateAppServerRequest(row);
+  }
+
   updateQueuedInput(input: QueuedInput): void {
     this.db
       .prepare(
@@ -2700,6 +2839,23 @@ export class SyncAppDatabase {
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS app_server_requests (
+        session_id TEXT NOT NULL,
+        request_id_json TEXT NOT NULL,
+        method TEXT NOT NULL,
+        params_json TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'responded', 'resolved')),
+        response_json TEXT,
+        received_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        responded_at TEXT,
+        resolved_at TEXT,
+        PRIMARY KEY(session_id, request_id_json),
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS btw_exchanges (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
@@ -2795,6 +2951,7 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
       CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_app_server_requests_session_state ON app_server_requests(session_id, state, received_at);
       CREATE INDEX IF NOT EXISTS idx_btw_exchanges_session_created ON btw_exchanges(session_id, created_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_btw_exchanges_one_running ON btw_exchanges(session_id) WHERE status = 'running';
       CREATE INDEX IF NOT EXISTS idx_notification_rules_session ON notification_rules(session_id);
@@ -3253,6 +3410,50 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     updatedAt: row.updated_at,
     sentAt: row.sent_at
   };
+}
+
+function hydrateAppServerRequest(row: AppServerRequestRow): PersistedAppServerRequest {
+  return {
+    sessionId: row.session_id,
+    requestId: JSON.parse(row.request_id_json) as string | number,
+    method: row.method,
+    params: JSON.parse(row.params_json) as unknown,
+    threadId: row.thread_id,
+    turnId: row.turn_id,
+    state: row.state,
+    response: row.response_json === null ? null : JSON.parse(row.response_json) as unknown,
+    receivedAt: row.received_at,
+    lastSeenAt: row.last_seen_at,
+    respondedAt: row.responded_at,
+    resolvedAt: row.resolved_at
+  };
+}
+
+function validateAppServerRequest(request: ReceivedAppServerRequest): void {
+  for (const [name, value] of [
+    ["sessionId", request.sessionId],
+    ["method", request.method],
+    ["threadId", request.threadId],
+    ["turnId", request.turnId],
+    ["receivedAt", request.receivedAt],
+    ["lastSeenAt", request.lastSeenAt]
+  ] as const) {
+    if (!value.trim()) throw new Error(`App-server request ${name} must not be empty`);
+  }
+  appServerRequestIdJson(request.requestId);
+  serializeAppServerJson(request.params, "params");
+}
+
+function appServerRequestIdJson(requestId: string | number): string {
+  if (typeof requestId === "string") return JSON.stringify(requestId);
+  if (typeof requestId === "number" && Number.isSafeInteger(requestId)) return JSON.stringify(requestId);
+  throw new Error("App-server request id must be a string or safe integer");
+}
+
+function serializeAppServerJson(value: unknown, name: string): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) throw new Error(`App-server request ${name} must be JSON serializable`);
+  return serialized;
 }
 
 function hydrateBtwExchange(row: BtwExchangeRow): BtwExchange {
