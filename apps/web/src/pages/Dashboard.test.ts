@@ -32,6 +32,7 @@ describe("DASHBOARD_STATUSES", () => {
     expect(DASHBOARD_STATUSES).toContain("planning");
     expect(DASHBOARD_STATUSES).toContain("running");
     expect(DASHBOARD_STATUSES).toContain("plan_ready");
+    expect(DASHBOARD_STATUSES).toContain("blocked");
     expect(DASHBOARD_STATUSES).toContain("input_failed");
   });
 });
@@ -177,7 +178,7 @@ describe("SessionCard", () => {
     expect(html).toContain("1 need attention");
   });
 
-  it("keeps a blocked child visible without marking its parent as needing attention", () => {
+  it("marks a blocked child as parent attention", () => {
     const parent = testSession({ id: "parent", paneId: "%111", windowName: "parent", status: "waiting" });
     const child = testSession({
       id: "child",
@@ -197,10 +198,9 @@ describe("SessionCard", () => {
 
     const html = renderSessionCard(parent, [], null, [child]);
 
-    expect(html).toContain('aria-label="waiting"');
+    expect(html).toContain('aria-label="blocked · from child"');
     expect(html).toContain('aria-label="blocked"');
-    expect(html).toContain("quiet");
-    expect(html).not.toContain("need attention");
+    expect(html).toContain("1 need attention");
   });
 
   it("hides completed descendants behind a subdued disclosure", () => {

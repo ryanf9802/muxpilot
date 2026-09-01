@@ -1,4 +1,10 @@
-import { operatorSessionStatusPresentation, type ManagedSession, type SessionDisplayStatus } from "@muxpilot/core";
+import {
+  operatorAttentionDescendants,
+  operatorSessionStatusPresentation,
+  type ManagedSession,
+  type OperatorActionableAgentStatus,
+  type SessionDisplayStatus
+} from "@muxpilot/core";
 
 export type SessionStatusSeverity = "red" | "yellow" | "green";
 
@@ -30,6 +36,51 @@ export function isSessionStatusSeverity(value: string | null): value is SessionS
 }
 
 export const sessionStatusPresentation = operatorSessionStatusPresentation;
+
+export interface ChildSessionAttentionItem {
+  session: ManagedSession;
+  status: OperatorActionableAgentStatus;
+  detail: string;
+}
+
+const CHILD_ATTENTION_PRIORITY: Record<OperatorActionableAgentStatus, number> = {
+  approval: 0,
+  question: 1,
+  input_failed: 2,
+  blocked: 3,
+  plan_ready: 4
+};
+
+export function childSessionAttentionItems(parent: ManagedSession, sessions: readonly ManagedSession[]): ChildSessionAttentionItem[] {
+  return operatorAttentionDescendants(parent, sessions)
+    .map((session) => ({ session, status: session.status, detail: childAttentionDetail(session) }))
+    .sort((left, right) =>
+      CHILD_ATTENTION_PRIORITY[left.status] - CHILD_ATTENTION_PRIORITY[right.status]
+      || sessionActivityTime(right.session) - sessionActivityTime(left.session)
+      || left.session.id.localeCompare(right.session.id)
+    );
+}
+
+function sessionActivityTime(session: ManagedSession): number {
+  const timestamp = session.lastActivityAt ? Date.parse(session.lastActivityAt) : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+export function childAttentionDetail(session: ManagedSession): string {
+  if (session.status === "approval") return "Approval required";
+  if (session.status === "question") return "Answer requested";
+  if (session.status === "plan_ready") return "Plan decision required";
+  if (session.status === "input_failed") return "Input delivery needs recovery";
+  const contextBlocked = Boolean(session.agentOwnership?.contextPausedAt);
+  const budgetBlocked = Boolean(session.agentOwnership?.budgetExhaustedAt);
+  if (contextBlocked && budgetBlocked) return "High context and work-token budget need attention";
+  if (contextBlocked) {
+    const percent = session.contextUsage?.contextPercent;
+    return typeof percent === "number" && Number.isFinite(percent) ? `Paused at ${Math.round(percent)}% context` : "Paused by the high-context guard";
+  }
+  if (budgetBlocked) return "Work-token budget exhausted";
+  return "Child session is blocked";
+}
 
 export function countSessionStatuses(sessions: readonly ManagedSession[]): SessionStoplightCounts {
   const counts: SessionStoplightCounts = { red: 0, yellow: 0, green: 0 };

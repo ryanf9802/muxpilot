@@ -29,6 +29,7 @@ import type {
 import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
+  AgentSessionError,
   CreateSessionError,
   FastModeSwitchError,
   InputDeliveryError,
@@ -143,6 +144,12 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
+  z.object({ type: z.literal("acknowledgeAgentHighContext"), reason: z.string().trim().min(1).max(1_000) }),
+  z.object({
+    type: z.literal("extendAgentBudget"),
+    additionalTokens: z.number().int().min(1).max(2_000_000),
+    reason: z.string().trim().min(1).max(1_000)
+  }),
   z.object({ type: z.literal("retryInputDelivery") }),
   z.object({ type: z.literal("dismissInputDeliveryFailure") }),
   z.object({ type: z.literal("rename"), name: sessionNameSchema }),
@@ -713,6 +720,9 @@ export function registerRoutes(
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (error instanceof FastModeSwitchError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      if (error instanceof AgentSessionError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       throw error;

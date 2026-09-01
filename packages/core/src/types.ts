@@ -841,6 +841,8 @@ export type SessionAction =
   | { type: "setFastMode"; enabled: boolean }
   | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }
+  | { type: "acknowledgeAgentHighContext"; reason: string }
+  | { type: "extendAgentBudget"; additionalTokens: number; reason: string }
   | { type: "retryInputDelivery" }
   | { type: "dismissInputDeliveryFailure" }
   | { type: "rename"; name: string }

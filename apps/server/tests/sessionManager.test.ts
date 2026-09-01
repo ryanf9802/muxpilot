@@ -6025,6 +6025,76 @@ describe("agent-managed session hierarchy", () => {
     await harness.db.close();
   });
 
+  it("lets the operator acknowledge a high-context guard for the next turn", async () => {
+    const harness = await createHarness();
+    const parent = agentHierarchySession("guard-parent");
+    const child = agentHierarchySession("guard-child");
+    await harness.db.upsertSession(parent, "2026-08-31T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-31T00:00:00.000Z");
+    const claimed = await harness.manager.agentClaim(parent.id, child.id);
+    await harness.db.setSessionAgentOwnership(child.id, {
+      ...claimed.agentOwnership!,
+      contextPausedAt: "2026-08-31T00:01:00.000Z"
+    }, "2026-08-31T00:01:00.000Z");
+    await harness.db.setSessionStatus(child.id, "blocked", "2026-08-31T00:01:00.000Z");
+    const events: string[] = [];
+    harness.events.subscribe((event) => events.push(`${event.type}:${event.sessionId}`));
+
+    const updated = await harness.manager.act(child.id, {
+      type: "acknowledgeAgentHighContext",
+      reason: "Operator accepts the next high-context turn"
+    });
+
+    expect(updated).toMatchObject({
+      status: "waiting",
+      agentOwnership: { contextPausedAt: null, highContextApprovedAt: expect.any(String) }
+    });
+    expect(events).toContain(`session.updated:${child.id}`);
+    await expect(harness.manager.act(child.id, {
+      type: "acknowledgeAgentHighContext",
+      reason: "stale retry"
+    })).rejects.toThrow("not paused");
+    await harness.db.close();
+  });
+
+  it("extends an exhausted budget but preserves another active guard", async () => {
+    const harness = await createHarness();
+    const parent = agentHierarchySession("budget-parent");
+    const child = agentHierarchySession("budget-child");
+    await harness.db.upsertSession(parent, "2026-08-31T00:00:00.000Z");
+    await harness.db.upsertSession(child, "2026-08-31T00:00:00.000Z");
+    const claimed = await harness.manager.agentClaim(parent.id, child.id);
+    await harness.db.setSessionAgentOwnership(child.id, {
+      ...claimed.agentOwnership!,
+      budgetExhaustedAt: "2026-08-31T00:01:00.000Z",
+      contextPausedAt: "2026-08-31T00:01:00.000Z"
+    }, "2026-08-31T00:01:00.000Z");
+    await harness.db.setSessionStatus(child.id, "blocked", "2026-08-31T00:01:00.000Z");
+
+    const budgetUpdated = await harness.manager.act(child.id, {
+      type: "extendAgentBudget",
+      additionalTokens: 500_000,
+      reason: "Finish the delegated implementation"
+    });
+
+    expect(budgetUpdated).toMatchObject({
+      status: "blocked",
+      agentOwnership: {
+        workTokenBudget: 1_500_000,
+        budgetExhaustedAt: null,
+        contextPausedAt: "2026-08-31T00:01:00.000Z"
+      }
+    });
+    const unblocked = await harness.manager.act(child.id, {
+      type: "acknowledgeAgentHighContext",
+      reason: "Continue after extending the budget"
+    });
+    expect(unblocked).toMatchObject({ status: "waiting" });
+    await expect(harness.manager.agentExtendBudget(parent.id, child.id, 2_000_001, "too much"))
+      .rejects.toThrow("between 1 and 2,000,000");
+    await harness.db.close();
+  });
+
   it("refuses agent creation and claims when session scopes are unavailable", async () => {
     const harness = await createHarness({ sessionScopesAvailable: false });
     const root = agentHierarchySession("scope-root");

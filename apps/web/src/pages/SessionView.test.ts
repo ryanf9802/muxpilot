@@ -14,12 +14,14 @@ import {
 import {
   activeSkillToken,
   applyPlanActionResponse,
+  AgentGuardBanner,
   ApprovalBanner,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
   blurActiveElementForVimSubmit,
   buildQuestionAnswerRequest,
   clearQuestionAnswerDraft,
+  ChildSessionAttentionTray,
   composerLockReason,
   composerDraftStorageKey,
   composerHasContent,
@@ -127,6 +129,7 @@ import {
   UserText
 } from "./SessionView.js";
 import { ApiError } from "../api/client.js";
+import { childSessionAttentionItems } from "../utils/sessionStatus.js";
 
 describe("InputDeliveryFailureBanner", () => {
   it("offers retry and dismissal with the persisted delivery failure detail", () => {
@@ -156,6 +159,76 @@ describe("InputDeliveryFailureBanner", () => {
     expect(html).toContain("Retrying…");
     expect(html).toContain("Retry failed");
     expect(html.match(/disabled/g)).toHaveLength(2);
+  });
+});
+
+describe("child session attention", () => {
+  it("renders a pinned navigation row for an actionable descendant", () => {
+    const parent = managedSession({ id: "parent" });
+    const child = managedSession({
+      id: "child",
+      status: "question",
+      tmux: { ...managedSession().tmux, windowName: "research-child" },
+      agentOwnership: {
+        parentSessionId: parent.id,
+        rootSessionId: parent.id,
+        origin: "created",
+        createdAt: "2026-08-31T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null
+      }
+    });
+    const html = renderToStaticMarkup(createElement(ChildSessionAttentionTray, {
+      items: childSessionAttentionItems(parent, [parent, child]),
+      onOpen: () => undefined
+    }));
+
+    expect(html).toContain('aria-label="1 child session needs attention"');
+    expect(html).toContain("research-child");
+    expect(html).toContain("Answer requested");
+    expect(html).toContain("Open child");
+  });
+
+  it("renders dedicated controls for both active agent guards", () => {
+    const session = managedSession({
+      status: "blocked",
+      contextUsage: {
+        activeTokens: 86_000,
+        contextWindowTokens: 100_000,
+        contextPercent: 86,
+        lifetimeInputTokens: 100_000,
+        lifetimeCachedInputTokens: 0,
+        lifetimeOutputTokens: 10_000,
+        lifetimeReasoningTokens: 5_000,
+        lifetimeTotalTokens: 115_000,
+        lifetimeWorkTokens: 115_000,
+        sampledAt: "2026-08-31T00:00:00.000Z"
+      },
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created",
+        createdAt: "2026-08-31T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 100_000,
+        completedAt: null,
+        contextPausedAt: "2026-08-31T00:01:00.000Z",
+        budgetExhaustedAt: "2026-08-31T00:01:00.000Z"
+      }
+    });
+    const html = renderToStaticMarkup(createElement(AgentGuardBanner, {
+      session,
+      busyAction: null,
+      error: "",
+      onAction: () => undefined
+    }));
+
+    expect(html).toContain("Active context is 86%");
+    expect(html).toContain("Allow next high-context turn");
+    expect(html).toContain("Work-token budget exhausted");
+    expect(html).toContain('value="1000000"');
+    expect(html).toContain("Extend budget");
   });
 });
 

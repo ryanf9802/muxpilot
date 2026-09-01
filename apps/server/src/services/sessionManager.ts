@@ -1727,20 +1727,75 @@ export class SessionManager {
   }
 
   async agentExtendBudget(actorSessionId: string, childSessionId: string, additionalTokens: number, reason: string): Promise<ManagedSession> {
-    const child = await this.requireAgentControl(actorSessionId, childSessionId);
-    const ownership = child.agentOwnership!;
+    return this.withAgentMutation(async () => {
+      const child = await this.requireAgentControl(actorSessionId, childSessionId);
+      return this.extendAgentBudget(child, additionalTokens, reason, `session:${actorSessionId}`, false);
+    });
+  }
+
+  async operatorAcknowledgeAgentHighContext(sessionId: string, reason: string): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const child = requireLiveAgentSession(await this.db.getSession(sessionId));
+      const ownership = child.agentOwnership!;
+      if (!ownership.contextPausedAt) throw new AgentSessionError("This session is not paused by the high-context guard");
+      const normalizedReason = requireAgentGuardReason(reason);
+      const now = nowIso();
+      let updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
+        ...ownership,
+        contextPausedAt: null,
+        highContextApprovedAt: now
+      }, now));
+      updated = await this.restoreAgentGuardStatus(updated, now);
+      await this.db.addAudit("local", "acknowledge_agent_high_context", child.id, normalizedReason, now);
+      this.publish("session.updated", child.id, updated);
+      return updated;
+    });
+  }
+
+  async operatorExtendAgentBudget(sessionId: string, additionalTokens: number, reason: string): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const child = requireLiveAgentSession(await this.db.getSession(sessionId));
+      if (!child.agentOwnership?.budgetExhaustedAt) throw new AgentSessionError("This session has not exhausted its work-token budget");
+      return this.extendAgentBudget(child, additionalTokens, reason, "local", true);
+    });
+  }
+
+  private async extendAgentBudget(
+    child: ManagedSession,
+    additionalTokens: number,
+    reason: string,
+    actor: string,
+    requireExhausted: boolean
+  ): Promise<ManagedSession> {
+    const ownership = child.agentOwnership;
+    if (!ownership || ownership.completedAt || child.archived || child.status === "missing") {
+      throw new AgentSessionError("Budget extensions require a live agent-managed session");
+    }
+    if (requireExhausted && !ownership.budgetExhaustedAt) throw new AgentSessionError("This session has not exhausted its work-token budget");
     if (!Number.isSafeInteger(additionalTokens) || additionalTokens < 1 || additionalTokens > 2_000_000) {
       throw new AgentSessionError("Budget extension must be between 1 and 2,000,000 work tokens");
     }
-    if (!reason.trim()) throw new AgentSessionError("Budget extensions require a reason");
-    const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
+    const normalizedReason = requireAgentGuardReason(reason);
+    const now = nowIso();
+    let updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
       ...ownership,
       workTokenBudget: ownership.workTokenBudget + additionalTokens,
       budgetExhaustedAt: null
-    }, nowIso()));
-    await this.db.addAudit(`session:${actorSessionId}`, "extend_agent_budget", child.id, `${additionalTokens}:${reason.trim()}`, nowIso());
+    }, now));
+    updated = await this.restoreAgentGuardStatus(updated, now);
+    await this.db.addAudit(actor, "extend_agent_budget", child.id, `${additionalTokens}:${normalizedReason}`, now);
     this.publish("session.updated", child.id, updated);
     return updated;
+  }
+
+  private async restoreAgentGuardStatus(session: ManagedSession, updatedAt: string): Promise<ManagedSession> {
+    const ownership = session.agentOwnership;
+    const nextStatus = ownership?.budgetExhaustedAt || ownership?.contextPausedAt
+      ? "blocked"
+      : session.status === "blocked" ? "waiting" : session.status;
+    if (nextStatus === session.status) return session;
+    await this.db.setSessionStatus(session.id, nextStatus, updatedAt);
+    return requireSession(await this.db.getSession(session.id));
   }
 
   async requireAgentControl(actorSessionId: string, targetSessionId: string): Promise<ManagedSession> {
@@ -2219,6 +2274,12 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const session = requireSession(await this.db.getSession(sessionId));
+    if (action.type === "acknowledgeAgentHighContext") {
+      return this.operatorAcknowledgeAgentHighContext(sessionId, action.reason);
+    }
+    if (action.type === "extendAgentBudget") {
+      return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
+    }
     if (action.type === "interrupt") {
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
       await this.tmux.interrupt(session.tmux.paneId);
@@ -4215,6 +4276,20 @@ function requireSession(session: ManagedSession | null): ManagedSession {
   if (!session) throw new Error("Session not found");
   if (session.status === "missing") throw new Error("Session is no longer available in tmux");
   return session;
+}
+
+function requireLiveAgentSession(session: ManagedSession | null): ManagedSession {
+  if (!session || !session.agentOwnership || session.agentOwnership.completedAt || session.archived || session.status === "missing") {
+    throw new AgentSessionError("This action requires a live agent-managed session");
+  }
+  return session;
+}
+
+function requireAgentGuardReason(reason: string): string {
+  const normalized = reason.trim();
+  if (!normalized) throw new AgentSessionError("Agent guard changes require a reason");
+  if (normalized.length > 1_000) throw new AgentSessionError("Agent guard reasons cannot exceed 1,000 characters");
+  return normalized;
 }
 
 async function requireExistingDirectory(cwd: string): Promise<string> {

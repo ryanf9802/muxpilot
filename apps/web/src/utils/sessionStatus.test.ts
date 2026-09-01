@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ManagedSession, SessionStatus } from "@muxpilot/core";
-import { countSessionStatuses, SESSION_STATUS_RECONCILE_INTERVAL_MS, sessionStatusPresentation, sessionStatusesForSeverity, sessionStatusSeverity } from "./sessionStatus.js";
+import { childSessionAttentionItems, countSessionStatuses, SESSION_STATUS_RECONCILE_INTERVAL_MS, sessionStatusPresentation, sessionStatusesForSeverity, sessionStatusSeverity } from "./sessionStatus.js";
 
 it("uses a 30-second visible-session fallback cadence", () => {
   expect(SESSION_STATUS_RECONCILE_INTERVAL_MS).toBe(30_000);
@@ -82,16 +82,43 @@ describe("countSessionStatuses", () => {
     expect(sessionStatusPresentation(child, [root, child]).status).toBe("completed");
   });
 
-  it("keeps a live blocked child visible without making the root count red", () => {
+  it("counts a live blocked child as root attention", () => {
     const root = session("root", "waiting");
     const child = {
       ...session("child", "blocked"),
       agentOwnership: ownership(root.id)
     };
 
-    expect(countSessionStatuses([root, child])).toEqual({ red: 0, yellow: 0, green: 1 });
-    expect(sessionStatusPresentation(root, [root, child]).status).toBe("waiting");
+    expect(countSessionStatuses([root, child])).toEqual({ red: 1, yellow: 0, green: 0 });
+    expect(sessionStatusPresentation(root, [root, child]).status).toBe("blocked");
     expect(sessionStatusPresentation(child, [root, child]).status).toBe("blocked");
+  });
+});
+
+describe("childSessionAttentionItems", () => {
+  it("returns actionable descendants with guard-specific details in priority order", () => {
+    const root = session("root", "waiting");
+    const blocked = {
+      ...session("blocked", "blocked"),
+      contextUsage: { contextPercent: 86 },
+      agentOwnership: { ...ownership(root.id), contextPausedAt: "2026-08-25T00:01:00.000Z" }
+    } as ManagedSession;
+    const approval = {
+      ...session("approval", "approval"),
+      agentOwnership: ownership(root.id)
+    };
+    const completed = {
+      ...session("completed", "question"),
+      agentOwnership: { ...ownership(root.id), completedAt: "2026-08-25T00:02:00.000Z" }
+    };
+
+    expect(childSessionAttentionItems(root, [root, blocked, approval, completed]).map((item) => ({
+      id: item.session.id,
+      detail: item.detail
+    }))).toEqual([
+      { id: "approval", detail: "Approval required" },
+      { id: "blocked", detail: "Paused at 86% context" }
+    ]);
   });
 });
 

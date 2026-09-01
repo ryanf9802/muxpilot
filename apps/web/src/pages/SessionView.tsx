@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowUpToLine,
   Check,
+  ChevronRight,
   Clock3,
   Copy,
   FileText,
@@ -116,7 +117,7 @@ import { Modal } from "../components/Modal.js";
 import { copyText } from "../utils/clipboard.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
-import { sessionStatusPresentation } from "../utils/sessionStatus.js";
+import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
 
 const MESSAGE_PAGE_SIZE = 80;
@@ -1171,6 +1172,7 @@ export function SessionView() {
   const [submitBusy, setSubmitBusy] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputDeliveryError, setInputDeliveryError] = useState("");
+  const [agentGuardError, setAgentGuardError] = useState("");
   const [sessionLoadError, setSessionLoadError] = useState("");
   const [sessionLoadRetrying, setSessionLoadRetrying] = useState(false);
   const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
@@ -1273,6 +1275,10 @@ export function SessionView() {
   const firstSequence = useMemo(() => transcriptItems[0]?.firstSequence ?? 0, [transcriptItems]);
   lastSequenceRef.current = lastSequence;
   const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages, suppressedPlanMessageId), [loadedMessages, suppressedPlanMessageId]);
+  const childAttention = useMemo(
+    () => session ? childSessionAttentionItems(session, [session, ...shellSessions.filter((candidate) => candidate.id !== session.id)]) : [],
+    [session, shellSessions]
+  );
   const showWorkingIndicator = !session?.transcriptSyncing && shouldShowWorkingIndicator(session?.status, hasMoreAfter);
   const showQueuedIndicator = !session?.transcriptSyncing && shouldShowQueuedIndicator(session?.status, hasMoreAfter);
   const showTranscriptSyncIndicator = session?.transcriptSyncing === true && !hasMoreAfter;
@@ -1309,6 +1315,7 @@ export function SessionView() {
     showQueuedIndicator ? "queued" : "",
     question && !questionRenderedInline ? `question:${question.messageId}` : "",
     approval ? `approval:${approval.id}` : "",
+    childAttention.map((item) => `${item.session.id}:${item.status}`).join(","),
     queuedInputs.map((input) => `${input.id}:${input.status}`).join(","),
     hasMoreAfter ? "newer" : ""
   ].join("\0");
@@ -1590,6 +1597,7 @@ export function SessionView() {
       setPlanActionError("");
       setSubmitBusy(false);
       setActionBusy(null);
+      setAgentGuardError("");
       pendingFastModeRef.current = null;
       setInputModeError("");
       setFastModeError("");
@@ -2416,6 +2424,24 @@ export function SessionView() {
     }
   }
 
+  async function resolveAgentGuard(action: Extract<SessionAction, { type: "acknowledgeAgentHighContext" | "extendAgentBudget" }>) {
+    if (actionBusy) return;
+    const targetId = id;
+    const token = requestTokenRef.current;
+    setActionBusy(action.type);
+    setAgentGuardError("");
+    try {
+      const response = await api.action(targetId, action);
+      if (!isCurrentRequest(targetId, token)) return;
+      if (response.session) setSession(response.session);
+      void refreshSessionStoplight().catch(() => undefined);
+    } catch (error) {
+      if (isCurrentRequest(targetId, token)) setAgentGuardError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (isCurrentRequest(targetId, token)) setActionBusy(null);
+    }
+  }
+
   function killSession() {
     if (actionBusy || !confirm("Kill this tmux pane?")) return;
     const targetId = id;
@@ -2915,16 +2941,27 @@ export function SessionView() {
         ) : null}
       </div>
 
-      {approval ? (
-        <ApprovalBanner
-          approval={approval}
-          busy={approvalBusy}
-          disabled={readySession.initializing === true}
-          error={approvalError}
-          onDecision={resolveApproval}
-        />
-      ) : (
-        <div className="composer-stack">
+      <div className="session-input-stack">
+        {childAttention.length > 0 ? (
+          <ChildSessionAttentionTray items={childAttention} onOpen={(sessionId) => navigate(`/sessions/${sessionId}`)} />
+        ) : null}
+        {approval ? (
+          <ApprovalBanner
+            approval={approval}
+            busy={approvalBusy}
+            disabled={readySession.initializing === true}
+            error={approvalError}
+            onDecision={resolveApproval}
+          />
+        ) : readySession.status === "blocked" && readySession.agentOwnership ? (
+          <AgentGuardBanner
+            session={readySession}
+            busyAction={actionBusy}
+            error={agentGuardError}
+            onAction={(action) => void resolveAgentGuard(action)}
+          />
+        ) : (
+          <div className="composer-stack">
           {queuedInputs.length ? (
             <QueuedInputList
               inputs={queuedInputs}
@@ -2990,8 +3027,9 @@ export function SessionView() {
               {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
             </button>
           </form>
-        </div>
-      )}
+          </div>
+        )}
+      </div>
       {gitPanelOpen && readyWorkspace ? (
         <GitWorkspacePanel
           workspace={readyWorkspace}
@@ -3028,6 +3066,130 @@ export function InputDeliveryFailureBanner({
         </button>
         <button type="button" disabled={Boolean(busyAction)} onClick={onDismiss}>Dismiss</button>
       </div>
+    </section>
+  );
+}
+
+export function ChildSessionAttentionTray({
+  items,
+  onOpen
+}: {
+  items: ChildSessionAttentionItem[];
+  onOpen: (sessionId: string) => void;
+}) {
+  const label = items.length === 1 ? "1 child session needs attention" : `${items.length} child sessions need attention`;
+  return (
+    <section className="child-attention-tray" aria-label={label} aria-live="polite">
+      <div className="child-attention-heading">
+        <AlertTriangle size={17} aria-hidden="true" />
+        <strong>{label}</strong>
+      </div>
+      <div className="child-attention-list">
+        {items.map((item) => (
+          <button
+            key={item.session.id}
+            className="child-attention-item"
+            type="button"
+            onClick={() => onOpen(item.session.id)}
+            aria-label={`Open ${sessionDisplayName(item.session)}: ${item.detail}`}
+          >
+            <span className="child-attention-copy">
+              <strong>{sessionDisplayName(item.session)}</strong>
+              <small>{item.detail}</small>
+            </span>
+            <StatusPill status={item.status} />
+            <span className="child-attention-open">Open child</span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+type AgentGuardAction = Extract<SessionAction, { type: "acknowledgeAgentHighContext" | "extendAgentBudget" }>;
+
+export function AgentGuardBanner({
+  session,
+  busyAction,
+  error,
+  onAction
+}: {
+  session: ManagedSession;
+  busyAction: SessionAction["type"] | null;
+  error: string;
+  onAction: (action: AgentGuardAction) => void;
+}) {
+  const [contextReason, setContextReason] = useState("");
+  const [budgetReason, setBudgetReason] = useState("");
+  const [additionalTokens, setAdditionalTokens] = useState("1000000");
+  const contextBlocked = Boolean(session.agentOwnership?.contextPausedAt);
+  const budgetBlocked = Boolean(session.agentOwnership?.budgetExhaustedAt);
+  const parsedTokens = Number(additionalTokens);
+  const tokensValid = Number.isSafeInteger(parsedTokens) && parsedTokens >= 1 && parsedTokens <= 2_000_000;
+  const contextPercent = session.contextUsage?.contextPercent;
+
+  function acknowledgeContext(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!contextReason.trim() || busyAction) return;
+    onAction({ type: "acknowledgeAgentHighContext", reason: contextReason.trim() });
+  }
+
+  function extendBudget(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!budgetReason.trim() || !tokensValid || busyAction) return;
+    onAction({ type: "extendAgentBudget", additionalTokens: parsedTokens, reason: budgetReason.trim() });
+  }
+
+  return (
+    <section className="agent-guard-banner" role="alert">
+      <div className="agent-guard-heading">
+        <AlertTriangle size={18} aria-hidden="true" />
+        <div>
+          <strong>Agent session paused</strong>
+          <p>Resolve the active guard before sending the next instruction.</p>
+        </div>
+      </div>
+      {contextBlocked ? (
+        <form className="agent-guard-form" onSubmit={acknowledgeContext}>
+          <div>
+            <strong>High context</strong>
+            <p>{typeof contextPercent === "number" && Number.isFinite(contextPercent) ? `Active context is ${Math.round(contextPercent)}%.` : "The high-context limit was reached."} This approval applies to the next turn only.</p>
+          </div>
+          <label>
+            <span>Reason</span>
+            <input {...noAutofillTextField} maxLength={1_000} value={contextReason} onChange={(event) => setContextReason(event.target.value)} placeholder="Why should this session continue?" />
+          </label>
+          <button type="submit" disabled={Boolean(busyAction) || !contextReason.trim()} aria-busy={busyAction === "acknowledgeAgentHighContext"}>
+            {busyAction === "acknowledgeAgentHighContext" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
+            {busyAction === "acknowledgeAgentHighContext" ? "Allowing" : "Allow next high-context turn"}
+          </button>
+        </form>
+      ) : null}
+      {budgetBlocked ? (
+        <form className="agent-guard-form" onSubmit={extendBudget}>
+          <div>
+            <strong>Work-token budget exhausted</strong>
+            <p>Extend the delegated budget before continuing this child session.</p>
+          </div>
+          <label>
+            <span>Additional tokens</span>
+            <input type="number" min={1} max={2_000_000} step={100_000} value={additionalTokens} onChange={(event) => setAdditionalTokens(event.target.value)} />
+          </label>
+          <label>
+            <span>Reason</span>
+            <input {...noAutofillTextField} maxLength={1_000} value={budgetReason} onChange={(event) => setBudgetReason(event.target.value)} placeholder="Why is more delegated budget needed?" />
+          </label>
+          <button type="submit" disabled={Boolean(busyAction) || !budgetReason.trim() || !tokensValid} aria-busy={busyAction === "extendAgentBudget"}>
+            {busyAction === "extendAgentBudget" ? <LoaderCircle className="spin" size={16} /> : <Gauge size={16} />}
+            {busyAction === "extendAgentBudget" ? "Extending" : "Extend budget"}
+          </button>
+        </form>
+      ) : null}
+      {!contextBlocked && !budgetBlocked ? (
+        <p className="agent-guard-unknown">Muxpilot could not identify the active guard. Refresh the session before retrying.</p>
+      ) : null}
+      {error ? <p className="agent-guard-error">{error}</p> : null}
     </section>
   );
 }

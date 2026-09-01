@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ManagedSession, SessionStatus } from "./types.js";
-import { agentSessionRoot, highestPrioritySession, operatorSessionStatusPresentation, sessionStatusPresentation } from "./sessionStatus.js";
+import { agentSessionRoot, highestPrioritySession, operatorAttentionDescendants, operatorSessionStatusPresentation, sessionStatusPresentation } from "./sessionStatus.js";
 
 describe("highestPrioritySession", () => {
   it("prefers attention over active work and active work over ready states", () => {
@@ -43,21 +43,32 @@ describe("agent tree status", () => {
     expect(sessionStatusPresentation(child, [root, child]).status).toBe("completed");
   });
 
-  it.each(["question", "input_failed", "startup_failed", "blocked", "plan_ready"] as const)(
-    "keeps a child's %s status internal to the agent tree",
+  it.each(["question", "input_failed", "blocked", "plan_ready"] as const)(
+    "rolls a child's actionable %s status into the operator presentation",
     (status) => {
       const root = session("root", "waiting");
       const child = session("child", status, root.id);
 
       expect(sessionStatusPresentation(root, [root, child]).status).toBe(status);
       expect(operatorSessionStatusPresentation(root, [root, child])).toEqual({
-        status: "waiting",
-        sourceSessionId: root.id,
-        inherited: false
+        status,
+        sourceSessionId: child.id,
+        inherited: true
       });
       expect(operatorSessionStatusPresentation(child, [root, child]).status).toBe(status);
     }
   );
+
+  it("keeps a child startup failure internal to the agent tree", () => {
+    const root = session("root", "waiting");
+    const child = session("child", "startup_failed", root.id);
+
+    expect(operatorSessionStatusPresentation(root, [root, child])).toEqual({
+      status: "waiting",
+      sourceSessionId: root.id,
+      inherited: false
+    });
+  });
 
   it.each(["working", "running", "approval"] as const)("rolls a child's %s status into the operator presentation", (status) => {
     const root = session("root", "waiting");
@@ -68,6 +79,21 @@ describe("agent tree status", () => {
       sourceSessionId: child.id,
       inherited: true
     });
+  });
+
+  it("returns actionable live descendants recursively and excludes completed history", () => {
+    const root = session("root", "waiting");
+    const child = session("child", "working", root.id);
+    const grandchild = {
+      ...session("grandchild", "question", root.id),
+      agentOwnership: {
+        ...session("grandchild", "question", root.id).agentOwnership!,
+        parentSessionId: child.id
+      }
+    };
+    const completed = session("completed", "blocked", root.id, "2026-08-26T00:00:00.000Z");
+
+    expect(operatorAttentionDescendants(root, [root, child, grandchild, completed])).toEqual([grandchild]);
   });
 });
 

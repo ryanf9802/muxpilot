@@ -19,13 +19,22 @@ const SESSION_STATUS_PRIORITY: readonly SessionStatus[] = [
   "missing"
 ];
 
-const AGENT_INTERNAL_ATTENTION_STATUSES = new Set<SessionStatus>([
+export type OperatorActionableAgentStatus = "approval" | "question" | "plan_ready" | "input_failed" | "blocked";
+export type OperatorAttentionSession = ManagedSession & { status: OperatorActionableAgentStatus };
+
+const OPERATOR_ACTIONABLE_AGENT_STATUSES = new Set<SessionStatus>([
+  "approval",
   "question",
+  "plan_ready",
   "input_failed",
-  "startup_failed",
-  "blocked",
-  "plan_ready"
+  "blocked"
 ]);
+
+const AGENT_INTERNAL_ATTENTION_STATUSES = new Set<SessionStatus>(["startup_failed"]);
+
+export function isOperatorActionableAgentStatus(status: SessionStatus): status is OperatorActionableAgentStatus {
+  return OPERATOR_ACTIONABLE_AGENT_STATUSES.has(status);
+}
 
 export function highestPrioritySession<T extends { status: SessionStatus }>(sessions: readonly T[]): T | null {
   for (const status of SESSION_STATUS_PRIORITY) {
@@ -80,4 +89,10 @@ export function operatorSessionStatusPresentation(session: ManagedSession, sessi
   const operatorVisible = subtree.filter((candidate) => candidate.id === session.id || !AGENT_INTERNAL_ATTENTION_STATUSES.has(candidate.status));
   const effective = highestPrioritySession(operatorVisible.length > 0 ? operatorVisible : [session]) ?? session;
   return { status: effective.status, sourceSessionId: effective.id, inherited: effective.id !== session.id };
+}
+
+export function operatorAttentionDescendants(session: ManagedSession, sessions: readonly ManagedSession[]): OperatorAttentionSession[] {
+  return liveSessionSubtree(session, sessions).filter(
+    (candidate): candidate is OperatorAttentionSession => candidate.id !== session.id && isOperatorActionableAgentStatus(candidate.status)
+  );
 }
