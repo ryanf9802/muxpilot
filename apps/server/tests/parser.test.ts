@@ -177,6 +177,35 @@ describe("parseCodexJsonl", () => {
     expect(result.nextOffset).toBeGreaterThan(0);
   });
 
+  it("preserves exact rollout turn and item identity for app-server reconciliation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-identity-"));
+    const path = join(dir, "session.jsonl");
+    await writeFile(path, `${JSON.stringify({
+      timestamp: "2026-09-01T12:00:00.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "msg-agent-1",
+        role: "assistant",
+        content: [{ type: "output_text", text: "authoritative rollout evidence" }],
+        internal_chat_message_metadata_passthrough: { turn_id: "turn-1" }
+      }
+    })}\n`);
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      payload: {
+        codexItemIdentity: {
+          turnId: "turn-1",
+          itemId: "msg-agent-1",
+          clientMessageId: null
+        }
+      }
+    });
+  });
+
   it("hides internal context compaction bookkeeping", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
     const path = join(dir, "session.jsonl");

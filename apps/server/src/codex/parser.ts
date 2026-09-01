@@ -148,11 +148,32 @@ function parseCodexJsonlChunk(chunk: string, offset: number): Omit<ParseResult, 
     for (const workflowMessage of gitWorkflowMessages(line, collaborationMode)) {
       if (!isDuplicateGitWorkflowEvent(workflowMessage, messages)) messages.push(workflowMessage);
     }
-    const mapped = mapEvent(line, collaborationMode);
+    const mapped = withCodexItemIdentity(mapEvent(line, collaborationMode), line);
     if (mapped && !isDuplicateSessionWaitEvent(mapped, messages) && !isDuplicateHeavyCommandQueueEvent(mapped, messages) && !isDuplicateUserEcho(mapped, messages)) messages.push(mapped);
   }
 
   return { messages, nextOffset: consumed, pendingSkillNames, contextUsage };
+}
+
+function withCodexItemIdentity(
+  message: Omit<ChatMessage, "sessionId" | "sequence"> | null,
+  line: string
+): Omit<ChatMessage, "sessionId" | "sequence"> | null {
+  if (!message) return null;
+  let event: RawEvent;
+  try { event = JSON.parse(line) as RawEvent; } catch { return message; }
+  if (event.type !== "response_item") return message;
+  const itemId = stringValue(event.payload?.id);
+  const metadata = recordValue(event.payload?.internal_chat_message_metadata_passthrough);
+  const turnId = stringValue(metadata?.turn_id);
+  if (!itemId || !turnId) return message;
+  return {
+    ...message,
+    payload: {
+      ...message.payload,
+      codexItemIdentity: { turnId, itemId, clientMessageId: null }
+    }
+  };
 }
 
 function contextUsageFromLine(line: string): SessionContextUsage | null {

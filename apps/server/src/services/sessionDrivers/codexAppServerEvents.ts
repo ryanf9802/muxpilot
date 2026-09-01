@@ -110,6 +110,7 @@ function completedItemMessage(
     payload: {
       source: "codex_app_server",
       method: notification.method,
+      codexItemIdentity: identityPayload,
       appServerIdentity: identityPayload,
       item
     }

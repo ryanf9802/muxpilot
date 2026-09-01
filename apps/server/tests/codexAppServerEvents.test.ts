@@ -42,7 +42,10 @@ describe("projectAppServerEvent", () => {
         type: "assistant",
         role: "assistant",
         text: "Final answer",
-        payload: { appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" } }
+        payload: {
+          codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" },
+          appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" }
+        }
       }
     });
     expect(replay?.message?.id).toBe(first?.message?.id);
