@@ -48,9 +48,11 @@ import {
   FormEvent,
   KeyboardEvent,
   cloneElement,
+  createContext,
   isValidElement,
   type ReactNode,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -883,33 +885,7 @@ export function DocumentsModal({
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
   const selectedDocumentKey = selected ? `${sessionId}\u0000${selected}` : null;
   const selectedContentKey = selectedDocumentKey ? `${selectedDocumentKey}\u0000${selectedVersion}` : null;
-  const documentMarkdownComponents = useMemo<Components>(() => ({
-    ...markdownComponents,
-    a({ href, children, node: _node, ...props }) {
-      const relativeHref = href && !href.startsWith("/") && !href.startsWith("//") && !/^[a-z][a-z\d+.-]*:/i.test(href)
-        ? href
-        : null;
-      const pathname = relativeHref?.split("#", 1)[0]?.split("?", 1)[0];
-      const candidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
-      const linkedDocument = documents.find((document) => document.name === candidate);
-      if (!linkedDocument) {
-        return <FileAwareMarkdownLink {...props} href={href} onOpenDocument={onOpenDocument}>{children}</FileAwareMarkdownLink>;
-      }
-      return (
-        <a
-          {...props}
-          href={href}
-          onClick={(event) => {
-            event.preventDefault();
-            event.currentTarget.blur();
-            setSelected(linkedDocument.name);
-          }}
-        >
-          {children}
-        </a>
-      );
-    }
-  }), [documents, onOpenDocument]);
+  const documentMarkdownComponents = fileAwareMarkdownComponentsValue;
   useEffect(() => {
     if (!open || !selected) {
       setContent("");
@@ -976,8 +952,10 @@ export function DocumentsModal({
               </div>
             ) : null}
             {contentError ? <p className="error-text" role="alert">{contentError}</p> : loadedContentKey ? (
-              <div key={loadedContentKey} className="documents-viewer-content" data-loading={viewerBusy || undefined} aria-hidden={viewerBusy || undefined}>
-                <MarkdownBlock text={content} components={documentMarkdownComponents} />
+              <div key={selectedDocumentKey} className="documents-viewer-content" data-loading={viewerBusy || undefined} aria-hidden={viewerBusy || undefined}>
+                <MarkdownLinkBehaviorProvider documents={documents} onOpenDocument={onOpenDocument} onSelectDocument={setSelected}>
+                  <MarkdownBlock text={content} components={documentMarkdownComponents} />
+                </MarkdownLinkBehaviorProvider>
               </div>
             ) : viewerBusy ? (
               <div className="documents-viewer-skeleton" aria-hidden="true">
@@ -5280,6 +5258,8 @@ function MessageContent({
   planAction?: ReactNode;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
 }) {
+  const components = fileAwareMarkdownComponentsValue;
+
   if (isToolOutput(message)) {
     return (
       <details className="tool-output">
@@ -5295,16 +5275,17 @@ function MessageContent({
   if (message.role === "assistant") {
     const segments = parseProposedPlanSegments(displayText(message) ?? "");
     const lastPlanSegmentIndex = lastSegmentIndex(segments, "plan");
-    const components = fileAwareMarkdownComponents(onOpenDocument);
     return (
-      <div className="rendered assistant-content">
-        {segments.map((segment, index) => {
-          if (segment.type === "plan") {
-            return <ProposedPlanBlock key={index} text={segment.text} components={components} action={index === lastPlanSegmentIndex ? planAction : null} />;
-          }
-          return <MarkdownBlock key={index} text={segment.text} components={components} />;
-        })}
-      </div>
+      <MarkdownLinkBehaviorProvider onOpenDocument={onOpenDocument}>
+        <div className="rendered assistant-content">
+          {segments.map((segment, index) => {
+            if (segment.type === "plan") {
+              return <ProposedPlanBlock key={index} text={segment.text} components={components} action={index === lastPlanSegmentIndex ? planAction : null} />;
+            }
+            return <MarkdownBlock key={index} text={segment.text} components={components} />;
+          })}
+        </div>
+      </MarkdownLinkBehaviorProvider>
     );
   }
 
@@ -5391,6 +5372,24 @@ type FileAwareMarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
 };
 
+interface MarkdownLinkBehavior {
+  documents?: SessionDocumentSummary[];
+  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
+  onSelectDocument?: (name: string) => void;
+}
+
+const MarkdownLinkBehaviorContext = createContext<MarkdownLinkBehavior>({});
+
+function MarkdownLinkBehaviorProvider({
+  documents,
+  onOpenDocument,
+  onSelectDocument,
+  children
+}: MarkdownLinkBehavior & { children: ReactNode }) {
+  const value = useMemo(() => ({ documents, onOpenDocument, onSelectDocument }), [documents, onOpenDocument, onSelectDocument]);
+  return <MarkdownLinkBehaviorContext.Provider value={value}>{children}</MarkdownLinkBehaviorContext.Provider>;
+}
+
 function FileAwareMarkdownLink({ href, children, onOpenDocument, ...props }: FileAwareMarkdownLinkProps) {
   const target = markdownLinkTarget(href);
   const [copied, setCopied] = useState(false);
@@ -5441,15 +5440,30 @@ function FileAwareMarkdownLink({ href, children, onOpenDocument, ...props }: Fil
   );
 }
 
-export function fileAwareMarkdownComponents(
-  onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean
-): Components {
-  return {
-    ...markdownComponents,
-    a({ node: _node, ...props }) {
-      return <FileAwareMarkdownLink {...props} onOpenDocument={onOpenDocument} />;
-    }
-  };
+function FileAwareMarkdownAnchor({ href, children, ...props }: ComponentPropsWithoutRef<"a">) {
+  const { documents, onOpenDocument, onSelectDocument } = useContext(MarkdownLinkBehaviorContext);
+  const relativeHref = href && !href.startsWith("/") && !href.startsWith("//") && !/^[a-z][a-z\d+.-]*:/i.test(href)
+    ? href
+    : null;
+  const pathname = relativeHref?.split("#", 1)[0]?.split("?", 1)[0];
+  const candidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
+  const linkedDocument = documents?.find((document) => document.name === candidate);
+  if (!linkedDocument || !onSelectDocument) {
+    return <FileAwareMarkdownLink {...props} href={href} onOpenDocument={onOpenDocument}>{children}</FileAwareMarkdownLink>;
+  }
+  return (
+    <a
+      {...props}
+      href={href}
+      onClick={(event) => {
+        event.preventDefault();
+        event.currentTarget.blur();
+        onSelectDocument(linkedDocument.name);
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 const markdownComponents: Components = {
@@ -5466,6 +5480,13 @@ const markdownComponents: Components = {
         codeClassName={code?.props.className}
       />
     );
+  }
+};
+
+const fileAwareMarkdownComponentsValue: Components = {
+  ...markdownComponents,
+  a({ node: _node, ...props }) {
+    return <FileAwareMarkdownAnchor {...props} />;
   }
 };
 

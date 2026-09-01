@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api } from "../api/client.js";
-import { DocumentsButton, DocumentsModal, fileAwareMarkdownComponents, MarkdownBlock } from "./SessionView.js";
+import { DocumentsButton, DocumentsModal, MessageBubble } from "./SessionView.js";
 
 const copyTextMock = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../utils/clipboard.js", () => ({ copyText: copyTextMock }));
@@ -171,6 +171,14 @@ describe("DocumentsModal", () => {
     expect(documentLink?.target).toBe("");
     expect(externalLink?.target).toBe("_blank");
     expect(externalLink?.rel).toBe("noopener noreferrer");
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents.map((document) => ({ ...document }))} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+    });
+    expect(container.querySelector('a[href="./plan.md#current-plan"]')).toBe(documentLink);
+    expect(container.querySelector('a[href="https://example.com"]')).toBe(externalLink);
+
     if (viewer) viewer.scrollTop = 160;
 
     await act(async () => {
@@ -266,17 +274,22 @@ describe("DocumentsModal", () => {
 
   it("opens muxpilot document paths and copies other file paths without source locations", async () => {
     const openDocument = vi.fn(async () => true);
+    const message = {
+      id: "message-1",
+      sessionId: "session-1",
+      sequence: 1,
+      type: "assistant" as const,
+      role: "assistant" as const,
+      timestamp: "2026-09-01T00:00:00.000Z",
+      text: "[Document](/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md:1) [Source](/workspace/My%20Project/app.ts:42:7) [Web](https://example.com)",
+      payload: {}
+    };
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(
-        <MarkdownBlock
-          text={'[Document](/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/tw-1352-orchestrator-handoff-prompt.md:1) [Source](/workspace/My%20Project/app.ts:42:7) [Web](https://example.com)'}
-          components={fileAwareMarkdownComponents(openDocument)}
-        />
-      );
+      root.render(<MessageBubble message={message} onOpenDocument={openDocument} />);
     });
 
     const documentLink = container.querySelector<HTMLAnchorElement>('a[href*="tw-1352-orchestrator"]');
@@ -303,6 +316,49 @@ describe("DocumentsModal", () => {
     });
     expect(copyTextMock).toHaveBeenCalledWith("/workspace/My Project/app.ts");
     expect(sourceLink?.dataset.copied).toBe("true");
+    act(() => root.unmount());
+  });
+
+  it("keeps document and web anchors mounted across passive transcript refreshes", async () => {
+    const firstOpenDocument = vi.fn(async () => true);
+    const latestOpenDocument = vi.fn(async () => true);
+    const message = {
+      id: "message-1",
+      sessionId: "session-1",
+      sequence: 1,
+      type: "assistant" as const,
+      role: "assistant" as const,
+      timestamp: "2026-09-01T00:00:00.000Z",
+      text: "[Document](/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/plan.md) [Web](https://example.com)",
+      payload: {}
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<MessageBubble message={message} onOpenDocument={firstOpenDocument} onOpenMenu={() => undefined} />);
+    });
+    const documentLink = container.querySelector<HTMLAnchorElement>('a[href*="/documents/plan.md"]');
+    const webLink = container.querySelector<HTMLAnchorElement>('a[href="https://example.com"]');
+    documentLink?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+
+    await act(async () => {
+      root.render(<MessageBubble message={{ ...message }} onOpenDocument={latestOpenDocument} onOpenMenu={() => undefined} />);
+    });
+
+    expect(container.querySelector('a[href*="/documents/plan.md"]')).toBe(documentLink);
+    expect(container.querySelector('a[href="https://example.com"]')).toBe(webLink);
+    const webClick = new MouseEvent("click", { bubbles: true, cancelable: true });
+    webLink?.dispatchEvent(webClick);
+    expect(webClick.defaultPrevented).toBe(false);
+    await act(async () => {
+      documentLink?.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+      documentLink?.click();
+      await Promise.resolve();
+    });
+    expect(firstOpenDocument).not.toHaveBeenCalled();
+    expect(latestOpenDocument).toHaveBeenCalledOnce();
     act(() => root.unmount());
   });
 
