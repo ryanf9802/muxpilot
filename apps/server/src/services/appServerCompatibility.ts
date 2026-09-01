@@ -4,20 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import type { AppServerCompatibility } from "@muxpilot/core";
+import { checkGeneratedProtocolSchema } from "./sessionDrivers/codexAppServerProtocol.js";
 
 const execFileAsync = promisify(execFile);
-const REQUIRED_PROTOCOL_CAPABILITIES = [
-  "initialize",
-  "thread/start",
-  "thread/resume",
-  "thread/fork",
-  "thread/read",
-  "turn/start",
-  "turn/steer",
-  "turn/interrupt",
-  "item/completed",
-  "serverRequest/resolved"
-] as const;
 
 export interface AppServerProbeExecutor {
   codexVersion(): Promise<string>;
@@ -50,9 +39,7 @@ export async function probeAppServerCompatibility(
     const appServerHelp = await executor.appServerHelp();
     const proxyHelp = await executor.proxyHelp();
     const schema = await executor.protocolSchema();
-    const missingCapabilities: string[] = REQUIRED_PROTOCOL_CAPABILITIES.filter((capability) =>
-      !schema.includes(JSON.stringify(capability))
-    );
+    const missingCapabilities = checkGeneratedProtocolSchema(schema).missingCapabilities;
     if (!appServerHelp.includes("--listen") || !appServerHelp.includes("unix://")) {
       missingCapabilities.push("unix-listen");
     }
@@ -106,7 +93,11 @@ export class CodexCliAppServerProbeExecutor implements AppServerProbeExecutor {
       await execFileAsync("codex", ["app-server", "generate-json-schema", "--experimental", "--out", directory], {
         timeout: 15_000
       });
-      return await readFile(join(directory, "codex_app_server_protocol.v2.schemas.json"), "utf8");
+      const files = [
+        "codex_app_server_protocol.v2.schemas.json",
+        "ServerRequest.json"
+      ];
+      return JSON.stringify(await Promise.all(files.map(async (file) => JSON.parse(await readFile(join(directory, file), "utf8")))));
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

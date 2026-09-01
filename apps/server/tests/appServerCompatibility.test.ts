@@ -1,9 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { probeAppServerCompatibility, type AppServerProbeExecutor } from "../src/services/appServerCompatibility.js";
+import {
+  REQUIRED_CLIENT_METHODS,
+  REQUIRED_PROTOCOL_FIELDS,
+  REQUIRED_SERVER_NOTIFICATIONS,
+  REQUIRED_SERVER_REQUESTS
+} from "../src/services/sessionDrivers/codexAppServerProtocol.js";
 
 const requiredSchema = JSON.stringify([
-  "initialize", "thread/start", "thread/resume", "thread/fork", "thread/read",
-  "turn/start", "turn/steer", "turn/interrupt", "item/completed", "serverRequest/resolved"
+  ...REQUIRED_CLIENT_METHODS,
+  ...REQUIRED_SERVER_REQUESTS,
+  ...REQUIRED_SERVER_NOTIFICATIONS,
+  ...REQUIRED_PROTOCOL_FIELDS
 ]);
 
 function executor(overrides: Partial<AppServerProbeExecutor> = {}): AppServerProbeExecutor {

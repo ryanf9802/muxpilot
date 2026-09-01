@@ -1,0 +1,25 @@
+{
+  "codexVersion": "0.152.0",
+  "capturedAt": "2026-09-01T21:33:12.800Z",
+  "initializeRequest": {
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "clientInfo": { "name": "muxpilot", "title": "muxpilot", "version": "0.1.0" },
+      "capabilities": { "experimentalApi": true }
+    }
+  },
+  "initializeResponse": {
+    "id": 1,
+    "result": {
+      "userAgent": "muxpilot/0.152.0 (Ubuntu 24.4.0; x86_64) xterm-256color (muxpilot; 0.1.0)",
+      "codexHome": "/tmp/normalized-codex-home",
+      "platformFamily": "unix",
+      "platformOs": "linux"
+    }
+  },
+  "additiveNotifications": [
+    { "method": "configWarning", "params": { "summary": "normalized warning", "details": null } },
+    { "method": "remoteControl/status/changed", "params": { "status": "disabled" } }
+  ]
+}
