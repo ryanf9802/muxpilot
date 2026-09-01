@@ -231,6 +231,74 @@ describe("heavyweight validation helper", () => {
     expect(events[3]).toBe(events[2]?.replace("-start", "-end"));
   });
 
+  it("keeps a fresh legacy lease through a temporary control-probe failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const output = join(root, "ran.txt");
+    const legacyRunId = "mlegacy-aaaaaaaaaaaa";
+    const legacyRunDir = join(leases, "runs", legacyRunId);
+    const slotPath = join(leases, "slot-0");
+    await mkdir(legacyRunDir, { recursive: true });
+    await mkdir(slotPath);
+    await writeFile(join(legacyRunDir, "owner.json"), JSON.stringify({
+      version: 4,
+      runId: legacyRunId,
+      state: "running",
+      wrapperPid: null,
+      resourceUnit: null
+    }));
+    await writeFile(join(slotPath, "owner.json"), JSON.stringify({
+      version: 2,
+      runId: legacyRunId,
+      controlSocket: join(legacyRunDir, "control.sock"),
+      heartbeatAt: Date.now()
+    }));
+    const startedAt = Date.now();
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1], 'ran')", output
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10",
+        MUXPILOT_HEAVY_VALIDATION_STALE_MS: "250"
+      }
+    });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
+    expect(await stat(output).catch(() => null)).toBeNull();
+    await run;
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(200);
+    expect(await readFile(output, "utf8")).toBe("ran");
+  });
+
+  it("writes and refreshes a v3 lease owner alongside the run heartbeat", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const run = execFileAsync(process.execPath, [
+      helper, "--heavy", "--", process.execPath, "-e", "setTimeout(() => {}, 300)"
+    ], {
+      env: {
+        ...process.env,
+        MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
+        MUXPILOT_HEAVY_VALIDATION_DIR: leases,
+        MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "1",
+        MUXPILOT_HEAVY_VALIDATION_POLL_MS: "10",
+        MUXPILOT_HEAVY_VALIDATION_OWNER_HEARTBEAT_MS: "30"
+      }
+    });
+    const runId = await waitForRun(leases);
+    const first = JSON.parse(await readFile(join(leases, "slot-0", "owner.json"), "utf8"));
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    const second = JSON.parse(await readFile(join(leases, "slot-0", "owner.json"), "utf8"));
+    expect(first).toMatchObject({ version: 3, runId, wrapperPid: expect.any(Number), controlSocket: join(leases, "runs", runId, "control.sock") });
+    expect(second.heartbeatAt).toBeGreaterThan(first.heartbeatAt);
+    await run;
+  });
+
   it("defers a managed command without running it and resumes only its reserved ticket", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-helper-"));
     roots.push(root);

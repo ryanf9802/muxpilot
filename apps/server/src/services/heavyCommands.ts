@@ -18,6 +18,7 @@ const MAX_OWNER_BYTES = 256 * 1024;
 const MAX_TAIL_BYTES = 128 * 1024;
 const COMPLETION_TAIL_BYTES = 32 * 1024;
 const ACTIVE_OWNER_STALE_MS = 60_000;
+const SLOT_OWNER_STALE_MS = 12 * 60 * 60 * 1000;
 const COMPLETION_SUPPRESSION_FILE = "completion-suppressed";
 
 export interface HeavyCommandSessionCoordinator {
@@ -35,20 +36,31 @@ export interface HeavyCommandLaunchBrokerOptions {
   runCommand?: (command: string, args: string[]) => Promise<void>;
 }
 
+type OwnerProcessState = "active" | "inactive" | "unknown";
+
+export interface HeavyCommandRuntime {
+  ownerProcessState(owner: { wrapperPid?: number | null; resourceUnit?: string | null }): Promise<OwnerProcessState>;
+  stopResourceUnit(resourceUnit: string): Promise<void>;
+}
+
 export class HeavyCommandService {
   private timer: NodeJS.Timeout | null = null;
   private ticking = false;
   private coordinator: HeavyCommandSessionCoordinator | null = null;
   private brokerServer: Server | null = null;
   private activeStatusWorkspaces = new Set<string>();
+  private readonly runtime: HeavyCommandRuntime;
 
   constructor(
     private readonly leaseRoot: string,
     private readonly sessionRoot: string,
     private readonly concurrency = 2,
     private readonly resumeTimeoutMs = 120_000,
-    private readonly launchBroker: HeavyCommandLaunchBrokerOptions | null = null
-  ) {}
+    private readonly launchBroker: HeavyCommandLaunchBrokerOptions | null = null,
+    runtime?: HeavyCommandRuntime
+  ) {
+    this.runtime = runtime ?? new HostHeavyCommandRuntime(launchBroker);
+  }
 
   brokerSocketPath(): string | null {
     return this.launchBroker?.enabled ? join(this.leaseRoot, "broker.sock") : null;
@@ -290,7 +302,9 @@ export class HeavyCommandService {
       for (const owner of reserved) {
         await this.dispatchOwnerSafely(owner, "resume", () => this.dispatchResume(owner));
       }
-      const currentOwners = await this.readPersistentOwners();
+      let currentOwners = await this.readPersistentOwners();
+      await this.recoverExpiredOwners(currentOwners);
+      currentOwners = await this.readPersistentOwners();
       for (const owner of currentOwners) {
         if (owner.state === "reporting" && !owner.completionSentAt) {
           await this.dispatchOwnerSafely(owner, "completion", () => this.dispatchCompletion(owner));
@@ -300,6 +314,54 @@ export class HeavyCommandService {
     } finally {
       this.ticking = false;
     }
+  }
+
+  private async recoverExpiredOwners(owners: QueueOwner[]): Promise<void> {
+    for (const owner of owners) {
+      if (!RUNNING_STATES.has(owner.state) || !owner.startedAt || !owner.resourceUnit) continue;
+      const startedAt = Date.parse(owner.startedAt);
+      if (!Number.isFinite(startedAt) || Date.now() < startedAt + owner.deadlines.runtimeTimeoutMs + owner.deadlines.terminationGraceMs) continue;
+      await this.recoverExpiredOwner(owner);
+    }
+  }
+
+  private async recoverExpiredOwner(owner: QueueOwner): Promise<void> {
+    if (await this.runtime.ownerProcessState(owner) === "inactive") return;
+    const reason = `runtime exceeded ${formatElapsed(owner.deadlines.runtimeTimeoutMs)} while the heavyweight worker remained active`;
+    const eligible = await this.withSchedulerLock(async () => {
+      const current = await this.readQueueOwner(owner.runId);
+      if (!current || !RUNNING_STATES.has(current.state) || !current.startedAt || current.resourceUnit !== owner.resourceUnit) return false;
+      const startedAt = Date.parse(current.startedAt);
+      if (!Number.isFinite(startedAt) || Date.now() < startedAt + current.deadlines.runtimeTimeoutMs + current.deadlines.terminationGraceMs) return false;
+      return true;
+    });
+    if (!eligible) return;
+    try {
+      await this.runtime.stopResourceUnit(owner.resourceUnit);
+    } catch (error) {
+      console.error("Muxpilot heavyweight deadline recovery failed", {
+        runId: owner.runId,
+        workspaceId: owner.workspaceId,
+        resourceUnit: owner.resourceUnit,
+        error
+      });
+      return;
+    }
+    await this.withSchedulerLock(async () => {
+      const current = await this.readQueueOwner(owner.runId);
+      if (!current || current.resourceUnit !== owner.resourceUnit || !RUNNING_STATES.has(current.state)) return;
+      const finishedAt = new Date().toISOString();
+      const slot = current.slot;
+      current.state = "reporting";
+      current.slot = null;
+      current.exitCode = 124;
+      current.signal = null;
+      current.finishedAt = finishedAt;
+      current.terminationReason = reason;
+      current.heartbeatAt = finishedAt;
+      await this.writeOwner(current);
+      if (slot !== null) await this.releaseMatchingSlot(slot, current.runId);
+    });
   }
 
   private async dispatchOwnerSafely(
@@ -435,9 +497,26 @@ export class HeavyCommandService {
       await rm(path, { recursive: true, force: true });
       return false;
     }
-    if (owner.version === 2 && typeof owner.controlSocket === "string") {
+    if ((owner.version === 2 || owner.version === 3) && typeof owner.runId === "string" && typeof owner.controlSocket === "string") {
+      const runOwner = await this.readQueueOwner(owner.runId);
+      if (!runOwner) {
+        await rm(path, { recursive: true, force: true });
+        return false;
+      }
+      const processState = await this.runtime.ownerProcessState(runOwner);
+      if (processState === "active") return true;
+      if (processState === "inactive") {
+        await rm(path, { recursive: true, force: true });
+        return false;
+      }
       const response = await sendControl(owner.controlSocket, { action: "probe" }).catch(() => null);
-      if (response?.ok) return true;
+      if (response?.ok && response.runId === owner.runId) return true;
+      if (response) {
+        await rm(path, { recursive: true, force: true });
+        return false;
+      }
+      const heartbeat = typeof owner.heartbeatAt === "number" ? owner.heartbeatAt : Date.parse(String(owner.heartbeatAt));
+      if (Number.isFinite(heartbeat) && Date.now() - heartbeat < SLOT_OWNER_STALE_MS) return true;
       await rm(path, { recursive: true, force: true });
       return false;
     }
@@ -447,12 +526,18 @@ export class HeavyCommandService {
     return false;
   }
 
+  private async releaseMatchingSlot(slot: number, runId: string): Promise<void> {
+    const path = join(this.leaseRoot, `slot-${slot}`);
+    const current = await readFile(join(path, "owner.json"), "utf8").then(JSON.parse).catch(() => null) as Record<string, unknown> | null;
+    if (current?.runId === runId) await rm(path, { recursive: true, force: true });
+  }
+
   private async cancelOwner(owner: QueueOwner, reason: string): Promise<void> {
     owner.state = "cancelled";
     owner.terminationReason = reason;
     owner.heartbeatAt = new Date().toISOString();
     await this.writeOwner(owner);
-    if (owner.slot !== null) await rm(join(this.leaseRoot, `slot-${owner.slot}`), { recursive: true, force: true });
+    if (owner.slot !== null) await this.releaseMatchingSlot(owner.slot, owner.runId);
   }
 
   private async readQueueOwners(): Promise<QueueOwner[]> {
@@ -528,12 +613,13 @@ export class HeavyCommandService {
       if (Number(owner.version) >= 3 && ((owner.lastActivityAt !== null && typeof owner.lastActivityAt !== "string") || !validActivity(owner.activity))) return null;
       if (owner.logPath !== null && typeof owner.logPath !== "string") return null;
       if (owner.childPid !== null && (!Number.isInteger(owner.childPid) || Number(owner.childPid) <= 0)) return null;
+      if (owner.wrapperPid !== undefined && owner.wrapperPid !== null && (!Number.isInteger(owner.wrapperPid) || Number(owner.wrapperPid) <= 0)) return null;
       if (owner.slot !== null && (!Number.isInteger(owner.slot) || Number(owner.slot) < 0)) return null;
       if (!validDeadlines(owner.deadlines) || (owner.packageDiagnostics !== null && !validPackageDiagnostics(owner.packageDiagnostics))) return null;
       if (owner.terminationReason !== null && typeof owner.terminationReason !== "string") return null;
       if (owner.resourceUnit !== null && owner.resourceUnit !== undefined && !RESOURCE_UNIT.test(String(owner.resourceUnit))) return null;
       if (ACTIVE_STATES.has(String(owner.state)) && Date.now() - heartbeatAt > ACTIVE_OWNER_STALE_MS) {
-        const liveState = await this.liveStaleOwnerState(runPath, owner);
+        const liveState = await this.liveStaleOwnerState(runPath, owner as unknown as QueueOwner);
         if (!liveState) return null;
         owner.state = liveState;
       }
@@ -548,14 +634,19 @@ export class HeavyCommandService {
     }
   }
 
-  private async liveStaleOwnerState(runPath: string, owner: Record<string, unknown>): Promise<HeavyCommand["state"] | null> {
-    if (typeof owner.controlSocket !== "string") return null;
+  private async liveStaleOwnerState(runPath: string, owner: QueueOwner): Promise<HeavyCommand["state"] | null> {
+    const processState = await this.runtime.ownerProcessState(owner);
+    if (processState === "active") return staleLiveState(owner.state);
+    if (processState === "inactive") return null;
+    if (typeof owner.controlSocket !== "string") return ownerWithinRuntimeGrace(owner) ? staleLiveState(owner.state) : null;
     const socketPath = resolve(owner.controlSocket);
     if (socketPath !== resolve(runPath, "control.sock")) return null;
     const details = await lstat(socketPath).catch(() => null);
-    if (!details?.isSocket() || details.isSymbolicLink()) return null;
+    if (!details) return ownerWithinRuntimeGrace(owner) ? staleLiveState(owner.state) : null;
+    if (!details.isSocket() || details.isSymbolicLink()) return null;
     const response = await sendControl(socketPath, { action: "probe" }).catch(() => null);
-    if (!response?.ok || response.runId !== owner.runId || !ACTIVE_STATES.has(response.state ?? "")) return null;
+    if (!response) return ownerWithinRuntimeGrace(owner) ? staleLiveState(owner.state) : null;
+    if (!response.ok || response.runId !== owner.runId || !ACTIVE_STATES.has(response.state ?? "")) return null;
     return response.state as HeavyCommand["state"];
   }
 }
@@ -574,7 +665,51 @@ interface QueueOwner extends Omit<HeavyCommand, "state"> {
   state: HeavyCommand["state"] | "acquiring" | "cancelled" | "completed";
   runnerPath: string;
   runnerOptions: string[];
+  wrapperPid?: number | null;
+  controlSocket?: string | null;
   completionSentAt?: string | null;
+}
+
+class HostHeavyCommandRuntime implements HeavyCommandRuntime {
+  constructor(private readonly launchBroker: HeavyCommandLaunchBrokerOptions | null) {}
+
+  async ownerProcessState(owner: { wrapperPid?: number | null; resourceUnit?: string | null }): Promise<OwnerProcessState> {
+    if (!owner.wrapperPid || !owner.resourceUnit || !RESOURCE_UNIT.test(owner.resourceUnit)) return "unknown";
+    try {
+      const cgroup = await readFile(`/proc/${owner.wrapperPid}/cgroup`, "utf8");
+      return cgroup.split(/\r?\n/).some((line) => line.endsWith(`/${owner.resourceUnit}`)) ? "active" : "inactive";
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT" ? "inactive" : "unknown";
+    }
+  }
+
+  async stopResourceUnit(resourceUnit: string): Promise<void> {
+    if (!this.launchBroker?.enabled || !RESOURCE_UNIT.test(resourceUnit)) throw new Error("managed heavyweight resource control is unavailable");
+    if (this.launchBroker.runCommand) {
+      await this.launchBroker.runCommand("systemctl", ["--user", "stop", resourceUnit]);
+      return;
+    }
+    await execFileAsync("systemctl", ["--user", "stop", resourceUnit], {
+      timeout: 5_000,
+      env: { ...process.env, ...this.launchBroker.environment }
+    });
+  }
+}
+
+function staleLiveState(state: QueueOwner["state"]): HeavyCommand["state"] {
+  return state === "running" ? "stalled" : state as HeavyCommand["state"];
+}
+
+function ownerWithinRuntimeGrace(owner: QueueOwner): boolean {
+  if (!owner.startedAt) return false;
+  const startedAt = Date.parse(owner.startedAt);
+  return Number.isFinite(startedAt) && Date.now() < startedAt + owner.deadlines.runtimeTimeoutMs + owner.deadlines.terminationGraceMs;
+}
+
+function formatElapsed(milliseconds: number): string {
+  if (milliseconds % 60_000 === 0) return `${milliseconds / 60_000}m`;
+  if (milliseconds % 1_000 === 0) return `${milliseconds / 1_000}s`;
+  return `${milliseconds}ms`;
 }
 
 function validActivity(value: unknown): boolean {

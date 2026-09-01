@@ -443,7 +443,7 @@ async function acquireLease() {
       const candidateSlot = available[0];
       const candidate = join(leaseRoot, `slot-${candidateSlot}`);
       await mkdir(candidate);
-      await writeFile(join(candidate, "owner.json"), JSON.stringify({ version: 2, runId, controlSocket, heartbeatAt: Date.now() }), { mode: 0o600 });
+      await writeLeaseOwner(candidate);
       return { path: candidate, slot: candidateSlot };
     });
     if (acquired) return acquired;
@@ -519,7 +519,7 @@ async function claimReservation(owner) {
     const path = join(leaseRoot, `slot-${reservedSlot}`);
     const lease = JSON.parse(await readFile(join(path, "owner.json"), "utf8").catch(() => "null"));
     if (lease?.runId !== runId) throw new Error(`heavyweight reservation ${runId} lost its slot`);
-    await writeFile(join(path, "owner.json"), JSON.stringify({ version: 2, runId, controlSocket, heartbeatAt: Date.now() }), { mode: 0o600 });
+    await writeLeaseOwner(path);
     return { path, slot: reservedSlot };
   });
 }
@@ -535,8 +535,25 @@ async function reapStaleLeases() {
         if (!Number.isFinite(timestamp) || Date.now() - timestamp > staleMs) await rm(path, { recursive: true, force: true });
         continue;
       }
-      if (owner.version === 2 && validSocketPath(owner.controlSocket)) {
-        if (!await probeSocket(owner.controlSocket)) await rm(path, { recursive: true, force: true });
+      if (owner.version === 2 || owner.version === 3) {
+        if (!RUN_ID_PATTERN.test(String(owner.runId)) || !validSocketPath(owner.controlSocket)) {
+          await rm(path, { recursive: true, force: true });
+          continue;
+        }
+        const runOwner = await readFile(join(leaseRoot, "runs", owner.runId, "owner.json"), "utf8").then(JSON.parse).catch(() => null);
+        if (!runOwner) {
+          await rm(path, { recursive: true, force: true });
+          continue;
+        }
+        const processState = await ownerProcessState(runOwner);
+        if (processState === "active") continue;
+        if (processState === "inactive") {
+          await rm(path, { recursive: true, force: true });
+          continue;
+        }
+        if (await probeSocket(owner.controlSocket)) continue;
+        const timestamp = Number(owner.heartbeatAt ?? owner.startedAt);
+        if (!Number.isFinite(timestamp) || Date.now() - timestamp > staleMs) await rm(path, { recursive: true, force: true });
         continue;
       }
       const timestamp = Number(owner.heartbeatAt ?? owner.startedAt);
@@ -673,6 +690,33 @@ async function writeOwner() {
   const temporary = join(runDir, `owner-${process.pid}-${randomBytes(3).toString("hex")}.tmp`);
   await writeFile(temporary, JSON.stringify(owner), { mode: 0o600 });
   await rename(temporary, join(runDir, "owner.json"));
+  if (leasePath) await writeLeaseOwner(leasePath).catch((error) => {
+    if (error?.code !== "ENOENT") throw error;
+  });
+}
+
+async function writeLeaseOwner(path) {
+  const temporary = join(path, `owner-${process.pid}-${randomBytes(3).toString("hex")}.tmp`);
+  await writeFile(temporary, JSON.stringify({
+    version: 3,
+    runId,
+    wrapperPid: process.pid,
+    resourceUnit,
+    controlSocket,
+    heartbeatAt: Date.now()
+  }), { mode: 0o600 });
+  await rename(temporary, join(path, "owner.json"));
+}
+
+async function ownerProcessState(owner) {
+  if (!Number.isInteger(owner?.wrapperPid) || owner.wrapperPid <= 0 ||
+    typeof owner.resourceUnit !== "string" || !RESOURCE_UNIT_PATTERN.test(owner.resourceUnit)) return "unknown";
+  try {
+    const cgroup = await readFile(`/proc/${owner.wrapperPid}/cgroup`, "utf8");
+    return cgroup.split(/\r?\n/).some((line) => line.endsWith(`/${owner.resourceUnit}`)) ? "active" : "inactive";
+  } catch (error) {
+    return error?.code === "ENOENT" ? "inactive" : "unknown";
+  }
 }
 
 async function createRunLog() {
