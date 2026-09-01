@@ -2490,6 +2490,13 @@ describe("WorkingIndicator", () => {
     expect(html).not.toContain("Codex is working");
   });
 
+  it("renders heavyweight execution with running copy", () => {
+    const html = renderToStaticMarkup(createElement(WorkingIndicator, { status: "running" }));
+
+    expect(html).toContain("Heavyweight command is running");
+    expect(html).not.toContain("Codex is queued");
+  });
+
   it("renders transcript synchronization without an elapsed runtime", () => {
     const html = renderToStaticMarkup(createElement(TranscriptSyncIndicator));
 
@@ -2510,6 +2517,7 @@ describe("WorkingIndicator", () => {
 
   it("only shows for live working sessions at the newest transcript position", () => {
     expect(shouldShowWorkingIndicator("working", false)).toBe(true);
+    expect(shouldShowWorkingIndicator("running", false)).toBe(true);
     expect(shouldShowWorkingIndicator("generating", false)).toBe(true);
     expect(shouldShowWorkingIndicator("executing", false)).toBe(true);
     expect(shouldShowWorkingIndicator("planning", false)).toBe(true);
@@ -2524,6 +2532,7 @@ describe("WorkingIndicator", () => {
     expect(shouldShowQueuedIndicator("queued", true)).toBe(false);
     expect(shouldShowQueuedIndicator("waiting", false)).toBe(false);
     expect(shouldShowQueuedIndicator("working", false)).toBe(false);
+    expect(shouldShowQueuedIndicator("running", false)).toBe(false);
   });
 
   it("finds the latest user prompt timestamp", () => {

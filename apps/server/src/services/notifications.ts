@@ -248,7 +248,7 @@ function notificationRuleMatches(
 }
 
 function isTaskRunningStatus(status: SessionStatus): boolean {
-  return status === "working" || status === "generating" || status === "executing";
+  return status === "working" || status === "running" || status === "generating" || status === "executing";
 }
 
 function isInputReadyStatus(status: SessionStatus): boolean {
@@ -322,6 +322,7 @@ function isSessionStatus(value: unknown): value is SessionStatus {
     value === "generating" ||
     value === "executing" ||
     value === "working" ||
+    value === "running" ||
     value === "planning" ||
     value === "queued" ||
     value === "waiting" ||

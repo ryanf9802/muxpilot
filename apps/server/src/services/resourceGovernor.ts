@@ -10,6 +10,7 @@ const BUSY_STATUSES = new Set<SessionStatus>([
   "generating",
   "executing",
   "working",
+  "running",
   "planning",
   "unknown"
 ]);

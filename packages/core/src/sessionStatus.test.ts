@@ -6,10 +6,12 @@ describe("highestPrioritySession", () => {
   it("prefers attention over active work and active work over ready states", () => {
     const waiting = { id: "parent", status: "waiting" as const };
     const working = { id: "worker", status: "working" as const };
+    const running = { id: "runner", status: "running" as const };
     const approval = { id: "approval", status: "approval" as const };
 
     expect(highestPrioritySession([waiting, working])).toBe(working);
-    expect(highestPrioritySession([waiting, working, approval])).toBe(approval);
+    expect(highestPrioritySession([waiting, running])).toBe(running);
+    expect(highestPrioritySession([waiting, working, running, approval])).toBe(approval);
   });
 
   it("treats unknown state as active rather than ready", () => {
@@ -57,7 +59,7 @@ describe("agent tree status", () => {
     }
   );
 
-  it.each(["working", "approval"] as const)("rolls a child's %s status into the operator presentation", (status) => {
+  it.each(["working", "running", "approval"] as const)("rolls a child's %s status into the operator presentation", (status) => {
     const root = session("root", "waiting");
     const child = session("child", status, root.id);
 

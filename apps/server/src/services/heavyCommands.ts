@@ -11,6 +11,7 @@ const execFileAsync = promisify(execFile);
 
 const ACTIVE_STATES = new Set(["waiting", "reserved", "running", "stalled", "terminating", "reporting"]);
 const RUNNING_STATES = new Set(["running", "stalled", "terminating"]);
+const TRANSITION_STATES = new Set(["reserved", "reporting"]);
 const RUN_ID = /^[a-z0-9]+-[a-f0-9]{12}$/;
 const RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
 const MAX_OWNER_BYTES = 256 * 1024;
@@ -154,6 +155,10 @@ export class HeavyCommandService {
 
   async hasRunning(workspaceId: string): Promise<boolean> {
     return (await this.list(workspaceId)).commands.some((command) => RUNNING_STATES.has(command.state));
+  }
+
+  async sessionStatusForWorkspace(workspaceId: string): Promise<HeavyCommandSessionStatus> {
+    return heavyCommandSessionStatus((await this.list(workspaceId)).commands);
   }
 
   async runningWorkspaceIds(): Promise<Set<string>> {
@@ -491,6 +496,15 @@ export class HeavyCommandService {
       return null;
     }
   }
+}
+
+export type HeavyCommandSessionStatus = "queued" | "running" | "working" | null;
+
+export function heavyCommandSessionStatus(commands: readonly Pick<HeavyCommand, "state">[]): HeavyCommandSessionStatus {
+  if (commands.some((command) => RUNNING_STATES.has(command.state))) return "running";
+  if (commands.some((command) => TRANSITION_STATES.has(command.state))) return "working";
+  if (commands.some((command) => command.state === "waiting")) return "queued";
+  return null;
 }
 
 interface QueueOwner extends Omit<HeavyCommand, "state"> {

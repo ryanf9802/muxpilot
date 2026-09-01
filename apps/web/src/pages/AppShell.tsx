@@ -1430,7 +1430,7 @@ export function defaultForkSessionName(session: ManagedSession): string {
 
 export function forkSessionWarnings(session: ManagedSession): string[] {
   const warnings: string[] = [];
-  if (["generating", "executing", "working", "planning"].includes(session.status)) {
+  if (["generating", "executing", "working", "running", "planning"].includes(session.status)) {
     warnings.push("This session is still working. The fork may mark its in-progress turn as interrupted.");
   }
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);

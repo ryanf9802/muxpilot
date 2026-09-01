@@ -9,6 +9,7 @@ describe("matchingNotificationRules", () => {
     const settings = testNotificationSettings([], { a: ["done_task"] });
 
     expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task"]);
+    expect(matchingNotificationRules(settings, "a", "running", "waiting")).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "generating", "idle")).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "planning", "waiting")).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "working", "waiting", { inputMode: "plan" })).toEqual([]);
@@ -415,7 +416,7 @@ describe("matchingNotificationRules", () => {
     expect(triggeredEvents).toEqual([]);
   });
 
-  it.each(["working", "waiting", "question", "plan_ready", "blocked", "input_failed", "startup_failed"] as const)(
+  it.each(["working", "running", "waiting", "question", "plan_ready", "blocked", "input_failed", "startup_failed"] as const)(
     "keeps a child's %s transition silent",
     async (status) => {
       const events = new EventBus();

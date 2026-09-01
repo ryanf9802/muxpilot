@@ -13,6 +13,7 @@ describe("sessionStatusSeverity", () => {
       generating: "yellow",
       executing: "yellow",
       working: "yellow",
+      running: "yellow",
       planning: "yellow",
       queued: "yellow",
       waiting: "green",
@@ -36,7 +37,7 @@ describe("sessionStatusSeverity", () => {
 describe("sessionStatusesForSeverity", () => {
   it("returns the statuses included in each stoplight bucket", () => {
     expect(sessionStatusesForSeverity("red")).toEqual(["approval", "question", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);
-    expect(sessionStatusesForSeverity("yellow")).toEqual(["working", "generating", "executing", "planning", "queued", "unknown"]);
+    expect(sessionStatusesForSeverity("yellow")).toEqual(["working", "running", "generating", "executing", "planning", "queued", "unknown"]);
     expect(sessionStatusesForSeverity("green")).toEqual(["waiting", "idle", "completed"]);
   });
 });

@@ -102,7 +102,7 @@ describe("shell connection state", () => {
   });
 
   it("warns when live work or an isolated Git worktree will not carry into the fork", () => {
-    const session = testSession({ id: "fork-warning", status: "working" });
+    const session = testSession({ id: "fork-warning", status: "running" });
     session.gitWorkspace = {
       workflowVersion: 1,
       id: "workspace-source",

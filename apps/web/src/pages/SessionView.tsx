@@ -4693,7 +4693,7 @@ export function shouldShowQueuedIndicator(status: ManagedSession["status"] | und
 }
 
 function isWorkingSessionStatus(status: ManagedSession["status"] | undefined): boolean {
-  return status === "working" || status === "generating" || status === "executing" || status === "planning";
+  return status === "working" || status === "running" || status === "generating" || status === "executing" || status === "planning";
 }
 
 export function latestUserPromptTimestamp(messages: ChatMessage[]): string | null {
@@ -4731,7 +4731,11 @@ export function WorkingIndicator({
   lastUserPromptAt?: string | null;
   nowMs?: number;
 }) {
-  const label = status === "planning" ? "Codex is planning..." : "Codex is working";
+  const label = status === "planning"
+    ? "Codex is planning..."
+    : status === "running"
+      ? "Heavyweight command is running"
+      : "Codex is working";
   const [currentNowMs, setCurrentNowMs] = useState(() => nowMs ?? Date.now());
   const elapsedSeconds = elapsedSince(lastUserPromptAt ?? null, nowMs ?? currentNowMs);
 

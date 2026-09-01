@@ -22,7 +22,7 @@ export function sessionStatusSeverity(status: SessionDisplayStatus): SessionStat
 export function sessionStatusesForSeverity(severity: SessionStatusSeverity): readonly SessionDisplayStatus[] {
   if (severity === "red") return ["approval", "question", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"];
   if (severity === "green") return ["waiting", "idle", "completed"];
-  return ["working", "generating", "executing", "planning", "queued", "unknown"];
+  return ["working", "running", "generating", "executing", "planning", "queued", "unknown"];
 }
 
 export function isSessionStatusSeverity(value: string | null): value is SessionStatusSeverity {

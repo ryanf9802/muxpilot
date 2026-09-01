@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
-import { HeavyCommandService } from "../src/services/heavyCommands.js";
+import { HeavyCommandService, heavyCommandSessionStatus } from "../src/services/heavyCommands.js";
 
 const roots: string[] = [];
 
@@ -13,6 +13,17 @@ afterEach(async () => {
 });
 
 describe("HeavyCommandService", () => {
+  it("projects queue, process, and handoff states into distinct session statuses", () => {
+    expect(heavyCommandSessionStatus([])).toBeNull();
+    expect(heavyCommandSessionStatus([{ state: "waiting" }])).toBe("queued");
+    expect(heavyCommandSessionStatus([{ state: "reserved" }])).toBe("working");
+    expect(heavyCommandSessionStatus([{ state: "reporting" }])).toBe("working");
+    expect(heavyCommandSessionStatus([{ state: "running" }])).toBe("running");
+    expect(heavyCommandSessionStatus([{ state: "stalled" }])).toBe("running");
+    expect(heavyCommandSessionStatus([{ state: "terminating" }])).toBe("running");
+    expect(heavyCommandSessionStatus([{ state: "waiting" }, { state: "reporting" }, { state: "running" }])).toBe("running");
+  });
+
   it("ignores wrapper-owned acquiring records until they become queue eligible", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);
@@ -60,8 +71,10 @@ describe("HeavyCommandService", () => {
 
     expect((await service.list("workspace-a")).commands).toHaveLength(1);
     expect(await service.hasActive("workspace-a")).toBe(true);
+    expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("running");
     expect((await service.list("workspace-b")).commands).toHaveLength(0);
     expect(await service.hasActive("workspace-b")).toBe(false);
+    expect(await service.sessionStatusForWorkspace("workspace-b")).toBeNull();
     expect((await service.output("workspace-a", runId))?.output).toBe("visible output");
     expect(await service.output("workspace-b", runId)).toBeNull();
 
@@ -72,6 +85,7 @@ describe("HeavyCommandService", () => {
     }));
     expect((await service.list("workspace-a")).commands[0]).toMatchObject({ state: "waiting", lastActivityAt: null });
     expect(await service.hasActive("workspace-a")).toBe(true);
+    expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("queued");
   });
 
   it("rejects malformed owners and sends termination over the private control socket", async () => {

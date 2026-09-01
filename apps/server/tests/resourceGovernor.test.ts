@@ -21,7 +21,7 @@ const config = {
 describe("allocateSessionResources", () => {
   it("fans the busy pool out and gives sustained idle sessions conservative limits", () => {
     const idleSince = new Map([["idle", 0]]);
-    const sessions = [session("one", "working"), session("two", "planning"), session("idle", "waiting")];
+    const sessions = [session("one", "working"), session("two", "running"), session("idle", "waiting")];
     const result = allocateSessionResources(sessions, config, idleSince, 10_000, 16 * 1024 ** 3, 8);
 
     expect(result.get("one")).toMatchObject({

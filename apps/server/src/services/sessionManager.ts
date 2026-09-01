@@ -100,6 +100,7 @@ interface SessionResourceUsageLookup {
 
 interface HeavyCommandQueueLookup {
   hasActive(workspaceId: string): Promise<boolean>;
+  sessionStatusForWorkspace(workspaceId: string): Promise<"queued" | "running" | "working" | null>;
   cancelWorkspace(workspaceId: string, reason: string): Promise<void>;
 }
 
@@ -657,10 +658,10 @@ export class SessionManager {
       if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
       const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
       const activeGitWorkspace = refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null;
-      const projectedStatus =
-        !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace && await this.heavyCommandQueue?.hasActive(activeGitWorkspace.id)
-          ? "queued"
-          : effectiveStatus;
+      const heavyCommandStatus = !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace
+        ? await this.heavyCommandQueue?.sessionStatusForWorkspace(activeGitWorkspace.id) ?? null
+        : null;
+      const projectedStatus = heavyCommandStatus ?? effectiveStatus;
       const session: ManagedSession = {
         id: sessionId,
         tmux: pane,

@@ -8,6 +8,7 @@ const SESSION_STATUS_PRIORITY: readonly SessionStatus[] = [
   "blocked",
   "plan_ready",
   "working",
+  "running",
   "planning",
   "executing",
   "generating",

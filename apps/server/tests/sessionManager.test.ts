@@ -3224,7 +3224,11 @@ describe("SessionManager transcript isolation", () => {
       ...session,
       gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
     }, new Date().toISOString());
-    harness.manager.setHeavyCommandQueue({ hasActive: async () => true, cancelWorkspace: async () => undefined });
+    harness.manager.setHeavyCommandQueue({
+      hasActive: async () => true,
+      sessionStatusForWorkspace: async () => "queued",
+      cancelWorkspace: async () => undefined
+    });
 
     await harness.manager.discover();
     expect((await harness.manager.getSession(session.id))?.status).toBe("queued");
@@ -3232,6 +3236,37 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.sendInput(session.id, "wait behind heavy task");
     expect(sentInputs).toEqual([]);
     expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ text: "wait behind heavy task", status: "queued" }]);
+    harness.db.close();
+  });
+
+  it("shows running while keeping input queued for a process-owning heavyweight command", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sentInputs: string[] = [];
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => "› ";
+    harness.tmux.sendInput = async (_paneId, text) => { sentInputs.push(text); };
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.db.upsertSession({
+      ...session,
+      gitWorkspace: { id: "workspace-a", entryPath: repo, targetBranch: "main" }
+    }, new Date().toISOString());
+    harness.manager.setHeavyCommandQueue({
+      hasActive: async () => true,
+      sessionStatusForWorkspace: async () => "running",
+      cancelWorkspace: async () => undefined
+    });
+
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("running");
+
+    await harness.manager.sendInput(session.id, "wait for running heavy task");
+    expect(sentInputs).toEqual([]);
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([
+      { text: "wait for running heavy task", status: "queued" }
+    ]);
     harness.db.close();
   });
 
@@ -3283,6 +3318,7 @@ describe("SessionManager transcript isolation", () => {
     let deferred = true;
     harness.manager.setHeavyCommandQueue({
       hasActive: async () => deferred,
+      sessionStatusForWorkspace: async () => deferred ? "queued" : null,
       cancelWorkspace: async () => { operations.push("cancel"); deferred = false; }
     });
     harness.tmux.interrupt = async () => { operations.push("interrupt"); };
