@@ -127,6 +127,17 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/remote-access", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("loads app-server compatibility status", async () => {
+    const fetchMock = mockJsonResponse({ status: "available", available: true });
+
+    await api.appServerCompatibility();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/app-server/compatibility",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("revokes remote access with a bodyless post", async () => {
     const fetchMock = mockJsonResponse({ urls: [], accessUrls: [], accessKey: "river-slate-42-orbit-copper-18" });
 

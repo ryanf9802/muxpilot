@@ -30,6 +30,7 @@ import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroke
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
+import { probeAppServerCompatibility } from "./services/appServerCompatibility.js";
 import { randomBytes } from "node:crypto";
 
 const config = loadConfig();
@@ -78,7 +79,17 @@ const activitySummarizer = new ActivitySummarizer({
   logger: app.log
 });
 let dockerProxy: DockerResourceProxy | null = null;
-const sessionScopes = await detectSessionScopeCapability(config.resourceGovernor !== "off");
+const userSystemd = await detectSessionScopeCapability(true);
+const sessionScopes = config.resourceGovernor === "off"
+  ? { ...userSystemd, configured: false, available: false, unavailableReason: "disabled" as const }
+  : userSystemd;
+const appServerCompatibility = await probeAppServerCompatibility(userSystemd.available);
+if (!appServerCompatibility.available) {
+  app.log.warn(
+    { status: appServerCompatibility.status, detail: appServerCompatibility.detail },
+    "Codex app-server sessions are unavailable; legacy tmux sessions remain enabled"
+  );
+}
 const heavyLaunchToken = randomBytes(32).toString("hex");
 if (sessionScopes.configured && !sessionScopes.available) {
   app.log.warn(
@@ -216,10 +227,11 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility);
 
 app.get("/healthz", async () => ({
   ok: true,
+  appServerCompatibility,
   resourceGovernor: resourceGovernor.snapshot(),
   dockerGuardActive: Boolean(dockerProxy)
 }));

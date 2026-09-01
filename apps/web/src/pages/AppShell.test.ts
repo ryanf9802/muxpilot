@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
+import type { AppServerCompatibility, ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
+  appServerCompatibilityLabel,
   applySessionEventToSessions,
   ConnectDeviceContent,
   defaultForkSessionName,
@@ -54,6 +55,25 @@ import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
+  it("describes app-server availability and concrete incompatibility", () => {
+    const available: AppServerCompatibility = {
+      status: "available",
+      available: true,
+      codexVersion: "0.152.0",
+      detail: "ready",
+      checkedAt: "2026-09-01T12:00:00.000Z",
+      missingCapabilities: []
+    };
+    expect(appServerCompatibilityLabel(available)).toBe("Codex app-server available · Codex 0.152.0.");
+    expect(appServerCompatibilityLabel({
+      ...available,
+      status: "user_systemd_unavailable",
+      available: false,
+      codexVersion: null,
+      detail: "A persistent user-systemd manager is required."
+    })).toBe("A persistent user-systemd manager is required.");
+  });
+
   it("renders every interrupted session selected with crash limitations and failures", () => {
     const incident: SessionRecoveryIncident = {
       id: "incident-1",

@@ -6,6 +6,7 @@ import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, no
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
+  AppServerCompatibility,
   CreateSessionRequest,
   GitRepositoryProbe,
   ManagedSession,
@@ -98,6 +99,8 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
+  const [appServerCompatibility, setAppServerCompatibility] = useState<AppServerCompatibility | null>(null);
+  const [appServerCompatibilityLoading, setAppServerCompatibilityLoading] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
@@ -529,6 +532,17 @@ export function AppShell() {
     };
   }, [createSessionOpen, createSessionTab, sessionHistoryQuery]);
 
+  useEffect(() => {
+    if (!createSessionOpen || createSessionTab !== "create") return undefined;
+    let cancelled = false;
+    setAppServerCompatibilityLoading(true);
+    void api.appServerCompatibility()
+      .then((compatibility) => { if (!cancelled) setAppServerCompatibility(compatibility); })
+      .catch(() => { if (!cancelled) setAppServerCompatibility(null); })
+      .finally(() => { if (!cancelled) setAppServerCompatibilityLoading(false); });
+    return () => { cancelled = true; };
+  }, [createSessionOpen, createSessionTab]);
+
   useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
     setNotificationMenu(null);
     setNotificationSettingsSubmenuOpen(false);
@@ -575,6 +589,7 @@ export function AppShell() {
     setCreateSessionName("");
     setCreateSessionGitProbe(null);
     setCreateSessionTargetBranch("");
+    setAppServerCompatibility(null);
     setGitSkillStatus(null);
     setCreateSessionError(null);
     setCreateSessionDirectoryFocused(!hasPrefilledCwd);
@@ -1170,6 +1185,11 @@ export function AppShell() {
             </div>
             {createSessionTab === "create" ? (
               <>
+                <p className="session-git-probe-note" data-status={appServerCompatibility?.status}>
+                  {appServerCompatibilityLoading
+                    ? "Checking Codex app-server compatibility…"
+                    : appServerCompatibilityLabel(appServerCompatibility)}
+                </p>
                 <label className="rename-field">
                   <span>Directory</span>
                   <div className="session-directory-combobox">
@@ -2176,6 +2196,14 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}
     </Modal>
   );
+}
+
+export function appServerCompatibilityLabel(compatibility: AppServerCompatibility | null): string {
+  if (!compatibility) return "Codex app-server compatibility could not be loaded; tmux sessions remain available.";
+  if (compatibility.available) {
+    return `Codex app-server available${compatibility.codexVersion ? ` · Codex ${compatibility.codexVersion}` : ""}.`;
+  }
+  return compatibility.detail;
 }
 
 export function primaryInputFocusCommandForShortcut(

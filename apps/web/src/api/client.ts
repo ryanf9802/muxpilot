@@ -3,6 +3,7 @@ import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
   ActivitySummarySettingsResponse,
+  AppServerCompatibility,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
@@ -104,6 +105,7 @@ export const api = {
     json<AccessResponse>("/api/access", { method: "POST", body: JSON.stringify({ accessKey }) }),
   logout: () => json<{ ok: true }>("/api/logout", { method: "POST" }),
   connectivity: () => json<ConnectivityResponse>("/api/connectivity"),
+  appServerCompatibility: () => json<AppServerCompatibility>("/api/app-server/compatibility"),
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>

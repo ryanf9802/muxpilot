@@ -3,6 +3,7 @@ import { z } from "zod";
 import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
+  AppServerCompatibility,
   CodexSkillsResponse,
   CreateSessionRequest,
   ForkSessionRequest,
@@ -171,11 +172,18 @@ export function registerRoutes(
   notificationService?: NotificationService,
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
-  btw?: BtwService
+  btw?: BtwService,
+  appServerCompatibility?: AppServerCompatibility
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
   );
+
+  if (appServerCompatibility) {
+    app.get("/api/app-server/compatibility", { preHandler: access.requireAccess }, async (): Promise<AppServerCompatibility> =>
+      appServerCompatibility
+    );
+  }
 
   if (sessionTransfers) {
     app.get("/api/session-transfers/status", { preHandler: access.requireLocalAccess }, async () => ({
