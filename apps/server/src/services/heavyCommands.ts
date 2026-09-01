@@ -326,30 +326,32 @@ export class HeavyCommandService {
   }
 
   private async recoverExpiredOwner(owner: QueueOwner): Promise<void> {
+    const resourceUnit = owner.resourceUnit;
+    if (!resourceUnit) return;
     if (await this.runtime.ownerProcessState(owner) === "inactive") return;
     const reason = `runtime exceeded ${formatElapsed(owner.deadlines.runtimeTimeoutMs)} while the heavyweight worker remained active`;
     const eligible = await this.withSchedulerLock(async () => {
       const current = await this.readQueueOwner(owner.runId);
-      if (!current || !RUNNING_STATES.has(current.state) || !current.startedAt || current.resourceUnit !== owner.resourceUnit) return false;
+      if (!current || !RUNNING_STATES.has(current.state) || !current.startedAt || current.resourceUnit !== resourceUnit) return false;
       const startedAt = Date.parse(current.startedAt);
       if (!Number.isFinite(startedAt) || Date.now() < startedAt + current.deadlines.runtimeTimeoutMs + current.deadlines.terminationGraceMs) return false;
       return true;
     });
     if (!eligible) return;
     try {
-      await this.runtime.stopResourceUnit(owner.resourceUnit);
+      await this.runtime.stopResourceUnit(resourceUnit);
     } catch (error) {
       console.error("Muxpilot heavyweight deadline recovery failed", {
         runId: owner.runId,
         workspaceId: owner.workspaceId,
-        resourceUnit: owner.resourceUnit,
+        resourceUnit,
         error
       });
       return;
     }
     await this.withSchedulerLock(async () => {
       const current = await this.readQueueOwner(owner.runId);
-      if (!current || current.resourceUnit !== owner.resourceUnit || !RUNNING_STATES.has(current.state)) return;
+      if (!current || current.resourceUnit !== resourceUnit || !RUNNING_STATES.has(current.state)) return;
       const finishedAt = new Date().toISOString();
       const slot = current.slot;
       current.state = "reporting";
