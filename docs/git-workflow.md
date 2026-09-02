@@ -33,7 +33,7 @@ When a request names a new destination branch for implementation, that destinati
 
 1. Name the `fixed-target` guard.
 2. Explain that current and future task commits will integrate into the new branch.
-3. Obtain separate, explicit operator confirmation.
+3. Obtain separate, explicit operator confirmation unless the direct skill-invocation authorization below applies.
 4. Create the local branch when requested, then retarget with `muxpilot-git-target.mjs`.
 
 Retargeting an active worktree invalidates its prior checks and review. They must be repeated before integration.
@@ -106,7 +106,19 @@ The workflow enforces these named guards:
 - `automatic-cleanup`
 - `no-pull-push`
 
-An operator can approve a specific guard bypass for a specific operation only after the agent names the guard and consequence. There is no blanket force option. Sandbox, permission, and security approvals are separate and cannot be bypassed through workflow guards.
+A direct skill invocation is operation-scoped authorization when the request
+names the skill with `$skill-name` or unambiguous wording and the skill body
+explicitly directs the guard-conflicting action. The skill need not identify
+the guard. The agent still names each mapped guard and consequence, announces
+the skill-derived authorization, and uses the exact helper bypass without
+pausing for redundant confirmation. Automatic skill selection, broad
+capability descriptions, undeclared actions, and later operations do not
+qualify.
+
+For all other conflicts, an operator can approve a specific guard bypass for a
+specific operation only after the agent names the guard and consequence. There
+is no blanket force option. Platform safety, sandbox, permission, and security
+approvals are separate and cannot be bypassed through workflow guards.
 
 ## Integration Boundaries and Recovery
 
