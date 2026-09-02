@@ -26,6 +26,7 @@ import type {
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionDirectorySuggestion,
+  SessionDriverKind,
   SessionModelSettings,
   SessionModelSelections,
   SessionStatus,
@@ -53,7 +54,7 @@ import {
   isCodexStartupFailureCapture,
   TmuxAdapter
 } from "../tmux/tmuxAdapter.js";
-import type { AgentSessionDriver, AgentSessionLaunchOptions, McpServerLaunchConfig } from "./sessionDrivers/types.js";
+import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
@@ -391,7 +392,8 @@ export class SessionManager {
     if (!capabilityId || !this.orchestrationProvider) return requireSession(await this.db.getSession(sessionId));
     await this.orchestrationProvider.bindCapability(capabilityId, sessionId);
     await this.db.setSessionOrchestrationAvailable(sessionId, true, nowIso());
-    if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1") {
+    const session = requireSession(await this.db.getSession(sessionId));
+    if (session.driverKind !== "codex_app_server" && this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1") {
       await this.db.setSessionResourceScope(sessionId, sessionScopeName(capabilityId), nowIso());
     }
     return requireSession(await this.db.getSession(sessionId));
@@ -769,6 +771,7 @@ export class SessionManager {
     }
 
     for (const session of await this.db.listSessions(true)) {
+      if (session.driverKind === "codex_app_server") continue;
       if (!seen.has(session.id) && !session.initializing && session.status !== "missing") {
         const readyGeneration = this.readySessionDiscoveryGeneration.get(session.id);
         if (readyGeneration !== undefined && discoveryGeneration <= readyGeneration) continue;
@@ -2152,16 +2155,32 @@ export class SessionManager {
   async createSessionInDirectory(
     cwd: string,
     name: string,
-    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
+    driverKind: SessionDriverKind = "codex_tmux"
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
+    if (driverKind === "codex_app_server") this.requireAppServerDriver();
     const documentScopeId = this.requireDocuments().newScopeId();
     const documentOptions = await this.withDocumentLaunchOptions({
       environment: this.managedEnvironment,
       ...launchSettings
     }, documentScopeId);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    if (driverKind === "codex_app_server") {
+      const session = await this.launchAppServerSession({
+        operation: "start",
+        directory,
+        repoPath: directory,
+        sessionName,
+        options: prepared.options,
+        orchestrationCapabilityId: prepared.capabilityId,
+        documentScopeId
+      });
+      await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
+      this.publish("session.updated", session.id, session);
+      return session;
+    }
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, prepared.options);
     let session = await this.persistInitializingSession(launch.pane, directory, null, null, undefined, documentScopeId);
     session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
@@ -2177,11 +2196,14 @@ export class SessionManager {
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
+    if (request.driverKind === "codex_app_server") this.requireAppServerDriver();
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
-    if (request.workspace?.mode !== "git") return this.createSessionInDirectory(directory, sessionName, launchSettings);
+    if (request.workspace?.mode !== "git") {
+      return this.createSessionInDirectory(directory, sessionName, launchSettings, request.driverKind);
+    }
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
     const workspace = await this.gitWorkspaces.provision({
@@ -2197,6 +2219,22 @@ export class SessionManager {
       fastMode: launchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    if (request.driverKind === "codex_app_server") {
+      const session = await this.launchAppServerSession({
+        operation: "start",
+        directory: controlPath,
+        repoPath: workspace.summary.entryPath,
+        sessionName,
+        options: prepared.options,
+        orchestrationCapabilityId: prepared.capabilityId,
+        gitWorkspace: workspace.summary,
+        gitWorkspaceId: workspace.id,
+        documentScopeId: workspace.id
+      });
+      await this.db.addAudit("local", "create_git_session", session.id, workspace.id, nowIso());
+      this.publish("session.updated", session.id, session);
+      return session;
+    }
     const launch = await this.tmux.createCodexWindowInMuxpilotSession(
       controlPath,
       sessionName,
@@ -2212,16 +2250,22 @@ export class SessionManager {
     return session;
   }
 
-  async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
+  async forkSession(sessionId: string, name: string, driverKind?: SessionDriverKind): Promise<ManagedSession> {
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
-    if (!source.codexSessionId) throw new CreateSessionError("Session does not have a Codex session id to fork");
+    const sourceThreadId = source.provider?.threadId ?? source.codexSessionId;
+    if (!sourceThreadId) throw new CreateSessionError("Session does not have a Codex session id to fork");
     const sessionNameValue = requireSessionName(name);
     const forkedFrom: SessionForkOrigin = {
-      codexSessionId: source.codexSessionId,
+      codexSessionId: sourceThreadId,
       sessionId: source.id,
       sessionName: sessionName(source)
     };
+    const selectedDriver = driverKind ?? source.driverKind ?? "codex_tmux";
+    if (selectedDriver === "codex_app_server") {
+      this.requireAppServerDriver();
+      return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
+    }
 
     let launch;
     let orchestrationCapabilityId: string | null = null;
@@ -2248,7 +2292,7 @@ export class SessionManager {
       launch = await this.tmux.createCodexForkWindowInMuxpilotSession(
         controlPath,
         sessionNameValue,
-        source.codexSessionId,
+        sourceThreadId,
         prepared.options
       );
       const forkSessionId = tmuxPaneSessionId(launch.pane);
@@ -2262,7 +2306,7 @@ export class SessionManager {
       await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
       const documentOptions = await this.withDocumentLaunchOptions({ environment: this.managedEnvironment }, documentScopeId);
       const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, source.codexSessionId, prepared.options);
+      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, sourceThreadId, prepared.options);
       orchestrationCapabilityId = prepared.capabilityId;
     }
 
@@ -2272,6 +2316,193 @@ export class SessionManager {
     await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
     this.publish("session.updated", session.id, session);
     return session;
+  }
+
+  private async forkAppServerSession(
+    source: ManagedSession,
+    sourceThreadId: string,
+    sessionNameValue: string,
+    forkedFrom: SessionForkOrigin
+  ): Promise<ManagedSession> {
+    let gitWorkspace: GitWorkspaceSummary | null = null;
+    let documentScopeId: string;
+    let directory: string;
+    let repoPath: string;
+    let documentOptions: AgentSessionLaunchOptions;
+    const activeModel = source.models[source.inputMode];
+    const inheritedSettings = {
+      model: activeModel.model,
+      reasoningEffort: activeModel.reasoningEffort,
+      fastMode: source.fastMode
+    };
+    let workspaceId: string | null = null;
+
+    if (source.gitWorkspace) {
+      if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
+      const workspace = await this.gitWorkspaces.provision({
+        sessionName: sessionNameValue,
+        entryPath: source.gitWorkspace.entryPath,
+        targetBranch: source.gitWorkspace.targetBranch
+      });
+      directory = await this.gitWorkspaces.ensureControlPath(workspace);
+      repoPath = workspace.summary.entryPath;
+      gitWorkspace = workspace.summary;
+      workspaceId = workspace.id;
+      documentScopeId = workspace.id;
+      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
+      documentOptions = await this.withDocumentLaunchOptions({
+        ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
+        ...inheritedSettings
+      }, documentScopeId);
+    } else {
+      repoPath = await requireExistingDirectory(source.cwd ?? source.repo.root ?? source.tmux.cwd);
+      directory = repoPath;
+      documentScopeId = this.requireDocuments().newScopeId();
+      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
+      documentOptions = await this.withDocumentLaunchOptions({
+        environment: this.managedEnvironment,
+        ...inheritedSettings
+      }, documentScopeId);
+    }
+
+    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    const session = await this.launchAppServerSession({
+      operation: "fork",
+      directory,
+      repoPath,
+      sessionName: sessionNameValue,
+      options: prepared.options,
+      sourceThreadId,
+      orchestrationCapabilityId: prepared.capabilityId,
+      gitWorkspace,
+      gitWorkspaceId: workspaceId,
+      forkedFrom,
+      preferences: source,
+      documentScopeId
+    });
+    await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
+    this.publish("session.updated", session.id, session);
+    return session;
+  }
+
+  private async launchAppServerSession(input: {
+    operation: "start" | "resume" | "fork";
+    directory: string;
+    repoPath: string;
+    sessionName: string;
+    options: AgentSessionLaunchOptions;
+    sourceThreadId?: string;
+    orchestrationCapabilityId: string | null;
+    gitWorkspace?: GitWorkspaceSummary | null;
+    gitWorkspaceId?: string | null;
+    forkedFrom?: SessionForkOrigin | null;
+    preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">;
+    documentScopeId: string;
+  }): Promise<ManagedSession> {
+    const driver = this.requireAppServerDriver();
+    const sessionId = `app-${eventId()}`;
+    const launch = await driver[input.operation]({
+      sessionId,
+      name: input.sessionName,
+      cwd: input.directory,
+      options: input.options,
+      sourceThreadId: input.sourceThreadId
+    });
+    if (launch.sessionId !== sessionId) {
+      await driver.kill(appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
+      throw new Error(`App-server driver returned the wrong session id: expected ${sessionId}, received ${launch.sessionId}`);
+    }
+    let session: ManagedSession | null = null;
+    try {
+      session = await this.persistInitializingAppServerSession(
+        launch,
+        input.sessionName,
+        input.directory,
+        input.repoPath,
+        input.gitWorkspace ?? null,
+        input.forkedFrom ?? null,
+        input.preferences,
+        input.documentScopeId
+      );
+      if (input.gitWorkspaceId) {
+        if (!this.gitWorkspaces) throw new Error("Managed Git workspaces disappeared during app-server launch");
+        await this.gitWorkspaces.bind(input.gitWorkspaceId, session.id);
+      }
+      session = await this.bindOrchestratedLaunch(input.orchestrationCapabilityId, session.id);
+      this.finishSessionInitialization(session.id, launch.ready);
+      return session;
+    } catch (error) {
+      await driver.kill(session ?? appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
+      if (session) {
+        const startupError = error instanceof Error ? error.message : "App-server session initialization failed";
+        try {
+          await this.db.setSessionInitializationResult(session.id, "startup_failed", startupError, nowIso());
+        } catch {
+          // Preserve the original launch/binding failure after best-effort failure-state persistence.
+        }
+      }
+      throw error;
+    }
+  }
+
+  private async persistInitializingAppServerSession(
+    launch: AgentSessionLaunchResult,
+    name: string,
+    cwd: string,
+    repoPath: string,
+    gitWorkspace: GitWorkspaceSummary | null,
+    forkedFrom: SessionForkOrigin | null,
+    preferences: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable"> | undefined,
+    documentScopeId: string
+  ): Promise<ManagedSession> {
+    const now = nowIso();
+    const session: ManagedSession = {
+      id: launch.sessionId,
+      name,
+      cwd,
+      provider: launch.provider,
+      driverKind: "codex_app_server",
+      runtime: launch.runtime,
+      capabilities: launch.capabilities,
+      tmux: appServerCompatibilityPane(launch.sessionId, name, cwd),
+      repo: await loadRepoMetadata(repoPath),
+      codexSessionId: launch.provider.threadId,
+      codexJsonlPath: launch.provider.rolloutPath,
+      discoveryConfidence: "high",
+      status: "unknown",
+      initializing: true,
+      startupError: null,
+      lastActivityAt: null,
+      preview: "",
+      recentUserPrompts: [],
+      activitySummary: null,
+      activitySummaryGeneratedAt: null,
+      activitySummarySourceSequence: null,
+      inputMode: preferences?.inputMode ?? "default",
+      models: preferences?.models ?? emptySessionModels(),
+      fastMode: preferences?.fastMode ?? null,
+      fastModeAvailable: preferences?.fastModeAvailable ?? null,
+      transcriptSize: 0,
+      transcriptSyncing: false,
+      unreadCount: 0,
+      pinned: false,
+      archived: false,
+      forkedFrom,
+      gitWorkspace,
+      resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : null,
+      documentScopeId
+    };
+    await this.db.upsertSession(session, now);
+    const persisted = requireSession(await this.db.setSessionInitializing(session.id, true, now));
+    await this.recordTouchedRepository(persisted, now);
+    return persisted;
+  }
+
+  private requireAppServerDriver(): AgentSessionDriver {
+    if (!this.sessionDrivers?.has("codex_app_server")) {
+      throw new CreateSessionError("App-server sessions are unavailable", 503);
+    }
+    return this.sessionDrivers.require("codex_app_server");
   }
 
   private async persistInitializingSession(
@@ -4384,6 +4615,37 @@ function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus 
 function startupReadyStatus(status: SessionStatus | undefined): SessionStatus {
   if (!status || status === "unknown" || status === "missing" || status === "startup_failed") return "waiting";
   return status;
+}
+
+function appServerCompatibilityPane(sessionId: string, name: string, cwd: string): TmuxPane {
+  const target = `app-server:${sessionId}`;
+  return {
+    sessionId: target,
+    sessionName: name,
+    windowId: target,
+    windowIndex: -1,
+    windowName: name,
+    paneId: target,
+    paneIndex: -1,
+    paneActive: false,
+    cwd,
+    currentCommand: "codex app-server",
+    title: "Codex app-server",
+    pid: 0,
+    size: "0x0"
+  };
+}
+
+function appServerLaunchSession(launch: AgentSessionLaunchResult, name: string, cwd: string): ManagedSession {
+  return {
+    id: launch.sessionId,
+    name,
+    cwd,
+    provider: launch.provider,
+    driverKind: "codex_app_server",
+    runtime: launch.runtime,
+    capabilities: launch.capabilities
+  } as ManagedSession;
 }
 
 function inferStatusFromScreen(capture: string): SessionStatus | null {

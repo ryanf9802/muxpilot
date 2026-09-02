@@ -712,15 +712,17 @@ export type CreateSessionRequest =
   | {
       cwd: string;
       name: string;
+      driverKind?: SessionDriverKind;
       workspace: {
         mode: "git";
         targetBranch: string;
       };
     }
-  | { cwd: string; name: string; workspace?: { mode: "directory" } };
+  | { cwd: string; name: string; driverKind?: SessionDriverKind; workspace?: { mode: "directory" } };
 
 export interface ForkSessionRequest {
   name: string;
+  driverKind?: SessionDriverKind;
 }
 
 export interface ForkSessionResponse {

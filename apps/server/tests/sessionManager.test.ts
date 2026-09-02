@@ -5473,6 +5473,154 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("starts and forks explicit app-server sessions without using tmux discovery or launch", async () => {
+    const start = vi.fn(async (spec: Parameters<AgentSessionDriver["start"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: "thread-started", rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: "/tmp/app-server-started.sock",
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    }));
+    const fork = vi.fn(async (spec: Parameters<AgentSessionDriver["fork"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: "thread-forked", rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-89abcdef0123456701234567.service",
+        socketPath: "/tmp/app-server-forked.sock",
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: pendingReadiness()
+    }));
+    const driver = { kind: "codex_app_server", start, fork } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.tmux.createCodexWindowInMuxpilotSession = async () => { throw new Error("tmux start must not be used"); };
+    harness.tmux.createCodexForkWindowInMuxpilotSession = async () => { throw new Error("tmux fork must not be used"); };
+    harness.tmux.listPanes = async () => [];
+
+    const created = await harness.manager.createSessionInDirectory(
+      repo,
+      "app-start",
+      { model: "gpt-5.6-sol", reasoningEffort: "high", fastMode: true },
+      "codex_app_server"
+    );
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: expect.stringMatching(/^app-/),
+      name: "app-start",
+      cwd: repo,
+      options: expect.objectContaining({ model: "gpt-5.6-sol", reasoningEffort: "high", fastMode: true })
+    }));
+    expect(created).toMatchObject({
+      name: "app-start",
+      cwd: repo,
+      driverKind: "codex_app_server",
+      provider: { threadId: "thread-started" },
+      codexSessionId: "thread-started",
+      runtime: { kind: "systemd_service", state: "connected" },
+      resourceUnit: "muxpilot-session-0123456789abcdef01234567.service",
+      tmux: { pid: 0, currentCommand: "codex app-server" }
+    });
+    await expect.poll(async () => (await harness.manager.getSession(created.id))?.initializing).toBe(false);
+    await harness.manager.discoverNow();
+    expect((await harness.manager.getSession(created.id))?.status).toBe("waiting");
+
+    const source = await harness.manager.getSession(created.id);
+    expect(source).not.toBeNull();
+    await harness.db.upsertSession({
+      ...source!,
+      inputMode: "plan",
+      models: {
+        default: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+        plan: { model: "gpt-5.6-sol", reasoningEffort: "high" }
+      },
+      fastMode: true
+    }, "2026-09-01T13:00:00.000Z");
+    const forked = await harness.manager.forkSession(created.id, "app-fork", "codex_app_server");
+    expect(fork).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: expect.stringMatching(/^app-/),
+      name: "app-fork",
+      cwd: repo,
+      sourceThreadId: "thread-started",
+      options: expect.objectContaining({ model: "gpt-5.6-sol", reasoningEffort: "high", fastMode: true })
+    }));
+    expect(forked).toMatchObject({
+      driverKind: "codex_app_server",
+      provider: { threadId: "thread-forked" },
+      codexSessionId: "thread-forked",
+      inputMode: "plan",
+      forkedFrom: { codexSessionId: "thread-started", sessionId: created.id }
+    });
+    expect(forked.id).not.toBe(created.id);
+    harness.db.close();
+  });
+
+  it("stops an app-server launch and records failure when post-launch binding fails", async () => {
+    const launch = {
+      provider: { kind: "codex" as const, threadId: "thread-binding-failure", rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-fedcba987654321001234567.service",
+        socketPath: "/tmp/app-server-binding-failure.sock",
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    };
+    const start = vi.fn(async (spec: Parameters<AgentSessionDriver["start"]>[0]) => ({ ...launch, sessionId: spec.sessionId }));
+    const kill = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", start, kill } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    harness.manager.setOrchestrationProvider({
+      prepareLaunch: async () => ({
+        capabilityId: "fedcba987654321001234567",
+        server: { name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/tmp/mcp.mjs"] }
+      }),
+      bindCapability: async () => { throw new Error("binding failed"); }
+    });
+
+    await expect(harness.manager.createSessionInDirectory(repo, "binding-failure", undefined, "codex_app_server"))
+      .rejects.toThrow("binding failed");
+    const sessionId = start.mock.calls[0]![0].sessionId;
+    expect(kill).toHaveBeenCalledWith(expect.objectContaining({
+      id: sessionId,
+      driverKind: "codex_app_server",
+      provider: expect.objectContaining({ threadId: "thread-binding-failure" })
+    }));
+    expect(await harness.manager.getSession(sessionId)).toMatchObject({
+      status: "startup_failed",
+      initializing: false,
+      startupError: "binding failed"
+    });
+    harness.db.close();
+  });
+
+  it("fails explicit app-server creation without falling back to tmux", async () => {
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry() });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const tmuxStart = vi.fn(async () => { throw new Error("tmux fallback must not run"); });
+    harness.tmux.createCodexWindowInMuxpilotSession = tmuxStart;
+
+    await expect(harness.manager.createSessionInDirectory(repo, "app-unavailable", undefined, "codex_app_server"))
+      .rejects.toThrow("App-server sessions are unavailable");
+    expect(tmuxStart).not.toHaveBeenCalled();
+    expect(harness.manager.listSessions(true)).toEqual([]);
+    harness.db.close();
+  });
+
   it("normalizes created session names before creating tmux windows", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
@@ -6484,6 +6632,26 @@ async function createHarness(options: {
     options.sessionDrivers ?? null
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
+}
+
+function appServerCapabilities() {
+  return {
+    start: true,
+    sendMessage: true,
+    steer: true,
+    resume: true,
+    fork: true,
+    verifiedInput: true,
+    interrupt: true,
+    kill: true,
+    approvals: false,
+    questions: false,
+    planActions: false,
+    fastMode: true,
+    rawTerminalCapture: false,
+    terminalAttach: true,
+    hibernate: false
+  };
 }
 
 function agentHierarchySession(id: string): ManagedSession {

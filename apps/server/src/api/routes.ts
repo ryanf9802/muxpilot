@@ -75,6 +75,7 @@ const sessionNameSchema = z
 const createSessionSchema = z.object({
   cwd: z.string().trim().min(1).max(4096),
   name: sessionNameSchema,
+  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional(),
   workspace: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("directory") }),
     z.object({
@@ -83,7 +84,10 @@ const createSessionSchema = z.object({
     })
   ]).optional()
 });
-const forkSessionSchema = z.object({ name: sessionNameSchema });
+const forkSessionSchema = z.object({
+  name: sessionNameSchema,
+  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
+});
 const queuedInputSchema = inputBodySchema;
 const btwQuestionSchema = z.object({ text: z.string().trim().min(1).max(20_000) });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
@@ -417,7 +421,7 @@ export function registerRoutes(
         await reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before forking a Git session", code: "git_skill_required" });
         return;
       }
-      const session = await manager.forkSession(id, body.name);
+      const session = await manager.forkSession(id, body.name, body.driverKind);
       return reply.code(201).send({ session });
     } catch (error) {
       if (error instanceof SessionNameError || error instanceof CreateSessionError || error instanceof SessionNotFoundError) {
