@@ -1,0 +1,46 @@
+export function hostScopedHeavyEnvironment(environment) {
+  return { ...environment, MUXPILOT_HEAVY_QUEUE_ENABLED: "0" };
+}
+
+const SESSION_SCOPE_PATTERN = /(?:^|\/)muxpilot-session-[a-f0-9]{24}\.scope(?:\/|$)/;
+const SHADOW_SCOPE_PATTERN = /(?:^|\/)muxpilot-shadow-start-\d+-[a-f0-9]{8}\.scope(?:\/|$)/;
+
+export function isMuxpilotSessionCgroup(cgroup) {
+  return SESSION_SCOPE_PATTERN.test(cgroup);
+}
+
+export function isShadowExecutionCgroup(cgroup) {
+  return cgroup === "/init.scope" || SHADOW_SCOPE_PATTERN.test(cgroup);
+}
+
+export function shadowScopeUnitName(pid, suffix) {
+  return `muxpilot-shadow-start-${pid}-${suffix}`;
+}
+
+export function verifyProductionUnchanged(before, after) {
+  for (const role of ["supervisor", "server", "web"]) {
+    const prior = before.processes[role];
+    const current = after.processes[role];
+    if (!prior || !current || prior.pid !== current.pid || prior.cgroup !== current.cgroup) {
+      throw new Error(`production ${role} identity changed`);
+    }
+  }
+  const panes = new Map(after.tmuxPanes.map((pane) => [pane.identity, pane.pid]));
+  for (const pane of before.tmuxPanes) {
+    if (panes.get(pane.identity) !== pane.pid) throw new Error(`production tmux pane changed: ${pane.identity}`);
+  }
+  const services = new Map(after.appServerServices.map((service) => [service.unit, service]));
+  for (const service of before.appServerServices) {
+    const current = services.get(service.unit);
+    if (!current || current.mainPid !== service.mainPid || current.activeState !== service.activeState) {
+      throw new Error(`production app-server service changed: ${service.unit}`);
+    }
+  }
+  const sessions = new Map(after.sessions.map((session) => [session.id, session]));
+  for (const session of before.sessions) {
+    const current = sessions.get(session.id);
+    if (!current || current.codexSessionId !== session.codexSessionId || current.driverKind !== session.driverKind || current.tmuxPaneId !== session.tmuxPaneId || current.tmuxPid !== session.tmuxPid) {
+      throw new Error(`production session identity changed: ${session.id}`);
+    }
+  }
+}

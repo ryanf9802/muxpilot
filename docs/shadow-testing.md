@@ -13,6 +13,8 @@ Open `http://localhost:15177` in the Windows or Linux browser. WSL localhost for
 
 Shadow startup refuses dependency links that resolve to another checkout. If the worktree was created by muxpilot and shares `node_modules` with production, use the Git workflow dependency-localization helper for its registered Node dependency paths before starting shadow mode; this prevents branch code from loading production's older core build.
 
+For Codex-driven live testing, use `$muxpilot-start-shadow` after the branch commit is integrated. Its helper creates a hard host-scope boundary around dependency installation and startup, then proves the production supervisor/server/web PIDs and cgroups, every pre-existing tmux pane, and every pre-existing active app-server service retained their identities. Raw `pnpm app start shadow` remains appropriate for a human shell that is already outside a muxpilot session scope.
+
 Shadow mode forcibly uses:
 
 - loopback-only HTTP on backend port `14177` and web port `15177`;

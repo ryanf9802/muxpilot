@@ -1,0 +1,4 @@
+interface:
+  display_name: "Muxpilot Shadow Start"
+  short_description: "Start shadow safely outside session limits"
+  default_prompt: "Use $muxpilot-start-shadow to launch the integrated muxpilot commit beside production without disturbing live sessions."
