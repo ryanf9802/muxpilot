@@ -157,7 +157,8 @@ const manager = new SessionManager(
   config.gitWorktreeRoot,
   managedEnvironment,
   codexModels,
-  sessionDrivers
+  sessionDrivers,
+  config.appServerHibernateMs
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(

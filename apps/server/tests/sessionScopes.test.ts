@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   detectSessionScopeCapability,
+  isMuxpilotSessionResourceUnit,
   isMuxpilotSessionScope,
   sessionScopeName,
   userSystemdEnvironment
@@ -57,5 +58,8 @@ describe("session scope capability", () => {
     expect(isMuxpilotSessionScope("init.scope")).toBe(false);
     expect(isMuxpilotSessionScope("muxpilot-session-child.scope")).toBe(false);
     expect(isMuxpilotSessionScope(null)).toBe(false);
+    expect(isMuxpilotSessionResourceUnit(scope)).toBe(true);
+    expect(isMuxpilotSessionResourceUnit("muxpilot-session-0123456789abcdef01234567.service")).toBe(true);
+    expect(isMuxpilotSessionResourceUnit("ssh.service")).toBe(false);
   });
 });

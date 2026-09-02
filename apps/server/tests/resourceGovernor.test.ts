@@ -111,6 +111,36 @@ describe("ResourceGovernor", () => {
     ]);
   });
 
+  it("governs a connected app-server service and excludes it once hibernated", async () => {
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 2048, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => undefined)
+    };
+    let runtimeState: "connected" | "hibernated" = "connected";
+    const unit = "muxpilot-session-abcdef0123456789abcdef01.service";
+    const governor = new ResourceGovernor(config, async () => [{
+      ...session("app", "idle"),
+      driverKind: "codex_app_server",
+      resourceUnit: unit,
+      resourceScope: null,
+      runtime: {
+        kind: "systemd_service",
+        unit,
+        socketPath: "/tmp/app-server.sock",
+        state: runtimeState,
+        codexVersion: "0.152.0"
+      }
+    }], { info: vi.fn(), warn: vi.fn() }, controller);
+
+    await governor.reconcile();
+    expect(governor.snapshot()).toMatchObject({ managedSessions: 1, unmanagedSessions: 0 });
+    expect(controller.metrics).toHaveBeenCalledWith(unit);
+
+    runtimeState = "hibernated";
+    await governor.reconcile();
+    expect(governor.snapshot()).toMatchObject({ managedSessions: 0, unmanagedSessions: 0 });
+  });
+
   it("never manages ambient or malformed scopes", async () => {
     const controller: SystemdController = {
       metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),

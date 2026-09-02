@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { cpus, totalmem } from "node:os";
 import { promisify } from "node:util";
 import type { ManagedSession, SessionResourceUsage, SessionStatus } from "@muxpilot/core";
-import { isMuxpilotSessionScope, type SessionScopeUnavailableReason } from "./sessionScopes.js";
+import { isMuxpilotSessionResourceUnit, type SessionScopeUnavailableReason } from "./sessionScopes.js";
 
 const execFileAsync = promisify(execFile);
 const BUSY_STATUSES = new Set<SessionStatus>([
@@ -140,10 +140,10 @@ export class ResourceGovernor {
     this.running = true;
     try {
       const liveSessions = (await this.listSessions()).filter((session) =>
-        !session.archived && session.status !== "missing" && session.tmux.pid > 0
+        !session.archived && session.status !== "missing" && isLiveSessionRuntime(session)
       );
       const sessions = this.config.enabled
-        ? liveSessions.filter((session) => isMuxpilotSessionScope(session.resourceScope))
+        ? liveSessions.filter((session) => isMuxpilotSessionResourceUnit(sessionResourceUnit(session)))
         : [];
       const allocations = allocateSessionResources(sessions, this.config, this.idleSince);
       const supplementalScopes = this.config.enabled
@@ -173,13 +173,13 @@ export class ResourceGovernor {
       const nextResourceUsage = new Map<string, SessionResourceUsage>();
       const sampledScopes = new Set<string>();
       await Promise.all(sessions.map(async (session) => {
-        const scope = session.resourceScope!;
-        this.managedScopes.add(scope);
-        sampledScopes.add(scope);
+        const unit = sessionResourceUnit(session)!;
+        this.managedScopes.add(unit);
+        sampledScopes.add(unit);
         const allocation = allocations.get(session.id)!;
         const sampledAtMs = Date.now();
-        const metrics = await this.controller.metrics(scope);
-        const cpuPercent = this.cpuPercentForSample(scope, metrics.cpuUsageNsec, sampledAtMs);
+        const metrics = await this.controller.metrics(unit);
+        const cpuPercent = this.cpuPercentForSample(unit, metrics.cpuUsageNsec, sampledAtMs);
         if (metrics.memoryCurrentBytes !== null) {
           nextResourceUsage.set(session.id, {
             memoryCurrentBytes: metrics.memoryCurrentBytes,
@@ -190,7 +190,7 @@ export class ResourceGovernor {
             sampledAt: new Date(sampledAtMs).toISOString()
           });
         }
-        await this.controller.setProperties(scope, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
+        await this.controller.setProperties(unit, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
       }).map((operation) => operation.catch((error) => {
         this.logger.warn({ err: error }, "could not apply resource limits to a session scope");
       })));
@@ -204,7 +204,11 @@ export class ResourceGovernor {
       })));
       const activeSupplementalScopes = new Set(supplementalScopes.map((entry) => entry.scope));
       for (const scope of this.managedScopes) {
-        if (HEAVY_RESOURCE_UNIT.test(scope) && !activeSupplementalScopes.has(scope)) this.managedScopes.delete(scope);
+        if (HEAVY_RESOURCE_UNIT.test(scope)) {
+          if (!activeSupplementalScopes.has(scope)) this.managedScopes.delete(scope);
+        } else if (!sampledScopes.has(scope)) {
+          this.managedScopes.delete(scope);
+        }
       }
       for (const scope of this.cpuSamples.keys()) {
         if (!sampledScopes.has(scope)) this.cpuSamples.delete(scope);
@@ -225,6 +229,17 @@ export class ResourceGovernor {
     if (!previous || usageNsec < previous.usageNsec || sampledAtMs <= previous.sampledAtMs) return null;
     return Math.max(0, (usageNsec - previous.usageNsec) / ((sampledAtMs - previous.sampledAtMs) * 1_000_000) * 100);
   }
+}
+
+function sessionResourceUnit(session: ManagedSession): string | null {
+  return session.resourceUnit ?? session.resourceScope ?? null;
+}
+
+function isLiveSessionRuntime(session: ManagedSession): boolean {
+  if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service") {
+    return session.runtime.state === "connected" || session.runtime.state === "starting";
+  }
+  return session.tmux.pid > 0;
 }
 
 export function allocateSessionResources(

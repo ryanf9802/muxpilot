@@ -337,6 +337,25 @@ describe("CodexAppServerDriver", () => {
     expect(harness.connections.close).toHaveBeenCalledWith("session-1");
     expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
   });
+
+  it("blocks hibernation for background terminals and otherwise stops cleanly", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    harness.rpc.request.mockImplementation(async (method: string) =>
+      method === "thread/backgroundTerminals/list" ? { data: [{ processId: "dev-server" }] } : {}
+    );
+    await expect(harness.driver.hibernationBlockers(session)).resolves.toContain("background_terminal");
+    await expect(harness.driver.hibernate(session)).rejects.toThrow("background_terminal");
+    expect(harness.supervisor.stop).not.toHaveBeenCalled();
+
+    harness.rpc.request.mockImplementation(async (method: string) =>
+      method === "thread/backgroundTerminals/list" ? { data: [] } : {}
+    );
+    await expect(harness.driver.hibernate(session)).resolves.toMatchObject({ state: "hibernated" });
+    expect(harness.connections.close).toHaveBeenCalledWith(session.id);
+    expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
+  });
 });
 
 function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServerDriverEventSink): {

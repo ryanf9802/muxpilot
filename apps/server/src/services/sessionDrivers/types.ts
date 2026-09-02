@@ -89,6 +89,8 @@ export interface AgentSessionDriver {
   kill(session: ManagedSession): Promise<void>;
   answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;
   answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void>;
+  hibernationBlockers(session: ManagedSession): Promise<string[]>;
+  hibernate(session: ManagedSession): Promise<SystemdSessionRuntimeRef>;
   choosePlanAction(
     session: ManagedSession,
     action: PlanActionChoice,

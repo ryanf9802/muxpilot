@@ -5736,6 +5736,84 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("hibernates and wakes eligible app-server sessions without losing thread identity", async () => {
+    const hibernationBlockers = vi.fn(async () => [] as string[]);
+    const hibernate = vi.fn(async (session: ManagedSession) => ({
+      ...(session.runtime as Extract<ManagedSession["runtime"], { kind: "systemd_service" }>),
+      state: "hibernated" as const
+    }));
+    const resume = vi.fn(async (spec: Parameters<AgentSessionDriver["resume"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: spec.sourceThreadId!, rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: "/tmp/app-hibernate.sock",
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    }));
+    const driver = { kind: "codex_app_server", hibernationBlockers, hibernate, resume } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const base = appServerSession("app-hibernate", "thread-hibernate", "idle");
+    const session = { ...base, cwd: repo, tmux: { ...base.tmux, cwd: repo }, repo: { ...base.repo, root: repo } };
+    await harness.db.upsertSession(session, "2026-09-01T12:00:00.000Z");
+
+    await harness.manager.act(session.id, { type: "hibernate" });
+    expect(hibernate).toHaveBeenCalledWith(expect.objectContaining({ id: session.id, codexSessionId: "thread-hibernate" }));
+    expect(await harness.manager.getSession(session.id)).toMatchObject({
+      status: "idle",
+      runtime: { state: "hibernated" },
+      codexSessionId: "thread-hibernate"
+    });
+
+    await harness.manager.act(session.id, { type: "wake" });
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: session.id,
+      sourceThreadId: "thread-hibernate",
+      cwd: repo
+    }));
+    expect(await harness.manager.getSession(session.id)).toMatchObject({
+      runtime: { state: "connected" },
+      codexSessionId: "thread-hibernate"
+    });
+
+    await harness.db.setSessionStatus(session.id, "idle", "2026-09-01T12:01:00.000Z");
+    hibernationBlockers.mockResolvedValueOnce(["background_terminal"]);
+    await expect(harness.manager.act(session.id, { type: "hibernate" })).rejects.toThrow("background_terminal");
+    expect(hibernate).toHaveBeenCalledTimes(1);
+    harness.db.close();
+  });
+
+  it("automatically hibernates only app-server sessions idle beyond the configured delay", async () => {
+    const hibernationBlockers = vi.fn(async () => [] as string[]);
+    const hibernate = vi.fn(async (session: ManagedSession) => ({
+      ...(session.runtime as Extract<ManagedSession["runtime"], { kind: "systemd_service" }>),
+      state: "hibernated" as const
+    }));
+    const driver = { kind: "codex_app_server", hibernationBlockers, hibernate } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]), appServerHibernateMs: 60_000 });
+    const old = { ...appServerSession("app-old", "thread-old", "idle"), lastActivityAt: "2026-09-01T11:58:00.000Z" };
+    const fresh = { ...appServerSession("app-fresh", "thread-fresh", "idle"), lastActivityAt: "2026-09-01T11:59:30.000Z" };
+    const active = { ...appServerSession("app-active", "thread-active", "working"), lastActivityAt: "2026-09-01T11:00:00.000Z" };
+    await harness.db.upsertSession(old, old.lastActivityAt);
+    await harness.db.upsertSession(fresh, fresh.lastActivityAt);
+    await harness.db.upsertSession(active, active.lastActivityAt);
+
+    await harness.manager.hibernateIdleAppServerSessions(Date.parse("2026-09-01T12:00:00.000Z"));
+
+    expect(hibernate).toHaveBeenCalledTimes(1);
+    expect(hibernate).toHaveBeenCalledWith(expect.objectContaining({ id: old.id }));
+    expect(await harness.manager.getSession(old.id)).toMatchObject({ runtime: { state: "hibernated" } });
+    expect(await harness.manager.getSession(fresh.id)).toMatchObject({ runtime: { state: "connected" } });
+    expect(await harness.manager.getSession(active.id)).toMatchObject({ runtime: { state: "connected" } });
+    harness.db.close();
+  });
+
   it("stops an app-server launch and records failure when post-launch binding fails", async () => {
     const launch = {
       provider: { kind: "codex" as const, threadId: "thread-binding-failure", rolloutPath: null },
@@ -6848,6 +6926,7 @@ describe("agent-managed session hierarchy", () => {
 async function createHarness(options: {
   sessionScopesAvailable?: boolean;
   sessionDrivers?: SessionDriverRegistry;
+  appServerHibernateMs?: number;
 } = {}): Promise<{
   dir: string;
   codexHome: string;
@@ -6887,7 +6966,8 @@ async function createHarness(options: {
     null,
     { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" },
     null,
-    options.sessionDrivers ?? null
+    options.sessionDrivers ?? null,
+    options.appServerHibernateMs
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
 }

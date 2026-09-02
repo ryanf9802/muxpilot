@@ -68,7 +68,7 @@ import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
 import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
 import { accountAgentWorkTokens, agentWorkTokensUsed } from "./agentUsage.js";
 import type { PortableSession } from "./sessionTransfer.js";
-import { isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
+import { isMuxpilotSessionResourceUnit, isMuxpilotSessionScope, sessionScopeName } from "./sessionScopes.js";
 import {
   SessionDocumentService,
   type BtwDocumentApplyResult,
@@ -148,6 +148,7 @@ type InputDeliveryFailureCode =
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
   private parserTimer: NodeJS.Timeout | null = null;
+  private appServerHibernateTimer: NodeJS.Timeout | null = null;
   private discoveryRunning = false;
   private ingestRunning = false;
   private readonly answeredPlanMessageIds = new Set<string>();
@@ -169,6 +170,8 @@ export class SessionManager {
   private readonly restoreLocks = new Map<string, Promise<unknown>>();
   private agentMutationQueue = Promise.resolve();
   private appServerRecoveryRunning = false;
+  private appServerHibernationRunning = false;
+  private readonly runtimeOperationTails = new Map<string, Promise<void>>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -187,7 +190,8 @@ export class SessionManager {
     private readonly gitWorktreeRoot: string | null = null,
     private readonly managedEnvironment: Record<string, string> = {},
     private readonly codexMetadata: CodexMetadataLookup | null = null,
-    private readonly sessionDrivers: SessionDriverRegistry | null = null
+    private readonly sessionDrivers: SessionDriverRegistry | null = null,
+    private readonly appServerHibernateMs = 900_000
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -204,6 +208,12 @@ export class SessionManager {
       () => this.runBackgroundTask("ingest", () => this.runIngestTick()),
       this.parserIntervalMs
     );
+    const hibernateIntervalMs = Math.min(60_000, Math.max(1_000, Math.floor(this.appServerHibernateMs / 3)));
+    this.appServerHibernateTimer = setInterval(
+      () => this.runBackgroundTask("app-server hibernation", () => this.hibernateIdleAppServerSessions()),
+      hibernateIntervalMs
+    );
+    this.appServerHibernateTimer.unref();
   }
 
   async reconcileNow(): Promise<void> {
@@ -614,6 +624,8 @@ export class SessionManager {
   stop(): void {
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     if (this.parserTimer) clearInterval(this.parserTimer);
+    if (this.appServerHibernateTimer) clearInterval(this.appServerHibernateTimer);
+    this.appServerHibernateTimer = null;
     this.codexStore.stop();
     this.activitySummarizer?.stop();
   }
@@ -1465,6 +1477,22 @@ export class SessionManager {
     actorSessionId: string | null = null
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const session = requireSession(await this.db.getSession(sessionId));
+    if (session.driverKind !== "codex_app_server") {
+      return this.sendInputExclusive(sessionId, text, mode, actorSessionId);
+    }
+    return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId));
+  }
+
+  private async sendInputExclusive(
+    sessionId: string,
+    text: string,
+    mode?: CollaborationMode,
+    actorSessionId: string | null = null
+  ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
+    let session = requireSession(await this.db.getSession(sessionId));
+    if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated") {
+      session = await this.wakeAppServerSessionExclusive(session);
+    }
     if (session.status === "input_failed") {
       throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
     }
@@ -1696,7 +1724,7 @@ export class SessionManager {
       if (child.status === "missing" || child.archived) throw new AgentSessionError("Only live sessions can be claimed");
       const all = await this.db.listSessions(true);
       const claimedSubtree = [child, ...agentDescendants(all, child.id)];
-      if (claimedSubtree.some((session) => isLiveManagedSession(session) && !isMuxpilotSessionScope(session.resourceScope))) {
+      if (claimedSubtree.some((session) => isLiveManagedSession(session) && !isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope))) {
         throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be claimed. Restore this session after enabling user systemd scopes, then retry.");
       }
       if (claimedSubtree.some((session) => session.id === actor.id)) {
@@ -1776,7 +1804,7 @@ export class SessionManager {
       if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
         throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
       }
-      if (all.some((session) => subtreeIds.has(session.id) && isLiveManagedSession(session) && !isMuxpilotSessionScope(session.resourceScope))) {
+      if (all.some((session) => subtreeIds.has(session.id) && isLiveManagedSession(session) && !isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope))) {
         throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be attached. Restore this session after enabling user systemd scopes, then retry.");
       }
 
@@ -2525,6 +2553,118 @@ export class SessionManager {
     }
   }
 
+  private async appServerHibernationBlockers(session: ManagedSession): Promise<string[]> {
+    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      return ["unsupported_runtime"];
+    }
+    const blockers: string[] = [];
+    if (session.runtime.state !== "connected") blockers.push("runtime_not_connected");
+    if (session.status !== "idle") blockers.push(`status_${session.status}`);
+    if (session.initializing) blockers.push("initializing");
+    if (this.deliveringInputSessionIds.has(session.id) || this.processingQueuedSessionIds.has(session.id)) {
+      blockers.push("input_delivery");
+    }
+    if ((await this.db.listQueuedInputs(session.id)).length > 0) blockers.push("queued_input");
+    const latestUser = await this.db.latestUserMessage(session.id);
+    const deliveryState = inputDeliveryState(latestUser);
+    if (deliveryState === "pending" || deliveryState === "failed") blockers.push("uncertain_input");
+    if (await this.db.activeBtwExchange(session.id)) blockers.push("btw_handoff");
+    if ((await this.db.listAgentWaits()).some((wait) => wait.actorSessionId === session.id)) {
+      blockers.push("orchestration_continuation");
+    }
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) {
+      blockers.push("heavy_command");
+    }
+    if (blockers.length === 0) {
+      try {
+        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session));
+      } catch {
+        blockers.push("runtime_evidence_unavailable");
+      }
+    }
+    return [...new Set(blockers)];
+  }
+
+  async hibernateIdleAppServerSessions(nowMs = Date.now()): Promise<void> {
+    if (this.appServerHibernationRunning || !this.sessionDrivers?.has("codex_app_server")) return;
+    this.appServerHibernationRunning = true;
+    try {
+      const sessions = (await this.db.listSessions(true))
+        .filter((session) =>
+          !session.archived &&
+          session.driverKind === "codex_app_server" &&
+          session.runtime?.kind === "systemd_service" &&
+          session.runtime.state === "connected" &&
+          session.status === "idle"
+        )
+        .sort(compareAppServerRecoveryOrder);
+      for (const session of sessions) {
+        const lastActivityMs = session.lastActivityAt ? Date.parse(session.lastActivityAt) : Number.NaN;
+        if (!Number.isFinite(lastActivityMs) || nowMs - lastActivityMs < this.appServerHibernateMs) continue;
+        try {
+          await this.hibernateAppServerSession(session);
+        } catch {
+          // Eligibility can change between observation and stop. A later interval re-evaluates from durable state.
+        }
+      }
+    } finally {
+      this.appServerHibernationRunning = false;
+    }
+  }
+
+  private async hibernateAppServerSession(session: ManagedSession, audit = true): Promise<ManagedSession> {
+    return this.serializeRuntimeOperation(session.id, async () => {
+      const current = requireSession(await this.db.getSession(session.id));
+      return this.hibernateAppServerSessionExclusive(current, audit);
+    });
+  }
+
+  private async hibernateAppServerSessionExclusive(session: ManagedSession, audit: boolean): Promise<ManagedSession> {
+    const blockers = await this.appServerHibernationBlockers(session);
+    if (blockers.length > 0) {
+      throw new SessionRuntimeActionError(`Session cannot hibernate while ${blockers.join(", ")}`);
+    }
+    const runtime = await this.requireAppServerDriver().hibernate(session);
+    const now = nowIso();
+    const current = requireSession(await this.db.getSession(session.id));
+    await this.db.upsertSession({ ...current, runtime, status: "idle", initializing: false }, now);
+    if (audit) await this.db.addAudit("local", "runtime:hibernate", session.id, "ok", now);
+    const updated = requireSession(await this.db.getSession(session.id));
+    this.publish("status.changed", session.id, { status: "idle" });
+    this.publish("session.updated", session.id, updated);
+    return updated;
+  }
+
+  private async wakeAppServerSession(session: ManagedSession, audit = true): Promise<ManagedSession> {
+    return this.serializeRuntimeOperation(session.id, async () => {
+      const current = requireSession(await this.db.getSession(session.id));
+      return this.wakeAppServerSessionExclusive(current, audit);
+    });
+  }
+
+  private async wakeAppServerSessionExclusive(session: ManagedSession, audit = true): Promise<ManagedSession> {
+    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      throw new SessionRuntimeActionError("Only app-server sessions can be woken");
+    }
+    if (session.runtime.state !== "hibernated") {
+      throw new SessionRuntimeActionError("Session is not hibernated");
+    }
+    const updated = await this.resumeAppServerSession(session);
+    if (audit) await this.db.addAudit("local", "runtime:wake", session.id, "ok", nowIso());
+    return updated;
+  }
+
+  private serializeRuntimeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.runtimeOperationTails.get(sessionId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.runtimeOperationTails.set(sessionId, tail);
+    void tail.finally(() => {
+      if (this.runtimeOperationTails.get(sessionId) === tail) this.runtimeOperationTails.delete(sessionId);
+    });
+    return result;
+  }
+
   private async performAppServerPlanAction(
     session: ManagedSession,
     planMessage: ChatMessage,
@@ -2905,6 +3045,12 @@ export class SessionManager {
       const now = nowIso();
       await this.db.setSessionStatus(sessionId, "waiting", now);
       this.publish("status.changed", sessionId, { status: "waiting" });
+    }
+    if (action.type === "hibernate") {
+      await this.hibernateAppServerSession(session, false);
+    }
+    if (action.type === "wake") {
+      await this.wakeAppServerSession(session, false);
     }
     if (action.type === "choosePlanAction") {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
@@ -3713,6 +3859,10 @@ export class FastModeSwitchError extends Error {
 }
 
 export class InputDeliveryError extends Error {
+  readonly statusCode = 409;
+}
+
+export class SessionRuntimeActionError extends Error {
   readonly statusCode = 409;
 }
 

@@ -917,6 +917,8 @@ export type SessionAction =
   | { type: "pin" }
   | { type: "unpin" }
   | { type: "detach" }
+  | { type: "hibernate" }
+  | { type: "wake" }
   | { type: "kill" };
 
 export interface SessionActionResponse {

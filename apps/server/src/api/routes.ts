@@ -40,6 +40,7 @@ import {
   SessionRestoreError,
   SessionNotFoundError,
   SessionNameError,
+  SessionRuntimeActionError,
   type SessionManager
 } from "../services/sessionManager.js";
 import type { EventBus } from "../services/eventBus.js";
@@ -161,6 +162,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("pin") }),
   z.object({ type: z.literal("unpin") }),
   z.object({ type: z.literal("detach") }),
+  z.object({ type: z.literal("hibernate") }),
+  z.object({ type: z.literal("wake") }),
   z.object({ type: z.literal("kill") })
 ]);
 
@@ -619,6 +622,9 @@ export function registerRoutes(
       if (error instanceof InputDeliveryError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      if (error instanceof SessionRuntimeActionError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
       throw error;
     }
   });
@@ -729,6 +735,9 @@ export function registerRoutes(
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (error instanceof InputDeliveryError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      if (error instanceof SessionRuntimeActionError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (error instanceof FastModeSwitchError) {

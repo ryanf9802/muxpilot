@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const SESSION_SCOPE_PATTERN = /^muxpilot-session-[a-f0-9]{24}\.scope$/;
+const SESSION_SERVICE_PATTERN = /^muxpilot-session-[a-f0-9]{24}\.service$/;
 
 export type SessionScopeUnavailableReason = "disabled" | "user_systemd_unavailable";
 
@@ -49,6 +50,10 @@ export function sessionScopeName(capabilityId: string): string {
 
 export function isMuxpilotSessionScope(scope: string | null | undefined): scope is string {
   return typeof scope === "string" && SESSION_SCOPE_PATTERN.test(scope);
+}
+
+export function isMuxpilotSessionResourceUnit(unit: string | null | undefined): unit is string {
+  return typeof unit === "string" && (SESSION_SCOPE_PATTERN.test(unit) || SESSION_SERVICE_PATTERN.test(unit));
 }
 
 async function probeUserSystemd(environment: Record<string, string>): Promise<void> {

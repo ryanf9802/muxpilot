@@ -101,6 +101,7 @@ describe("config LAN access validation", () => {
     const defaults = parseConfig({});
     expect(defaults).toMatchObject({
       resourceGovernor: "auto",
+      appServerHibernateMs: 900_000,
       agentMemorySoftPercent: 50,
       agentMemoryHardPercent: 60,
       agentCpuPercent: 75,
@@ -118,10 +119,12 @@ describe("config LAN access validation", () => {
 
     const overridden = parseConfig({
       MUXPILOT_RESOURCE_GOVERNOR: "off",
+      MUXPILOT_APP_SERVER_HIBERNATE_MS: "120000",
       MUXPILOT_AGENT_MEMORY_SOFT_PERCENT: "40",
       MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "3"
     });
     expect(overridden.resourceGovernor).toBe("off");
+    expect(overridden.appServerHibernateMs).toBe(120_000);
     expect(overridden.agentMemorySoftPercent).toBe(40);
     expect(overridden.heavyValidationConcurrency).toBe(3);
     expect(parseConfig({ MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS: "45000" }).heavyValidationResumeTimeoutMs).toBe(45_000);

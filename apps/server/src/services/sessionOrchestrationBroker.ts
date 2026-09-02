@@ -7,7 +7,7 @@ import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
 import { liveSessionSubtree, serializeSessionWaitEvent, sessionStatusPresentation, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
-import { isMuxpilotSessionScope } from "./sessionScopes.js";
+import { isMuxpilotSessionResourceUnit } from "./sessionScopes.js";
 import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 import { agentWorkTokensUsed } from "./agentUsage.js";
 import type { McpServerLaunchConfig } from "./sessionDrivers/types.js";
@@ -317,7 +317,7 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
   const effective = sessionStatusPresentation(session, allSessions);
   return {
     id: session.id,
-    name: session.tmux.windowName,
+    name: session.name,
     status: session.status,
     effectiveStatus: effective.status,
     effectiveStatusSessionId: effective.sourceSessionId,
@@ -334,8 +334,10 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
     preview: session.preview.slice(0, 500),
     orchestrationAvailable: session.orchestrationAvailable === true,
     resourceIsolation: {
-      isolated: isMuxpilotSessionScope(session.resourceScope),
-      scope: isMuxpilotSessionScope(session.resourceScope) ? session.resourceScope : null
+      isolated: isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope),
+      unit: isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope)
+        ? session.resourceUnit ?? session.resourceScope
+        : null
     }
   };
 }

@@ -190,6 +190,41 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     await this.respondPending(session, requestId, pending, { answers: answer.answers });
   }
 
+  async hibernationBlockers(session: ManagedSession): Promise<string[]> {
+    const { threadId, protocol } = this.protocolFor(session);
+    const blockers: string[] = [];
+    if (this.activeTurns.has(session.id)) blockers.push("active_turn");
+    if ([...this.pendingRequests.values()].some((request) => request.sessionId === session.id)) {
+      blockers.push("interactive_request");
+    }
+    const terminals = await protocol.listBackgroundTerminals(threadId);
+    if (backgroundProcessIds(terminals).length > 0) blockers.push("background_terminal");
+    return blockers;
+  }
+
+  async hibernate(session: ManagedSession): Promise<SystemdSessionRuntimeRef> {
+    const runtime = requireAppServerSession(session);
+    const threadId = requireThreadId(session);
+    const blockers = await this.hibernationBlockers(session);
+    if (blockers.length > 0) throw new Error(`App-server session cannot hibernate: ${blockers.join(", ")}`);
+    await this.connections.close(session.id);
+    let stopped: SystemdSessionRuntimeRef;
+    try {
+      stopped = await this.supervisor.stop(runtime);
+    } catch (error) {
+      await this.connections.reconnect({
+        sessionId: session.id,
+        runtime,
+        threadId,
+        handlers: this.handlers(session.id)
+      }).catch(() => undefined);
+      throw error;
+    }
+    this.activeTurns.delete(session.id);
+    this.clearPendingRequests(session.id);
+    return { ...stopped, state: "hibernated" };
+  }
+
   async choosePlanAction(
     session: ManagedSession,
     action: "implement" | "clear_context_implement" | "stay_in_plan",
