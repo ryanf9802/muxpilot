@@ -3,7 +3,8 @@
 Prerequisites:
 
 - WSL2 Ubuntu or another local Linux-like host.
-- tmux.
+- A persistent user-systemd manager for the default Codex app-server runtime.
+- tmux only when using or retaining legacy sessions.
 - Codex CLI.
 - Node.js 24 or newer.
 - pnpm 11.12.0, matching the repository's `packageManager` pin.
@@ -24,7 +25,7 @@ Open:
 http://127.0.0.1:12778
 ```
 
-`pnpm app start` installs or updates muxpilot's bundled Git, heavyweight-queue, session-orchestration, and documents skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app still runs on the host under your user account so it can access your tmux socket, Codex CLI sessions, and `~/.codex/sessions`.
+`pnpm app start` installs or updates muxpilot's bundled Git, heavyweight-queue, session-orchestration, and documents skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app runs under your user account so it can own per-session app-server services and sockets, access legacy tmux sessions, and read `~/.codex/sessions`.
 
 Useful production commands:
 
@@ -62,9 +63,9 @@ pnpm app stop dev
 pnpm app restart dev
 ```
 
-The dashboard shows discovered Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, resource/context indicators, nested agent sessions, and usage data when available. Opening a session shows the structured transcript, verified/queued input, interactive gates, documents, BTW, heavyweight and Git state, skill suggestions, and raw terminal view. See the [Usage Guide](usage.md).
+The dashboard shows managed app-server sessions and discovered legacy Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, resource/context indicators, nested agent sessions, and usage data when available. Opening a session shows the structured transcript, verified/queued input, interactive gates, documents, BTW, heavyweight and Git state, skill suggestions, and the evidence supported by that runtime. See the [Usage Guide](usage.md).
 
-Nested agent sessions require a persistent user-systemd manager so each child receives an independent resource scope. Ordinary operator sessions do not require it. Follow [Resource Controls](configuration.md#resource-controls) before using session orchestration.
+App-server and nested agent sessions require a persistent user-systemd manager so each runtime receives an independent service or resource scope. Legacy operator sessions can continue under tmux. Follow [Resource Controls](configuration.md#resource-controls) before using session orchestration.
 
 ## Phone Access On The Same Network
 
@@ -94,7 +95,7 @@ Open the app on your desktop, press the Connect device button in the top bar, an
 https://192.168.1.25:12778
 ```
 
-Use the Connect device modal on the host machine to copy the generated access key or scan the QR code. The phone browser talks to the Web UI over the LAN, and the backend controls tmux/Codex sessions on the desktop.
+Use the Connect device modal on the host machine to copy the generated access key or scan the QR code. The phone browser talks to the Web UI over the LAN, and the backend controls the local Codex runtimes on the desktop.
 
 If the phone cannot reach the URL, install and verify the host firewall rule. On native Linux:
 

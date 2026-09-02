@@ -158,7 +158,8 @@ const manager = new SessionManager(
   managedEnvironment,
   codexModels,
   sessionDrivers,
-  config.appServerHibernateMs
+  config.appServerHibernateMs,
+  config.defaultSessionDriver
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(

@@ -191,7 +191,8 @@ export class SessionManager {
     private readonly managedEnvironment: Record<string, string> = {},
     private readonly codexMetadata: CodexMetadataLookup | null = null,
     private readonly sessionDrivers: SessionDriverRegistry | null = null,
-    private readonly appServerHibernateMs = 900_000
+    private readonly appServerHibernateMs = 900_000,
+    private readonly defaultSessionDriver: SessionDriverKind = "codex_tmux"
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -2331,7 +2332,7 @@ export class SessionManager {
     cwd: string,
     name: string,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
-    driverKind: SessionDriverKind = "codex_tmux"
+    driverKind: SessionDriverKind = this.defaultSessionDriver
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
@@ -2371,13 +2372,14 @@ export class SessionManager {
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
-    if (request.driverKind === "codex_app_server") this.requireAppServerDriver();
+    const driverKind = request.driverKind ?? this.defaultSessionDriver;
+    if (driverKind === "codex_app_server") this.requireAppServerDriver();
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
     if (request.workspace?.mode !== "git") {
-      return this.createSessionInDirectory(directory, sessionName, launchSettings, request.driverKind);
+      return this.createSessionInDirectory(directory, sessionName, launchSettings, driverKind);
     }
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
@@ -2394,7 +2396,7 @@ export class SessionManager {
       fastMode: launchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    if (request.driverKind === "codex_app_server") {
+    if (driverKind === "codex_app_server") {
       const session = await this.launchAppServerSession({
         operation: "start",
         directory: controlPath,
@@ -3187,7 +3189,9 @@ export class SessionManager {
       await this.db.markSessionArchived(sessionId, true, nowIso());
     }
     if (action.type === "setInputMode") {
-      await this.ensureInputMode(session, action.mode);
+      const appServerDriver = this.appServerDriver(session);
+      if (appServerDriver) await appServerDriver.setPreferences(session, { mode: action.mode });
+      else await this.ensureInputMode(session, action.mode);
       const updatedAt = nowIso();
       const updatedSession = await this.db.setSessionInputMode(sessionId, action.mode, updatedAt);
       await this.db.addAudit(
@@ -3197,8 +3201,8 @@ export class SessionManager {
         JSON.stringify({
           previousMode: session.inputMode,
           requestedMode: action.mode,
-          switchMethod: "cycle_keys",
-          cycleKeys: this.inputModeCycleKeys,
+          switchMethod: appServerDriver ? "structured_settings" : "cycle_keys",
+          cycleKeys: appServerDriver ? null : this.inputModeCycleKeys,
           resultingMode: updatedSession?.inputMode ?? null
         }),
         updatedAt
@@ -3353,9 +3357,6 @@ export class SessionManager {
   }
 
   private async retryInputDelivery(session: ManagedSession): Promise<void> {
-    if (session.driverKind === "codex_app_server") {
-      throw new InputDeliveryError("App-server input is not replayed without a reconciled client-message identity");
-    }
     if (this.deliveringInputSessionIds.has(session.id)) {
       throw new InputDeliveryError("Another input delivery is already in progress for this session");
     }
@@ -3364,6 +3365,11 @@ export class SessionManager {
     const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
     if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) {
       throw new InputDeliveryError("There is no failed input delivery to retry");
+    }
+    const appServerDriver = this.appServerDriver(session);
+    if (appServerDriver) {
+      await this.retryAppServerInputDelivery(session, message, submission, appServerDriver);
+      return;
     }
     const pane = await this.livePane(session);
     const inferred = await inferStatus(pane, session.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
@@ -3462,6 +3468,60 @@ export class SessionManager {
     await this.db.setSessionStatus(session.id, status, attemptedAt);
     this.publish("message.appended", session.id, pending);
     this.publish("status.changed", session.id, { status });
+  }
+
+  private async retryAppServerInputDelivery(
+    session: ManagedSession,
+    message: ChatMessage,
+    submission: Record<string, unknown>,
+    driver: AgentSessionDriver
+  ): Promise<void> {
+    const clientMessageId = typeof submission.clientMessageId === "string" && submission.clientMessageId
+      ? submission.clientMessageId
+      : message.id;
+    const mode = collaborationModeFromMessage(message) ?? session.inputMode;
+    if (!isInputReadyStatus(session.status) && session.status !== "input_failed") {
+      throw new InputDeliveryError("Codex is not ready to retry this input");
+    }
+    this.deliveringInputSessionIds.add(session.id);
+    try {
+      const reconciled = await driver.reconcileInput(session, clientMessageId);
+      if (!reconciled) {
+        await this.db.addAudit("local", "input_delivery_app_server_unresolved", session.id, JSON.stringify({
+          promptHash: inputPromptHash(session.id, message.text),
+          clientMessageId
+        }), nowIso());
+        throw new InputDeliveryError("The original client message is still unconfirmed after an authoritative thread read. It was not resent because Codex does not guarantee client-message idempotency.");
+      }
+      const receipt = reconciled;
+      const acknowledged = await this.updateInputDelivery(message, {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: "app_server_reconciliation",
+        clientMessageId: receipt.clientMessageId,
+        threadId: receipt.threadId,
+        turnId: receipt.turnId,
+        acceptedAt: receipt.acceptedAt,
+        attemptCount: typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2,
+        failureCode: null,
+        failureReason: null
+      });
+      const updatedAt = nowIso();
+      const status = activeInputStatus(mode);
+      await this.db.setSessionStatus(session.id, status, updatedAt);
+      await this.db.addAudit("local", "input_delivery_reconciled", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, message.text),
+        clientMessageId,
+        threadId: receipt.threadId,
+        turnId: receipt.turnId
+      }), updatedAt);
+      this.publish("message.appended", session.id, acknowledged);
+      this.publish("status.changed", session.id, { status });
+    } catch (error) {
+      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.deliveringInputSessionIds.delete(session.id);
+    }
   }
 
   private async dismissInputDeliveryFailure(session: ManagedSession): Promise<void> {
@@ -3693,6 +3753,24 @@ export class SessionManager {
     }
     if (session.fastModeAvailable === false) {
       throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
+    }
+    const appServerDriver = this.appServerDriver(session);
+    if (appServerDriver) {
+      try {
+        await appServerDriver.setPreferences(session, { fastMode: enabled });
+      } catch (error) {
+        throw new FastModeSwitchError(error instanceof Error ? error.message : String(error));
+      }
+      const updatedAt = nowIso();
+      await this.db.setSessionFastMode(session.id, enabled, updatedAt);
+      await this.db.addAudit(
+        "local",
+        "set_fast_mode",
+        session.id,
+        JSON.stringify({ enabled, method: "structured_settings" }),
+        updatedAt
+      );
+      return;
     }
     if (!session.codexJsonlPath) {
       throw new FastModeSwitchError("Fast mode is unavailable until the Codex session is detected");

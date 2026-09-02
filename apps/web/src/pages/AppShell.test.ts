@@ -100,6 +100,16 @@ describe("shell connection state", () => {
       selectedIds: new Set(["session-1"]),
       busy: false,
       errors: { "session-1": "Directory is unavailable" },
+      driverKind: "codex_app_server",
+      compatibility: {
+        status: "available",
+        available: true,
+        codexVersion: "0.152.0",
+        detail: "Codex app-server is available.",
+        checkedAt: "2026-09-01T20:00:00.000Z",
+        missingCapabilities: []
+      },
+      onDriverChange: () => undefined,
       onToggle: () => undefined,
       onDismiss: () => undefined,
       onRestore: () => undefined

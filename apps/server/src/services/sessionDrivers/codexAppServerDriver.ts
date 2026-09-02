@@ -137,6 +137,13 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return receipt(threadId, response.turn.id, clientMessageId, this.now());
   }
 
+  async reconcileInput(session: ManagedSession, clientMessageId: string): Promise<DriverInputReceipt | null> {
+    const { threadId, protocol } = this.protocolFor(session);
+    const current = await protocol.readThread(threadId, true);
+    const turnId = findClientMessageTurnId(current.thread, clientMessageId);
+    return turnId ? receipt(threadId, turnId, clientMessageId, this.now()) : null;
+  }
+
   async steer(
     session: ManagedSession,
     text: string,
@@ -547,6 +554,22 @@ function turnOptions(session: ManagedSession): Record<string, unknown> {
 
 function receipt(threadId: string, turnId: string, clientMessageId: string, now: Date): DriverInputReceipt {
   return { clientMessageId, threadId, turnId, acceptedAt: now.toISOString() };
+}
+
+function findClientMessageTurnId(thread: Record<string, unknown>, clientMessageId: string): string | null {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  for (const value of turns) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const turn = value as Record<string, unknown>;
+    if (typeof turn.id !== "string" || !turn.id) continue;
+    const items = Array.isArray(turn.items) ? turn.items : [];
+    if (items.some((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const record = item as Record<string, unknown>;
+      return record.clientId === clientMessageId || record.clientUserMessageId === clientMessageId;
+    })) return turn.id;
+  }
+  return null;
 }
 
 function nestedId(value: unknown, key: string): string | null {

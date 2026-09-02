@@ -1540,7 +1540,7 @@ describe("tmux command helpers", () => {
     const html = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, compact: true, onCopy: () => undefined }));
 
     expect(html).toContain('class="tmux-command-button tmux-command-metadata"');
-    expect(html).toContain("Copy tmux attach command");
+    expect(html).toContain("Copy runtime attach command");
     expect(html).toContain("gpt-5.5");
   });
 });
@@ -2370,7 +2370,7 @@ describe("heavyweight queue automation events", () => {
       lastSequence: queueMessage.sequence
     };
 
-    expect(copyableMessageText(queueMessage)).toContain("<muxpilot_heavy_command_queue>");
+    expect(copyableMessageText(queueMessage)).toContain("<muxpilot_heavy_command>");
     expect(visibleTranscriptFindEntries([item], new Set(), {})[0]?.text).toBe(
       "Agent → Muxpilot Heavyweight command queued · session released while waiting pnpm test -- --quoted"
     );

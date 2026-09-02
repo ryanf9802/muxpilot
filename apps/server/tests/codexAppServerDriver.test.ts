@@ -71,6 +71,25 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.sendMessage(session, "unsafe", "client-3")).rejects.toThrow("not reconciled");
   });
 
+  it("reconciles a stable client message identity before input retry", async () => {
+    const harness = createHarness();
+    harness.rpc.request.mockResolvedValueOnce({
+      thread: {
+        id: "thread-1",
+        turns: [{ id: "turn-existing", items: [{ type: "userMessage", clientId: "client-1" }] }]
+      }
+    });
+    await expect(harness.driver.reconcileInput(managedSession(), "client-1")).resolves.toEqual({
+      clientMessageId: "client-1",
+      threadId: "thread-1",
+      turnId: "turn-existing",
+      acceptedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    harness.rpc.request.mockResolvedValueOnce({ thread: { id: "thread-1", turns: [] } });
+    await expect(harness.driver.reconcileInput(managedSession(), "missing-client")).resolves.toBeNull();
+  });
+
   it("fans out protocol events without allowing a subscriber to fail transport", async () => {
     const harness = createHarness();
     const observed: string[] = [];

@@ -1,17 +1,18 @@
 # Architecture Overview
 
-muxpilot is a lightweight developer operator console layered on top of existing tmux and Codex CLI sessions.
+muxpilot is a lightweight developer operator console for durable Codex sessions. Codex app-server is the default runtime; tmux is a legacy adapter rather than the application architecture.
 
 ```text
-Operator device browser -> HTTP/WebSocket -> Backend/API server -> tmux -> Codex CLI panes
-                                                       |
-                                                       -> Codex JSONL files
-                                                       -> SQLite database
+Operator browser -> HTTP/WebSocket -> Backend/API server -> semantic session driver
+                                                       |-> Codex app-server + systemd service
+                                                       |-> legacy tmux + Codex CLI pane
+                                                       |-> Codex JSONL evidence
+                                                       `-> SQLite database
 ```
 
-The Backend/API server owns all tmux communication. The browser never runs shell commands and only talks to constrained REST and WebSocket endpoints.
+The Backend/API server owns every runtime adapter. The browser uses provider-neutral actions and never shell primitives.
 
-This iteration supports a local session host only: tmux, Codex JSONL files, and the Backend/API server run on the same host machine. Same-network phones connect to the web UI over LAN HTTP and authenticate with the backend-generated remote access key when the server is exposed beyond loopback.
+This iteration supports a local session host only: runtime services or panes, Codex files, and the Backend/API server run on the same host machine. Same-network phones connect to the web UI over LAN HTTP and authenticate with the backend-generated remote access key when the server is exposed beyond loopback.
 
 ## Workspace Boundaries
 
@@ -23,7 +24,7 @@ This iteration supports a local session host only: tmux, Codex JSONL files, and 
 
 ## Sources Of Truth
 
-tmux is authoritative for live session existence, pane ids, cwd, window names, pane titles, and input delivery.
+For app-server sessions, the provider/thread identity, reconciled protocol snapshot, and muxpilot-owned systemd unit/socket are authoritative. For legacy sessions, tmux remains authoritative for pane existence and terminal transport.
 
 Codex JSONL files under `~/.codex/sessions` are the preferred transcript source because they contain structured user, assistant, and tool events. Terminal capture is used for raw view and recovery previews.
 
@@ -37,7 +38,8 @@ Managed Git sessions store the repository entry point, current existing local ta
 
 - React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, raw terminal panel, transfer/recovery dialogs, and LAN connection details.
 - Fastify Backend/API server: operator access gate, REST API, WebSocket event stream.
-- Session manager: discovery, pane-to-Codex mapping, parser scheduling, verified input delivery, queued input, crash recovery, session create/fork/restore, agent ownership, and event publishing.
+- Session manager: provider-neutral dispatch, legacy discovery, structured reconciliation, verified input, queues, hibernation/recovery, create/fork/restore, agent ownership, and event publishing.
+- Session driver registry and Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
 - Tmux adapter: fixed argv wrappers around `list-panes`, `capture-pane`, `send-keys`, `load-buffer`, and management commands.
 - Codex parser: maps JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
 - Database adapter: local SQLite via `node:sqlite`, isolated so libSQL/Turso can be added later.
@@ -47,7 +49,7 @@ Managed Git sessions store the repository entry point, current existing local ta
 - Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
 - BTW service: forks a bounded app-server turn from a conversation snapshot, streams independent answers, coordinates isolated document staging, and hands safe changes back to the main session.
 - Session orchestration broker: binds a capability-scoped MCP server to each managed Codex launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
-- Raw evidence reader: exposes bounded, read-only tmux, `/proc`, and Codex JSONL evidence for independent diagnosis.
+- Raw evidence reader: exposes bounded, read-only runtime/service, process-tree, protocol-journal, tmux, and Codex JSONL evidence for independent diagnosis.
 - Heavy command service: observes shared queue metadata, resumes reserved sessions, serves bounded live output, and terminates exact process groups on operator request.
 - Resource governor and Docker proxy: allocate muxpilot-owned systemd scopes and label/constrain containers created through managed sessions.
 - Session transfer service: packages portable transcript prefixes, preferences, documents, and eligible committed Git objects with optional authenticated encryption.
@@ -80,7 +82,7 @@ Remote SSH session hosts, GitHub Pages/static cross-origin hosting, VPN/tunnel g
 Dashboard:
 
 ```text
-tmux list-panes + Codex session scan -> session manager -> SQLite -> GET /api/sessions -> React cards
+driver runtime evidence + legacy discovery + Codex scan -> session manager -> SQLite -> API -> React
 ```
 
 Transcript:
@@ -92,28 +94,28 @@ Codex JSONL appended -> parser offset read -> new events mapped -> messages stor
 Input:
 
 ```text
-React composer -> POST /api/sessions/:id/input -> tmux load-buffer -> paste-buffer -> short delay -> send submit keys
-Busy session -> queued input stored in SQLite -> sent when the session becomes input-ready
-Mode toggle -> POST /api/sessions/:id/actions -> tmux send configured mode-cycle keys
-Interactive buttons -> POST /api/sessions/:id/actions or /question -> tmux menu keys
-App permission form in terminal -> live approval parser -> GET/POST /approval -> verified relative tmux menu keys
+React composer -> persist stable client ID -> driver.sendMessage -> turn/start
+Busy session -> queued input in SQLite -> wake if hibernated -> send when ready
+Mode/Fast toggle -> driver.setPreferences -> thread/settings/update
+Interactive gate -> persisted exact request ID -> structured JSON-RPC response
+Legacy tmux sessions retain verified paste/menu-key behavior behind the tmux adapter
 ```
 
 Verified delivery:
 
 ```text
-persist user message + source identity -> paste exact text -> verify composer -> submit
-        -> Codex lifecycle/status acknowledgement -> mark acknowledged
-        -> safe submit retry or one empty-composer replay -> mark input_failed for operator retry/dismiss
+persist user message + provider/thread/client identity -> structured send -> exact receipt/item acknowledgement
+uncertain app-server delivery -> thread/read -> reconcile stable client ID before any retry
+legacy tmux -> verify composer/paste/submit/ack -> bounded safe retry
 ```
 
 Session actions:
 
 ```text
-React action button -> POST /api/sessions/:id/actions -> SessionManager -> TmuxAdapter/SQLite -> WebSocket session update
+React action button -> POST /api/sessions/:id/actions -> SessionManager -> selected driver/SQLite -> WebSocket update
 ```
 
-Supported actions include interrupt, input-mode switch, proposed-plan choice, rename, detach notice, kill pane, and archive transcript.
+Supported actions include interrupt, settings, proposed-plan choice, rename, hibernate/wake, detach notice, runtime kill, and archive transcript.
 
 BTW and documents:
 
@@ -126,7 +128,7 @@ Agent orchestration:
 
 ```text
 capability-bound MCP call -> ownership/scope/context/budget validation -> SessionManager action
-create child -> fresh Codex/tmux session + private scope/documents + inherited repo/target/settings -> initial task
+create child -> fresh Codex session using the parent driver + private resource/documents + inherited repo/target/settings -> initial task
 wait -> durable SQLite record -> out-of-model event watch -> exact parent resume message
 ```
 
@@ -151,7 +153,7 @@ Restorable session history:
 
 ```text
 Parsed user messages -> SQLite FTS prompt index -> GET /api/session-history -> New Session History tab
-History restore -> POST /api/session-history/:id/restore -> tmux new-window "codex resume <session-id>"
+History restore -> POST /api/session-history/:id/restore -> exact-thread app-server resume by default, or explicit legacy tmux resume
 ```
 
 The history index contains only displayable user prompts from sessions muxpilot has managed. Assistant, tool, command, hidden environment context, and action-only user context are excluded from the index.

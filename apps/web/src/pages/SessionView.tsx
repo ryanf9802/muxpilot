@@ -15,9 +15,11 @@ import {
   ListChecks,
   LoaderCircle,
   MessageSquare,
+  Moon,
   Pause,
   Pencil,
   Plus,
+  Play,
   Save,
   Send,
   ShieldCheck,
@@ -2558,7 +2560,7 @@ export function SessionView() {
   }
 
   function killSession() {
-    if (actionBusy || !confirm("Kill this tmux pane?")) return;
+    if (actionBusy || !confirm("Kill this session runtime? The conversation remains available to restore.")) return;
     const targetId = id;
     navigate("/", { state: { optimisticallyRemovedSessionId: targetId } });
     void api
@@ -2621,7 +2623,7 @@ export function SessionView() {
 
   async function copyTmuxCommand() {
     if (!session) return;
-    const command = tmuxAttachCommand(session);
+    const command = runtimeAttachCommand(session);
     try {
       await copyText(command);
       setCopiedTmuxCommand(true);
@@ -2893,7 +2895,7 @@ export function SessionView() {
             </button>
           ) : null}
           <button
-            disabled={completed || readySession.initializing === true || Boolean(actionBusy)}
+            disabled={completed || readySession.initializing === true || Boolean(actionBusy) || readySession.capabilities?.interrupt === false || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
             aria-busy={actionBusy === "interrupt"}
             aria-label={actionBusy === "interrupt" ? "Interrupting session" : "Interrupt session"}
             data-busy={actionBusy === "interrupt" || undefined}
@@ -2903,9 +2905,23 @@ export function SessionView() {
             <Pause size={16} />
             <span className="session-action-label">{actionBusy === "interrupt" ? "Interrupting" : "Interrupt"}</span>
           </button>
+          {readySession.capabilities?.hibernate && readySession.runtime?.kind === "systemd_service" ? (
+            <button
+              disabled={completed || readySession.initializing === true || Boolean(actionBusy)}
+              aria-busy={actionBusy === "hibernate" || actionBusy === "wake"}
+              aria-label={readySession.runtime.state === "hibernated" ? "Wake session" : "Hibernate session"}
+              onClick={() => void runAction({ type: readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated" ? "wake" : "hibernate" })}
+              title={readySession.runtime.state === "hibernated" ? "Wake app-server runtime" : "Hibernate idle app-server runtime"}
+            >
+              {readySession.runtime.state === "hibernated" ? <Play size={16} /> : <Moon size={16} />}
+              <span className="session-action-label">
+                {actionBusy === "wake" ? "Waking" : actionBusy === "hibernate" ? "Hibernating" : readySession.runtime.state === "hibernated" ? "Wake" : "Hibernate"}
+              </span>
+            </button>
+          ) : null}
           <button
             className="danger"
-            disabled={completed || readySession.initializing === true || Boolean(actionBusy)}
+            disabled={completed || readySession.initializing === true || Boolean(actionBusy) || readySession.capabilities?.kill === false}
             aria-busy={actionBusy === "kill"}
             aria-label={actionBusy === "kill" ? "Killing session" : "Kill session"}
             data-busy={actionBusy === "kill" || undefined}
@@ -3095,13 +3111,13 @@ export function SessionView() {
             <div className="composer-settings" role="group" aria-label="Composer settings">
               <ModeToggle
                 mode={readySession.inputMode}
-                busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError)}
+                busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError) || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
                 onChange={setInputMode}
               />
               <FastModeToggle
                 enabled={readySession.fastMode === true}
                 available={readySession.fastModeAvailable ?? null}
-                busy={completed || readySession.initializing === true || actionBusy === "setFastMode"}
+                busy={completed || readySession.initializing === true || actionBusy === "setFastMode" || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
                 status={readySession.status}
                 onChange={setFastMode}
               />
@@ -4212,7 +4228,7 @@ export function SessionTitleHeading({
 
 export function SessionHeaderMeta({ session }: {
   session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> &
-    Partial<Pick<ManagedSession, "contextUsage">>;
+    Partial<Pick<ManagedSession, "contextUsage" | "driverKind" | "runtime" | "resourceUsage">>;
 }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
@@ -4228,6 +4244,16 @@ export function SessionHeaderMeta({ session }: {
             ·
           </span>
           <span className="session-header-dirty dirty">dirty</span>
+        </>
+      ) : null}
+      <span className="session-header-meta-separator" aria-hidden="true">·</span>
+      <span title={runtimeDetail(session)}>{runtimeLabel(session)}</span>
+      {session.resourceUsage ? (
+        <>
+          <span className="session-header-meta-separator" aria-hidden="true">·</span>
+          <span title={`Memory limit ${formatRuntimeBytes(session.resourceUsage.memoryMaxBytes)}`}>
+            {formatRuntimeBytes(session.resourceUsage.memoryCurrentBytes)} memory
+          </span>
         </>
       ) : null}
       {session.forkedFrom ? (
@@ -4426,7 +4452,7 @@ export function TmuxCommandButton({
   copyEnabled?: boolean;
   onCopy: () => void;
 }) {
-  const command = tmuxAttachCommand(session);
+  const command = runtimeAttachCommand(session);
   const model = sessionModelDisplay(session);
   const content = (
     <>
@@ -4452,7 +4478,7 @@ export function TmuxCommandButton({
       className={className}
       onClick={onCopy}
       title={`${model.model} / ${model.reasoningEffort}\n${command}`}
-      aria-label={`Copy tmux attach command for ${model.model} ${model.reasoningEffort}`}
+      aria-label={`Copy runtime attach command for ${model.model} ${model.reasoningEffort}`}
     >
       {content}
     </button>
@@ -4479,6 +4505,31 @@ export function tmuxAttachCommand(session: Pick<ManagedSession, "tmux">): string
   const sessionTarget = shellQuote(session.tmux.sessionName);
   const windowTarget = shellQuote(`${session.tmux.sessionName}:${session.tmux.windowIndex}`);
   return `tmux select-window -t ${windowTarget} && tmux attach-session -t ${sessionTarget}`;
+}
+
+export function runtimeAttachCommand(session: Pick<ManagedSession, "tmux" | "runtime" | "driverKind">): string {
+  if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service") {
+    return `codex --remote ${shellQuote(`unix://${session.runtime.socketPath}`)}`;
+  }
+  return tmuxAttachCommand(session);
+}
+
+export function runtimeLabel(session: Partial<Pick<ManagedSession, "driverKind" | "runtime">>): string {
+  if (session.driverKind !== "codex_app_server") return "Legacy tmux";
+  if (session.runtime?.kind !== "systemd_service") return "App server";
+  return session.runtime.state === "hibernated" ? "App server · sleeping" : `App server · ${session.runtime.state}`;
+}
+
+function runtimeDetail(session: Partial<Pick<ManagedSession, "driverKind" | "runtime">>): string {
+  if (session.runtime?.kind !== "systemd_service") return runtimeLabel(session);
+  return `${runtimeLabel(session)} · ${session.runtime.unit}${session.runtime.codexVersion ? ` · Codex ${session.runtime.codexVersion}` : ""}`;
+}
+
+function formatRuntimeBytes(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "unknown";
+  if (value < 1024 ** 2) return `${Math.round(value / 1024)} KiB`;
+  if (value < 1024 ** 3) return `${Math.round(value / 1024 ** 2)} MiB`;
+  return `${(value / 1024 ** 3).toFixed(1)} GiB`;
 }
 
 export function shellQuote(value: string): string {

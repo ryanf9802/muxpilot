@@ -1,6 +1,6 @@
 # Deployment Guide
 
-The supported deployment is a developer-controlled host on a trusted LAN. muxpilot intentionally runs on the host machine, not in Docker, because the backend must talk to the same user's tmux socket, Codex CLI processes, and Codex JSONL files.
+The supported deployment is a developer-controlled host on a trusted LAN. muxpilot intentionally runs on the host machine, not in Docker, because the backend owns same-user Codex app-server services, optional legacy tmux panes, and local Codex evidence.
 
 Do not expose muxpilot directly to the internet.
 
@@ -26,6 +26,9 @@ Production defaults:
 - Runtime state: `./data/runtime/prod/`
 - Logs: `supervisor.log`, `server.log`, `web.log`
 - PIDs: `supervisor.pid`, `server.pid`, `web.pid`
+- New-session runtime: `codex_app_server`; set `MUXPILOT_DEFAULT_SESSION_DRIVER=codex_tmux` only for a deliberate legacy default.
+
+The app-server runtime requires an available systemd user manager. muxpilot probes Codex protocol compatibility before enabling it and reports missing systemd or incompatible Codex versions without silently creating tmux sessions. Enable user lingering when needed with `sudo loginctl enable-linger "$USER"`, then restart muxpilot. Existing tmux sessions remain intact and can be used or restored explicitly.
 
 You can close the terminal after startup. The supervisor keeps running while the Linux/WSL instance stays running, and it restarts the backend or web process if one crashes. If the WSL distro, Linux session, or host machine stops, start muxpilot again with `pnpm app start`.
 

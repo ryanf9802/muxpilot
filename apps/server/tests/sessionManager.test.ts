@@ -2711,12 +2711,14 @@ describe("SessionManager transcript isolation", () => {
     const interrupt = vi.fn(async () => undefined);
     const rename = vi.fn(async () => undefined);
     const kill = vi.fn(async () => undefined);
+    const setPreferences = vi.fn(async () => undefined);
     const driver = {
       kind: "codex_app_server",
       sendMessage,
       interrupt,
       rename,
-      kill
+      kill,
+      setPreferences
     } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     appDb = harness.db;
@@ -2758,8 +2760,13 @@ describe("SessionManager transcript isolation", () => {
       }
     });
     await expect(harness.manager.act(session.id, { type: "retryInputDelivery" }))
-      .rejects.toThrow("not replayed without a reconciled client-message identity");
+      .rejects.toThrow("There is no failed input delivery to retry");
     expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    await harness.manager.act(session.id, { type: "setInputMode", mode: "default" });
+    expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), { mode: "default" });
+    await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
+    expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), { fastMode: true });
 
     await harness.manager.act(session.id, { type: "interrupt" });
     expect(interrupt).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), null);
@@ -5473,7 +5480,7 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("starts and forks explicit app-server sessions without using tmux discovery or launch", async () => {
+  it("starts app-server sessions by configured default and forks them without tmux", async () => {
     const start = vi.fn(async (spec: Parameters<AgentSessionDriver["start"]>[0]) => ({
       sessionId: spec.sessionId,
       provider: { kind: "codex" as const, threadId: "thread-started", rolloutPath: null },
@@ -5501,7 +5508,10 @@ describe("SessionManager transcript isolation", () => {
       ready: pendingReadiness()
     }));
     const driver = { kind: "codex_app_server", start, fork } as unknown as AgentSessionDriver;
-    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const harness = await createHarness({
+      sessionDrivers: new SessionDriverRegistry([driver]),
+      defaultSessionDriver: "codex_app_server"
+    });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     harness.tmux.createCodexWindowInMuxpilotSession = async () => { throw new Error("tmux start must not be used"); };
@@ -5511,8 +5521,7 @@ describe("SessionManager transcript isolation", () => {
     const created = await harness.manager.createSessionInDirectory(
       repo,
       "app-start",
-      { model: "gpt-5.6-sol", reasoningEffort: "high", fastMode: true },
-      "codex_app_server"
+      { model: "gpt-5.6-sol", reasoningEffort: "high", fastMode: true }
     );
     expect(start).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: expect.stringMatching(/^app-/),
@@ -7047,6 +7056,7 @@ async function createHarness(options: {
   sessionScopesAvailable?: boolean;
   sessionDrivers?: SessionDriverRegistry;
   appServerHibernateMs?: number;
+  defaultSessionDriver?: ManagedSession["driverKind"];
 } = {}): Promise<{
   dir: string;
   codexHome: string;
@@ -7087,7 +7097,8 @@ async function createHarness(options: {
     { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" },
     null,
     options.sessionDrivers ?? null,
-    options.appServerHibernateMs
+    options.appServerHibernateMs,
+    options.defaultSessionDriver
   );
   return { dir, codexHome, db, tmux, codexStore, events, manager, activitySummarizer, processLookup };
 }

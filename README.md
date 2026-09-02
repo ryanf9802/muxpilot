@@ -5,7 +5,7 @@
 <h1 align="center">muxpilot</h1>
 
 <p align="center">
-  A local, phone-friendly control surface for Codex CLI sessions running in tmux.
+  A local, phone-friendly control surface for parallel Codex sessions.
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 muxpilot gives one operator a single place to watch multiple Codex sessions, answer the ones that need attention, and send follow-up prompts without hunting through terminal windows. Use it from the development machine or check in from a phone on the same network.
 
-It is a local companion to Codex and tmux, not a hosted agent platform or a general remote shell. The backend runs as your user, reads local Codex transcripts, controls tmux through fixed operations, and stores its own state in SQLite.
+It is a local companion to Codex, not a hosted agent platform or a general remote shell. New sessions use Codex app-server by default; existing and explicitly selected tmux sessions remain fully supported. The backend runs as your user and stores its durable operator state in SQLite.
 
 > [!WARNING]
 > muxpilot is designed for one trusted machine and optional same-LAN access. Do not expose it directly to the internet.
@@ -47,20 +47,18 @@ Desktop or phone browser
                                               │
                          ┌────────────────────┼────────────────────┐
                          ▼                    ▼                    ▼
-                       tmux          Codex JSONL files          SQLite
-                         │
-                         ▼
-                    Codex CLI panes
+             Codex app-server          legacy tmux             SQLite
+              systemd services          CLI panes
 ```
 
-tmux remains the source of truth for live panes and input delivery. Codex session files provide structured transcripts. SQLite holds muxpilot state such as queued input, prompt history, notification settings, and parsed messages.
+For app-server sessions, structured protocol state and muxpilot-owned systemd services are authoritative for lifecycle and input. Legacy sessions retain tmux pane semantics. Codex session files remain durable transcript evidence, and SQLite holds queued input, prompt history, gates, recovery state, and parsed messages.
 
 ## Quick start
 
 ### Requirements
 
 - WSL2 Ubuntu or another local Linux-like host
-- [tmux](https://github.com/tmux/tmux)
+- systemd user services (recommended app-server runtime); [tmux](https://github.com/tmux/tmux) only for the legacy runtime
 - [Codex CLI](https://github.com/openai/codex)
 - Node.js 24 or newer
 - pnpm 11.12.0, matching the repository's `packageManager` pin
@@ -120,7 +118,7 @@ Read [Architecture](docs/architecture.md) and [Deployment](docs/deployment.md) b
 
 ## Using muxpilot
 
-The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, ask a BTW side question, inspect documents or the raw terminal, monitor heavyweight work, and manage the session. Agent-created sessions remain visible in a nested tree with context, budget, and rolled-up status.
+The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, ask a BTW side question, inspect documents and runtime evidence, monitor heavyweight work, and manage the session. Agent-created sessions remain visible in a nested tree with context, budget, and rolled-up status.
 
 The [usage guide](docs/usage.md) covers:
 

@@ -7,8 +7,14 @@ describe("config LAN access validation", () => {
 
     expect(config.lanEnabled).toBe(false);
     expect(config.host).toBe("127.0.0.1");
+    expect(config.defaultSessionDriver).toBe("codex_app_server");
     expect(config.operatorToken).toMatch(/^[a-z]+-[a-z]+-\d{2}-[a-z]+-[a-z]+-\d{2}$/);
     expect(requiresOperatorToken(config)).toBe(false);
+  });
+
+  it("allows an explicit legacy tmux creation default", () => {
+    expect(parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_tmux" }).defaultSessionDriver).toBe("codex_tmux");
+    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "automatic" })).toThrow();
   });
 
   it("enables LAN binding when MUXPILOT_LAN_ENABLED is set", () => {

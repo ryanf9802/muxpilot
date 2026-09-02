@@ -2,7 +2,7 @@
 
 Workspace layout:
 
-- `apps/server`: Fastify API, tmux/Codex adapters, discovery and parser, verified input and queues, SQLite persistence, orchestration/BTW/documents, transfers, Git/heavy brokers, resource controls, usage integration, and REST/WebSocket routes.
+- `apps/server`: Fastify API, semantic app-server and legacy tmux drivers, structured reconciliation plus JSONL evidence, verified input and queues, SQLite persistence, orchestration/BTW/documents, transfers, Git/heavy brokers, resource controls, usage integration, and REST/WebSocket routes.
 - `apps/web`: React UI for dashboard and agent trees, transcript/composer and interactive gates, documents/BTW, Git/heavy controls, transfer/recovery, notifications, PWA/connection handling, and LAN access.
 - `packages/core`: shared TypeScript API/domain types plus transcript, status, Git/heavy event, proposed-plan, and user-context normalization used by both apps.
 - `scripts`: application lifecycle/supervisor helpers, managed Codex launch/MCP bridges, database maintenance, certificate setup, and Linux/Windows LAN helpers.

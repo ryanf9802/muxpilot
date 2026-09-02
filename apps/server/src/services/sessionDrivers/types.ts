@@ -84,6 +84,7 @@ export interface AgentSessionDriver {
   fork(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult>;
   subscribe(session: ManagedSession, onEvent: (event: DriverEvent) => void): Promise<DriverSubscription>;
   sendMessage(session: ManagedSession, text: string, clientMessageId: string): Promise<DriverInputReceipt>;
+  reconcileInput(session: ManagedSession, clientMessageId: string): Promise<DriverInputReceipt | null>;
   steer(session: ManagedSession, text: string, expectedTurnId: string, clientMessageId: string): Promise<DriverInputReceipt>;
   interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<void>;
   kill(session: ManagedSession): Promise<void>;

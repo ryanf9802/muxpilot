@@ -100,11 +100,11 @@ A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 
 
 The History tab in the new-session dialog searches sessions previously managed by muxpilot. Search covers submitted user prompts, not assistant messages or tool output.
 
-Selecting a live result opens its existing pane. Selecting a missing or archived result starts a new tmux window with Codex's native resume command and opens the restored session.
+Selecting a live result opens its existing runtime. Selecting a missing or archived result resumes the exact Codex thread through app-server by default and keeps the same muxpilot session identity. Choose **Legacy tmux** in the Runtime field for an explicit compatibility fallback; muxpilot never silently changes runtimes.
 
-If muxpilot stops without a clean shutdown, it records which non-archived Codex panes were open. On the next startup, any of those panes that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
+If muxpilot stops without a clean shutdown, it records which non-archived Codex runtimes were open. On the next startup, any that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
 
-Recovery restores the durable Codex conversation, muxpilot metadata, and any managed Git workspace binding. It cannot recreate an operating-system process or automatically restart a command that was executing when WSL, tmux, or the host stopped.
+Recovery restores the durable Codex conversation, muxpilot metadata, documents, orchestration ownership, and any managed Git workspace binding. It does not claim that an interrupted shell command was safely resumed; background-terminal evidence is reconciled independently.
 
 ## Forking sessions
 
@@ -122,11 +122,11 @@ Nested muxpilot sessions are reserved for work the operator explicitly requests 
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
-Created children inherit the source repository/target, model settings, and Fast setting but start with fresh context, their own tmux pane, resource scope, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context/work-token guardrails, waits, and raw evidence.
+Created children inherit the source runtime, repository/target, model settings, and Fast setting but start with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context/work-token guardrails, waits, and raw evidence.
 
 ## Moving sessions between hosts
 
-The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, and portable session preferences, then resumes the imported sessions in tmux.
+The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, portable driver identity, and preferences, then resumes through app-server by default. Legacy v2-v4 archives remain supported, and Legacy tmux can be selected explicitly during import.
 
 For managed Git sessions, current exports can include the committed local target branch and objects not available from its upstream. Import may create, reuse, or safely fast-forward the same branch name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting upstream.
 
@@ -136,7 +136,7 @@ Set the same `MUXPILOT_SESSION_FILE_KEY` value on both hosts to encrypt exports 
 
 ## Sending and queuing input
 
-muxpilot sends text through a tmux paste buffer, followed by the configured submit key sequence.
+muxpilot persists every input before delivery. App-server sessions send a structured turn with a stable client message ID; legacy sessions use a verified tmux paste buffer and configured submit key sequence.
 
 - `Ctrl+Enter` submits the composer.
 - Input is sent immediately when Codex is ready.
@@ -147,9 +147,9 @@ muxpilot sends text through a tmux paste buffer, followed by the configured subm
 
 Every submitted message is persisted before delivery and bound to the current Codex transcript source. muxpilot verifies the pasted text, submit transition, and Codex acknowledgement. It can retry the submit key and perform one safe replay only when the composer is empty. It never overwrites different composer text.
 
-If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** rechecks the live pane before submitting an exact matching draft or restoring the preserved text; **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
+If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** first reads authoritative state: app-server retries reconcile the stable client ID before any send, while tmux retries recheck the live composer. **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
 
-The Normal/Plan toggle changes Codex collaboration mode through the configured tmux key sequence. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
+The Normal/Plan and Fast controls use structured thread settings for app-server sessions and retain the verified terminal path for legacy tmux sessions. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
 
 When supported by the active model, **Fast** sends Codex's Fast-mode command and also updates the default for future Codex sessions. Fast mode uses more credits. The control is disabled while the session is in a state where Codex cannot accept the change, and dashboard cards show when it is active.
 
@@ -164,7 +164,7 @@ muxpilot exposes common Codex interactions in the browser:
 - Free-form answers are pasted into the pane.
 - Proposed plans can remain in plan mode or move into implementation, with or without clearing context.
 
-These actions automate the same tmux input path an operator would use in the terminal. muxpilot does not bypass Codex approval behavior.
+App-server sessions answer these requests with their exact JSON-RPC request identity; legacy sessions automate the corresponding verified terminal path. muxpilot does not bypass Codex approval behavior.
 
 ## Prompt history and skills
 

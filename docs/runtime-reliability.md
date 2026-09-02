@@ -1,6 +1,6 @@
 # Runtime Reliability Reference
 
-muxpilot sits between a browser, tmux, live Codex processes, append-only Codex transcripts, and local SQLite state. This guide describes how those sources are supervised and reconciled, and what an operator can inspect when a state transition fails.
+muxpilot sits between a browser, Codex app-server or legacy tmux runtimes, append-only Codex transcripts, and local SQLite state. This guide describes how those sources are supervised and reconciled, and what an operator can inspect when a state transition fails.
 
 ## Supervised Application Lifecycle
 
@@ -20,9 +20,9 @@ If Codex exits during its first 15 seconds, the wrapper retries up to three time
 
 A small child supervisor learns the durable stdio tool-server commands started by Codex. If context compaction starts an identical replacement without retiring the older process, it keeps the replacement and terminates the stale tree. When the Codex runtime exits, it cleans up the tool-server children it learned rather than leaving duplicate servers behind.
 
-## Discovery and Transcript Reconciliation
+## Runtime and Transcript Reconciliation
 
-tmux is authoritative for live panes and input transport. Codex JSONL files are authoritative for structured conversation events. SQLite holds muxpilot's parsed and local state.
+For app-server sessions, muxpilot reconciles the exact thread through initialize, resume, and thread/read before accepting input; service, socket, protocol, rollout, and database evidence are considered together. Tmux remains authoritative only for legacy panes. Codex JSONL files remain durable conversation evidence, while SQLite holds muxpilot's parsed and local state.
 
 At startup muxpilot synchronously discovers current panes so the newest sessions appear quickly, then catches up transcript history in the background with recent JSONL files first. Notifications start only after catch-up establishes a quiet baseline, preventing old status transitions from producing a burst of alerts.
 
@@ -32,7 +32,7 @@ Initializing sessions remain visible while Codex reaches its ready screen. Live 
 
 ## Verified Input Delivery
 
-Operator and agent messages are persisted before tmux input begins. A submission records the destination Codex session/source identity, collaboration mode, prompt hash and length, attempt counters, actor, and delivery phase.
+Operator and agent messages are persisted before runtime delivery begins. A submission records the destination provider/thread identity, collaboration mode, prompt hash and length, attempt counters, actor, and delivery phase.
 
 Delivery then follows a guarded state machine:
 
@@ -42,6 +42,8 @@ Delivery then follows a guarded state machine:
 4. If the prompt is still present, retry the submit key once.
 5. If Codex is still ready and the composer is empty, replay the preserved prompt once.
 6. Stop with `input_failed` rather than guessing after the safe retry budget is exhausted.
+
+Those steps describe the legacy tmux adapter. App-server delivery supplies a stable `clientUserMessageId` to `turn/start` and acknowledges only a structured receipt or matching projected item. If the response is lost, **Retry input** performs an authoritative `thread/read` and searches exact client IDs. A matching item is reconciled without resending; an absent identity remains failed because Codex does not currently guarantee client-ID idempotency.
 
 The acknowledgement deadline is 30 seconds. muxpilot never overwrites a composer containing different text. Failures distinguish missing paste observation, rejected submit, no acknowledgement, changed composer, unavailable session, legacy unverified state, and tmux transport failure.
 
@@ -57,9 +59,11 @@ Only one queued item is processed at a time. It advances when discovery reports 
 
 ## Crash Session Recovery
 
-During clean operation muxpilot records the non-archived Codex panes that are open. If the server later starts after an unclean shutdown, it compares that snapshot with current tmux state. Missing conversations appear in one recovery dialog with all candidates selected by default.
+During clean operation muxpilot records the non-archived Codex runtimes that are open. If the server later starts after an unclean shutdown, it reconciles current service/socket or tmux state. Missing conversations appear in one recovery dialog with all candidates selected by default.
 
-Restoring a candidate creates a new tmux window with Codex's native resume command and reconnects muxpilot metadata, documents, and managed Git binding. It restores the durable conversation, not the operating-system process or command that was running when the host stopped. Dismissed candidates remain available through session History.
+Restoring a candidate resumes the exact Codex thread through app-server by default, or through an explicitly selected legacy tmux window, and reconnects muxpilot metadata, documents, hierarchy, orchestration, and managed Git binding. It restores the durable conversation, not a command that was executing when the host stopped. Dismissed candidates remain available through session History.
+
+Eligible idle app-server sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
 
 ## Heavyweight Command Scheduler
 
@@ -119,7 +123,7 @@ Use the narrowest evidence that answers the problem:
 
 1. `pnpm app status` for supervisor, endpoint, PID, and port ownership.
 2. `pnpm app logs <mode> --process all --lines 80` for recent server/web/supervisor errors.
-3. The session status, failed-input banner, heavy-command modal, Git workspace panel, and raw terminal view.
-4. For agent orchestration mismatches, compare persisted session state with raw tmux panes, process trees, and Codex JSONL evidence as described in [Agent Orchestration](agent-orchestration.md#raw-evidence-tools).
+3. The session status, failed-input banner, heavy-command modal, Git workspace panel, and runtime evidence available for the selected driver.
+4. For agent orchestration mismatches, compare persisted state with neutral runtime/service, process-tree, protocol-journal, rollout, and legacy tmux evidence as described in [Agent Orchestration](agent-orchestration.md#raw-evidence-tools).
 
 A ready pane with no queued input can simply be idle. Do not resend or overwrite a draft unless the persisted submission, transcript source, terminal composer, and queue state all support that exact action.

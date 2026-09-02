@@ -21,6 +21,7 @@ import type {
   SessionEvent,
   SessionHistoryResult,
   SessionRecoveryIncident,
+  SessionDriverKind,
   SessionTransferImportResponse,
   SessionTransferInspectResponse
 } from "@muxpilot/core";
@@ -99,6 +100,7 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
+  const [createSessionDriver, setCreateSessionDriver] = useState<SessionDriverKind>("codex_app_server");
   const [appServerCompatibility, setAppServerCompatibility] = useState<AppServerCompatibility | null>(null);
   const [appServerCompatibilityLoading, setAppServerCompatibilityLoading] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
@@ -533,7 +535,8 @@ export function AppShell() {
   }, [createSessionOpen, createSessionTab, sessionHistoryQuery]);
 
   useEffect(() => {
-    if (!createSessionOpen || createSessionTab !== "create") return undefined;
+    const needsCompatibility = createSessionOpen || sessionTransferOpen || Boolean(sessionRecoveryIncident);
+    if (!needsCompatibility) return undefined;
     let cancelled = false;
     setAppServerCompatibilityLoading(true);
     void api.appServerCompatibility()
@@ -541,7 +544,7 @@ export function AppShell() {
       .catch(() => { if (!cancelled) setAppServerCompatibility(null); })
       .finally(() => { if (!cancelled) setAppServerCompatibilityLoading(false); });
     return () => { cancelled = true; };
-  }, [createSessionOpen, createSessionTab]);
+  }, [createSessionOpen, sessionRecoveryIncident, sessionTransferOpen]);
 
   useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
     setNotificationMenu(null);
@@ -866,10 +869,14 @@ export function AppShell() {
 
   async function restoreHistorySession(result: SessionHistoryResult) {
     if (sessionHistoryRestoreId) return;
+    if (!runtimeDriverAvailable(createSessionDriver, appServerCompatibility)) {
+      setSessionHistoryError("Codex app-server is unavailable. Choose Legacy tmux to restore this session.");
+      return;
+    }
     setSessionHistoryRestoreId(result.sessionId);
     setSessionHistoryError("");
     try {
-      const response = await api.restoreSession(result.sessionId);
+      const response = await api.restoreSession(result.sessionId, createSessionDriver);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
@@ -916,7 +923,8 @@ export function AppShell() {
     try {
       const response = await api.restoreSessionRecovery({
         incidentId: incident.id,
-        sessionIds: [...sessionRecoverySelectedIds]
+        sessionIds: [...sessionRecoverySelectedIds],
+        driverKind: createSessionDriver
       });
       for (const result of response.results) {
         if (result.session) syncSessionStoplight(result.session);
@@ -967,11 +975,11 @@ export function AppShell() {
     setCreateSessionError(null);
     try {
       const request: CreateSessionRequest = createSessionGitProbe?.isGit
-        ? { cwd, name, workspace: {
+        ? { cwd, name, driverKind: createSessionDriver, workspace: {
             mode: "git" as const,
             targetBranch: createSessionTargetBranch.trim()
           } }
-        : { cwd, name, workspace: { mode: "directory" } };
+        : { cwd, name, driverKind: createSessionDriver, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
@@ -1057,7 +1065,7 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
-      {sessionTransferOpen ? <SessionTransferDialog onClose={() => setSessionTransferOpen(false)} /> : null}
+      {sessionTransferOpen ? <SessionTransferDialog compatibility={appServerCompatibility} onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
           className="notification-rule-menu"
@@ -1145,6 +1153,9 @@ export function AppShell() {
           selectedIds={sessionRecoverySelectedIds}
           busy={sessionRecoveryBusy}
           errors={sessionRecoveryErrors}
+          driverKind={createSessionDriver}
+          compatibility={appServerCompatibility}
+          onDriverChange={setCreateSessionDriver}
           onToggle={toggleSessionRecoverySelection}
           onDismiss={() => void dismissSessionRecovery()}
           onRestore={() => void restoreSessionRecovery()}
@@ -1190,6 +1201,12 @@ export function AppShell() {
                     ? "Checking Codex app-server compatibility…"
                     : appServerCompatibilityLabel(appServerCompatibility)}
                 </p>
+                <RuntimeDriverField
+                  value={createSessionDriver}
+                  compatibility={appServerCompatibility}
+                  busy={createSessionBusy}
+                  onChange={setCreateSessionDriver}
+                />
                 <label className="rename-field">
                   <span>Directory</span>
                   <div className="session-directory-combobox">
@@ -1299,7 +1316,7 @@ export function AppShell() {
                   <button
                     className="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
+                    disabled={createSessionBusy || createSessionNameInvalid || !runtimeDriverAvailable(createSessionDriver, appServerCompatibility) || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
                     aria-busy={createSessionBusy}
                     data-busy={createSessionBusy || undefined}
                   >
@@ -1309,6 +1326,12 @@ export function AppShell() {
               </>
             ) : (
               <div className="session-history-panel">
+                <RuntimeDriverField
+                  value={createSessionDriver}
+                  compatibility={appServerCompatibility}
+                  busy={Boolean(sessionHistoryRestoreId)}
+                  onChange={setCreateSessionDriver}
+                />
                 <label className="prompt-history-search">
                   <Search size={17} aria-hidden="true" />
                   <input
@@ -1384,6 +1407,9 @@ export function SessionRecoveryContent({
   selectedIds,
   busy,
   errors,
+  driverKind,
+  compatibility,
+  onDriverChange,
   onToggle,
   onDismiss,
   onRestore
@@ -1392,6 +1418,9 @@ export function SessionRecoveryContent({
   selectedIds: ReadonlySet<string>;
   busy: boolean;
   errors: Record<string, string>;
+  driverKind: SessionDriverKind;
+  compatibility: AppServerCompatibility | null;
+  onDriverChange: (value: SessionDriverKind) => void;
   onToggle: (sessionId: string) => void;
   onDismiss: () => void;
   onRestore: () => void;
@@ -1401,6 +1430,7 @@ export function SessionRecoveryContent({
       <p className="session-recovery-copy">
         muxpilot stopped unexpectedly. Reopen the conversations you had running before the interruption. Commands that were executing will not restart automatically.
       </p>
+      <RuntimeDriverField value={driverKind} compatibility={compatibility} busy={busy} onChange={onDriverChange} />
       <div className="session-recovery-results" role="group" aria-label="Sessions to restore">
         {incident.sessions.map((session) => (
           <label className="session-recovery-result" key={sessionHistoryResultKey(session)}>
@@ -1415,7 +1445,7 @@ export function SessionRecoveryContent({
       </div>
       <div className="dialog-actions">
         <button type="button" onClick={onDismiss} disabled={busy}>Not now</button>
-        <button type="button" className="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0} aria-busy={busy}>
+        <button type="button" className="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !runtimeDriverAvailable(driverKind, compatibility)} aria-busy={busy}>
           {busy ? <><LoaderCircle className="spin" size={15} aria-hidden="true" /> Restoring</> : `Restore selected (${selectedIds.size})`}
         </button>
       </div>
@@ -1912,7 +1942,7 @@ export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: st
   return suggestions.some((suggestion) => suggestion.value === preferred) ? preferred : suggestions[0]?.value ?? "";
 }
 
-function SessionTransferDialog({ onClose }: { onClose: () => void }) {
+function SessionTransferDialog({ compatibility, onClose }: { compatibility: AppServerCompatibility | null; onClose: () => void }) {
   const [tab, setTab] = useState<"export" | "import">("export");
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -1926,6 +1956,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
   const [importDragging, setImportDragging] = useState(false);
   const [importFileName, setImportFileName] = useState("");
   const [mappingProbes, setMappingProbes] = useState<Record<string, SessionTransferMappingProbe>>({});
+  const [driverKind, setDriverKind] = useState<SessionDriverKind>("codex_app_server");
 
   useEffect(() => {
     void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
@@ -2040,7 +2071,8 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
           destinationCwd: mappings[requirement.sourceCwd]?.destinationCwd.trim() ?? "",
           ...(preview.formatVersion === 2 && requirement.workspaceMode === "git"
             ? { targetBranch: mappings[requirement.sourceCwd]?.targetBranch.trim() }
-            : {})
+            : {}),
+          driverKind
         }))
       });
       setResult(imported);
@@ -2146,6 +2178,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
             </> : null}
             {preview && !result ? <>
               <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
+              <RuntimeDriverField value={driverKind} compatibility={compatibility} busy={busy} onChange={setDriverKind} />
               <div className="session-transfer-mappings">
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
                   <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
@@ -2185,7 +2218,7 @@ function SessionTransferDialog({ onClose }: { onClose: () => void }) {
                   </> : null}
                 </div>)}
               </div>
-              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
+              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete || !runtimeDriverAvailable(driverKind, compatibility)} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
             </> : null}
             {result ? <><div className="session-transfer-results">
               {result.branches.map((item) => <div className="session-transfer-result" key={`${item.destinationCwd}:${item.branchName}`}><strong>{item.branchName}</strong><span>{item.status.replaceAll("_", " ")} · upstream {item.upstreamStatus.replaceAll("_", " ")}{item.warning ? ` · ${item.warning}` : ""}</span></div>)}
@@ -2204,6 +2237,35 @@ export function appServerCompatibilityLabel(compatibility: AppServerCompatibilit
     return `Codex app-server available${compatibility.codexVersion ? ` · Codex ${compatibility.codexVersion}` : ""}.`;
   }
   return compatibility.detail;
+}
+
+export function runtimeDriverAvailable(driverKind: SessionDriverKind, compatibility: AppServerCompatibility | null): boolean {
+  return driverKind === "codex_tmux" || compatibility?.available === true;
+}
+
+function RuntimeDriverField({
+  value,
+  compatibility,
+  busy,
+  onChange
+}: {
+  value: SessionDriverKind;
+  compatibility: AppServerCompatibility | null;
+  busy: boolean;
+  onChange: (value: SessionDriverKind) => void;
+}) {
+  return (
+    <label className="rename-field">
+      <span>Runtime</span>
+      <select value={value} disabled={busy} onChange={(event) => onChange(event.target.value as SessionDriverKind)}>
+        <option value="codex_app_server" disabled={!compatibility?.available}>Codex app server (recommended)</option>
+        <option value="codex_tmux">Legacy tmux</option>
+      </select>
+      {value === "codex_app_server" && !compatibility?.available
+        ? <small className="session-git-probe-note">App server is unavailable. Choose Legacy tmux for an explicit fallback.</small>
+        : null}
+    </label>
+  );
 }
 
 export function primaryInputFocusCommandForShortcut(
