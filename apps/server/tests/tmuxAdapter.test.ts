@@ -7,6 +7,7 @@ import {
   composerHasInput,
   inputSubmitDelayMs,
   isCodexDirectoryTrustPrompt,
+  isMissingTmuxServerError,
   parsePaneLine,
   TmuxAdapter,
   tmuxNewCodexForkWindowArgs,
@@ -29,6 +30,17 @@ describe("parsePaneLine", () => {
       serverPid: 3156,
       sessionCreatedAt: 1783898706
     });
+  });
+});
+
+describe("isMissingTmuxServerError", () => {
+  it("treats only an absent private tmux server as an empty pane inventory", () => {
+    expect(isMissingTmuxServerError({
+      stderr: "error connecting to /home/user/mp-s/data/shadow/tmux/tmux-1000/default (No such file or directory)\n"
+    })).toBe(true);
+    expect(isMissingTmuxServerError({ stderr: "no server running on /tmp/tmux-1000/default\n" })).toBe(true);
+    expect(isMissingTmuxServerError({ stderr: "tmux: permission denied\n" })).toBe(false);
+    expect(isMissingTmuxServerError(new Error("unrelated failure"))).toBe(false);
   });
 });
 

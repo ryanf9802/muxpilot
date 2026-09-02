@@ -25,6 +25,8 @@ Shadow mode forcibly uses:
 - a shadow-namespaced app-server capability identity, so even a reused session ID cannot select a production unit;
 - app-server as the new-session default.
 
+An unused private tmux namespace has no server process or panes. Its missing socket is treated as an empty pane inventory; selecting the explicit legacy-tmux driver creates the namespace on demand.
+
 These values override `.env` and `.env.local`. Shadow mode disables LAN/HTTPS exposure and resource governance by default, does not synchronize bundled skills into `~/.codex`, and does not read or copy the production database.
 
 ## Safety boundary

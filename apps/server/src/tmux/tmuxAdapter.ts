@@ -82,7 +82,13 @@ export class TmuxAdapter {
   ) {}
 
   async listPanes(): Promise<TmuxPane[]> {
-    const { stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]);
+    let stdout: string;
+    try {
+      ({ stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]));
+    } catch (error) {
+      if (isMissingTmuxServerError(error)) return [];
+      throw error;
+    }
     return stdout
       .trim()
       .split("\n")
@@ -577,6 +583,13 @@ export function codexStartupErrorFromCapture(text: string): CodexStartupError | 
 
 export function isCodexStartupFailureCapture(text: string): boolean {
   return text.includes(CODEX_STARTUP_FAILED_MARKER);
+}
+
+export function isMissingTmuxServerError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("stderr" in error)) return false;
+  const stderr = String(error.stderr ?? "");
+  return /(?:^|\n)no server running on /i.test(stderr)
+    || /(?:^|\n)error connecting to .* \(No such file or directory\)(?:\n|$)/i.test(stderr);
 }
 
 export function isCodexDirectoryTrustPrompt(text: string): boolean {
