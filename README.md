@@ -139,6 +139,12 @@ pnpm app start dev
 
 Development uses separate ports, logs, and SQLite data from production. Automated coding agents should use this lane; production is reserved for operator use.
 
+For app-server burn-in alongside a live production instance, use the stricter [shadow testing lane](docs/shadow-testing.md) from a dedicated branch worktree:
+
+```bash
+pnpm app start shadow
+```
+
 ```bash
 pnpm typecheck
 pnpm test
@@ -160,6 +166,7 @@ The workspace contains a React/Vite web app, a Fastify server, and a shared Type
 | [Runtime reliability](docs/runtime-reliability.md) | Supervision, reconciliation, input delivery, recovery, heavyweight work, and resource controls |
 | [Configuration](docs/configuration.md) | Environment variables and defaults |
 | [Development](docs/development.md) | Workspace layout, commands, and code boundaries |
+| [Shadow testing](docs/shadow-testing.md) | Isolated app-server burn-in beside live production |
 | [Architecture](docs/architecture.md) | Components, data flow, persistence, and trust model |
 | [Deployment](docs/deployment.md) | Production runtime and operational notes |
 | [Style guide](docs/style-guide.md) | Visual tokens and UI usage rules |

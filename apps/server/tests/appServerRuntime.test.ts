@@ -41,7 +41,9 @@ describe("app-server runtime composition", () => {
     expect(appServerCapabilityId("session-1")).toMatch(/^[a-f0-9]{24}$/);
     expect(appServerCapabilityId("session-1")).toBe(appServerCapabilityId("session-1"));
     expect(appServerCapabilityId("session-1")).not.toBe(appServerCapabilityId("session-2"));
+    expect(appServerCapabilityId("session-1", "shadow")).not.toBe(appServerCapabilityId("session-1"));
     expect(() => appServerCapabilityId(" ")).toThrow("must not be empty");
+    expect(() => appServerCapabilityId("session-1", " ")).toThrow("namespace must not be empty");
   });
 });
 

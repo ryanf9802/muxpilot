@@ -75,11 +75,11 @@ function parseLogOptions(args) {
 
 function printUsage() {
   console.log(`Usage:
-  pnpm app start [prod|dev]
-  pnpm app stop [prod|dev|all]
-  pnpm app restart [prod|dev|all]
-  pnpm app status [prod|dev|all]
-  pnpm app logs [prod|dev] [--lines N] [--follow] [--process server|web|supervisor|all]
+  pnpm app start [prod|dev|shadow]
+  pnpm app stop [prod|dev|shadow|all]
+  pnpm app restart [prod|dev|shadow|all]
+  pnpm app status [prod|dev|shadow|all]
+  pnpm app logs [prod|dev|shadow] [--lines N] [--follow] [--process server|web|supervisor|all]
 
 Defaults:
   start/restart/stop/logs use prod

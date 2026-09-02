@@ -32,6 +32,8 @@ Always use `pnpm app start dev` for the development server. It checks whether th
 Codex and other automated development or browser checks must interact only with the dev server. Production is the operator lane; an explicitly requested post-integration restart uses the scoped helper described in [Deployment](deployment.md#updating).
 Use `pnpm app stop dev` to stop the dev server only. `pnpm app restart dev` stops and starts it again. `pnpm restart` restarts only environments that are already running, leaving stopped development or production servers down.
 
+Use `pnpm app start shadow` from a dedicated feature-branch worktree when testing app-server behavior beside live production. Shadow mode has stronger isolation than development mode: it forces loopback ports, separate data/Git/session/heavy roots, a private tmux namespace, and app-server defaults regardless of `.env.local`. See [Shadow Testing](shadow-testing.md) for the safety boundary and burn-in checklist.
+
 `pnpm db:reset:dev` removes the development SQLite database and its WAL/SHM files. It refuses to run while the development ports are active unless `--force` is passed through to `scripts/reset-dbs.mjs`.
 
 `pnpm db:compact:dev` removes unused transient event history and vacuums a stopped development database. It verifies the compacted copy and retains the original database as a timestamped backup.

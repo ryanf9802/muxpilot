@@ -1,13 +1,16 @@
 import { execFileSync, spawn } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   unwatchFile,
@@ -28,16 +31,30 @@ const START_POLL_MS = 500;
 const STOP_GRACE_MS = 1500;
 const DEFAULT_DEV_PORTS = ["4177", "5177"];
 const DEFAULT_PROD_PORTS = ["12777", "12778"];
-const MODES = ["dev", "prod"];
+const DEFAULT_SHADOW_PORTS = ["14177", "15177"];
+const MODES = ["dev", "prod", "shadow"];
 const PROCESSES = ["supervisor", "server", "web"];
+const APP_SERVER_CAPABILITY_ID = /^[a-f0-9]{24}$/;
+const HEAVY_RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
 const RUNTIME_ENV_KEYS = [
+  "MUXPILOT_SHADOW",
+  "MUXPILOT_SHADOW_RESOURCE_GOVERNOR",
+  "MUXPILOT_LAN_ENABLED",
   "MUXPILOT_HOST",
   "MUXPILOT_PORT",
   "MUXPILOT_API_TARGET",
   "MUXPILOT_WEB_PROTOCOL",
   "MUXPILOT_WEB_PORT",
+  "MUXPILOT_HTTPS_CERT",
+  "MUXPILOT_HTTPS_KEY",
+  "MUXPILOT_PWA_TRUST_PORT",
+  "MUXPILOT_PWA_TRUST_DIR",
+  "MUXPILOT_CORS_ORIGINS",
   "MUXPILOT_DATA_DIR",
   "MUXPILOT_DB_PATH",
+  "MUXPILOT_GIT_WORKTREE_ROOT",
+  "MUXPILOT_GIT_SESSION_ROOT",
+  "MUXPILOT_DEFAULT_SESSION_DRIVER",
   "MUXPILOT_RESOURCE_GOVERNOR",
   "MUXPILOT_AGENT_MEMORY_SOFT_PERCENT",
   "MUXPILOT_AGENT_MEMORY_HARD_PERCENT",
@@ -52,7 +69,10 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_HEAVY_VALIDATION_INACTIVITY_TIMEOUT_MS",
   "MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS",
   "MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS",
-  "MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS"
+  "MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS",
+  "TMUX",
+  "TMUX_TMPDIR",
+  "VITE_MUXPILOT_SHADOW"
 ];
 
 const MODE_CONFIG = {
@@ -72,9 +92,19 @@ const MODE_CONFIG = {
     webPort: "12778",
     dataDir: "./data/prod",
     dbPath: "./data/prod/muxpilot.db",
-    build: true,
+    build: "workspace",
     backendArgs: ["--filter", "@muxpilot/server", "start"],
     webArgs: ["--filter", "@muxpilot/web", "start"]
+  },
+  shadow: {
+    label: "shadow",
+    backendPort: "14177",
+    webPort: "15177",
+    dataDir: "./data/shadow",
+    dbPath: "./data/shadow/muxpilot.db",
+    build: "core",
+    backendArgs: ["--filter", "@muxpilot/server", "dev"],
+    webArgs: ["--filter", "@muxpilot/web", "dev"]
   }
 };
 
@@ -113,7 +143,9 @@ export async function startMode(mode) {
       process.exit(1);
     }
 
-    if (config.build) runPnpmSync(["build"]);
+    if (mode === "shadow") assertShadowDependencyIsolation(process.cwd());
+    if (config.build === "workspace") runPnpmSync(["build"]);
+    if (config.build === "core") runPnpmSync(["--filter", "@muxpilot/core", "build"]);
 
     spawnSupervisor(mode, state);
     console.log(`Starting ${config.label} under the muxpilot supervisor...`);
@@ -173,31 +205,31 @@ export async function stopMode(mode) {
   if (allPids.length === 0) {
     console.log(`No ${modeLabel(mode)} servers found on ports ${ports.join(", ")}.`);
     removePidFiles(modes);
-    return;
-  }
+  } else {
+    const supervisorPids = allPids.filter((pid) => pidCandidates.get(pid)?.role === "supervisor");
+    const otherPids = allPids.filter((pid) => !supervisorPids.includes(pid));
 
-  const supervisorPids = allPids.filter((pid) => pidCandidates.get(pid)?.role === "supervisor");
-  const otherPids = allPids.filter((pid) => !supervisorPids.includes(pid));
+    for (const pid of supervisorPids) {
+      console.log(`Stopping supervisor PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
+      terminatePid(pid, "SIGTERM");
+    }
+    await sleep(STOP_GRACE_MS);
 
-  for (const pid of supervisorPids) {
-    console.log(`Stopping supervisor PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
-    terminatePid(pid, "SIGTERM");
-  }
-  await sleep(STOP_GRACE_MS);
+    for (const pid of otherPids) {
+      if (!isRunning(pid)) continue;
+      console.log(`Stopping PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
+      terminatePid(pid, "SIGTERM");
+    }
+    await sleep(STOP_GRACE_MS);
 
-  for (const pid of otherPids) {
-    if (!isRunning(pid)) continue;
-    console.log(`Stopping PID ${pid} (${pidCandidates.get(pid)?.source ?? "runtime state"})`);
-    terminatePid(pid, "SIGTERM");
-  }
-  await sleep(STOP_GRACE_MS);
-
-  for (const pid of allPids.filter(isRunning)) {
-    console.log(`Force-stopping PID ${pid}`);
-    terminatePid(pid, "SIGKILL");
+    for (const pid of allPids.filter(isRunning)) {
+      console.log(`Force-stopping PID ${pid}`);
+      terminatePid(pid, "SIGKILL");
+    }
   }
 
   removePidFiles(modes);
+  if (modes.includes("shadow")) stopShadowSystemdUnits(resolve(MODE_CONFIG.shadow.dataDir));
   console.log(`${capitalize(modeLabel(mode))} server stop complete.`);
 }
 
@@ -342,7 +374,8 @@ function prepareMode(mode) {
   const envSnapshot = snapshotEnv(RUNTIME_ENV_KEYS);
 
   loadDotenv();
-  applyRuntimeDefaults(config);
+  if (mode === "shadow") applyShadowIsolation(config);
+  else applyRuntimeDefaults(config);
 
   const state = runtimeState(mode);
   mkdirSync(state.dir, { recursive: true });
@@ -404,6 +437,11 @@ function printStatus(mode, details, status) {
   console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
   console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
   console.log(`  runtime: ${state.dir}`);
+  if (mode === "shadow") {
+    console.log(`  isolation: active (loopback-only; new shadow sessions only)`);
+    console.log(`  data: ${process.env.MUXPILOT_DATA_DIR}`);
+    console.log(`  tmux namespace: ${process.env.TMUX_TMPDIR}`);
+  }
   const governor = process.env.MUXPILOT_RESOURCE_GOVERNOR ?? "auto";
   const dockerGuardSocket = resolve(process.env.MUXPILOT_DATA_DIR ?? config.dataDir, "runtime", "docker-guard.sock");
   console.log(`  resource governor: ${governor}`);
@@ -753,14 +791,14 @@ function listeningSocketInodes(port) {
 }
 
 function allLocalPorts() {
-  return uniquePorts([...DEFAULT_DEV_PORTS, ...DEFAULT_PROD_PORTS, ...configuredPorts()]);
+  return uniquePorts([...DEFAULT_DEV_PORTS, ...DEFAULT_PROD_PORTS, ...DEFAULT_SHADOW_PORTS, ...configuredPorts()]);
 }
 
 function modePorts(stopMode) {
-  const [defaultBackendPort, defaultWebPort] = stopMode === "prod" ? DEFAULT_PROD_PORTS : DEFAULT_DEV_PORTS;
+  const config = modeConfig(stopMode);
   return uniquePorts([
-    process.env.MUXPILOT_PORT ?? defaultBackendPort,
-    process.env.MUXPILOT_WEB_PORT ?? defaultWebPort
+    stopMode === "shadow" ? config.backendPort : process.env.MUXPILOT_PORT ?? config.backendPort,
+    stopMode === "shadow" ? config.webPort : process.env.MUXPILOT_WEB_PORT ?? config.webPort
   ]);
 }
 
@@ -792,11 +830,38 @@ function safeReadFile(path) {
   }
 }
 
+function safeDirectory(path) {
+  try {
+    const details = lstatSync(path);
+    return details.isDirectory() && !details.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function safeRegularFile(path) {
+  try {
+    const details = lstatSync(path);
+    if (!details.isFile() || details.isSymbolicLink() || details.size > 64 * 1024) return "";
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
 function safeReadLink(path) {
   try {
     return readlinkSync(path);
   } catch {
     return "";
+  }
+}
+
+function safeRealPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
   }
 }
 
@@ -827,6 +892,99 @@ function applyRuntimeDefaults(config) {
   process.env.MUXPILOT_WEB_PORT ??= config.webPort;
   process.env.MUXPILOT_DATA_DIR ??= config.dataDir;
   process.env.MUXPILOT_DB_PATH ??= config.dbPath;
+}
+
+export function shadowIsolationEnvironment(root, source = process.env) {
+  const dataDir = resolve(root, "data", "shadow");
+  const governor = source.MUXPILOT_SHADOW_RESOURCE_GOVERNOR === "auto" ? "auto" : "off";
+  return {
+    MUXPILOT_SHADOW: "1",
+    MUXPILOT_LAN_ENABLED: "0",
+    MUXPILOT_HOST: "127.0.0.1",
+    MUXPILOT_PORT: MODE_CONFIG.shadow.backendPort,
+    MUXPILOT_API_TARGET: `http://127.0.0.1:${MODE_CONFIG.shadow.backendPort}`,
+    MUXPILOT_WEB_PROTOCOL: "http",
+    MUXPILOT_WEB_PORT: MODE_CONFIG.shadow.webPort,
+    MUXPILOT_PWA_TRUST_PORT: "15880",
+    MUXPILOT_DATA_DIR: dataDir,
+    MUXPILOT_DB_PATH: join(dataDir, "muxpilot.db"),
+    MUXPILOT_GIT_WORKTREE_ROOT: join(dataDir, "git-worktrees"),
+    MUXPILOT_GIT_SESSION_ROOT: join(dataDir, "sessions"),
+    MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_app_server",
+    MUXPILOT_RESOURCE_GOVERNOR: governor,
+    MUXPILOT_HEAVY_VALIDATION_DIR: join(dataDir, "heavy"),
+    TMUX_TMPDIR: join(dataDir, "tmux"),
+    VITE_MUXPILOT_SHADOW: "1"
+  };
+}
+
+export function shadowDependencyIsolation(root) {
+  const checkout = resolve(root);
+  const expected = safeRealPath(join(checkout, "packages", "core"));
+  const server = safeRealPath(join(checkout, "apps", "server", "node_modules", "@muxpilot", "core"));
+  const web = safeRealPath(join(checkout, "apps", "web", "node_modules", "@muxpilot", "core"));
+  return { expected, server, web, isolated: Boolean(expected && server === expected && web === expected) };
+}
+
+function assertShadowDependencyIsolation(root) {
+  if (shadowDependencyIsolation(root).isolated) return;
+  console.error("Shadow mode requires dependencies installed for this checkout; @muxpilot/core currently resolves outside it or is missing.");
+  console.error("Run pnpm install --frozen-lockfile in a standalone worktree. In a muxpilot-managed worktree, localize its registered node_modules dependencies first.");
+  process.exit(1);
+}
+
+function applyShadowIsolation(config) {
+  const shadow = shadowIsolationEnvironment(process.cwd());
+  for (const key of ["TMUX", "MUXPILOT_HTTPS_CERT", "MUXPILOT_HTTPS_KEY", "MUXPILOT_PWA_TRUST_DIR", "MUXPILOT_CORS_ORIGINS"]) {
+    delete process.env[key];
+  }
+  Object.assign(process.env, shadow);
+  mkdirSync(shadow.MUXPILOT_DATA_DIR, { recursive: true, mode: 0o700 });
+  mkdirSync(shadow.TMUX_TMPDIR, { recursive: true, mode: 0o700 });
+  chmodSync(shadow.MUXPILOT_DATA_DIR, 0o700);
+  chmodSync(shadow.TMUX_TMPDIR, 0o700);
+  applyRuntimeDefaults(config);
+}
+
+export function shadowOwnedSystemdUnits(dataDir) {
+  const root = resolve(dataDir);
+  const units = new Set();
+  const appServerRoot = join(root, "runtime", "app-server-sessions");
+  for (const capabilityId of safeReadDir(appServerRoot)) {
+    if (!APP_SERVER_CAPABILITY_ID.test(capabilityId)) continue;
+    const runtimeDir = join(appServerRoot, capabilityId);
+    if (!safeDirectory(runtimeDir)) continue;
+    const marker = safeRegularFile(join(runtimeDir, "environment"));
+    if (!marker.split(/\r?\n/).includes('MUXPILOT_SHADOW="1"')) continue;
+    units.add(`muxpilot-session-${capabilityId}.service`);
+  }
+  const heavyRoot = join(root, "heavy", "runs");
+  for (const runId of safeReadDir(heavyRoot)) {
+    if (!/^[a-z0-9-]+$/.test(runId)) continue;
+    const runDir = join(heavyRoot, runId);
+    if (!safeDirectory(runDir)) continue;
+    try {
+      const owner = JSON.parse(safeRegularFile(join(runDir, "owner.json")));
+      if (typeof owner.resourceUnit === "string" && HEAVY_RESOURCE_UNIT.test(owner.resourceUnit)) {
+        units.add(owner.resourceUnit);
+      }
+    } catch {
+      // Incomplete or corrupt queue metadata is not proof of shadow ownership.
+    }
+  }
+  return [...units].sort();
+}
+
+function stopShadowSystemdUnits(dataDir) {
+  const units = shadowOwnedSystemdUnits(dataDir);
+  for (const unit of units) {
+    try {
+      execFileSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      console.log(`Stopped shadow-owned unit ${unit}.`);
+    } catch (error) {
+      console.warn(`Could not stop shadow-owned unit ${unit}: ${error.message}`);
+    }
+  }
 }
 
 function lanEnabled() {

@@ -24,6 +24,8 @@ export interface AppServerRuntimeCompositionOptions {
 export function createSessionDriverRegistry(options: AppServerRuntimeCompositionOptions): SessionDriverRegistry {
   const registry = new SessionDriverRegistry();
   if (!options.compatibility.available) return registry;
+  const capabilityNamespace = options.environment.MUXPILOT_SHADOW === "1" ? "shadow" : "default";
+  const capabilityId = (sessionId: string) => appServerCapabilityId(sessionId, capabilityNamespace);
 
   const runtimeRoot = join(options.dataDir, "runtime", "app-server-sessions");
   const journalRoot = join(options.dataDir, "protocol", "app-server-sessions");
@@ -34,7 +36,7 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
     (sessionId) => {
       const existing = journals.get(sessionId);
       if (existing) return existing;
-      const journal = new ProtocolJournal(protocolJournalPath(journalRoot, appServerCapabilityId(sessionId)));
+      const journal = new ProtocolJournal(protocolJournalPath(journalRoot, capabilityId(sessionId)));
       journals.set(sessionId, journal);
       return journal;
     },
@@ -46,17 +48,23 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
     eventSink: reconciler,
     runtimeSpec: (spec) => ({
       sessionId: spec.sessionId,
-      capabilityId: appServerCapabilityId(spec.sessionId),
+      capabilityId: capabilityId(spec.sessionId),
       cwd: spec.cwd,
       codexHome: options.codexHome,
       codexVersion: options.compatibility.codexVersion,
-      environment: { ...options.environment, ...(spec.options.environment ?? {}) }
+      environment: {
+        ...options.environment,
+        ...(spec.options.environment ?? {}),
+        ...(options.environment.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {})
+      }
     })
   }));
   return registry;
 }
 
-export function appServerCapabilityId(sessionId: string): string {
+export function appServerCapabilityId(sessionId: string, namespace = "default"): string {
   if (!sessionId.trim()) throw new Error("App-server session id must not be empty");
-  return createHash("sha256").update(`muxpilot-app-server:${sessionId}`).digest("hex").slice(0, 24);
+  if (!namespace.trim()) throw new Error("App-server capability namespace must not be empty");
+  const prefix = namespace === "default" ? "muxpilot-app-server" : `muxpilot-app-server:${namespace}`;
+  return createHash("sha256").update(`${prefix}:${sessionId}`).digest("hex").slice(0, 24);
 }

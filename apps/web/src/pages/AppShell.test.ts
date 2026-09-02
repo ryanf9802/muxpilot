@@ -194,6 +194,12 @@ describe("shell connection state", () => {
     expect(html).toContain('src="/favicon.svg"');
     expect(html).toContain("<strong>muxpilot</strong>");
   });
+  it("visibly labels the shadow lane", () => {
+    const html = renderToStaticMarkup(createElement(AppBrand, { shadowMode: true }));
+
+    expect(html).toContain('class="shadow-badge"');
+    expect(html).toContain(">shadow</span>");
+  });
 
   it("uses a short reconnect interval for transient disconnects", () => {
     expect(SHELL_RECONNECT_INTERVAL_MS).toBe(2000);

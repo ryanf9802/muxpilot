@@ -4,9 +4,9 @@ muxpilot sits between a browser, Codex app-server or legacy tmux runtimes, appen
 
 ## Supervised Application Lifecycle
 
-`pnpm app start [prod|dev]` builds or starts the selected lane, launches a background supervisor, and waits for the backend and web endpoints to become healthy. The supervisor owns the server and web child processes and restarts either one after an unexpected exit.
+`pnpm app start [prod|dev|shadow]` builds or starts the selected lane, launches a background supervisor, and waits for the backend and web endpoints to become healthy. The supervisor owns the server and web child processes and restarts either one after an unexpected exit.
 
-Production and development use separate ports, databases, logs, PID files, and runtime directories. `pnpm app status` classifies each lane as `running`, `stopped`, `unmanaged`, `partial`, `unhealthy`, `stale-pid`, or `port-conflict`. `restart all` restarts only lanes that were already running.
+Production, development, and shadow use separate ports, databases, logs, PID files, and runtime directories. Shadow additionally forces private Git/session/heavy roots and a separate tmux namespace; its exact ownership cleanup is described in [Shadow Testing](shadow-testing.md). `pnpm app status` classifies each lane as `running`, `stopped`, `unmanaged`, `partial`, `unhealthy`, `stale-pid`, or `port-conflict`. `restart all` restarts only lanes that were already running.
 
 Stop and restart terminate tracked descendants and process groups, not only the parent package-manager PID. This prevents Vite, `tsx watch`, or other children from retaining listeners after the supervisor exits.
 

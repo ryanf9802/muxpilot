@@ -99,6 +99,7 @@ if (sessionScopes.configured && !sessionScopes.available) {
   );
 }
 const managedEnvironment: Record<string, string> = {
+  ...(process.env.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {}),
   MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
@@ -244,6 +245,7 @@ registerRoutes(app, manager, events, db, config, access, codexUsage, activitySum
 
 app.get("/healthz", async () => ({
   ok: true,
+  shadowMode: process.env.MUXPILOT_SHADOW === "1",
   appServerCompatibility,
   resourceGovernor: resourceGovernor.snapshot(),
   dockerGuardActive: Boolean(dockerProxy)

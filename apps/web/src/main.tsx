@@ -13,6 +13,7 @@ import "./styles/app.css";
 
 const cleanRecoveryUrl = urlWithoutConnectionRecoveryToken(window.location.href);
 if (cleanRecoveryUrl) window.history.replaceState(window.history.state, "", cleanRecoveryUrl);
+if (import.meta.env.VITE_MUXPILOT_SHADOW === "1") document.title = "muxpilot shadow";
 
 const serviceWorkerUpdates = import.meta.env.PROD ? browserServiceWorkerUpdateCoordinator() : null;
 if (serviceWorkerUpdates) {

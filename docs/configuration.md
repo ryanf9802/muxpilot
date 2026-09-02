@@ -40,17 +40,17 @@ MUXPILOT_DB_PATH="$HOME/.local/share/muxpilot/muxpilot.db"
 These are available for unusual local setups but are not needed for normal desktop or LAN use:
 
 - `MUXPILOT_HOST`: override backend bind host. Defaults to `127.0.0.1`, or `0.0.0.0` when LAN is enabled.
-- `MUXPILOT_PORT`: backend port, default `4177` in development and `12777` in production.
+- `MUXPILOT_PORT`: backend port, default `4177` in development and `12777` in production. Shadow mode forcibly uses `14177`.
 - `MUXPILOT_WEB_PROTOCOL`: published Web UI protocol, `http` or `https`. The lifecycle scripts set this to `https` automatically when both local HTTPS certificate variables are configured.
-- `MUXPILOT_WEB_PORT`: Web UI port, default `5177` in development and `12778` in production.
+- `MUXPILOT_WEB_PORT`: Web UI port, default `5177` in development and `12778` in production. Shadow mode forcibly uses `15177`.
 - `MUXPILOT_HTTPS_CERT`: optional certificate path for Vite dev/preview HTTPS.
 - `MUXPILOT_HTTPS_KEY`: optional private key path for Vite dev/preview HTTPS. Must be set with `MUXPILOT_HTTPS_CERT`.
 - `MUXPILOT_PWA_CA_DIR`: optional override for the shared local root CA directory used by `pnpm pwa:setup`. Normal use should put shared CA files in `.certs/pwa-ca/` instead.
 - `MUXPILOT_PWA_TRUST_PORT`: optional port for `pnpm pwa:trust`, default `12880`.
 - `MUXPILOT_PWA_TRUST_DIR`: directory containing the public CA/profile files served by the phone trust server. `pnpm pwa:setup` writes this machine-specific value to `.env.local`; it is normally not set by hand.
 - `MUXPILOT_API_TARGET`: Vite proxy target for `/api`, defaulting to the local backend port selected by the lifecycle script.
-- `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm app start dev`, `./data/prod` under `pnpm app start`, and `./data` when the server is started directly.
-- `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm app start dev`, `./data/prod/muxpilot.db` under `pnpm app start`, and `./data/muxpilot.db` when the server is started directly.
+- `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm app start dev`, `./data/prod` under `pnpm app start`, and `./data` when the server is started directly. Shadow mode forcibly uses `./data/shadow` in its launching worktree.
+- `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm app start dev`, `./data/prod/muxpilot.db` under `pnpm app start`, and `./data/muxpilot.db` when the server is started directly. Shadow mode forcibly uses `./data/shadow/muxpilot.db`.
 - `MUXPILOT_CODEX_HOME`: Codex home on the host machine, default `$HOME/.codex`.
 - `MUXPILOT_SESSION_SECRET`: optional HMAC secret of at least 16 characters for persistent operator cookies across restarts.
 - `MUXPILOT_OPERATOR_TOKEN`: optional override of at least 12 characters for the generated remote access key. Normal LAN use should leave this unset.
