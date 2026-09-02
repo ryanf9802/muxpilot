@@ -162,13 +162,14 @@ const manager = new SessionManager(
   config.defaultSessionDriver
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
+const rawSessionEvidence = new RawSessionEvidenceReader(config.codexHome, undefined, undefined, config.dataDir);
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   db,
   manager,
   join(config.dataDir, "runtime", "session-orchestration.sock"),
   join(config.dataDir, "runtime", "session-capabilities"),
   app.log,
-  new RawSessionEvidenceReader(config.codexHome, undefined, undefined, config.dataDir)
+  rawSessionEvidence
 );
 await sessionOrchestrationBroker.start();
 manager.setOrchestrationProvider(sessionOrchestrationBroker);
@@ -239,7 +240,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, rawSessionEvidence);
 
 app.get("/healthz", async () => ({
   ok: true,

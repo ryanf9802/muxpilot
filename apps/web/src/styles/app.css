@@ -2822,6 +2822,33 @@ select:focus-visible {
 
 .heavy-command-modal { --modal-max-width: 860px; }
 
+.session-evidence-modal { --modal-max-width: 960px; }
+
+.session-evidence-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.session-evidence-sections section {
+  min-width: 0;
+}
+
+.session-evidence-sections h3 {
+  margin: 0 0 6px;
+}
+
+.session-evidence-sections pre {
+  max-height: 34vh;
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-input);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .documents-modal {
   --modal-max-width: 960px;
   --modal-padding: 18px;

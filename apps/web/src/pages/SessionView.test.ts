@@ -37,6 +37,7 @@ import {
   GitWorkspacePanel,
   HeavyCommandIndicator,
   HeavyCommandsModal,
+  SessionEvidenceModal,
   hasActiveHeavyCommand,
   isDesktopVimAvailable,
   isLiveManagedSession,
@@ -444,6 +445,25 @@ describe("heavyweight command UI", () => {
     expect(html).toContain("No observed progress");
     expect(html).toContain("3 processes");
     expect(html).toContain("1 running / 2 created containers");
+  });
+
+  it("renders bounded runtime, process, and protocol evidence", () => {
+    const html = renderToStaticMarkup(createElement(SessionEvidenceModal, {
+      open: true,
+      evidence: {
+        runtime: { value: { systemd: { MainPID: "42" }, socketPresent: true }, error: null },
+        processTree: { value: { rootPid: 42, processes: [{ pid: 42 }] }, error: null },
+        protocolJournal: { value: { text: "thread/read" }, error: null },
+        sampledAt: "2026-09-01T20:00:00.000Z"
+      },
+      loading: false,
+      error: "",
+      onClose: vi.fn()
+    }));
+    expect(html).toContain("Raw runtime evidence");
+    expect(html).toContain("MainPID");
+    expect(html).toContain("rootPid");
+    expect(html).toContain("thread/read");
   });
 });
 

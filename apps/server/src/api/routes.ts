@@ -18,6 +18,7 @@ import type {
   SessionRecoveryResponse,
   SendInputRequest,
   SessionDirectoriesResponse,
+  SessionEvidenceResponse,
   SessionHistoryResponse,
   SessionSnapshotResponse,
   SessionTransferExportRequest,
@@ -59,6 +60,7 @@ import { SessionTransferError, type SessionTransferService } from "../services/s
 import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
+import type { RawSessionEvidence } from "../services/rawSessionEvidence.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const restoreSessionRecoverySchema = z.object({
@@ -186,7 +188,8 @@ export function registerRoutes(
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
   btw?: BtwService,
-  appServerCompatibility?: AppServerCompatibility
+  appServerCompatibility?: AppServerCompatibility,
+  rawEvidence?: RawSessionEvidence
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -452,6 +455,22 @@ export function registerRoutes(
     if (!session) return reply.code(404).send({ error: "Session not found" });
     return { session };
   });
+
+  if (rawEvidence) {
+    app.get("/api/sessions/:id/evidence", { preHandler: access.requireLocalAccess }, async (request, reply): Promise<SessionEvidenceResponse | void> => {
+      const { id } = request.params as { id: string };
+      const session = await manager.getSession(id);
+      if (!session) return reply.code(404).send({ error: "Session not found" });
+      const [runtime, processTree, protocolJournal] = await Promise.all([
+        evidenceSection(() => rawEvidence.readSessionRuntime(session)),
+        evidenceSection(() => rawEvidence.readSessionProcessTree(session)),
+        session.driverKind === "codex_app_server"
+          ? evidenceSection(() => rawEvidence.readSessionProtocolJournal(session, null, 64 * 1024))
+          : Promise.resolve(null)
+      ]);
+      return { runtime, processTree, protocolJournal, sampledAt: new Date().toISOString() };
+    });
+  }
 
   app.get("/api/sessions/:id/documents", { preHandler: access.requireAccess }, async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -822,6 +841,14 @@ function parseMessagePageLimit(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_MESSAGE_PAGE_SIZE);
   if (!Number.isFinite(parsed)) return DEFAULT_MESSAGE_PAGE_SIZE;
   return Math.min(MAX_MESSAGE_PAGE_SIZE, Math.max(1, Math.floor(parsed)));
+}
+
+async function evidenceSection(read: () => Promise<unknown>): Promise<{ value: unknown | null; error: string | null }> {
+  try {
+    return { value: await read(), error: null };
+  } catch (error) {
+    return { value: null, error: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function parseBoundedPositiveInteger(value: string | undefined, fallback: number, max: number): number {
