@@ -122,7 +122,7 @@ Nested muxpilot sessions are reserved for work the operator explicitly requests 
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
-Created children inherit the source repository/target, model settings, and Fast setting but start with fresh context, their own tmux pane, resource scope, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context/work-token guardrails, waits, and raw evidence.
+Created children inherit the source repository/target, model settings, and Fast setting but start with fresh context, their own tmux pane, resource scope, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
 
 ## Moving sessions between hosts
 

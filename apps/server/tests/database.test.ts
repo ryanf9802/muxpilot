@@ -6,6 +6,37 @@ import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type 
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
+  it("removes persisted context guards without clearing an exhausted work-token budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const legacyOwnership = (budgetExhaustedAt: string | null) => ({
+      parentSessionId: "parent",
+      rootSessionId: "parent",
+      origin: "created" as const,
+      createdAt: "2026-08-25T00:00:00.000Z",
+      workTokenBaseline: 0,
+      workTokenBudget: 1_000_000,
+      completedAt: null,
+      budgetExhaustedAt,
+      contextPausedAt: "2026-08-25T00:01:00.000Z",
+      highContextApprovedAt: null
+    }) as ManagedSession["agentOwnership"];
+    const db = new AppDatabase(path);
+    await db.upsertSession({ ...testSession("context-only"), status: "blocked", agentOwnership: legacyOwnership(null) }, "2026-08-25T00:01:00.000Z");
+    await db.upsertSession({ ...testSession("budget-blocked"), status: "blocked", agentOwnership: legacyOwnership("2026-08-25T00:01:00.000Z") }, "2026-08-25T00:01:00.000Z");
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    const contextOnly = await restarted.getSession("context-only");
+    const budgetBlocked = await restarted.getSession("budget-blocked");
+    expect(contextOnly?.status).toBe("waiting");
+    expect(contextOnly?.agentOwnership).not.toHaveProperty("contextPausedAt");
+    expect(contextOnly?.agentOwnership).not.toHaveProperty("highContextApprovedAt");
+    expect(budgetBlocked).toMatchObject({ status: "blocked", agentOwnership: { budgetExhaustedAt: "2026-08-25T00:01:00.000Z" } });
+    expect(budgetBlocked?.agentOwnership).not.toHaveProperty("contextPausedAt");
+    await restarted.close();
+  });
+
   it("persists event-driven agent waits across database restarts", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
     const path = join(dir, "test.db");

@@ -21,7 +21,7 @@ A root tree can contain no more than two live agent-managed descendants. Complet
 Creating a child assigns it to the calling session. Claiming attaches an existing unowned live session. Ownership forms an acyclic tree:
 
 - A session can control lifecycle only within its descendant tree.
-- A message may be sent to any live managed session, but descendant context and budget guards still apply.
+- A message may be sent to any live managed session, but descendant work-token budgets still apply.
 - Release returns a child to the top level without stopping it. Live descendants must be released first.
 - Finish stops the selected descendant and its descendants, cancels their active heavyweight work, and retains their history.
 - Security approvals always remain operator-only. An agent cannot approve a command or connector request for another session.
@@ -63,13 +63,13 @@ The tool server exposes bounded operations rather than arbitrary shell access:
 
 All operations use exact session IDs, and the broker rejects requests larger than 256 KiB. Created tasks and sent messages allow at most 200,000 characters. Transcript reads return between 1 and 30 recent messages. A wait targets one or two sessions and accepts a timeout from 1 minute through 24 hours. Control operations recheck ownership on the server.
 
-## Context and Work-Token Guardrails
+## Context Telemetry and Work-Token Budgets
 
 Each created or claimed child starts with a 1,000,000 work-token budget measured from the ownership baseline. Uncached input, output, and reasoning tokens count as work. Reaching the budget interrupts the child, marks it blocked, and prevents more delegated work until an ancestor extends the budget with a reason. A single extension can add at most 2,000,000 tokens.
 
-At 70 percent active context, the bundled skill directs the parent to narrow or hand off the task. At 85 percent, muxpilot interrupts and blocks an unapproved child. Sending more work at that pressure requires an explicit high-context acknowledgement and reason. That approval is cleared when the approved turn completes so it is not a permanent bypass.
+Context-window use remains visible as informational telemetry. Muxpilot lets Codex manage its context and automatic compaction without interrupting or blocking the child at a context threshold.
 
-These guardrails limit delegated work; they do not alter the Codex account's own rate limits or context implementation.
+The work-token budget limits delegated work; it does not alter the Codex account's own rate limits or context implementation.
 
 ## Waiting Without Polling
 

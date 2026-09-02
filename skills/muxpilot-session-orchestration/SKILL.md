@@ -45,8 +45,8 @@ After delegating work that blocks your next step, call `wait_for_sessions`. A su
 
 Use `cancel_wait` only when the dependency no longer blocks your work. If continuing work is useful while a child runs, continue and inspect it later instead of arming a wait.
 
-## Context and work-token guardrails
+## Context telemetry and work-token budgets
 
-Every orchestration response reports context-window use and delegated work-token use when available. At 70 percent context, narrow or hand off the task. At 85 percent, sending more work requires an explicit high-context reason. Delegated children default to a 1,000,000 work-token budget measured from creation or claim; uncached input, output, and reasoning tokens count. Extend a budget only with a specific audited reason.
+Every orchestration response reports context-window use and delegated work-token use when available. Context-window use is informational; let Codex manage its context and automatic compaction. Delegated children default to a 1,000,000 work-token budget measured from creation or claim; uncached input, output, and reasoning tokens count. Extend a budget only with a specific audited reason.
 
 Finish or release children promptly once their result has been incorporated. Finishing a child stops it; it does not merge Git work or authorize deployment, publication, or any other external mutation.

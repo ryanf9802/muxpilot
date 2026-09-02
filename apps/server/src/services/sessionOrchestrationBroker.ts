@@ -143,7 +143,7 @@ export class SessionOrchestrationBroker {
       case "create_session": return summarizeSession(await this.manager.agentCreateChild(actorId, requiredString(args.name, "name"), requiredString(args.task, "task"), collaborationMode(args.mode)));
       case "claim_session": return summarizeSession(await this.manager.agentClaim(actorId, requiredString(args.sessionId, "sessionId")));
       case "release_session": return summarizeSession(await this.manager.agentRelease(actorId, requiredString(args.sessionId, "sessionId")));
-      case "send_message": return summarizeSession(await this.manager.agentSendInput(actorId, requiredString(args.sessionId, "sessionId"), requiredString(args.text, "text"), collaborationMode(args.mode), args.allowHighContext === true, typeof args.reason === "string" ? args.reason : ""));
+      case "send_message": return summarizeSession(await this.manager.agentSendInput(actorId, requiredString(args.sessionId, "sessionId"), requiredString(args.text, "text"), collaborationMode(args.mode)));
       case "answer_question": {
         const target = requiredString(args.sessionId, "sessionId");
         const answers = recordValue(args.answers);

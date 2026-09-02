@@ -207,8 +207,6 @@ export interface AgentSessionOwnership {
   workTokenBudget: number;
   completedAt: string | null;
   budgetExhaustedAt?: string | null;
-  highContextApprovedAt?: string | null;
-  contextPausedAt?: string | null;
 }
 
 export interface AgentSessionSummary {
@@ -841,7 +839,6 @@ export type SessionAction =
   | { type: "setFastMode"; enabled: boolean }
   | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }
-  | { type: "acknowledgeAgentHighContext"; reason: string }
   | { type: "extendAgentBudget"; additionalTokens: number; reason: string }
   | { type: "retryInputDelivery" }
   | { type: "dismissInputDeliveryFailure" }

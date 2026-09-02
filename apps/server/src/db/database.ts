@@ -2788,6 +2788,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
+    this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
@@ -2807,6 +2808,22 @@ export class SyncAppDatabase {
       .all() as unknown as MessageRow[];
     for (const row of rows) this.upsertPromptIndexMessage(hydrateMessage(row));
     this.setSetting(PROMPT_INDEX_BACKFILLED_SETTING, "true", new Date().toISOString());
+  }
+
+  private removePersistedContextGuards(): void {
+    const rows = this.db.prepare("SELECT id, data_json, status FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json" | "status">>;
+    const update = this.db.prepare("UPDATE managed_sessions SET data_json = ?, status = ? WHERE id = ?");
+    for (const row of rows) {
+      const session = JSON.parse(row.data_json) as ManagedSession;
+      const ownership = session.agentOwnership as (AgentSessionOwnership & Record<string, unknown>) | null | undefined;
+      if (!ownership || (!("contextPausedAt" in ownership) && !("highContextApprovedAt" in ownership))) continue;
+      const wasContextPaused = typeof ownership.contextPausedAt === "string" && ownership.contextPausedAt.length > 0;
+      delete ownership.contextPausedAt;
+      delete ownership.highContextApprovedAt;
+      const status = wasContextPaused && !ownership.budgetExhaustedAt && row.status === "blocked" ? "waiting" : row.status;
+      session.status = status;
+      update.run(JSON.stringify(session), status, row.id);
+    }
   }
 
   private normalizePersistedSessionWaitMessages(): void {

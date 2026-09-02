@@ -2517,7 +2517,7 @@ export function SessionView() {
     }
   }
 
-  async function resolveAgentGuard(action: Extract<SessionAction, { type: "acknowledgeAgentHighContext" | "extendAgentBudget" }>) {
+  async function resolveAgentGuard(action: Extract<SessionAction, { type: "extendAgentBudget" }>) {
     if (actionBusy) return;
     const targetId = id;
     const token = requestTokenRef.current;
@@ -3202,7 +3202,7 @@ export function ChildSessionAttentionTray({
   );
 }
 
-type AgentGuardAction = Extract<SessionAction, { type: "acknowledgeAgentHighContext" | "extendAgentBudget" }>;
+type AgentGuardAction = Extract<SessionAction, { type: "extendAgentBudget" }>;
 
 export function AgentGuardBanner({
   session,
@@ -3215,21 +3215,11 @@ export function AgentGuardBanner({
   error: string;
   onAction: (action: AgentGuardAction) => void;
 }) {
-  const [contextReason, setContextReason] = useState("");
   const [budgetReason, setBudgetReason] = useState("");
   const [additionalTokens, setAdditionalTokens] = useState("1000000");
-  const contextBlocked = Boolean(session.agentOwnership?.contextPausedAt);
   const budgetBlocked = Boolean(session.agentOwnership?.budgetExhaustedAt);
   const parsedTokens = Number(additionalTokens);
   const tokensValid = Number.isSafeInteger(parsedTokens) && parsedTokens >= 1 && parsedTokens <= 2_000_000;
-  const contextPercent = session.contextUsage?.contextPercent;
-
-  function acknowledgeContext(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!contextReason.trim() || busyAction) return;
-    onAction({ type: "acknowledgeAgentHighContext", reason: contextReason.trim() });
-  }
-
   function extendBudget(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!budgetReason.trim() || !tokensValid || busyAction) return;
@@ -3245,22 +3235,6 @@ export function AgentGuardBanner({
           <p>Resolve the active guard before sending the next instruction.</p>
         </div>
       </div>
-      {contextBlocked ? (
-        <form className="agent-guard-form" onSubmit={acknowledgeContext}>
-          <div>
-            <strong>High context</strong>
-            <p>{typeof contextPercent === "number" && Number.isFinite(contextPercent) ? `Active context is ${Math.round(contextPercent)}%.` : "The high-context limit was reached."} This approval applies to the next turn only.</p>
-          </div>
-          <label>
-            <span>Reason</span>
-            <input {...noAutofillTextField} maxLength={1_000} value={contextReason} onChange={(event) => setContextReason(event.target.value)} placeholder="Why should this session continue?" />
-          </label>
-          <button type="submit" disabled={Boolean(busyAction) || !contextReason.trim()} aria-busy={busyAction === "acknowledgeAgentHighContext"}>
-            {busyAction === "acknowledgeAgentHighContext" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
-            {busyAction === "acknowledgeAgentHighContext" ? "Allowing" : "Allow next high-context turn"}
-          </button>
-        </form>
-      ) : null}
       {budgetBlocked ? (
         <form className="agent-guard-form" onSubmit={extendBudget}>
           <div>
@@ -3281,7 +3255,7 @@ export function AgentGuardBanner({
           </button>
         </form>
       ) : null}
-      {!contextBlocked && !budgetBlocked ? (
+      {!budgetBlocked ? (
         <p className="agent-guard-unknown">Muxpilot could not identify the active guard. Refresh the session before retrying.</p>
       ) : null}
       {error ? <p className="agent-guard-error">{error}</p> : null}

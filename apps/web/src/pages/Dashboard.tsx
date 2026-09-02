@@ -1097,9 +1097,6 @@ function AgentSessionRows({
 function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
   const statusPresentation = sessionStatusPresentation(session, allSessions);
   const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
-  const contextPressure = (session.contextUsage?.contextPercent ?? 0) >= 85
-    ? "high"
-    : (session.contextUsage?.contextPercent ?? 0) >= 70 ? "warning" : undefined;
   const ownership = session.agentOwnership;
   const workUsed = ownership && session.contextUsage ? Math.max(0, session.contextUsage.lifetimeWorkTokens - ownership.workTokenBaseline) : null;
   const budget = ownership && workUsed !== null ? `${Math.max(0, Math.round((ownership.workTokenBudget - workUsed) / 1000))}k budget` : "";
@@ -1107,7 +1104,7 @@ function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted 
     <div className="agent-session-branch" style={{ "--agent-depth": depth } as CSSProperties}>
       <button className="agent-session-row" type="button" data-completed={statusPresentation.status === "completed" || undefined} onClick={() => onOpen(session.id)}>
         <span className="agent-session-row-name">{sessionDisplayName(session)}</span>
-        <span className="agent-session-row-meta" data-context-pressure={contextPressure}>{context}{budget ? ` · ${budget}` : ""}</span>
+        <span className="agent-session-row-meta">{context}{budget ? ` · ${budget}` : ""}</span>
         {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} />}
       </button>
       <AgentSessionRows parentSessionId={session.id} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />

@@ -1457,8 +1457,6 @@ select:focus-visible {
 .agent-session-row[data-completed="true"] { opacity: 0.58; }
 .agent-session-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text); }
 .agent-session-row-meta { white-space: nowrap; opacity: 0.72; }
-.agent-session-row-meta[data-context-pressure="warning"] { color: var(--color-warning); opacity: 1; }
-.agent-session-row-meta[data-context-pressure="high"] { color: var(--color-error); opacity: 1; }
 
 .agent-session-completed {
   margin: 0.12rem 0.35rem;

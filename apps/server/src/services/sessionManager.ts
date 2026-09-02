@@ -881,7 +881,7 @@ export class SessionManager {
       if (result.contextUsage) {
         const updated = await this.db.setSessionContextUsage(session.id, result.contextUsage, nowIso());
         if (updated) {
-          await this.enforceAgentUsageGuardrails(updated);
+          await this.enforceAgentWorkTokenBudget(updated);
           this.publish("session.updated", session.id, await this.db.getSession(session.id));
         }
       }
@@ -917,7 +917,6 @@ export class SessionManager {
         });
         const appended = await this.db.appendMessage(message);
         if (isTurnCompletionMessage(message)) this.pendingPlanActionStatuses.delete(session.id);
-        if (isTurnCompletionMessage(message)) await this.clearAgentHighContextApproval(session.id);
         if (appended) {
           this.publish("message.appended", session.id, message);
           if (message.role === "user") this.activitySummarizer?.schedule(session.id);
@@ -1062,7 +1061,7 @@ export class SessionManager {
     const worstDescendant = highestPrioritySession(liveDescendants);
     return this.withResourceUsage({
       ...withOrigin,
-      status: !withOrigin.agentOwnership?.completedAt && (withOrigin.agentOwnership?.budgetExhaustedAt || withOrigin.agentOwnership?.contextPausedAt)
+      status: !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
         ? "blocked"
         : withOrigin.status,
       agentSummary: descendants.length > 0 ? {
@@ -1497,7 +1496,7 @@ export class SessionManager {
     return message;
   }
 
-  async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode, allowHighContext = false, reason = ""): Promise<ManagedSession> {
+  async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode): Promise<ManagedSession> {
     requireSession(await this.db.getSession(actorSessionId));
     const target = requireSession(await this.db.getSession(targetSessionId));
     if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
@@ -1507,26 +1506,11 @@ export class SessionManager {
     if (ownership && used >= ownership.workTokenBudget) {
       throw new AgentSessionError(`Work-token budget exhausted (${used} of ${ownership.workTokenBudget}); extend it before sending more work`);
     }
-    if (usage && usage.contextPercent >= 85 && !allowHighContext) {
-      throw new AgentSessionError(`Active context is ${usage.contextPercent.toFixed(1)}%; compact or explicitly acknowledge high context before sending more work`);
-    }
-    if (usage && usage.contextPercent >= 85 && !reason.trim()) throw new AgentSessionError("High-context acknowledgement requires a reason");
-    if (usage && usage.contextPercent >= 85) {
-      const approvedAt = nowIso();
-      await this.db.addAudit(`session:${actorSessionId}`, "high_context_override", targetSessionId, reason.trim(), approvedAt);
-      if (ownership) {
-        await this.db.setSessionAgentOwnership(target.id, {
-          ...ownership,
-          highContextApprovedAt: approvedAt,
-          contextPausedAt: null
-        }, approvedAt);
-      }
-    }
     const result = await this.sendInput(targetSessionId, text, mode, actorSessionId);
     return result && "session" in result ? result.session : target;
   }
 
-  private async enforceAgentUsageGuardrails(session: ManagedSession): Promise<void> {
+  private async enforceAgentWorkTokenBudget(session: ManagedSession): Promise<void> {
     let ownership = session.agentOwnership;
     const usage = session.contextUsage;
     if (!ownership || !usage || ownership.completedAt) return;
@@ -1534,30 +1518,6 @@ export class SessionManager {
     if (accounted !== ownership) {
       ownership = accounted;
       await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
-    }
-    if (usage.contextPercent < 85 && ownership.contextPausedAt) {
-      ownership = { ...ownership, contextPausedAt: null };
-      await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
-    }
-    if (usage.contextPercent >= 85 && !ownership.highContextApprovedAt && !ownership.contextPausedAt) {
-      const pausedAt = nowIso();
-      try {
-        await this.tmux.interrupt(session.tmux.paneId);
-      } catch (error) {
-        await this.db.addAudit(
-          "muxpilot",
-          "agent_context_interrupt_failed",
-          session.id,
-          error instanceof Error ? error.message : String(error),
-          pausedAt
-        );
-        return;
-      }
-      await this.db.setSessionAgentOwnership(session.id, { ...ownership, contextPausedAt: pausedAt }, pausedAt);
-      await this.db.setSessionStatus(session.id, "blocked", pausedAt);
-      await this.db.addAudit("muxpilot", "agent_context_paused", session.id, usage.contextPercent.toFixed(1), pausedAt);
-      this.publish("status.changed", session.id, { status: "blocked" });
-      return;
     }
     if (ownership.budgetExhaustedAt) return;
     const used = agentWorkTokensUsed(ownership, usage);
@@ -1579,15 +1539,6 @@ export class SessionManager {
     await this.db.setSessionStatus(session.id, "blocked", exhaustedAt);
     await this.db.addAudit("muxpilot", "agent_budget_exhausted", session.id, `${used}:${ownership.workTokenBudget}`, exhaustedAt);
     this.publish("status.changed", session.id, { status: "blocked" });
-  }
-
-  private async clearAgentHighContextApproval(sessionId: string): Promise<void> {
-    const session = await this.db.getSession(sessionId);
-    if (!session?.agentOwnership?.highContextApprovedAt) return;
-    await this.db.setSessionAgentOwnership(sessionId, {
-      ...session.agentOwnership,
-      highContextApprovedAt: null
-    }, nowIso());
   }
 
   async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
@@ -1619,9 +1570,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
-        budgetExhaustedAt: null,
-        highContextApprovedAt: null,
-        contextPausedAt: null
+        budgetExhaustedAt: null
       };
       await this.db.setSessionAgentOwnership(child.id, ownership, nowIso());
       for (const selection of ["default", "plan"] as const) {
@@ -1670,9 +1619,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
-        budgetExhaustedAt: null,
-        highContextApprovedAt: null,
-        contextPausedAt: null
+        budgetExhaustedAt: null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
       for (const descendant of claimedSubtree.slice(1)) {
@@ -1753,9 +1700,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.agentOwnership?.workTokenLastSampledAt ?? null,
         workTokenBudget: child.agentOwnership?.workTokenBudget ?? DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: child.agentOwnership?.completedAt ?? null,
-        budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null,
-        highContextApprovedAt: child.agentOwnership?.highContextApprovedAt ?? null,
-        contextPausedAt: child.agentOwnership?.contextPausedAt ?? null
+        budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
       for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
@@ -1775,25 +1720,6 @@ export class SessionManager {
     return this.withAgentMutation(async () => {
       const child = await this.requireAgentControl(actorSessionId, childSessionId);
       return this.extendAgentBudget(child, additionalTokens, reason, `session:${actorSessionId}`, false);
-    });
-  }
-
-  async operatorAcknowledgeAgentHighContext(sessionId: string, reason: string): Promise<ManagedSession> {
-    return this.withAgentMutation(async () => {
-      const child = requireLiveAgentSession(await this.db.getSession(sessionId));
-      const ownership = child.agentOwnership!;
-      if (!ownership.contextPausedAt) throw new AgentSessionError("This session is not paused by the high-context guard");
-      const normalizedReason = requireAgentGuardReason(reason);
-      const now = nowIso();
-      let updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
-        ...ownership,
-        contextPausedAt: null,
-        highContextApprovedAt: now
-      }, now));
-      updated = await this.restoreAgentGuardStatus(updated, now);
-      await this.db.addAudit("local", "acknowledge_agent_high_context", child.id, normalizedReason, now);
-      this.publish("session.updated", child.id, updated);
-      return updated;
     });
   }
 
@@ -1835,7 +1761,7 @@ export class SessionManager {
 
   private async restoreAgentGuardStatus(session: ManagedSession, updatedAt: string): Promise<ManagedSession> {
     const ownership = session.agentOwnership;
-    const nextStatus = ownership?.budgetExhaustedAt || ownership?.contextPausedAt
+    const nextStatus = ownership?.budgetExhaustedAt
       ? "blocked"
       : session.status === "blocked" ? "waiting" : session.status;
     if (nextStatus === session.status) return session;
@@ -2319,9 +2245,6 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const session = requireSession(await this.db.getSession(sessionId));
-    if (action.type === "acknowledgeAgentHighContext") {
-      return this.operatorAcknowledgeAgentHighContext(sessionId, action.reason);
-    }
     if (action.type === "extendAgentBudget") {
       return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     }

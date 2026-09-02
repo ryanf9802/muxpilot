@@ -192,7 +192,7 @@ describe("child session attention", () => {
     expect(html).toContain("Open child");
   });
 
-  it("renders dedicated controls for both active agent guards", () => {
+  it("renders dedicated controls for an exhausted work-token budget", () => {
     const session = managedSession({
       status: "blocked",
       contextUsage: {
@@ -215,7 +215,6 @@ describe("child session attention", () => {
         workTokenBaseline: 0,
         workTokenBudget: 100_000,
         completedAt: null,
-        contextPausedAt: "2026-08-31T00:01:00.000Z",
         budgetExhaustedAt: "2026-08-31T00:01:00.000Z"
       }
     });
@@ -226,8 +225,6 @@ describe("child session attention", () => {
       onAction: () => undefined
     }));
 
-    expect(html).toContain("Active context is 86%");
-    expect(html).toContain("Allow next high-context turn");
     expect(html).toContain("Work-token budget exhausted");
     expect(html).toContain('value="1000000"');
     expect(html).toContain("Extend budget");

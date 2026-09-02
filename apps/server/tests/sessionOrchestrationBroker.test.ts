@@ -11,7 +11,7 @@ import { SessionOrchestrationBroker } from "../src/services/sessionOrchestration
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
-  it("ignores advisory context pressure but wakes after the 85-percent guard blocks work", async () => {
+  it("keeps context pressure informational while a child is working", async () => {
     const child: ManagedSession = {
       ...managedSession(),
       id: "context-child",
@@ -53,11 +53,10 @@ describe("SessionOrchestrationBroker raw evidence", () => {
 
     expect(manager.resumeAgentWait).not.toHaveBeenCalled();
 
-    child.status = "blocked";
-    child.contextUsage!.contextPercent = 85;
+    child.contextUsage!.contextPercent = 99;
     await (broker as unknown as { tick(): Promise<void> }).tick();
 
-    expect(manager.resumeAgentWait).toHaveBeenCalledWith("parent-1", expect.stringContaining('"effectiveStatus":"blocked"'));
+    expect(manager.resumeAgentWait).not.toHaveBeenCalled();
   });
 
   it("keeps waiting for a working descendant and wakes with its attention status", async () => {
