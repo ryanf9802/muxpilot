@@ -643,15 +643,12 @@ export class SessionManager {
         existing?.inputMode ??
         "default";
       const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-      const latestMessage = await this.db.latestMessage(lookupId);
       const liveApprovalPrompt =
         rawInferredStatus !== "approval"
           ? null
-          : latestMessage?.type === "approval_request"
-            ? await this.capturePaneApprovalPrompt(pane)
-            : await this.corroboratedLiveApproval(pane, latestMessage);
+          : await this.corroboratedLiveApproval(pane, (await this.db.activeApprovalContext(lookupId)).messages);
       const inferredStatus =
-        rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
+        rawInferredStatus === "approval" && !liveApprovalPrompt
           ? rejectedApprovalFallbackStatus(pane, existing?.status)
           : rawInferredStatus;
       let latestUserMessage = await this.db.latestUserMessage(lookupId);
@@ -738,7 +735,10 @@ export class SessionManager {
       };
 
       if (effectiveStatus === "approval" && liveApprovalPrompt) {
-        this.liveApprovals.set(sessionId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
+        this.liveApprovals.set(
+          sessionId,
+          materializeInteractiveApproval(session, liveApprovalPrompt.prompt, liveApprovalPrompt.contextMessage)
+        );
       } else {
         this.liveApprovals.delete(sessionId);
       }
@@ -762,7 +762,7 @@ export class SessionManager {
       if (changed) this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? session);
       await this.processQueuedInputs(session.id);
       if (liveApprovalPrompt) {
-        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt);
+        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt.prompt);
       }
     }
 
@@ -1358,7 +1358,16 @@ export class SessionManager {
     if (!session || session.status === "missing") return null;
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
-      const approval = materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
+      const context = await this.db.activeApprovalContext(sessionId);
+      const contextMessage = matchingInteractiveApprovalContext(
+        interactive,
+        context.messages
+      );
+      if (!contextMessage && context.hasContext) {
+        this.liveApprovals.delete(sessionId);
+        return null;
+      }
+      const approval = materializeInteractiveApproval(session, interactive, contextMessage);
       this.liveApprovals.set(sessionId, approval);
       if (session.status !== "approval") {
         const now = nowIso();
@@ -2735,21 +2744,15 @@ export class SessionManager {
     }
   }
 
-  private async capturePaneApprovalPrompt(pane: TmuxPane): Promise<InteractiveApprovalPrompt | null> {
-    try {
-      return parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
-    } catch {
-      return null;
-    }
-  }
-
   private async corroboratedLiveApproval(
     pane: TmuxPane,
-    latestMessage: ChatMessage | null
-  ): Promise<InteractiveApprovalPrompt | null> {
+    contextMessages: ChatMessage[]
+  ): Promise<{ prompt: InteractiveApprovalPrompt; contextMessage: ChatMessage } | null> {
     try {
       const prompt = parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
-      return prompt && interactiveApprovalHasTranscriptContext(prompt, latestMessage) ? prompt : null;
+      if (!prompt) return null;
+      const contextMessage = matchingInteractiveApprovalContext(prompt, contextMessages);
+      return contextMessage ? { prompt, contextMessage } : null;
     } catch {
       return null;
     }
@@ -4436,6 +4439,21 @@ function interactiveApprovalHasTranscriptContext(
   if (!input || !/tools\.exec_command\s*\(/.test(input)) return false;
   if (/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return true;
   return nestedExecCommandMatchesPrompt(input, prompt);
+}
+
+function matchingInteractiveApprovalContext(
+  prompt: InteractiveApprovalPrompt,
+  contextMessages: ChatMessage[]
+): ChatMessage | null {
+  return contextMessages.find((message) => {
+    if (message.type === "approval_request") {
+      const approval = materializeApproval(message);
+      if (!approval || approval.kind !== prompt.kind) return false;
+      if (!approval.command || !prompt.command) return true;
+      return commandMatchesVisibleText(normalizeCommandText(approval.command), prompt.command);
+    }
+    return interactiveApprovalHasTranscriptContext(prompt, message);
+  }) ?? null;
 }
 
 function nestedExecCommandMatchesPrompt(input: string, prompt: InteractiveApprovalPrompt): boolean {

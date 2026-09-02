@@ -944,6 +944,16 @@ describe("SessionManager transcript isolation", () => {
             ].join("\n")
           }
         }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.100Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.200Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
         ""
       ].join("\n")
     );
@@ -974,7 +984,11 @@ describe("SessionManager transcript isolation", () => {
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
     expect(publishedStatuses).toContain("approval");
 
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-command-approval",
       kind: "command",
       title: "Would you like to run the following command?",
       command: "pnpm app restart prod",
@@ -993,6 +1007,59 @@ describe("SessionManager transcript isolation", () => {
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
     unsubscribe();
+    harness.db.close();
+  });
+
+  it("rejects an approval-shaped screen after the matching tool call completed", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "completed-command-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call-completed-command",
+            arguments: JSON.stringify({ cmd: "pnpm app restart prod" })
+          }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.100Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:02.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-completed-command",
+            output: "Process exited with code 0"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1);
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
     harness.db.close();
   });
 
@@ -1343,6 +1410,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
 
     expect(await harness.db.hasRepositoryApprovalRule(join(repo, ".git"), ["pnpm", "test"])).toBe(true);
+    expect((await harness.db.activeApprovalContext(session.id)).messages).toHaveLength(1);
     await harness.manager.discover();
     expect(sentKeys).toEqual([["Enter"], ["Enter"]]);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");

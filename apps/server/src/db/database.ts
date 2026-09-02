@@ -66,6 +66,11 @@ export interface PersistedAgentWait {
   readyAt: number | null;
 }
 
+export interface ApprovalContextState {
+  messages: ChatMessage[];
+  hasContext: boolean;
+}
+
 interface SessionRow {
   id: string;
   data_json: string;
@@ -475,8 +480,8 @@ export class AppDatabase {
     return this.call("latestUserMessage", sessionId) as Promise<ChatMessage | null>;
   }
 
-  latestMessage(sessionId: string): Promise<ChatMessage | null> {
-    return this.call("latestMessage", sessionId) as Promise<ChatMessage | null>;
+  activeApprovalContext(sessionId: string): Promise<ApprovalContextState> {
+    return this.call("activeApprovalContext", sessionId) as Promise<ApprovalContextState>;
   }
 
   latestTurnLifecycleMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -1423,16 +1428,38 @@ export class SyncAppDatabase {
     return row ? hydrateMessage(row) : null;
   }
 
-  latestMessage(sessionId: string): ChatMessage | null {
-    const row = this.db
+  activeApprovalContext(sessionId: string): ApprovalContextState {
+    const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ?
-         ORDER BY sequence DESC
-         LIMIT 1`
+           AND sequence > COALESCE(
+             (SELECT MAX(sequence) FROM messages WHERE session_id = ? AND role IN ('user', 'assistant')),
+             0
+           )
+           AND type IN ('approval_request', 'tool_call', 'tool_output', 'command_output')
+         ORDER BY sequence ASC`
       )
-      .get(sessionId) as MessageRow | undefined;
-    return row ? hydrateMessage(row) : null;
+      .all(sessionId, sessionId) as unknown as MessageRow[];
+    const messages = rows.map(hydrateMessage);
+    const completedCallIds = new Set(
+      messages
+        .filter((message) => message.type === "tool_output" || message.type === "command_output")
+        .map(toolCallId)
+        .filter((callId): callId is string => Boolean(callId))
+    );
+    const activeMessages = messages
+      .filter((message) => {
+        if (message.type === "approval_request") return true;
+        if (message.type !== "tool_call") return false;
+        const callId = toolCallId(message);
+        return !callId || !completedCallIds.has(callId);
+      })
+      .reverse();
+    return {
+      messages: activeMessages,
+      hasContext: messages.some((message) => message.type === "approval_request" || message.type === "tool_call")
+    };
   }
 
   latestTurnLifecycleMessage(sessionId: string): ChatMessage | null {
@@ -3339,6 +3366,10 @@ function isResponseItemUserMessage(message: ChatMessage): boolean {
   const payload = message.payload;
   const item = recordValue(payload.payload);
   return payload.type === "response_item" && item?.type === "message" && item.role === "user";
+}
+
+function toolCallId(message: ChatMessage): string | null {
+  return stringValue(recordValue(message.payload.payload)?.call_id);
 }
 
 function isMuxpilotSubmissionMessage(message: ChatMessage): boolean {
