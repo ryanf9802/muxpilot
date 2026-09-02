@@ -2,7 +2,9 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import type { ManagedSession } from "@muxpilot/core";
 import { RawSessionEvidenceReader } from "../src/services/rawSessionEvidence.js";
+import { appServerCapabilityId } from "../src/services/sessionDrivers/appServerRuntime.js";
 
 describe("RawSessionEvidenceReader", () => {
   it("returns verbatim pane listings and captures with explicit tmux options", async () => {
@@ -96,7 +98,62 @@ describe("RawSessionEvidenceReader", () => {
     await expect(reader.readCodexSessionFile(outside, 0, 100)).rejects.toThrow("relativePath");
     await expect(reader.readCodexSessionFile("not-jsonl.txt", 0, 100)).rejects.toThrow("JSONL");
   });
+
+  it("returns neutral app-server service, process, attachment, and protocol evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-raw-app-server-"));
+    const procRoot = join(root, "proc");
+    const dataDir = join(root, "data");
+    const session = appServerSession("app-evidence");
+    await writeProcess(procRoot, 700, "701 ", "codex\0app-server\0", "Name:\tcodex\n", "0::/muxpilot.service\n");
+    await writeProcess(procRoot, 701, "", "node\0dev-server\0", "Name:\tnode\n", "0::/muxpilot.service\n");
+    const journalDir = join(dataDir, "protocol", "app-server-sessions", appServerCapabilityId(session.id));
+    await mkdir(journalDir, { recursive: true });
+    await writeFile(join(journalDir, "protocol.jsonl"), "one\ntwo\n");
+    const runCommand = vi.fn(async (_command: string, args: string[]) => ({
+      stdout: args.includes("--value")
+        ? "700\n"
+        : `Id=${session.runtime!.kind === "systemd_service" ? session.runtime.unit : ""}\nActiveState=active\nSubState=running\nMainPID=700\nControlGroup=/user.slice/muxpilot.service\n`
+    }));
+    const reader = new RawSessionEvidenceReader(join(root, "codex"), runCommand, procRoot, dataDir);
+
+    await expect(reader.readSessionRuntime(session)).resolves.toMatchObject({
+      sessionId: session.id,
+      driverKind: "codex_app_server",
+      socketPresent: false,
+      attachmentCommand: "codex --remote 'unix:///tmp/app-evidence.sock'",
+      systemd: { ActiveState: "active", MainPID: "700" }
+    });
+    await expect(reader.readSessionProcessTree(session)).resolves.toMatchObject({
+      sessionId: session.id,
+      rootPid: 700,
+      processes: [expect.objectContaining({ pid: 700 }), expect.objectContaining({ pid: 701 })]
+    });
+    await expect(reader.readSessionProtocolJournal(session, null, 4)).resolves.toMatchObject({
+      sessionId: session.id,
+      startOffset: 4,
+      endOffset: 8,
+      text: "two\n"
+    });
+  });
 });
+
+function appServerSession(id: string): ManagedSession {
+  return {
+    id,
+    name: id,
+    cwd: "/repo",
+    driverKind: "codex_app_server",
+    runtime: {
+      kind: "systemd_service",
+      unit: "muxpilot-session-0123456789abcdef01234567.service",
+      socketPath: `/tmp/${id}.sock`,
+      state: "connected",
+      codexVersion: "0.152.0"
+    },
+    resourceUnit: "muxpilot-session-0123456789abcdef01234567.service",
+    tmux: { sessionName: "muxpilot", windowIndex: 1, paneId: "%1" }
+  } as ManagedSession;
+}
 
 async function writeProcess(root: string, pid: number, children: string, cmdline: string, status: string, cgroup: string): Promise<void> {
   const processRoot = join(root, String(pid));

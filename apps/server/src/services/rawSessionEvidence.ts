@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { open, readdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import type { ManagedSession } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FILE_READ_BYTES = 64 * 1024;
@@ -41,6 +43,7 @@ const PANE_FORMAT = [
   "#{pid}",
   "#{session_created}"
 ].join("\t");
+const APP_SERVER_UNIT = /^muxpilot-session-[a-f0-9]{24}\.service$/;
 
 type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string }>;
 
@@ -65,6 +68,15 @@ export interface RawSessionEvidence {
   listTmuxPanes(): Promise<{ fields: readonly string[]; output: string }>;
   captureTmuxPane(paneId: string, lines: number, includeAnsi: boolean, joinWrappedLines: boolean): Promise<{ paneId: string; output: string }>;
   readTmuxProcessTree(paneId: string): Promise<{ paneId: string; rootPid: number; processes: RawProcessRecord[]; truncated: boolean }>;
+  readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>>;
+  readSessionProcessTree(session: ManagedSession): Promise<{ sessionId: string; rootPid: number | null; processes: RawProcessRecord[]; truncated: boolean }>;
+  readSessionProtocolJournal(session: ManagedSession, offset: number | null, length: number): Promise<{
+    sessionId: string;
+    fileSize: number;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  }>;
   listCodexSessionFiles(limit: number, offset: number): Promise<{ root: string; files: RawCodexFile[]; nextOffset: number | null }>;
   readCodexSessionFile(relativePath: string, offset: number | null, length: number): Promise<{
     relativePath: string;
@@ -81,7 +93,8 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
   constructor(
     codexHome: string,
     private readonly runCommand: CommandRunner = async (command, args) => execFileAsync(command, args, { maxBuffer: 4 * 1024 * 1024 }),
-    private readonly procRoot = "/proc"
+    private readonly procRoot = "/proc",
+    private readonly dataDir: string | null = null
   ) {
     this.codexSessionsRoot = resolve(codexHome, "sessions");
   }
@@ -112,6 +125,75 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     truncated: boolean;
   }> {
     const rootPid = await this.panePid(paneId);
+    const tree = await this.readProcessTree(rootPid);
+    return { paneId, rootPid, ...tree };
+  }
+
+  async readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>> {
+    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      return {
+        sessionId: session.id,
+        driverKind: session.driverKind,
+        runtime: session.runtime,
+        resourceUnit: session.resourceUnit ?? session.resourceScope ?? null,
+        attachmentCommand: `tmux select-window -t ${shellQuote(`${session.tmux.sessionName}:${session.tmux.windowIndex}`)} && tmux attach-session -t ${shellQuote(session.tmux.sessionName)}`
+      };
+    }
+    const runtime = session.runtime;
+    if (!APP_SERVER_UNIT.test(runtime.unit)) throw new Error("Refusing non-muxpilot app-server unit");
+    const { stdout } = await this.runCommand("systemctl", [
+      "--user", "show", runtime.unit,
+      "--property=Id", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--property=ControlGroup",
+      "--no-pager"
+    ]);
+    const properties = parseProperties(stdout);
+    const socket = await stat(runtime.socketPath).catch(() => null);
+    return {
+      sessionId: session.id,
+      driverKind: session.driverKind,
+      runtime,
+      resourceUnit: session.resourceUnit ?? runtime.unit,
+      systemd: properties,
+      socketPresent: socket?.isSocket() === true,
+      attachmentCommand: `codex --remote ${shellQuote(`unix://${runtime.socketPath}`)}`
+    };
+  }
+
+  async readSessionProcessTree(session: ManagedSession): Promise<{
+    sessionId: string;
+    rootPid: number | null;
+    processes: RawProcessRecord[];
+    truncated: boolean;
+  }> {
+    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      const tree = await this.readTmuxProcessTree(session.tmux.paneId);
+      return { sessionId: session.id, rootPid: tree.rootPid, processes: tree.processes, truncated: tree.truncated };
+    }
+    if (!APP_SERVER_UNIT.test(session.runtime.unit)) throw new Error("Refusing non-muxpilot app-server unit");
+    const { stdout } = await this.runCommand("systemctl", ["--user", "show", session.runtime.unit, "--property=MainPID", "--value"]);
+    const rootPid = Number(stdout.trim());
+    if (!Number.isSafeInteger(rootPid) || rootPid <= 0) {
+      return { sessionId: session.id, rootPid: null, processes: [], truncated: false };
+    }
+    return { sessionId: session.id, rootPid, ...await this.readProcessTree(rootPid) };
+  }
+
+  async readSessionProtocolJournal(session: ManagedSession, offset: number | null, length: number): Promise<{
+    sessionId: string;
+    fileSize: number;
+    startOffset: number;
+    endOffset: number;
+    text: string;
+  }> {
+    if (session.driverKind !== "codex_app_server") throw new Error("Protocol journals are available only for app-server sessions");
+    if (!this.dataDir) throw new Error("App-server protocol journal storage is unavailable");
+    const capabilityId = createHash("sha256").update(`muxpilot-app-server:${session.id}`).digest("hex").slice(0, 24);
+    const path = join(resolve(this.dataDir), "protocol", "app-server-sessions", capabilityId, "protocol.jsonl");
+    const result = await readFileSlice(path, offset, length);
+    return { sessionId: session.id, ...result };
+  }
+
+  private async readProcessTree(rootPid: number): Promise<{ processes: RawProcessRecord[]; truncated: boolean }> {
     const pending: Array<{ pid: number; parentPid: number | null }> = [{ pid: rootPid, parentPid: null }];
     const seen = new Set<number>();
     const processes: RawProcessRecord[] = [];
@@ -123,7 +205,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
       processes.push(record);
       for (const childPid of processIds(record.children)) pending.push({ pid: childPid, parentPid: candidate.pid });
     }
-    return { paneId, rootPid, processes, truncated: pending.length > 0 };
+    return { processes, truncated: pending.length > 0 };
   }
 
   async listCodexSessionFiles(limit: number, offset: number): Promise<{ root: string; files: RawCodexFile[]; nextOffset: number | null }> {
@@ -244,6 +326,42 @@ async function readBoundedText(path: string): Promise<{ content: string | null; 
   } finally {
     await file.close();
   }
+}
+
+async function readFileSlice(path: string, offset: number | null, length: number): Promise<{
+  fileSize: number;
+  startOffset: number;
+  endOffset: number;
+  text: string;
+}> {
+  const metadata = await stat(path);
+  if (!metadata.isFile()) throw new Error("Evidence path is not a file");
+  const startOffset = offset === null ? Math.max(0, metadata.size - length) : Math.min(offset, metadata.size);
+  const readLength = Math.min(length, Math.max(0, metadata.size - startOffset));
+  const file = await open(path, "r");
+  try {
+    const buffer = Buffer.alloc(readLength);
+    const { bytesRead } = await file.read(buffer, 0, readLength, startOffset);
+    return {
+      fileSize: metadata.size,
+      startOffset,
+      endOffset: startOffset + bytesRead,
+      text: buffer.subarray(0, bytesRead).toString("utf8")
+    };
+  } finally {
+    await file.close();
+  }
+}
+
+function parseProperties(output: string): Record<string, string> {
+  return Object.fromEntries(output.split(/\r?\n/).filter(Boolean).map((line) => {
+    const separator = line.indexOf("=");
+    return separator < 0 ? [line, ""] : [line.slice(0, separator), line.slice(separator + 1)];
+  }));
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export const RAW_CODEX_DEFAULT_READ_BYTES = DEFAULT_FILE_READ_BYTES;

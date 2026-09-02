@@ -875,7 +875,7 @@ export class SessionManager {
     }
   }
 
-  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery", task: () => Promise<void>): void {
+  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation", task: () => Promise<void>): void {
     void task().catch((error) => {
       console.error(`Muxpilot ${name} background task failed`, error);
     });
@@ -1618,7 +1618,7 @@ export class SessionManager {
     if (usage.contextPercent >= 85 && !ownership.highContextApprovedAt && !ownership.contextPausedAt) {
       const pausedAt = nowIso();
       try {
-        await this.tmux.interrupt(session.tmux.paneId);
+        await this.interruptSessionRuntime(session);
       } catch (error) {
         await this.db.addAudit(
           "muxpilot",
@@ -1640,7 +1640,7 @@ export class SessionManager {
     if (used < ownership.workTokenBudget) return;
     const exhaustedAt = nowIso();
     try {
-      await this.tmux.interrupt(session.tmux.paneId);
+      await this.interruptSessionRuntime(session);
     } catch (error) {
       await this.db.addAudit(
         "muxpilot",
@@ -1677,10 +1677,10 @@ export class SessionManager {
       if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
         throw new AgentSessionError(`This root already has ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
       }
-      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.tmux.cwd;
+      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd;
       const request: CreateSessionRequest = actor.gitWorkspace
-        ? { cwd, name, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
-        : { cwd, name, workspace: { mode: "directory" } };
+        ? { cwd, name, driverKind: actor.driverKind, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
+        : { cwd, name, driverKind: actor.driverKind, workspace: { mode: "directory" } };
       const childMode = mode ?? "default";
       const inheritedSettings = { ...actor.models[childMode], fastMode: actor.fastMode };
       const child = await this.createSession(request, inheritedSettings);
@@ -1725,7 +1725,7 @@ export class SessionManager {
       const all = await this.db.listSessions(true);
       const claimedSubtree = [child, ...agentDescendants(all, child.id)];
       if (claimedSubtree.some((session) => isLiveManagedSession(session) && !isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope))) {
-        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be claimed. Restore this session after enabling user systemd scopes, then retry.");
+        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource units can be claimed. Restore this session after enabling user systemd, then retry.");
       }
       if (claimedSubtree.some((session) => session.id === actor.id)) {
         throw new AgentSessionError("Claiming this session would create an agent-session cycle");
@@ -1805,7 +1805,7 @@ export class SessionManager {
         throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
       }
       if (all.some((session) => subtreeIds.has(session.id) && isLiveManagedSession(session) && !isMuxpilotSessionResourceUnit(session.resourceUnit ?? session.resourceScope))) {
-        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource scopes can be attached. Restore this session after enabling user systemd scopes, then retry.");
+        throw new AgentSessionError("Only sessions running in dedicated muxpilot resource units can be attached. Restore this session after enabling user systemd, then retry.");
       }
 
       const parent = requireSession(await this.db.getSession(parentSessionId));
@@ -1948,9 +1948,16 @@ export class SessionManager {
         const current = await this.db.getSession(session.id);
         if (!current?.agentOwnership || current.agentOwnership.completedAt) continue;
         if (current.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(current.gitWorkspace.id, "owning agent session was finished");
-        const panes = await this.tmux.listPanes();
-        const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === current.id);
-        if (pane) await this.tmux.killPane(pane.paneId);
+        if (current.driverKind === "codex_app_server") {
+          if (current.runtime?.kind === "systemd_service" && current.runtime.state !== "hibernated" && current.runtime.state !== "stopped") {
+            await this.requireAppServerDriver().kill(current);
+            await this.db.upsertSession({ ...current, runtime: { ...current.runtime, state: "stopped" } }, nowIso());
+          }
+        } else {
+          const panes = await this.tmux.listPanes();
+          const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === current.id);
+          if (pane) await this.tmux.killPane(pane.paneId);
+        }
         const completedAt = nowIso();
         const completed = await this.db.completeAgentSession(current.id, completedAt);
         await this.db.addAudit(`session:${actorSessionId}`, "finish_agent_session", current.id, "ok", completedAt);
@@ -1963,6 +1970,11 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
+    if (session.driverKind === "codex_app_server") {
+      if (!isInputReadyStatus(session.status)) return false;
+      const result = await this.sendInput(sessionId, message);
+      return "session" in result;
+    }
     const ready = await this.readyLiveSession(session);
     if (!ready) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
@@ -1984,6 +1996,12 @@ export class SessionManager {
     const run = this.agentMutationQueue.catch(() => undefined).then(operation);
     this.agentMutationQueue = run.then(() => undefined, () => undefined);
     return run;
+  }
+
+  private async interruptSessionRuntime(session: ManagedSession): Promise<void> {
+    const driver = this.appServerDriver(session);
+    if (driver) await driver.interrupt(session, null);
+    else await this.tmux.interrupt(session.tmux.paneId);
   }
 
   private async waitForAgentChildReady(sessionId: string): Promise<void> {

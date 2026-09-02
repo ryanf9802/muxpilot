@@ -5564,6 +5564,57 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("inherits app-server runtime for child creation and finishes the child without tmux", async () => {
+    const start = vi.fn(async (spec: Parameters<AgentSessionDriver["start"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: `thread-${spec.sessionId}`, rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-abcdef0123456789abcdef01.service",
+        socketPath: `/tmp/${spec.sessionId}.sock`,
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    }));
+    const sendMessage = vi.fn(async (session: ManagedSession, _text: string, clientMessageId: string) => ({
+      acceptedAt: "2026-09-01T12:00:00.000Z",
+      clientMessageId,
+      threadId: session.codexSessionId!,
+      turnId: "turn-child"
+    }));
+    const kill = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", start, sendMessage, kill } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const root = { ...appServerSession("app-parent", "thread-parent", "idle"), cwd: repo, repo: { ...appServerSession("app-parent", "thread-parent", "idle").repo, root: repo } };
+    await harness.db.upsertSession(root, "2026-09-01T12:00:00.000Z");
+    const createTmux = vi.fn(async () => { throw new Error("tmux must not be used for app-server children"); });
+    harness.tmux.createCodexWindowInMuxpilotSession = createTmux;
+    harness.tmux.listPanes = async () => [];
+
+    const child = await harness.manager.agentCreateChild(root.id, "app-child", "Do child work");
+
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ name: "app-child", cwd: repo }));
+    expect(createTmux).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ id: child.id, driverKind: "codex_app_server" }), "Do child work", expect.any(String));
+    expect(child).toMatchObject({
+      driverKind: "codex_app_server",
+      agentOwnership: { parentSessionId: root.id, rootSessionId: root.id }
+    });
+    await harness.manager.agentFinish(root.id, child.id);
+    expect(kill).toHaveBeenCalledWith(expect.objectContaining({ id: child.id }));
+    expect(await harness.manager.getSession(child.id)).toMatchObject({
+      status: "missing",
+      runtime: { state: "stopped" },
+      agentOwnership: { completedAt: expect.any(String) }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    harness.db.close();
+  });
+
   it("routes app-server approvals and questions by exact request id without touching tmux", async () => {
     const answerApproval = vi.fn(async () => { throw new Error("response unavailable"); });
     const answerQuestion = vi.fn(async () => undefined);
@@ -6916,9 +6967,9 @@ describe("agent-managed session hierarchy", () => {
     await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
 
     await expect(harness.manager.agentClaim(root.id, child.id))
-      .rejects.toThrow("dedicated muxpilot resource scopes");
+      .rejects.toThrow("dedicated muxpilot resource units");
     await expect(harness.manager.operatorSetAgentParent(child.id, root.id))
-      .rejects.toThrow("dedicated muxpilot resource scopes");
+      .rejects.toThrow("dedicated muxpilot resource units");
     await harness.db.close();
   });
 });

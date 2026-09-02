@@ -214,6 +214,9 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       listTmuxPanes: vi.fn(async () => ({ fields: ["pane_id"], output: "%7\n" })),
       captureTmuxPane: vi.fn(async () => ({ paneId: "%7", output: "raw pane\n" })),
       readTmuxProcessTree: vi.fn(async () => ({ paneId: "%7", rootPid: 700, processes: [], truncated: false })),
+      readSessionRuntime: vi.fn(async () => ({ sessionId: session.id, driverKind: session.driverKind })),
+      readSessionProcessTree: vi.fn(async () => ({ sessionId: session.id, rootPid: 700, processes: [], truncated: false })),
+      readSessionProtocolJournal: vi.fn(async () => ({ sessionId: session.id, fileSize: 3, startOffset: 0, endOffset: 3, text: "rpc" })),
       listCodexSessionFiles: vi.fn(async () => ({ root: "/codex/sessions", files: [], nextOffset: null })),
       readCodexSessionFile: vi.fn(async () => ({
         relativePath: "rollout.jsonl",
@@ -249,6 +252,9 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     await expect(call("capture_tmux_pane", { paneId: "%7", lines: 50, includeAnsi: true }))
       .resolves.toEqual({ paneId: "%7", output: "raw pane\n" });
     expect(rawEvidence.captureTmuxPane).toHaveBeenCalledWith("%7", 50, true, false);
+    await expect(call("read_session_runtime", { sessionId: session.id }))
+      .resolves.toMatchObject({ sessionId: session.id });
+    expect(rawEvidence.readSessionRuntime).toHaveBeenCalledWith(session);
     await expect(call("read_codex_session_file", { relativePath: "rollout.jsonl" }))
       .resolves.toMatchObject({ text: "raw", startOffset: 0, endOffset: 3 });
     expect(rawEvidence.readCodexSessionFile).toHaveBeenCalledWith("rollout.jsonl", null, 64 * 1024);

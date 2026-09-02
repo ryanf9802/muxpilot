@@ -131,6 +131,17 @@ export class SessionOrchestrationBroker {
         args.joinWrappedLines === true
       );
       case "read_tmux_process_tree": return this.rawEvidence.readTmuxProcessTree(requiredPaneId(args.paneId));
+      case "read_session_runtime": return this.rawEvidence.readSessionRuntime(
+        await this.authorizedEvidenceSession(actorId, requiredString(args.sessionId, "sessionId"))
+      );
+      case "read_session_process_tree": return this.rawEvidence.readSessionProcessTree(
+        await this.authorizedEvidenceSession(actorId, requiredString(args.sessionId, "sessionId"))
+      );
+      case "read_session_protocol_journal": return this.rawEvidence.readSessionProtocolJournal(
+        await this.authorizedEvidenceSession(actorId, requiredString(args.sessionId, "sessionId")),
+        optionalInteger(args.offset, 0, Number.MAX_SAFE_INTEGER),
+        boundedInteger(args.length, 1, 256 * 1024, RAW_CODEX_DEFAULT_READ_BYTES)
+      );
       case "list_codex_session_files": return this.rawEvidence.listCodexSessionFiles(
         boundedInteger(args.limit, 1, 500, 100),
         boundedInteger(args.offset, 0, Number.MAX_SAFE_INTEGER, 0)
@@ -187,6 +198,13 @@ export class SessionOrchestrationBroker {
       sessions = sessions.filter((session) => session.id === root || session.agentOwnership?.rootSessionId === root);
     }
     return { actorSessionId: actorId, sessions: sessions.map((session) => summarizeSession(session, sessions)) };
+  }
+
+  private async authorizedEvidenceSession(actorId: string, sessionId: string): Promise<ManagedSession> {
+    if (sessionId !== actorId) await this.manager.requireAgentControl(actorId, sessionId);
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new Error("Session not found");
+    return session;
   }
 
   private async readSession(sessionId: string, limit: number): Promise<unknown> {

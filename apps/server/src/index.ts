@@ -167,7 +167,7 @@ const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   join(config.dataDir, "runtime", "session-orchestration.sock"),
   join(config.dataDir, "runtime", "session-capabilities"),
   app.log,
-  new RawSessionEvidenceReader(config.codexHome)
+  new RawSessionEvidenceReader(config.codexHome, undefined, undefined, config.dataDir)
 );
 await sessionOrchestrationBroker.start();
 manager.setOrchestrationProvider(sessionOrchestrationBroker);
