@@ -11,8 +11,8 @@ Use the tools exposed by `muxpilot_sessions` only when the operator explicitly r
 
 ## Visibility and messaging
 
-- Use `list_sessions` to inspect session IDs, hierarchy, status, context use, and delegated work budgets.
-- Use `read_session` for a bounded recent transcript. Read only what the current decision needs.
+- Use `list_sessions` to inspect session IDs, hierarchy, status, context use, delegated work budgets, and Codex thread-goal objective, state, elapsed time, and token use when available.
+- Use `read_session` for the same goal telemetry plus a bounded recent transcript. Read only what the current decision needs.
 - When muxpilot's normalized state may be wrong, inspect independent evidence with `list_tmux_panes`, `capture_tmux_pane`, `read_tmux_process_tree`, `list_codex_session_files`, and `read_codex_session_file`. Compare the raw sources yourself; the tools do not classify mismatches.
 - Raw evidence tools are diagnostic and read-only. Report factual inconsistencies and wait for separate operator direction before attempting remediation.
 - You may send a work message to any live managed session by exact ID. The transcript records you as the delegating session.
@@ -48,5 +48,7 @@ Use `cancel_wait` only when the dependency no longer blocks your work. If contin
 ## Context telemetry and work-token budgets
 
 Every orchestration response reports context-window use and delegated work-token use when available. Context-window use is informational; let Codex manage its context and automatic compaction. Delegated children default to a 1,000,000 work-token budget measured from creation or claim; uncached input, output, and reasoning tokens count. Extend a budget only with a specific audited reason.
+
+`list_sessions` and `read_session` also report the Codex thread goal when one exists, including its objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Check `goalTelemetry.available` before interpreting `goal: null`: an available source with a null goal means that thread has no recorded goal, while an unavailable source means muxpilot could not inspect Codex's goal store.
 
 Finish or release children promptly once their result has been incorporated. Finishing a child stops it; it does not merge Git work or authorize deployment, publication, or any other external mutation.

@@ -47,8 +47,8 @@ The tool server exposes bounded operations rather than arbitrary shell access:
 
 | Tool | Contract |
 | --- | --- |
-| `list_sessions` | List all sessions or the caller's tree with hierarchy, state, context, and budget. |
-| `read_session` | Read persisted metadata, queued input, and up to 30 recent parsed messages. |
+| `list_sessions` | List all sessions or the caller's tree with hierarchy, state, context, budget, and Codex goal telemetry. |
+| `read_session` | Read persisted metadata, Codex goal telemetry, queued input, and up to 30 recent parsed messages. |
 | `create_session` | Create a fresh-context child with a bounded task and optional Plan mode. |
 | `claim_session` | Attach an unowned live scoped session as a child. |
 | `release_session` | Detach a controlled child without stopping it. |
@@ -70,6 +70,12 @@ Each created or claimed child starts with a 1,000,000 work-token budget measured
 Context-window use remains visible as informational telemetry. Muxpilot lets Codex manage its context and automatic compaction without interrupting or blocking the child at a context threshold.
 
 The work-token budget limits delegated work; it does not alter the Codex account's own rate limits or context implementation.
+
+## Codex Goal Telemetry
+
+Session inspection reads Codex thread goals directly from the configured Codex home. When a session has a goal, its MCP summary includes the objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Active elapsed time advances from Codex's latest accounting checkpoint; paused and terminal durations remain fixed.
+
+Both inspection responses include `goalTelemetry.available`. When it is true, `goal: null` means the session's Codex thread has no recorded goal. When it is false, muxpilot could not read a compatible Codex goal store and leaves the rest of session inspection available.
 
 ## Waiting Without Polling
 

@@ -31,6 +31,7 @@ import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
 import { randomBytes } from "node:crypto";
+import { CodexGoalStore } from "./codex/codexGoalStore.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -145,7 +146,8 @@ const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   join(config.dataDir, "runtime", "session-orchestration.sock"),
   join(config.dataDir, "runtime", "session-capabilities"),
   app.log,
-  new RawSessionEvidenceReader(config.codexHome)
+  new RawSessionEvidenceReader(config.codexHome),
+  new CodexGoalStore(config.codexHome)
 );
 await sessionOrchestrationBroker.start();
 manager.setOrchestrationProvider(sessionOrchestrationBroker);

@@ -74,8 +74,8 @@ function toolDefinitions() {
   const object = (properties = {}, required = []) => ({ type: "object", additionalProperties: false, properties, required });
   const sessionId = { type: "string", description: "Exact muxpilot session id" };
   return [
-    { name: "list_sessions", description: "List muxpilot sessions with hierarchy, status, context pressure, and remaining work-token budget.", inputSchema: object({ scope: { type: "string", enum: ["all", "tree"] } }) },
-    { name: "read_session", description: "Read muxpilot's persisted session record, queued inputs, and a bounded parsed transcript tail with raw message payloads.", inputSchema: object({ sessionId, limit: { type: "integer", minimum: 1, maximum: 30 } }, ["sessionId"]) },
+    { name: "list_sessions", description: "List muxpilot sessions with hierarchy, status, context pressure, remaining work-token budget, and Codex goal telemetry when available.", inputSchema: object({ scope: { type: "string", enum: ["all", "tree"] } }) },
+    { name: "read_session", description: "Read muxpilot's persisted session record, Codex goal telemetry, queued inputs, and a bounded parsed transcript tail with raw message payloads.", inputSchema: object({ sessionId, limit: { type: "integer", minimum: 1, maximum: 30 } }, ["sessionId"]) },
     { name: "list_tmux_panes", description: "Return verbatim tmux list-panes output for independent runtime inspection.", inputSchema: object() },
     { name: "capture_tmux_pane", description: "Return a verbatim bounded capture of an exact tmux pane. Physical wrapping is preserved unless joinWrappedLines is true.", inputSchema: object({ paneId: { type: "string", pattern: "^%[0-9]+$" }, lines: { type: "integer", minimum: 1, maximum: 2000 }, includeAnsi: { type: "boolean" }, joinWrappedLines: { type: "boolean" } }, ["paneId"]) },
     { name: "read_tmux_process_tree", description: "Read direct /proc cmdline, status, cgroup, and child evidence for an exact tmux pane's process tree.", inputSchema: object({ paneId: { type: "string", pattern: "^%[0-9]+$" } }, ["paneId"]) },
