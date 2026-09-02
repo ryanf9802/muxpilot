@@ -5564,6 +5564,80 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("routes app-server approvals and questions by exact request id without touching tmux", async () => {
+    const answerApproval = vi.fn(async () => { throw new Error("response unavailable"); });
+    const answerQuestion = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", answerApproval, answerQuestion } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const capturePane = vi.fn(async () => { throw new Error("tmux capture must not be used"); });
+    const sendKeys = vi.fn(async () => { throw new Error("tmux keys must not be used"); });
+    harness.tmux.capturePane = capturePane;
+    harness.tmux.sendKeys = sendKeys;
+    const session = appServerSession("app-gates", "thread-gates", "approval");
+    await harness.db.upsertSession(session, "2026-09-01T12:00:00.000Z");
+    await harness.db.appendMessage({
+      id: "approval-message",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "approval_request",
+      role: "system",
+      timestamp: "2026-09-01T12:00:00.000Z",
+      text: "Run command?",
+      payload: {
+        source: "codex_app_server",
+        approval: {
+          id: "41",
+          requestId: 41,
+          kind: "command",
+          title: "Run command?",
+          command: "git status",
+          options: [
+            { decision: "approve_once", label: "Approve once", description: "Run it." },
+            { decision: "deny", label: "Deny", description: "Cancel it." }
+          ]
+        }
+      }
+    });
+
+    await expect(harness.manager.getPendingApproval(session.id)).resolves.toMatchObject({ requestId: 41 });
+    await expect(harness.manager.resolveApproval(session.id, { decision: "approve_once" }))
+      .rejects.toThrow("response unavailable");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+    answerApproval.mockImplementationOnce(async () => undefined);
+    await harness.manager.resolveApproval(session.id, { decision: "approve_once" });
+    expect(answerApproval).toHaveBeenLastCalledWith(expect.objectContaining({ id: session.id }), 41, "approve_once");
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+
+    await harness.db.appendMessage({
+      id: "question-message",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "question_request",
+      role: "system",
+      timestamp: "2026-09-01T12:01:00.000Z",
+      text: "Choose",
+      payload: {
+        source: "codex_app_server",
+        question: {
+          id: "question-9",
+          requestId: "question-9",
+          questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }]
+        }
+      }
+    });
+    await harness.db.setSessionStatus(session.id, "question", "2026-09-01T12:01:00.000Z");
+    await harness.manager.answerQuestion(session.id, { answers: { choice: { answers: ["yes"] } } });
+    expect(answerQuestion).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id }),
+      "question-9",
+      { answers: { choice: { answers: ["yes"] } } }
+    );
+    expect(capturePane).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    harness.db.close();
+  });
+
   it("stops an app-server launch and records failure when post-launch binding fails", async () => {
     const launch = {
       provider: { kind: "codex" as const, threadId: "thread-binding-failure", rolloutPath: null },
@@ -6730,13 +6804,33 @@ function appServerCapabilities() {
     verifiedInput: true,
     interrupt: true,
     kill: true,
-    approvals: false,
-    questions: false,
+    approvals: true,
+    questions: true,
     planActions: false,
     fastMode: true,
     rawTerminalCapture: false,
     terminalAttach: true,
     hibernate: false
+  };
+}
+
+function appServerSession(id: string, threadId: string, status: ManagedSession["status"]): ManagedSession {
+  return {
+    ...agentHierarchySession(id),
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId, rolloutPath: null },
+    driverKind: "codex_app_server",
+    runtime: {
+      kind: "systemd_service",
+      unit: "muxpilot-session-0123456789abcdef01234567.service",
+      socketPath: `/tmp/${id}.sock`,
+      state: "connected",
+      codexVersion: "0.152.0"
+    },
+    capabilities: appServerCapabilities(),
+    codexSessionId: threadId,
+    status
   };
 }
 

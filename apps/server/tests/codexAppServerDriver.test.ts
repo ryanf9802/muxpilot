@@ -29,7 +29,7 @@ describe("CodexAppServerDriver", () => {
     expect(harness.connections.reconnect).toHaveBeenCalledOnce();
     expect(harness.connections.fork).toHaveBeenCalledOnce();
     expect([start, resume, fork].map((result) => result.provider.threadId)).toEqual(["thread-1", "thread-1", "thread-1"]);
-    expect(start.capabilities).toMatchObject({ sendMessage: true, approvals: false, rawTerminalCapture: false });
+    expect(start.capabilities).toMatchObject({ sendMessage: true, approvals: true, questions: true, rawTerminalCapture: false });
   });
 
   it("sends verified structured turns only on the reconciled thread", async () => {
@@ -143,17 +143,53 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.answerApproval(session, "approval-1", "approve_once")).rejects.toThrow("Unknown");
   });
 
+  it("maps permission-profile grant scopes and denial without inventing permissions", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.handlers.serverRequest?.({
+      id: 17,
+      method: "item/permissions/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "permission-1",
+        permissions: { network: { enabled: true } }
+      }
+    });
+    await harness.driver.answerApproval(session, 17, "approve_for_session");
+    expect(harness.rpc.respond).toHaveBeenCalledWith(17, {
+      permissions: { network: { enabled: true } },
+      scope: "session"
+    });
+
+    await harness.handlers.serverRequest?.({
+      id: "permission-deny",
+      method: "item/permissions/requestApproval",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "permission-2",
+        permissions: { fileSystem: { write: ["/repo"] } }
+      }
+    });
+    await harness.driver.answerApproval(session, "permission-deny", "deny");
+    expect(harness.rpc.respond).toHaveBeenCalledWith("permission-deny", { permissions: {}, scope: "turn" });
+  });
+
   it("persists gates before delivery and seeds reconnect replay from durable state", async () => {
     const store = requestStore();
+    const sink = { handle: vi.fn(async () => undefined), restore: vi.fn(async () => undefined) };
     store.listUnresolvedAppServerRequests.mockResolvedValue([
-      { requestId: "approval-1", state: "pending" },
-      { requestId: 2, state: "responded" }
+      { requestId: "approval-1", state: "pending", response: null },
+      { requestId: 2, state: "responded", response: { decision: "accept" } }
     ]);
-    const harness = createHarness(store as unknown as AppServerRequestStore);
+    const harness = createHarness(store as unknown as AppServerRequestStore, sink);
     await harness.driver.resume(launchSpec("thread-1"));
     expect(harness.connections.reconnect).toHaveBeenCalledWith(expect.objectContaining({
       expectedPendingRequestIds: ["approval-1", 2]
     }));
+    expect(harness.rpc.respond).toHaveBeenCalledWith(2, { decision: "accept" });
 
     await harness.handlers.serverRequest?.({
       id: "approval-1",
@@ -166,6 +202,13 @@ describe("CodexAppServerDriver", () => {
       threadId: "thread-1",
       turnId: "turn-1"
     }));
+    expect(sink.handle).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      method: "item/commandExecution/requestApproval",
+      params: expect.objectContaining({ requestId: "approval-1" })
+    }));
+    expect(store.upsertAppServerRequest.mock.invocationCallOrder[0]).toBeLessThan(
+      sink.handle.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
+    );
     await harness.driver.answerApproval(managedSession(), "approval-1", "approve_once");
     expect(store.claimAppServerRequestResponse).toHaveBeenCalledWith(
       "session-1",
@@ -174,7 +217,7 @@ describe("CodexAppServerDriver", () => {
       "2026-09-01T12:00:00.000Z"
     );
     expect(store.claimAppServerRequestResponse.mock.invocationCallOrder[0]).toBeLessThan(
-      harness.rpc.respond.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
+      harness.rpc.respond.mock.invocationCallOrder.at(-1) ?? Number.POSITIVE_INFINITY
     );
     await harness.handlers.notification?.({
       method: "serverRequest/resolved",

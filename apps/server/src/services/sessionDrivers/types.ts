@@ -76,8 +76,8 @@ export interface AgentSessionDriver {
   steer(session: ManagedSession, text: string, expectedTurnId: string, clientMessageId: string): Promise<DriverInputReceipt>;
   interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<void>;
   kill(session: ManagedSession): Promise<void>;
-  answerApproval(session: ManagedSession, requestId: string, decision: ApprovalDecision): Promise<void>;
-  answerQuestion(session: ManagedSession, requestId: string, answer: QuestionAnswerRequest): Promise<void>;
+  answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;
+  answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void>;
   choosePlanAction(session: ManagedSession, action: PlanActionChoice): Promise<void>;
   setPreferences(session: ManagedSession, preferences: {
     mode?: CollaborationMode;

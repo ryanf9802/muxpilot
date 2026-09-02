@@ -28,8 +28,8 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
   verifiedInput: true,
   interrupt: true,
   kill: true,
-  approvals: false,
-  questions: false,
+  approvals: true,
+  questions: true,
   planActions: false,
   fastMode: true,
   rawTerminalCapture: false,
@@ -59,10 +59,11 @@ export interface AppServerRequestStore {
     turnId: string;
     receivedAt: string;
     lastSeenAt: string;
-  }): Promise<unknown>;
+  }): Promise<{ state: "pending" | "responded" | "resolved"; response: unknown | null }>;
   listUnresolvedAppServerRequests(sessionId: string): Promise<Array<{
     requestId: string | number;
     state: "pending" | "responded" | "resolved";
+    response: unknown | null;
   }>>;
   claimAppServerRequestResponse(
     sessionId: string,
@@ -172,14 +173,14 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     await this.supervisor.stop(runtime);
   }
 
-  async answerApproval(session: ManagedSession, requestId: string, decision: ApprovalDecision): Promise<void> {
+  async answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void> {
     const pending = this.requirePendingRequest(session, requestId);
     if (!APPROVAL_METHODS.has(pending.method)) throw new Error(`Server request is not an approval: ${pending.method}`);
     const response = approvalResponse(pending.method, pending.params, decision);
     await this.respondPending(session, requestId, pending, response);
   }
 
-  async answerQuestion(session: ManagedSession, requestId: string, answer: QuestionAnswerRequest): Promise<void> {
+  async answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void> {
     const pending = this.requirePendingRequest(session, requestId);
     if (pending.method !== "item/tool/requestUserInput") {
       throw new Error(`Server request is not a structured question: ${pending.method}`);
@@ -248,6 +249,11 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               handlers
             });
       if (operation === "resume") {
+        for (const request of unresolved) {
+          if (request.state !== "responded") continue;
+          if (request.response === null) throw new Error(`Responded app-server request has no durable response: ${request.requestId}`);
+          await connection.rpc.respond(request.requestId, request.response);
+        }
         await this.eventSink?.restore(spec.sessionId, connection.threadId, this.now().toISOString());
       }
       return {
@@ -301,7 +307,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         const turnId = directString(params, "turnId");
         if (!threadId || !turnId) throw new Error(`App-server request is missing thread/turn identity: ${method}`);
         const receivedAt = this.now().toISOString();
-        await this.requestStore?.upsertAppServerRequest({
+        const persisted = await this.requestStore?.upsertAppServerRequest({
           sessionId,
           requestId: id,
           method,
@@ -313,8 +319,12 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         });
         const key = pendingKey(sessionId, id);
         const existing = this.pendingRequests.get(key);
-        this.pendingRequests.set(key, { sessionId, id, method, params, responded: existing?.responded ?? false });
-        this.emit(sessionId, { method, params: { requestId: id, params }, receivedAt });
+        const responded = existing?.responded ?? (persisted?.state === "responded");
+        this.pendingRequests.set(key, { sessionId, id, method, params, responded });
+        if (responded) return;
+        const event = { method, params: { requestId: id, params }, receivedAt };
+        await this.eventSink?.handle(sessionId, event);
+        this.emit(sessionId, event);
       },
       error: (error) => this.emit(sessionId, {
         method: "connection/error",
@@ -342,7 +352,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return { threadId, protocol: new CodexAppServerProtocol(connection.rpc) };
   }
 
-  private requirePendingRequest(session: ManagedSession, requestId: string) {
+  private requirePendingRequest(session: ManagedSession, requestId: string | number) {
     this.protocolFor(session);
     const pending = this.pendingRequests.get(pendingKey(session.id, requestId));
     if (!pending) throw new Error(`Unknown app-server request id: ${requestId}`);
@@ -352,7 +362,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
 
   private async respondPending(
     session: ManagedSession,
-    requestId: string,
+    requestId: string | number,
     pending: { id: string | number; responded: boolean },
     response: unknown
   ): Promise<void> {
@@ -449,7 +459,12 @@ function pendingKey(sessionId: string, requestId: string | number): string {
 
 function approvalResponse(method: string, params: unknown, decision: ApprovalDecision): unknown {
   if (method === "item/permissions/requestApproval") {
-    throw new Error("Permission-profile approvals require an explicit granted profile");
+    if (decision === "deny") return { permissions: {}, scope: "turn" };
+    const permissions = recordValue(params, "permissions");
+    if (!permissions) throw new Error("Permission-profile approval is missing the requested permission profile");
+    if (decision === "approve_once") return { permissions, scope: "turn" };
+    if (decision === "approve_for_session") return { permissions, scope: "session" };
+    throw new Error(`Approval decision is not representable for ${method}: ${decision}`);
   }
   if (decision === "approve_once") return { decision: "accept" };
   if (decision === "approve_for_session") return { decision: "acceptForSession" };
@@ -459,6 +474,14 @@ function approvalResponse(method: string, params: unknown, decision: ApprovalDec
     if (amendment) return { decision: { acceptWithExecpolicyAmendment: { execpolicy_amendment: amendment } } };
   }
   throw new Error(`Approval decision is not representable for ${method}: ${decision}`);
+}
+
+function recordValue(value: unknown, key: string): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = (value as Record<string, unknown>)[key];
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? candidate as Record<string, unknown>
+    : null;
 }
 
 function recordArray(value: unknown, key: string): string[] | null {

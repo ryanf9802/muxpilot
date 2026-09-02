@@ -1394,6 +1394,12 @@ export class SessionManager {
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return null;
+    if (session.driverKind === "codex_app_server") {
+      if (session.status !== "approval") return null;
+      const message = await this.db.latestApprovalMessage(sessionId);
+      const approval = message ? materializeApproval(message) : null;
+      return approval ? this.repositoryScopedApproval(sessionId, approval) : null;
+    }
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
       const approval = materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
@@ -1434,6 +1440,7 @@ export class SessionManager {
   async getPendingQuestion(sessionId: string): Promise<QuestionRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return null;
+    if (session.driverKind === "codex_app_server" && session.status !== "question") return null;
     const latestQuestionMessage = await this.db.latestQuestionMessage(sessionId);
     const message = activeQuestionMessage(
       latestQuestionMessage,
@@ -2056,6 +2063,33 @@ export class SessionManager {
     const workspace = await this.db.getGitWorkspaceBySession(sessionId);
     const codexDecision = request.decision === "approve_for_prefix" && workspace ? "approve_once" : request.decision;
 
+    if (session.driverKind === "codex_app_server") {
+      try {
+        await this.appServerDriver(session)?.answerApproval(
+          session,
+          approval.requestId ?? approval.id,
+          codexDecision
+        );
+      } catch (error) {
+        throw new ApprovalResolutionError(
+          `Could not submit the approval to Codex app-server: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      const now = nowIso();
+      if (request.decision === "approve_for_prefix" && approval.prefixRule?.length && workspace) {
+        await this.db.addRepositoryApprovalRule(
+          workspace.commonGitDir,
+          normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace),
+          now
+        );
+      }
+      await this.db.setSessionStatus(sessionId, "waiting", now);
+      await this.db.addAudit("local", `approval:${request.decision}`, sessionId, "ok", now);
+      this.publish("status.changed", sessionId, { status: "waiting" });
+      this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+      return;
+    }
+
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     let keys: string[];
     if (interactive) {
@@ -2124,11 +2158,21 @@ export class SessionManager {
     if (!question) throw new QuestionResolutionError("No pending question for this session");
     const normalized = normalizeQuestionAnswer(question, request);
     try {
-      await this.answerInteractiveQuestion(session, question, normalized);
+      if (session.driverKind === "codex_app_server") {
+        await this.appServerDriver(session)?.answerQuestion(
+          session,
+          question.requestId ?? question.id,
+          normalized
+        );
+      } else {
+        await this.answerInteractiveQuestion(session, question, normalized);
+      }
     } catch (error) {
       if (error instanceof QuestionResolutionError) throw error;
       throw new QuestionResolutionError(
-        "Could not submit the answer to the active Codex question. The pane may have changed or become unavailable; restore or restart the session and try again."
+        session.driverKind === "codex_app_server"
+          ? `Could not submit the answer to Codex app-server: ${error instanceof Error ? error.message : String(error)}`
+          : "Could not submit the answer to the active Codex question. The pane may have changed or become unavailable; restore or restart the session and try again."
       );
     }
     this.answeredQuestionMessageIds.add(question.messageId);
@@ -4930,6 +4974,7 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
   const prefixRule = stringArray(approval.prefixRule);
   return {
     id,
+    requestId: jsonRpcRequestIdValue(approval.requestId) ?? undefined,
     sessionId: message.sessionId,
     messageId: message.id,
     kind,
@@ -5188,6 +5233,7 @@ function materializeQuestion(message: ChatMessage): QuestionRequest | null {
   if (!prompts) return null;
   return {
     id: stringValue(question.id) ?? message.id,
+    requestId: jsonRpcRequestIdValue(question.requestId) ?? undefined,
     sessionId: message.sessionId,
     messageId: message.id,
     questions: prompts,
@@ -5273,6 +5319,11 @@ function stringArray(value: unknown): string[] | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function jsonRpcRequestIdValue(value: unknown): string | number | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
 }
 
 function withQuestionCountdown(message: ChatMessage): ChatMessage {

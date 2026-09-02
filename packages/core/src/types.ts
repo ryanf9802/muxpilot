@@ -426,6 +426,8 @@ export interface ApprovalOption {
 
 export interface ApprovalRequest {
   id: string;
+  /** Exact JSON-RPC request identity for structured runtimes. */
+  requestId?: string | number;
   sessionId: string;
   messageId: string;
   kind: ApprovalKind;
@@ -461,6 +463,8 @@ export interface QuestionPrompt {
 
 export interface QuestionRequest {
   id: string;
+  /** Exact JSON-RPC request identity for structured runtimes. */
+  requestId?: string | number;
   sessionId: string;
   messageId: string;
   questions: QuestionPrompt[];

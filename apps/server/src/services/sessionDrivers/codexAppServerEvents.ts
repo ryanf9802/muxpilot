@@ -18,12 +18,16 @@ export interface AppServerEventProjection {
   payload: unknown;
 }
 
+type ProjectedApproval = { title: string } & Record<string, unknown>;
+
 export function projectAppServerEvent(
   notification: JsonRpcNotification,
   receivedAt: string
 ): AppServerEventProjection | null {
   const params = record(notification.params);
   if (!params) return null;
+  const serverRequest = serverRequestProjection(notification, params, receivedAt);
+  if (serverRequest) return serverRequest;
   const threadId = string(params.threadId);
   if (!threadId) return null;
 
@@ -72,6 +76,125 @@ export function projectAppServerEvent(
     return projection(notification, eventIdentity, "executing", true, null);
   }
   return null;
+}
+
+function serverRequestProjection(
+  notification: JsonRpcNotification,
+  envelope: Record<string, unknown>,
+  receivedAt: string
+): AppServerEventProjection | null {
+  const params = record(envelope.params);
+  const requestId = jsonRpcRequestId(envelope.requestId);
+  if (!params || requestId === null) return null;
+  const threadId = string(params.threadId);
+  const turnId = string(params.turnId);
+  const itemId = string(params.itemId);
+  if (!threadId || !turnId || !itemId) return null;
+  const eventIdentity = identity(threadId, turnId, itemId, null);
+  const timestamp = millisecondTimestamp(params.startedAtMs) ?? receivedAt;
+  const basePayload = {
+    source: "codex_app_server",
+    method: notification.method,
+    appServerIdentity: eventIdentity
+  };
+
+  if (notification.method === "item/tool/requestUserInput") {
+    if (!Array.isArray(params.questions) || params.questions.length === 0) return null;
+    return projection(notification, eventIdentity, "question", false, {
+      id: stableServerRequestId(eventIdentity, notification.method, requestId),
+      type: "question_request",
+      role: "system",
+      timestamp,
+      text: "Codex needs your input",
+      payload: {
+        ...basePayload,
+        question: {
+          id: String(requestId),
+          requestId,
+          questions: params.questions,
+          autoResolutionMs: safeInteger(params.autoResolutionMs),
+          createdAt: timestamp
+        }
+      }
+    });
+  }
+
+  const approval = approvalRequest(notification.method, params);
+  if (!approval) return null;
+  return projection(notification, eventIdentity, "approval", false, {
+    id: stableServerRequestId(eventIdentity, notification.method, requestId),
+    type: "approval_request",
+    role: "system",
+    timestamp,
+    text: approval.title,
+    payload: {
+      ...basePayload,
+      approval: {
+        id: String(requestId),
+        requestId,
+        createdAt: timestamp,
+        ...approval
+      }
+    }
+  });
+}
+
+function approvalRequest(method: string, params: Record<string, unknown>): ProjectedApproval | null {
+  const reason = string(params.reason);
+  const cwd = string(params.cwd);
+  if (method === "item/commandExecution/requestApproval") {
+    const command = commandText(params.command);
+    const prefixRule = stringArrayOrNull(params.proposedExecpolicyAmendment);
+    return {
+      kind: "command",
+      title: command ? `Run ${command}` : "Run this command?",
+      command,
+      cwd,
+      reason,
+      prefixRule,
+      options: [
+        approvalOption("approve_once", "Approve once", "Run this command and continue."),
+        approvalOption("approve_for_session", "Approve for session", "Allow this request for the current Codex session."),
+        ...(prefixRule ? [approvalOption("approve_for_prefix", "Always allow prefix", "Remember this command prefix.")] : []),
+        approvalOption("deny", "Deny", "Cancel this command.")
+      ]
+    };
+  }
+  if (method === "item/fileChange/requestApproval") {
+    return {
+      kind: "patch",
+      title: "Apply proposed file changes?",
+      command: null,
+      cwd,
+      reason,
+      prefixRule: null,
+      options: [
+        approvalOption("approve_once", "Approve once", "Apply these changes and continue."),
+        approvalOption("approve_for_session", "Approve for session", "Allow file changes for the current Codex session."),
+        approvalOption("deny", "Deny", "Cancel these file changes.")
+      ]
+    };
+  }
+  if (method === "item/permissions/requestApproval" && record(params.permissions)) {
+    return {
+      kind: "permissions",
+      title: "Grant additional permissions?",
+      command: null,
+      cwd,
+      reason,
+      prefixRule: null,
+      options: [
+        approvalOption("approve_once", "Approve once", "Grant these permissions for this turn."),
+        approvalOption("approve_for_session", "Approve for session", "Grant these permissions for this session."),
+        approvalOption("deny", "Deny", "Continue without granting these permissions.")
+      ]
+    };
+  }
+  return null;
+}
+
+function approvalOption(decision: string, label: string, description: string): Record<string, string> {
+  return { decision, label, description };
 }
 
 function projection(
@@ -209,6 +332,24 @@ function stableProjectionId(eventIdentity: AppServerEventIdentity, itemType: str
     .digest("hex");
 }
 
+function stableServerRequestId(
+  eventIdentity: AppServerEventIdentity,
+  method: string,
+  requestId: string | number
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify([
+      "codex_app_server_request",
+      eventIdentity.threadId,
+      eventIdentity.turnId,
+      eventIdentity.itemId,
+      method,
+      typeof requestId,
+      requestId
+    ]))
+    .digest("hex");
+}
+
 function proposedPlan(text: string): string {
   return text.includes("<proposed_plan>") ? text : `<proposed_plan>\n${text}\n</proposed_plan>`;
 }
@@ -234,6 +375,28 @@ function jsonText(value: unknown): string {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function stringArrayOrNull(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((entry) => typeof entry === "string" && entry.length > 0)) {
+    return null;
+  }
+  return value;
+}
+
+function commandText(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  const parts = stringArrayOrNull(value);
+  return parts?.join(" ") ?? null;
+}
+
+function jsonRpcRequestId(value: unknown): string | number | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function safeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function string(value: unknown): string | null {
