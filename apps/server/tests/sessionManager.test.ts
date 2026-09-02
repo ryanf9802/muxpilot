@@ -5533,6 +5533,15 @@ describe("SessionManager transcript isolation", () => {
     await expect.poll(async () => (await harness.manager.getSession(created.id))?.initializing).toBe(false);
     await harness.manager.discoverNow();
     expect((await harness.manager.getSession(created.id))?.status).toBe("waiting");
+    await writeCodexSession(harness.codexHome, "app-server.jsonl", {
+      sessionId: "thread-started",
+      cwd: repo,
+      user: "app prompt",
+      assistant: "app response",
+      mtime: new Date("2026-09-01T13:00:00.000Z")
+    });
+    await harness.manager.discoverNow();
+    expect((await harness.manager.getSession(created.id))?.codexJsonlPath).toBe(join(harness.codexHome, "sessions", "app-server.jsonl"));
 
     const source = await harness.manager.getSession(created.id);
     expect(source).not.toBeNull();
@@ -6486,7 +6495,7 @@ describe("SessionManager transcript isolation", () => {
       return { pane, ready: pendingReadiness() };
     };
 
-    const response = await harness.manager.restoreSessionRecovery(incident.id, [original.id]);
+    const response = await harness.manager.restoreSessionRecovery(incident.id, [original.id], "codex_tmux");
 
     expect(resumeCalls).toBe(1);
     expect(response.results).toMatchObject([{ sourceSessionId: original.id, status: "restored", error: null }]);
@@ -6534,8 +6543,8 @@ describe("SessionManager transcript isolation", () => {
     };
 
     const [restored, duplicate] = await Promise.all([
-      harness.manager.restoreSession(original!.id),
-      harness.manager.restoreSession(original!.id)
+      harness.manager.restoreSession(original!.id, "codex_tmux"),
+      harness.manager.restoreSession(original!.id, "codex_tmux")
     ]);
 
     expect(resumeCalls).toEqual([{ cwd: repo, name: "old-work", codexSessionId: "codex-restorable" }]);
@@ -6572,6 +6581,66 @@ describe("SessionManager transcript isolation", () => {
       "new after restore"
     ]);
     unsubscribe();
+    harness.db.close();
+  });
+
+  it("defaults stopped tmux restores to app-server without changing thread or session identity", async () => {
+    const runtimeEvidence = vi.fn(async () => ({
+      runtime: appServerSession("evidence", "thread-evidence", "idle").runtime as Extract<ManagedSession["runtime"], { kind: "systemd_service" }>,
+      activeState: "inactive",
+      subState: "dead",
+      mainPid: null,
+      controlGroup: null,
+      socketPresent: false,
+      attachmentCommand: "codex --remote unix:///tmp/app.sock"
+    }));
+    const resume = vi.fn(async (spec: Parameters<AgentSessionDriver["resume"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: spec.sourceThreadId!, rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: "/tmp/restored-app.sock",
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    }));
+    const driver = { kind: "codex_app_server", resume, runtimeEvidence } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const source = {
+      ...agentHierarchySession("stopped-tmux"),
+      name: "stopped-tmux",
+      cwd: repo,
+      repo: { ...agentHierarchySession("stopped-tmux").repo, root: repo },
+      tmux: { ...agentHierarchySession("stopped-tmux").tmux, cwd: repo, pid: 0 },
+      codexSessionId: "thread-stopped-tmux",
+      status: "missing" as const
+    };
+    await harness.db.upsertSession(source, "2026-09-01T12:00:00.000Z");
+    const tmuxResume = vi.fn(async () => { throw new Error("tmux fallback must not be implicit"); });
+    harness.tmux.createCodexResumeWindowInMuxpilotSession = tmuxResume;
+
+    const restored = await harness.manager.restoreSession(source.id);
+
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: source.id,
+      sourceThreadId: "thread-stopped-tmux",
+      cwd: repo
+    }));
+    expect(tmuxResume).not.toHaveBeenCalled();
+    expect(restored).toMatchObject({
+      restored: true,
+      session: {
+        id: source.id,
+        driverKind: "codex_app_server",
+        codexSessionId: "thread-stopped-tmux",
+        runtime: { state: "connected" }
+      }
+    });
     harness.db.close();
   });
 
@@ -6634,7 +6703,7 @@ describe("SessionManager transcript isolation", () => {
       return { pane, ready: pendingReadiness() };
     };
 
-    const restored = await harness.manager.restoreSession(original!.id);
+    const restored = await harness.manager.restoreSession(original!.id, "codex_tmux");
     releaseAppend?.();
     await expect(ingest).resolves.toBeUndefined();
     await harness.manager.ingest();

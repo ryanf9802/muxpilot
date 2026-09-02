@@ -7,8 +7,10 @@ import { gunzip, gzip } from "node:zlib";
 import { extract, pack } from "tar-stream";
 import { nanoid } from "nanoid";
 import type {
+  AgentProviderRef,
   CollaborationMode,
   ManagedSession,
+  SessionDriverKind,
   SessionModelSelections,
   SessionForkOrigin,
   SessionTransferImportBranchResult,
@@ -62,6 +64,10 @@ export interface PortableSession {
   transcriptSha256: string;
   gitBranchId?: string | null;
   documents?: PortableDocument[];
+  provider?: AgentProviderRef;
+  driverKind?: SessionDriverKind;
+  name?: string;
+  cwd?: string;
 }
 
 export interface PortableDocument {
@@ -91,7 +97,14 @@ interface ManifestV4 {
   gitBranches: PortableGitBranch[];
 }
 
-type Manifest = ManifestV2 | ManifestV3 | ManifestV4;
+interface ManifestV5 {
+  formatVersion: 5;
+  createdAt: string;
+  sessions: PortableSession[];
+  gitBranches: PortableGitBranch[];
+}
+
+type Manifest = ManifestV2 | ManifestV3 | ManifestV4 | ManifestV5;
 
 export interface SessionTransferExport {
   contents: Buffer;
@@ -136,7 +149,7 @@ export class SessionTransferService {
     if (uniqueIds.length > MAX_SESSIONS) throw new SessionTransferError(`At most ${MAX_SESSIONS} sessions can be exported`);
 
     const createdAt = new Date().toISOString();
-    const manifest: ManifestV4 = { formatVersion: 4, createdAt, sessions: [], gitBranches: [] };
+    const manifest: ManifestV5 = { formatVersion: 5, createdAt, sessions: [], gitBranches: [] };
     const contents = new Map<string, Buffer>();
     const branchIds = new Map<string, string>();
     const codexSessionIds = new Set<string>();
@@ -229,7 +242,8 @@ export class SessionTransferService {
         targetBranch: session.targetBranch,
         transcriptBytes: session.transcriptBytes,
         lastActivityAt: session.lastActivityAt,
-        documentCount: session.documents?.length ?? 0
+        documentCount: session.documents?.length ?? 0,
+        driverKind: session.driverKind
       })),
       mappings: uniqueMappings(manifest)
     };
@@ -275,7 +289,7 @@ export class SessionTransferService {
       const mapping = mappingBySource.get(session.sourceCwd)!;
       const transcript = contents.get(session.transcriptEntry)!;
       try {
-        const documents = manifest.formatVersion === 4
+        const documents = manifest.formatVersion >= 4
           ? sessionDocuments(session, contents)
           : null;
         results.push(await this.manager.importPortableSession(session, transcript, mapping, documents));
@@ -319,10 +333,12 @@ function portableSession(
   transcript: Buffer,
   gitBranchId: string | null
 ): PortableSession {
+  const name = session.name ?? (session.tmux.windowName || session.repo.name || "imported");
+  const cwd = session.gitWorkspace?.entryPath ?? session.cwd ?? session.repo.root ?? session.tmux.cwd;
   return {
     codexSessionId: session.codexSessionId!,
-    sessionName: session.tmux.windowName || session.repo.name || "imported",
-    sourceCwd: session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd,
+    sessionName: name,
+    sourceCwd: cwd,
     repoName: session.repo.name,
     workspaceMode: session.gitWorkspace ? "git" : "directory",
     targetBranch: session.gitWorkspace?.targetBranch ?? null,
@@ -337,7 +353,11 @@ function portableSession(
     transcriptEntry,
     transcriptBytes: transcript.length,
     transcriptSha256: sha256(transcript),
-    gitBranchId
+    gitBranchId,
+    provider: { kind: "codex", threadId: session.codexSessionId, rolloutPath: null },
+    driverKind: session.driverKind ?? "codex_tmux",
+    name,
+    cwd
   };
 }
 
@@ -388,7 +408,7 @@ function parseManifest(value: Buffer | undefined): Manifest {
   try { raw = JSON.parse(value.toString("utf8")); } catch { throw new SessionTransferError("Session archive manifest is invalid JSON"); }
   if (!raw || typeof raw !== "object") throw new SessionTransferError("Session archive manifest is invalid");
   const manifest = raw as Manifest;
-  if (![2, 3, 4].includes(manifest.formatVersion) || !Array.isArray(manifest.sessions)
+  if (![2, 3, 4, 5].includes(manifest.formatVersion) || !Array.isArray(manifest.sessions)
     || manifest.sessions.length === 0 || manifest.sessions.length > MAX_SESSIONS) {
     throw new SessionTransferError("Unsupported or invalid session archive manifest");
   }
@@ -410,7 +430,16 @@ function parseManifest(value: Buffer | undefined): Manifest {
         || (session.workspaceMode === "directory" && session.gitBranchId !== null))) {
       throw new SessionTransferError("Session archive manifest contains invalid Git branch metadata");
     }
-    if (manifest.formatVersion === 4) validateDocumentManifest(session, sessionIndex);
+    if (manifest.formatVersion === 5
+      && (session.provider?.kind !== "codex"
+        || session.provider.threadId !== session.codexSessionId
+        || session.provider.rolloutPath !== null
+        || !["codex_tmux", "codex_app_server"].includes(session.driverKind ?? "")
+        || typeof session.name !== "string" || session.name !== session.sessionName
+        || typeof session.cwd !== "string" || session.cwd !== session.sourceCwd)) {
+      throw new SessionTransferError("Session archive manifest contains invalid provider metadata");
+    }
+    if (manifest.formatVersion >= 4) validateDocumentManifest(session, sessionIndex);
     ids.add(session.codexSessionId);
   }
   if (manifest.formatVersion !== 2) validateGitBranchManifest(manifest);
@@ -421,7 +450,7 @@ function validateTranscripts(manifest: Manifest, contents: Map<string, Buffer>):
   const gitEntries = manifest.formatVersion !== 2
     ? manifest.gitBranches.filter((branch) => branch.bundleEntry !== null).length
     : 0;
-  const documentEntries = manifest.formatVersion === 4
+  const documentEntries = manifest.formatVersion >= 4
     ? manifest.sessions.reduce((total, session) => total + (session.documents?.length ?? 0), 0)
     : 0;
   if (contents.size !== manifest.sessions.length + gitEntries + documentEntries + 1) {
@@ -439,7 +468,7 @@ function validateTranscripts(manifest: Manifest, contents: Map<string, Buffer>):
       if ((parsed.payload?.id ?? parsed.payload?.session_id) !== session.codexSessionId) throw new Error();
     } catch { throw new SessionTransferError(`Transcript identity does not match '${session.sessionName}'`); }
   }
-  if (manifest.formatVersion === 4) {
+  if (manifest.formatVersion >= 4) {
     for (const session of manifest.sessions) sessionDocuments(session, contents);
   }
   if (manifest.formatVersion !== 2) for (const branch of manifest.gitBranches) {
@@ -493,7 +522,7 @@ function sessionDocuments(session: PortableSession, contents: Map<string, Buffer
   return snapshots;
 }
 
-function validateGitBranchManifest(manifest: ManifestV3 | ManifestV4): void {
+function validateGitBranchManifest(manifest: ManifestV3 | ManifestV4 | ManifestV5): void {
   if (!Array.isArray(manifest.gitBranches) || manifest.gitBranches.length > MAX_SESSIONS) {
     throw new SessionTransferError("Session archive manifest contains invalid Git branches");
   }

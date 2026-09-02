@@ -125,8 +125,11 @@ export const api = {
   transferableSessions: () => json<{ sessions: ManagedSession[] }>("/api/sessions?includeArchived=true&includeAll=true"),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),
-  restoreSession: (id: string) =>
-    json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, { method: "POST" }),
+  restoreSession: (id: string, driverKind?: ManagedSession["driverKind"]) =>
+    json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, {
+      method: "POST",
+      body: JSON.stringify(driverKind ? { driverKind } : {})
+    }),
   sessionRecovery: () => json<SessionRecoveryResponse>("/api/session-recovery"),
   restoreSessionRecovery: (request: RestoreSessionRecoveryRequest) =>
     json<RestoreSessionRecoveryResponse>("/api/session-recovery/restore", { method: "POST", body: JSON.stringify(request) }),

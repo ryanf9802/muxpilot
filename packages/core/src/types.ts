@@ -780,6 +780,10 @@ export interface RestoreSessionResponse {
   restored: boolean;
 }
 
+export interface RestoreSessionRequest {
+  driverKind?: SessionDriverKind;
+}
+
 export interface SessionRecoveryCandidate extends SessionHistoryResult {
   previousStatus: SessionStatus;
 }
@@ -797,6 +801,7 @@ export interface SessionRecoveryResponse {
 export interface RestoreSessionRecoveryRequest {
   incidentId: string;
   sessionIds: string[];
+  driverKind?: SessionDriverKind;
 }
 
 export interface RestoreSessionRecoveryResult {
@@ -825,6 +830,7 @@ export interface SessionTransferPreviewSession {
   transcriptBytes: number;
   lastActivityAt: string | null;
   documentCount: number;
+  driverKind?: SessionDriverKind;
 }
 
 export interface SessionTransferPreviewBranch {
@@ -849,7 +855,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3 | 4;
+  formatVersion: 2 | 3 | 4 | 5;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
@@ -858,6 +864,7 @@ export interface SessionTransferImportMapping {
   sourceCwd: string;
   destinationCwd: string;
   targetBranch?: string;
+  driverKind?: SessionDriverKind;
 }
 
 export interface SessionTransferImportRequest {

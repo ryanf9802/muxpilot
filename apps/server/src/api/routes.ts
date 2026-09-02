@@ -12,6 +12,7 @@ import type {
   QuestionAnswerRequest,
   ResolveApprovalRequest,
   RestoreSessionResponse,
+  RestoreSessionRequest,
   RestoreSessionRecoveryRequest,
   RestoreSessionRecoveryResponse,
   SessionRecoveryResponse,
@@ -62,7 +63,11 @@ import { BtwError, type BtwService } from "../services/btwService.js";
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const restoreSessionRecoverySchema = z.object({
   incidentId: z.string().trim().min(1).max(200),
-  sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100)
+  sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
+  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
+});
+const restoreSessionSchema = z.object({
+  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
 });
 const inputBodySchema = z
   .object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() })
@@ -118,7 +123,8 @@ const sessionTransferImportSchema = z.object({
   mappings: z.array(z.object({
     sourceCwd: z.string().min(1).max(4096),
     destinationCwd: z.string().min(1).max(4096),
-    targetBranch: z.string().min(1).max(1024).optional()
+    targetBranch: z.string().min(1).max(1024).optional(),
+    driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
   })).max(500)
 });
 const notificationDeviceIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,80}$/);
@@ -364,8 +370,9 @@ export function registerRoutes(
 
   app.post("/api/session-history/:id/restore", { preHandler: access.requireAccess }, async (request, reply): Promise<RestoreSessionResponse | void> => {
     const { id } = request.params as { id: string };
+    const body = restoreSessionSchema.parse(request.body ?? {}) satisfies RestoreSessionRequest;
     try {
-      return await manager.restoreSession(id);
+      return await manager.restoreSession(id, body.driverKind);
     } catch (error) {
       if (error instanceof SessionNotFoundError || error instanceof SessionRestoreError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
@@ -382,7 +389,7 @@ export function registerRoutes(
   app.post("/api/session-recovery/restore", { preHandler: access.requireAccess }, async (request, reply): Promise<RestoreSessionRecoveryResponse | void> => {
     const body = restoreSessionRecoverySchema.parse(request.body) as RestoreSessionRecoveryRequest;
     try {
-      return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds);
+      return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds, body.driverKind);
     } catch (error) {
       if (error instanceof SessionRestoreError || error instanceof SessionNotFoundError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });

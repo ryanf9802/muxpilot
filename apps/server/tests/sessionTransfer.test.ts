@@ -32,15 +32,19 @@ describe.sequential("SessionTransferService", () => {
     const entries = await tarEntries(gunzipSync(file.subarray(9)));
     expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "sessions/0002.jsonl"]);
     expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({
-      formatVersion: 4,
+      formatVersion: 5,
       gitBranches: [],
-      sessions: [expect.objectContaining({ fastMode: true }), expect.objectContaining({ fastMode: false })]
+      sessions: [
+        expect.objectContaining({ fastMode: true, driverKind: "codex_tmux", name: "work-0", cwd: fixture.root }),
+        expect.objectContaining({ fastMode: false, driverKind: "codex_tmux", name: "work-1", cwd: fixture.root })
+      ]
     });
+    expect(JSON.parse(entries.get("manifest.json")!.toString("utf8")).sessions[0]).not.toHaveProperty("runtime");
     expect([...entries.keys()].join(" ")).not.toContain(fixture.sessions[0]!.codexSessionId);
 
     const preview = await service.inspect(file);
     expect(preview.encrypted).toBe(false);
-    expect(preview.formatVersion).toBe(4);
+    expect(preview.formatVersion).toBe(5);
     expect(preview.sessions.every((session) => session.documentCount === 0)).toBe(true);
     expect(preview.sessions).toHaveLength(2);
     expect(preview.mappings).toEqual([{ sourceCwd: fixture.root, repoName: "fixture", workspaceMode: "directory", targetBranch: null, branches: [] }]);
@@ -116,9 +120,10 @@ describe.sequential("SessionTransferService", () => {
     const archive = await service.export([fixture.sessions[0]!.id]);
     const preview = await service.inspect(archive.contents);
 
-    await service.import(preview.token, [{ sourceCwd: fixture.root, destinationCwd: fixture.root }]);
+    await service.import(preview.token, [{ sourceCwd: fixture.root, destinationCwd: fixture.root, driverKind: "codex_tmux" }]);
 
     expect(importPortableSession).toHaveBeenCalledTimes(1);
+    expect(importPortableSession.mock.calls[0]?.[2]).toMatchObject({ driverKind: "codex_tmux" });
     expect(importPortableSession.mock.calls[0]?.[3]).toEqual([expect.objectContaining({ name: "plan.md", contents: Buffer.from("- [ ] ship\n") })]);
   });
 
@@ -155,7 +160,7 @@ describe.sequential("SessionTransferService", () => {
     expect(sessionTransferFilename(["a".repeat(120)], false, "2026-07-11T12:00:00.000Z")).toBe(`${"a".repeat(80)}.mpsession`);
   });
 
-  it("includes committed managed Git branch state in format v4", async () => {
+  it("includes committed managed Git branch state in format v5", async () => {
     const fixture = await createFixture(1);
     await git(fixture.root, ["init", "-b", "main"]);
     await git(fixture.root, ["config", "user.email", "muxpilot@example.com"]);
@@ -228,6 +233,25 @@ describe.sequential("SessionTransferService", () => {
 
     const preview = await service.inspect(legacy);
     expect(preview.formatVersion).toBe(3);
+    expect(preview.sessions[0]!.documentCount).toBe(0);
+  });
+
+  it("continues to inspect legacy format-v4 archives", async () => {
+    const fixture = await createFixture(1);
+    const service = transferService(fixture.sessions);
+    const current = await service.export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(current.contents.subarray(9)));
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    manifest.formatVersion = 4;
+    delete manifest.sessions[0].provider;
+    delete manifest.sessions[0].driverKind;
+    delete manifest.sessions[0].name;
+    delete manifest.sessions[0].cwd;
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const legacy = Buffer.concat([Buffer.from("MPSESSN2", "ascii"), Buffer.from([0]), gzipSync(await tarArchive(entries))]);
+
+    const preview = await service.inspect(legacy);
+    expect(preview.formatVersion).toBe(4);
     expect(preview.sessions[0]!.documentCount).toBe(0);
   });
 });

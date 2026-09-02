@@ -569,7 +569,11 @@ export class SessionManager {
     return next;
   }
 
-  async restoreSessionRecovery(incidentId: string, sessionIds: string[]): Promise<RestoreSessionRecoveryResponse> {
+  async restoreSessionRecovery(
+    incidentId: string,
+    sessionIds: string[],
+    driverKind?: SessionDriverKind
+  ): Promise<RestoreSessionRecoveryResponse> {
     const incident = await this.getSessionRecoveryIncident();
     if (!incident || incident.id !== incidentId) throw new SessionRestoreError("Recovery batch is no longer available");
     const selected = new Set(sessionIds);
@@ -579,7 +583,7 @@ export class SessionManager {
     const failedIds = new Set<string>();
     for (const candidate of candidates) {
       try {
-        const restored = await this.restoreSession(candidate.sessionId);
+        const restored = await this.restoreSession(candidate.sessionId, driverKind);
         results.push({
           sourceSessionId: candidate.sessionId,
           status: restored.restored ? "restored" : "reused_live",
@@ -646,6 +650,22 @@ export class SessionManager {
     const paneCwdCounts = new Map<string, number>();
     for (const pane of panes) paneCwdCounts.set(pane.cwd, (paneCwdCounts.get(pane.cwd) ?? 0) + 1);
     const codexModels = await this.codexMetadata?.listModels().catch(() => []) ?? [];
+
+    for (const session of await this.db.listSessions(true)) {
+      if (session.driverKind !== "codex_app_server" || !session.codexSessionId) continue;
+      const rollout = codexFiles.find((file) => file.sessionId === session.codexSessionId);
+      if (!rollout) continue;
+      codexClaims.add(rollout.path);
+      if (session.codexJsonlPath === rollout.path && session.provider?.rolloutPath === rollout.path) continue;
+      const updated = {
+        ...session,
+        provider: { kind: "codex" as const, threadId: session.codexSessionId, rolloutPath: rollout.path },
+        codexJsonlPath: rollout.path,
+        transcriptSyncing: true
+      };
+      await this.db.upsertSession(updated, now, true);
+      this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? updated);
+    }
 
     for (const [index, pane] of panes.entries()) {
       const sessionId = paneIds[index] ?? tmuxPaneSessionId(pane);
@@ -1132,13 +1152,13 @@ export class SessionManager {
     return collapseHistoryByIdentity(results, limit);
   }
 
-  async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
+  async restoreSession(sessionId: string, driverKind?: SessionDriverKind): Promise<{ session: ManagedSession; restored: boolean }> {
     const initial = await this.db.getSession(sessionId);
     if (!initial) throw new SessionNotFoundError("Session not found");
     if (!initial.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
     const key = recoveryIdentityForSession(initial);
     const prior = this.restoreLocks.get(key) ?? Promise.resolve();
-    const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key));
+    const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key, driverKind));
     this.restoreLocks.set(key, restore);
     try {
       const result = await restore;
@@ -1149,7 +1169,11 @@ export class SessionManager {
     }
   }
 
-  private async restoreSessionUnlocked(sessionId: string, restoreIdentity: string): Promise<{ session: ManagedSession; restored: boolean }> {
+  private async restoreSessionUnlocked(
+    sessionId: string,
+    restoreIdentity: string,
+    requestedDriverKind?: SessionDriverKind
+  ): Promise<{ session: ManagedSession; restored: boolean }> {
     const source = await this.db.getSession(sessionId) ??
       (await this.db.listSessions(true)).find((session) => recoveryIdentityForSession(session) === restoreIdentity) ?? null;
     if (!source) throw new SessionNotFoundError("Session not found");
@@ -1157,10 +1181,30 @@ export class SessionManager {
 
     const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
+      if (live.driverKind === "codex_app_server") {
+        const session = await this.resumeAppServerSession(live);
+        if (session.archived) await this.db.markSessionArchived(session.id, false, nowIso());
+        const updated = requireSession(await this.db.getSession(session.id));
+        this.publish("session.updated", updated.id, updated);
+        return { session: updated, restored: false };
+      }
       if (live.archived) await this.db.markSessionArchived(live.id, false, nowIso());
       const session = requireSession(await this.db.getSession(live.id));
       this.publish("session.updated", session.id, session);
       return { session, restored: false };
+    }
+
+    const restoreDriver = requestedDriverKind ?? "codex_app_server";
+    if (restoreDriver === "codex_app_server") {
+      if (!this.sessionDrivers?.has("codex_app_server")) {
+        throw new SessionRestoreError("Codex app-server is unavailable; explicitly choose the tmux fallback to restore this session");
+      }
+      const restored = await this.resumeAppServerSession(source);
+      await this.db.markSessionArchived(restored.id, false, nowIso());
+      await this.db.addAudit("local", "restore_session:codex_app_server", source.id, "ok", nowIso());
+      const updated = requireSession(await this.db.getSession(restored.id));
+      this.publish("session.updated", updated.id, updated);
+      return { session: updated, restored: true };
     }
 
     const storedGitWorkspace = await this.gitWorkspaces?.getBySession(source.id) ?? null;
@@ -1229,24 +1273,29 @@ export class SessionManager {
     await atomicWrite(transcriptPath, selectedTranscript);
     const placeholderId = `imported:${eventId()}`;
     const repo = await loadRepoMetadata(destination);
+    const portableName = portable.name ?? portable.sessionName;
     const syntheticPane: TmuxPane = {
       sessionId: "muxpilot",
       sessionName: "muxpilot",
       windowId: "@imported",
       windowIndex: -1,
-      windowName: portable.sessionName,
+      windowName: portableName,
       paneId: `%imported-${portable.codexSessionId}`,
       paneIndex: -1,
       paneActive: false,
       cwd: destination,
       currentCommand: "codex",
-      title: portable.sessionName,
+      title: portableName,
       pid: 0,
       size: "0x0"
     };
     const documentScopeId = portable.workspaceMode === "directory" ? this.requireDocuments().newScopeId() : null;
     const session: ManagedSession = {
       id: placeholderId,
+      name: portableName,
+      cwd: destination,
+      provider: { kind: "codex", threadId: portable.codexSessionId, rolloutPath: transcriptPath },
+      driverKind: "codex_tmux",
       tmux: syntheticPane,
       repo,
       codexSessionId: portable.codexSessionId,
@@ -1290,7 +1339,7 @@ export class SessionManager {
     await this.db.upsertSession(session, nowIso());
 
     await this.ingestSession(session);
-    const restored = await this.restoreSession(placeholderId);
+    const restored = await this.restoreSession(placeholderId, mapping.driverKind);
     return {
       codexSessionId: portable.codexSessionId,
       sessionName: portable.sessionName,
@@ -2861,16 +2910,17 @@ export class SessionManager {
       }
       await launch.ready;
       const current = requireSession(await this.db.getSession(session.id));
+      const rolloutPath = launch.provider.rolloutPath ?? current.provider?.rolloutPath ?? current.codexJsonlPath;
       await this.db.upsertSession({
         ...current,
         name: session.name ?? sessionName(session),
         cwd: directory,
-        provider: launch.provider,
+        provider: { ...launch.provider, rolloutPath },
         driverKind: "codex_app_server",
         runtime: launch.runtime,
         capabilities: launch.capabilities,
         codexSessionId: launch.provider.threadId,
-        codexJsonlPath: launch.provider.rolloutPath,
+        codexJsonlPath: rolloutPath,
         resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : current.resourceUnit,
         startupError: null
       }, nowIso());
@@ -3709,6 +3759,10 @@ export class SessionManager {
     const sessions = await this.db.listSessions(true);
     for (const session of sessions) {
       if (recoveryIdentityForSession(session) !== identity) continue;
+      if (session.driverKind === "codex_app_server") {
+        if (await this.isLiveAppServerRuntime(session)) return session;
+        continue;
+      }
       if (session.status === "missing") continue;
       try {
         return await this.liveSession(session);
@@ -3722,7 +3776,12 @@ export class SessionManager {
   private async findLiveSessionByCodexSessionId(codexSessionId: string): Promise<ManagedSession | null> {
     const sessions = await this.db.listSessions(true);
     for (const session of sessions) {
-      if (session.codexSessionId !== codexSessionId || session.status === "missing") continue;
+      if (session.codexSessionId !== codexSessionId) continue;
+      if (session.driverKind === "codex_app_server") {
+        if (await this.isLiveAppServerRuntime(session)) return session;
+        continue;
+      }
+      if (session.status === "missing") continue;
       try {
         return await this.liveSession(session);
       } catch {
@@ -3730,6 +3789,16 @@ export class SessionManager {
       }
     }
     return null;
+  }
+
+  private async isLiveAppServerRuntime(session: ManagedSession): Promise<boolean> {
+    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") return false;
+    try {
+      const evidence = await this.requireAppServerDriver().runtimeEvidence(session);
+      return evidence.activeState === "active" && evidence.socketPresent;
+    } catch {
+      return false;
+    }
   }
 
   private async rebindRestoredSession(source: ManagedSession, pane: TmuxPane): Promise<ManagedSession> {

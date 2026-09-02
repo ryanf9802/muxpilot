@@ -225,6 +225,10 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return { ...stopped, state: "hibernated" };
   }
 
+  async runtimeEvidence(session: ManagedSession) {
+    return this.supervisor.inspect(requireAppServerSession(session));
+  }
+
   async choosePlanAction(
     session: ManagedSession,
     action: "implement" | "clear_context_implement" | "stay_in_plan",
