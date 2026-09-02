@@ -55,6 +55,17 @@ export interface DriverInputReceipt {
   acceptedAt: string;
 }
 
+export interface DriverPlanActionRequest {
+  plan: string | null;
+  clientMessageId: string | null;
+  launchOptions?: AgentSessionLaunchOptions;
+}
+
+export interface DriverPlanActionResult {
+  provider: AgentProviderRef;
+  receipt: DriverInputReceipt | null;
+}
+
 export interface DriverEvent {
   method: string;
   params: unknown;
@@ -78,7 +89,11 @@ export interface AgentSessionDriver {
   kill(session: ManagedSession): Promise<void>;
   answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;
   answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void>;
-  choosePlanAction(session: ManagedSession, action: PlanActionChoice): Promise<void>;
+  choosePlanAction(
+    session: ManagedSession,
+    action: PlanActionChoice,
+    request: DriverPlanActionRequest
+  ): Promise<DriverPlanActionResult>;
   setPreferences(session: ManagedSession, preferences: {
     mode?: CollaborationMode;
     model?: SessionModelSettings;

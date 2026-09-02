@@ -13,6 +13,8 @@ import type {
   AgentSessionLaunchSpec,
   DriverEvent,
   DriverInputReceipt,
+  DriverPlanActionRequest,
+  DriverPlanActionResult,
   DriverSubscription,
   RuntimeStartSpec,
   RuntimeSupervisor,
@@ -30,7 +32,7 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
   kill: true,
   approvals: true,
   questions: true,
-  planActions: false,
+  planActions: true,
   fastMode: true,
   rawTerminalCapture: false,
   terminalAttach: true,
@@ -188,8 +190,71 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     await this.respondPending(session, requestId, pending, { answers: answer.answers });
   }
 
-  async choosePlanAction(): Promise<void> {
-    throw new Error("App-server plan actions are unavailable until durable plan records are enabled");
+  async choosePlanAction(
+    session: ManagedSession,
+    action: "implement" | "clear_context_implement" | "stay_in_plan",
+    request: DriverPlanActionRequest
+  ): Promise<DriverPlanActionResult> {
+    if (action === "stay_in_plan") {
+      return { provider: requireProvider(session), receipt: null };
+    }
+    if (!request.clientMessageId) throw new Error("App-server plan implementation requires a client message id");
+    const implementationSession = { ...session, inputMode: "default" as const };
+    if (action === "implement") {
+      const { threadId, protocol } = this.protocolFor(session);
+      const response = await protocol.startTurn(
+        threadId,
+        PLAN_IMPLEMENTATION_MESSAGE,
+        request.clientMessageId,
+        turnOptions(implementationSession)
+      );
+      this.activeTurns.set(session.id, response.turn.id);
+      return {
+        provider: requireProvider(session),
+        receipt: receipt(threadId, response.turn.id, request.clientMessageId, this.now())
+      };
+    }
+    if (!request.plan?.trim()) throw new Error("Clear-context implementation requires an approved plan");
+    const runtime = requireAppServerSession(session);
+    const launchOptions = request.launchOptions;
+    if (!launchOptions) throw new Error("Clear-context implementation requires fresh-thread launch options");
+    const previousThreadId = requireThreadId(session);
+    const connection = await this.connections.start({
+      sessionId: session.id,
+      runtime,
+      settings: {
+        cwd: session.cwd ?? session.tmux.cwd,
+        model: launchOptions.model,
+        developerInstructions: launchOptions.developerInstructions,
+        runtimeWorkspaceRoots: launchOptions.writableRoots
+      },
+      handlers: this.handlers(session.id)
+    });
+    const text = `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${request.plan.trim()}`;
+    let response: Awaited<ReturnType<CodexAppServerProtocol["startTurn"]>>;
+    try {
+      response = await new CodexAppServerProtocol(connection.rpc).startTurn(
+        connection.threadId,
+        text,
+        request.clientMessageId,
+        turnOptions(implementationSession)
+      );
+    } catch (error) {
+      const unresolved = await this.requestStore?.listUnresolvedAppServerRequests(session.id) ?? [];
+      await this.connections.reconnect({
+        sessionId: session.id,
+        runtime,
+        threadId: previousThreadId,
+        expectedPendingRequestIds: unresolved.map((pending) => pending.requestId),
+        handlers: this.handlers(session.id)
+      }).catch(() => undefined);
+      throw error;
+    }
+    this.activeTurns.set(session.id, response.turn.id);
+    return {
+      provider: { kind: "codex", threadId: connection.threadId, rolloutPath: null },
+      receipt: receipt(connection.threadId, response.turn.id, request.clientMessageId, this.now())
+    };
   }
 
   async setPreferences(session: ManagedSession, preferences: Parameters<AgentSessionDriver["setPreferences"]>[1]): Promise<void> {
@@ -395,6 +460,13 @@ const APPROVAL_METHODS = new Set([
   "item/permissions/requestApproval"
 ]);
 
+export const PLAN_IMPLEMENTATION_MESSAGE = "Implement the plan.";
+export const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = [
+  "A previous agent produced the plan below to accomplish the user's task.",
+  "Implement the plan in a fresh context. Treat the plan as the source of user intent,",
+  "re-read files as needed, and carry the work through implementation and verification."
+].join(" ");
+
 function requireAppServerSession(session: ManagedSession): SystemdSessionRuntimeRef {
   if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
     throw new Error("Session is not owned by the app-server driver");
@@ -406,6 +478,11 @@ function requireThreadId(session: ManagedSession): string {
   const threadId = session.provider?.threadId ?? session.codexSessionId;
   if (!threadId) throw new Error("App-server session has no Codex thread id");
   return threadId;
+}
+
+function requireProvider(session: ManagedSession): ManagedSession["provider"] & { kind: "codex"; threadId: string } {
+  const threadId = requireThreadId(session);
+  return { kind: "codex", threadId, rolloutPath: session.provider?.rolloutPath ?? session.codexJsonlPath };
 }
 
 function requireSourceThread(spec: AgentSessionLaunchSpec): string {

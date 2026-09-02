@@ -5638,6 +5638,104 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("persists and routes app-server plan actions without tmux menu keys", async () => {
+    const choosePlanAction = vi.fn(async (
+      session: ManagedSession,
+      action: "implement" | "clear_context_implement" | "stay_in_plan",
+      request: { clientMessageId: string | null }
+    ) => ({
+      provider: {
+        kind: "codex" as const,
+        threadId: action === "clear_context_implement" ? "thread-fresh" : session.codexSessionId,
+        rolloutPath: null
+      },
+      receipt: action === "stay_in_plan" ? null : {
+        clientMessageId: request.clientMessageId!,
+        threadId: action === "clear_context_implement" ? "thread-fresh" : session.codexSessionId!,
+        turnId: action === "clear_context_implement" ? "turn-fresh" : "turn-current",
+        acceptedAt: "2026-09-01T12:00:00.000Z"
+      }
+    }));
+    const driver = { kind: "codex_app_server", choosePlanAction } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const sendKeys = vi.fn(async () => { throw new Error("tmux keys must not be used"); });
+    harness.tmux.sendKeys = sendKeys;
+    const base = appServerSession("app-plan-actions", "thread-plan", "plan_ready");
+    const session = { ...base, cwd: repo, tmux: { ...base.tmux, cwd: repo }, repo: { ...base.repo, root: repo } };
+    await harness.db.upsertSession(session, "2026-09-01T12:00:00.000Z");
+    await harness.db.appendMessage({
+      id: "plan-message",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T12:00:00.000Z",
+      text: "<proposed_plan>\n1. Build it.\n</proposed_plan>",
+      payload: { source: "codex_app_server" }
+    });
+
+    await harness.manager.act(session.id, { type: "choosePlanAction", action: "implement" });
+    expect(choosePlanAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: session.id }),
+      "implement",
+      expect.objectContaining({ plan: "1. Build it.", clientMessageId: expect.any(String) })
+    );
+    expect(await harness.db.latestUserMessage(session.id)).toMatchObject({
+      text: "Implement the plan.",
+      payload: { muxpilotSubmission: { state: "acknowledged", threadId: "thread-plan", turnId: "turn-current" } }
+    });
+    expect((await harness.manager.readDocument(session.id, "plan-1.md")).document.content).toBe("1. Build it.\n");
+
+    await harness.db.appendMessage({
+      id: "plan-message-clear",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T12:01:00.000Z",
+      text: "<proposed_plan>\n1. Build it.\n</proposed_plan>",
+      payload: { source: "codex_app_server" }
+    });
+    await harness.db.setSessionStatus(session.id, "plan_ready", "2026-09-01T12:01:00.000Z");
+    await harness.manager.act(session.id, { type: "choosePlanAction", action: "clear_context_implement" });
+    expect(choosePlanAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: session.id }),
+      "clear_context_implement",
+      expect.objectContaining({
+        plan: "1. Build it.",
+        clientMessageId: expect.any(String),
+        launchOptions: expect.objectContaining({ developerInstructions: expect.any(String) })
+      })
+    );
+    expect(await harness.manager.getSession(session.id)).toMatchObject({
+      provider: { threadId: "thread-fresh" },
+      codexSessionId: "thread-fresh",
+      inputMode: "default",
+      status: "working"
+    });
+    expect((await harness.db.latestUserMessage(session.id))?.text).toContain("Implement the plan in a fresh context");
+
+    const inputCount = (await harness.db.listRecentMessages(session.id, 20)).items.filter((message) => message.type === "user").length;
+    await harness.db.appendMessage({
+      id: "plan-message-stay",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T12:02:00.000Z",
+      text: "<proposed_plan>\n1. Keep planning.\n</proposed_plan>",
+      payload: { source: "codex_app_server" }
+    });
+    await harness.db.setSessionStatus(session.id, "plan_ready", "2026-09-01T12:02:00.000Z");
+    await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
+    expect((await harness.db.listRecentMessages(session.id, 20)).items.filter((message) => message.type === "user")).toHaveLength(inputCount);
+    expect(await harness.manager.getSession(session.id)).toMatchObject({ inputMode: "plan", status: "planning" });
+    expect(sendKeys).not.toHaveBeenCalled();
+    harness.db.close();
+  });
+
   it("stops an app-server launch and records failure when post-launch binding fails", async () => {
     const launch = {
       provider: { kind: "codex" as const, threadId: "thread-binding-failure", rolloutPath: null },
@@ -6806,7 +6904,7 @@ function appServerCapabilities() {
     kill: true,
     approvals: true,
     questions: true,
-    planActions: false,
+    planActions: true,
     fastMode: true,
     rawTerminalCapture: false,
     terminalAttach: true,

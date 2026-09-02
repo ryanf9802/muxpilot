@@ -29,7 +29,13 @@ describe("CodexAppServerDriver", () => {
     expect(harness.connections.reconnect).toHaveBeenCalledOnce();
     expect(harness.connections.fork).toHaveBeenCalledOnce();
     expect([start, resume, fork].map((result) => result.provider.threadId)).toEqual(["thread-1", "thread-1", "thread-1"]);
-    expect(start.capabilities).toMatchObject({ sendMessage: true, approvals: true, questions: true, rawTerminalCapture: false });
+    expect(start.capabilities).toMatchObject({
+      sendMessage: true,
+      approvals: true,
+      questions: true,
+      planActions: true,
+      rawTerminalCapture: false
+    });
   });
 
   it("sends verified structured turns only on the reconciled thread", async () => {
@@ -175,6 +181,57 @@ describe("CodexAppServerDriver", () => {
     });
     await harness.driver.answerApproval(session, "permission-deny", "deny");
     expect(harness.rpc.respond).toHaveBeenCalledWith("permission-deny", { permissions: {}, scope: "turn" });
+  });
+
+  it("implements plans on the current thread and in a genuinely fresh thread", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+
+    const implemented = await harness.driver.choosePlanAction(session, "implement", {
+      plan: "1. Build it",
+      clientMessageId: "implement-message"
+    });
+    expect(harness.rpc.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({
+      threadId: "thread-1",
+      clientUserMessageId: "implement-message",
+      input: [{ type: "text", text: "Implement the plan." }]
+    }));
+    expect(implemented).toMatchObject({
+      provider: { threadId: "thread-1" },
+      receipt: { clientMessageId: "implement-message", threadId: "thread-1" }
+    });
+
+    harness.connection.threadId = "thread-fresh";
+    const cleared = await harness.driver.choosePlanAction(session, "clear_context_implement", {
+      plan: "1. Build it",
+      clientMessageId: "clear-message",
+      launchOptions: { model: "gpt-5.6", writableRoots: ["/repo"], developerInstructions: "Use the repository rules." }
+    });
+    expect(harness.connections.start).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: "session-1",
+      settings: expect.objectContaining({
+        cwd: "/repo",
+        model: "gpt-5.6",
+        runtimeWorkspaceRoots: ["/repo"]
+      })
+    }));
+    expect(harness.rpc.request).toHaveBeenLastCalledWith("turn/start", expect.objectContaining({
+      threadId: "thread-fresh",
+      clientUserMessageId: "clear-message",
+      input: [{ type: "text", text: expect.stringContaining("Implement the plan in a fresh context") }]
+    }));
+    expect(cleared).toMatchObject({
+      provider: { threadId: "thread-fresh" },
+      receipt: { clientMessageId: "clear-message", threadId: "thread-fresh" }
+    });
+
+    const requestCount = harness.rpc.request.mock.calls.length;
+    await expect(harness.driver.choosePlanAction(session, "stay_in_plan", {
+      plan: null,
+      clientMessageId: null
+    })).resolves.toMatchObject({ provider: { threadId: "thread-1" }, receipt: null });
+    expect(harness.rpc.request).toHaveBeenCalledTimes(requestCount);
   });
 
   it("persists gates before delivery and seeds reconnect replay from durable state", async () => {

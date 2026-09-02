@@ -56,6 +56,10 @@ import {
 } from "../tmux/tmuxAdapter.js";
 import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
+import {
+  PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX,
+  PLAN_IMPLEMENTATION_MESSAGE
+} from "./sessionDrivers/codexAppServerDriver.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -2521,6 +2525,120 @@ export class SessionManager {
     }
   }
 
+  private async performAppServerPlanAction(
+    session: ManagedSession,
+    planMessage: ChatMessage,
+    action: PlanActionChoice,
+    plan: string | null
+  ): Promise<void> {
+    const driver = this.requireAppServerDriver();
+    if (action === "stay_in_plan") {
+      await driver.choosePlanAction(session, action, { plan: null, clientMessageId: null });
+      this.answeredPlanMessageIds.add(planMessage.id);
+      const now = nowIso();
+      await this.db.setSessionInputMode(session.id, "plan", now);
+      await this.db.setSessionStatus(session.id, "planning", now);
+      this.pendingPlanActionStatuses.set(session.id, { status: "planning", expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
+      await this.db.addAudit("local", "plan_action:stay_in_plan", session.id, "ok", now);
+      this.publish("status.changed", session.id, { status: "planning" });
+      this.publish("session.updated", session.id, await this.db.getSession(session.id));
+      return;
+    }
+    if (!plan) throw new InputModeSwitchError("Pending proposed plan is incomplete");
+    const launchOptions = action === "clear_context_implement"
+      ? await this.appServerThreadLaunchOptions(session, "default")
+      : undefined;
+    const text = action === "implement"
+      ? PLAN_IMPLEMENTATION_MESSAGE
+      : `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${plan.trim()}`;
+    if (this.deliveringInputSessionIds.has(session.id)) {
+      throw new InputDeliveryError("Another input delivery is already in progress for this session");
+    }
+    const now = nowIso();
+    let message = await this.recordSubmittedInput(session, text, "default", now);
+    this.publish("message.appended", session.id, message);
+    this.deliveringInputSessionIds.add(session.id);
+    try {
+      message = await this.updateInputDelivery(message, { deliveryPhase: "delivering" });
+      const result = await driver.choosePlanAction(session, action, {
+        plan,
+        clientMessageId: message.id,
+        launchOptions
+      });
+      if (!result.receipt) throw new Error("App-server plan action did not return an input receipt");
+      const current = requireSession(await this.db.getSession(session.id));
+      await this.db.upsertSession({
+        ...current,
+        provider: result.provider,
+        codexSessionId: result.provider.threadId,
+        codexJsonlPath: result.provider.rolloutPath,
+        inputMode: "default",
+        status: "working"
+      }, now);
+      const currentMessage = await this.db.latestUserMessage(session.id);
+      if (currentMessage?.id === message.id) message = currentMessage;
+      message = await this.updateInputDelivery(message, {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: "app_server_receipt",
+        clientMessageId: result.receipt.clientMessageId,
+        threadId: result.receipt.threadId,
+        turnId: result.receipt.turnId,
+        acceptedAt: result.receipt.acceptedAt,
+        failureReason: null
+      });
+      this.answeredPlanMessageIds.add(planMessage.id);
+      this.pendingPlanActionStatuses.set(session.id, { status: "working", expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
+      await this.db.addAudit("local", `plan_action:${action}`, session.id, JSON.stringify({
+        clientMessageId: result.receipt.clientMessageId,
+        threadId: result.receipt.threadId,
+        turnId: result.receipt.turnId
+      }), result.receipt.acceptedAt);
+      this.publish("message.appended", session.id, message);
+      this.publish("status.changed", session.id, { status: "working" });
+      this.publish("session.updated", session.id, await this.db.getSession(session.id));
+    } catch (error) {
+      message = await this.updateInputDelivery(message, {
+        state: "failed",
+        deliveryPhase: "failed",
+        failureCode: "app_server_rejected",
+        failureReason: inputDeliveryFailureMessage("app_server_rejected")
+      });
+      const failedAt = nowIso();
+      await this.db.setSessionStatus(session.id, "input_failed", failedAt);
+      this.publish("message.appended", session.id, message);
+      this.publish("status.changed", session.id, { status: "input_failed" });
+      this.publish("session.updated", session.id, await this.db.getSession(session.id));
+      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.deliveringInputSessionIds.delete(session.id);
+    }
+  }
+
+  private async appServerThreadLaunchOptions(
+    session: ManagedSession,
+    mode: CollaborationMode
+  ): Promise<AgentSessionLaunchOptions> {
+    let launchOptions: AgentSessionLaunchOptions;
+    if (session.gitWorkspace) {
+      if (!this.gitWorkspaces) throw new Error("Managed Git workspaces are unavailable for app-server thread replacement");
+      const workspace = await this.gitWorkspaces.getBySession(session.id);
+      if (!workspace) throw new Error(`Managed Git workspace is missing for app-server thread replacement: ${session.gitWorkspace.id}`);
+      await this.gitWorkspaces.ensureControlPath(workspace);
+      launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
+    } else {
+      await requireExistingDirectory(session.cwd ?? session.repo.root ?? session.tmux.cwd);
+      launchOptions = { environment: this.managedEnvironment };
+    }
+    const selected = session.models[mode];
+    return this.withDocumentLaunchOptions({
+      ...launchOptions,
+      model: selected.model,
+      reasoningEffort: selected.reasoningEffort,
+      fastMode: session.fastMode
+    }, await this.ensureDocumentScope(session));
+  }
+
   private async resumeAppServerSession(session: ManagedSession): Promise<ManagedSession> {
     try {
       return await this.performAppServerResume(session);
@@ -2791,9 +2909,10 @@ export class SessionManager {
     if (action.type === "choosePlanAction") {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
-      const pane = await this.livePane(session);
+      const driver = this.appServerDriver(session);
+      let plan: string | null = null;
       if (action.action !== "stay_in_plan") {
-        const plan = extractLastCompleteProposedPlan(latestPlanMessage.text);
+        plan = extractLastCompleteProposedPlan(latestPlanMessage.text);
         if (plan === null) throw new InputModeSwitchError("Pending proposed plan is incomplete");
         const changes = await this.requireDocuments().persistApprovedPlan(
           await this.ensureDocumentScope(session),
@@ -2804,15 +2923,20 @@ export class SessionManager {
           this.publishDocumentsUpdated(sessionId, changes);
         }
       }
-      await this.tmux.sendKeys(pane.paneId, keysForPlanAction(action.action));
-      this.answeredPlanMessageIds.add(latestPlanMessage.id);
-      const now = nowIso();
-      const mode = inputModeForPlanAction(action.action);
-      const status = activeInputStatus(mode);
-      await this.db.setSessionInputMode(sessionId, mode, now);
-      await this.db.setSessionStatus(sessionId, status, now);
-      this.pendingPlanActionStatuses.set(sessionId, { status, expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
-      this.publish("status.changed", sessionId, { status });
+      if (driver) {
+        await this.performAppServerPlanAction(session, latestPlanMessage, action.action, plan);
+      } else {
+        const pane = await this.livePane(session);
+        await this.tmux.sendKeys(pane.paneId, keysForPlanAction(action.action));
+        this.answeredPlanMessageIds.add(latestPlanMessage.id);
+        const now = nowIso();
+        const mode = inputModeForPlanAction(action.action);
+        const status = activeInputStatus(mode);
+        await this.db.setSessionInputMode(sessionId, mode, now);
+        await this.db.setSessionStatus(sessionId, status, now);
+        this.pendingPlanActionStatuses.set(sessionId, { status, expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
+        this.publish("status.changed", sessionId, { status });
+      }
     }
     if (action.type === "rename") {
       const name = requireSessionName(action.name);
