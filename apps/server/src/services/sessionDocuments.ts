@@ -10,6 +10,7 @@ export const MAX_SESSION_DOCUMENTS = 100;
 export const MAX_SESSION_DOCUMENT_BYTES = 256 * 1024;
 export const MAX_SESSION_DOCUMENT_TOTAL_BYTES = 10 * 1024 * 1024;
 const DOCUMENT_NAME = /^(?=.{1,128}$)[A-Za-z0-9][A-Za-z0-9._-]*\.md$/i;
+const SANDBOX_METADATA_DIRECTORIES = new Set([".agents", ".codex", ".git"]);
 const SCOPE_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const EXCHANGE_ID = /^[A-Za-z0-9_-]{8,128}$/;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -271,7 +272,11 @@ async function snapshotDirectory(root: string): Promise<SessionDocumentSnapshot[
   if (!rootDetails?.isDirectory() || rootDetails.isSymbolicLink()) {
     throw new SessionDocumentError("Session documents directory is invalid", 409);
   }
-  const entries = await readdir(root, { withFileTypes: true });
+  const entries = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (await isEmptySandboxMetadataDirectory(root, entry.name, entry.isDirectory())) continue;
+    entries.push(entry);
+  }
   const names = entries.map((entry) => entry.name);
   if (names.length > MAX_SESSION_DOCUMENTS) throw new SessionDocumentError("Session has more than 100 documents", 413);
 
@@ -304,6 +309,15 @@ async function snapshotDirectory(root: string): Promise<SessionDocumentSnapshot[
     }
   }
   return snapshots.sort((first, second) => documentNameOrder(first.name, second.name));
+}
+
+async function isEmptySandboxMetadataDirectory(root: string, name: string, isDirectory: boolean): Promise<boolean> {
+  if (!isDirectory || !SANDBOX_METADATA_DIRECTORIES.has(name)) return false;
+  try {
+    return (await readdir(join(root, name))).length === 0;
+  } catch {
+    return false;
+  }
 }
 
 function documentHash(contents: Buffer): string {

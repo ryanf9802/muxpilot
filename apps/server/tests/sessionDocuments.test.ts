@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,6 +42,19 @@ describe("SessionDocumentService", () => {
     await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 413 });
   });
 
+  it("ignores empty sandbox metadata directories but rejects content inside them", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-sandbox-metadata");
+    const documents = join(root, "documents");
+    await writeFile(join(documents, "notes.md"), "# Notes\n");
+    for (const name of [".agents", ".codex", ".git"]) await mkdir(join(documents, name));
+
+    expect((await service.list("documents-sandbox-metadata")).documents.map((document) => document.name)).toEqual(["notes.md"]);
+
+    await writeFile(join(documents, ".codex", "unexpected"), "content");
+    await expect(service.list("documents-sandbox-metadata")).rejects.toMatchObject({ statusCode: 400 });
+  });
+
   it("atomically persists separate approved plans and indexes them idempotently", async () => {
     const service = await fixture();
     const root = await service.ensureScope("documents-approved-plan");
@@ -83,6 +96,7 @@ describe("SessionDocumentService", () => {
     const staging = await service.prepareBtwStaging("documents-btw", "exchange-1");
     await writeFile(join(staging, "plan.md"), "# Updated\n");
     await writeFile(join(staging, "notes.md"), "# Notes\n");
+    for (const name of [".agents", ".codex", ".git"]) await mkdir(join(staging, name));
     await writeFile(join(root, "documents", "main-agent.md"), "# Concurrent untouched file\n");
 
     expect(await service.inspectBtwStaging("documents-btw", "exchange-1")).toEqual({
