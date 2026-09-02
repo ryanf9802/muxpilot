@@ -3,6 +3,7 @@ import {
   hostScopedHeavyEnvironment,
   isMuxpilotSessionCgroup,
   isShadowExecutionCgroup,
+  shadowSocketPathSafety,
   shadowScopeUnitName,
   verifyProductionUnchanged
 } from "../../../.agents/skills/muxpilot-start-shadow/scripts/shadow-environment.mjs";
@@ -21,6 +22,17 @@ describe("muxpilot shadow start helper", () => {
     expect(isShadowExecutionCgroup("/user.slice/app.slice/muxpilot-shadow-start-123-ab12cd34.scope")).toBe(true);
     expect(isShadowExecutionCgroup("/user.slice/app.slice/muxpilot-session-685fce440c83e90394a1515c.scope")).toBe(false);
     expect(shadowScopeUnitName(123, "ab12cd34")).toBe("muxpilot-shadow-start-123-ab12cd34");
+  });
+
+  it("rejects checkout paths that cannot hold every shadow Unix socket", () => {
+    const short = shadowSocketPathSafety("/home/user/mp-s");
+    expect(short.safe).toBe(true);
+    expect(short.unsafePaths).toEqual([]);
+
+    const long = shadowSocketPathSafety(`/home/user/${"deep-checkout/".repeat(8)}muxpilot`);
+    expect(long.safe).toBe(false);
+    expect(long.unsafePaths.some(({ path }) => path.endsWith("git-workflow-broker.sock"))).toBe(true);
+    expect(long.unsafePaths.every(({ bytes }) => bytes > long.maxBytes)).toBe(true);
   });
 
   it("requires production identities to survive while allowing additive sessions", () => {

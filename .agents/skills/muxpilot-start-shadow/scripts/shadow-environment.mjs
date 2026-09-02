@@ -1,5 +1,24 @@
+import { join, resolve } from "node:path";
+
 export function hostScopedHeavyEnvironment(environment) {
   return { ...environment, MUXPILOT_HEAVY_QUEUE_ENABLED: "0" };
+}
+
+const MAX_UNIX_SOCKET_PATH_BYTES = 107;
+const CAPABILITY_ID_EXAMPLE = "f".repeat(24);
+
+export function shadowSocketPathSafety(shadowRoot) {
+  const dataDir = resolve(shadowRoot, "data", "shadow");
+  const paths = [
+    join(dataDir, "runtime", "git-workflow-broker.sock"),
+    join(dataDir, "runtime", "docker-guard.sock"),
+    join(dataDir, "runtime", "session-orchestration.sock"),
+    join(dataDir, "runtime", "app-server-sessions", CAPABILITY_ID_EXAMPLE, "app-server.sock")
+  ];
+  const unsafePaths = paths
+    .map((path) => ({ path, bytes: Buffer.byteLength(path) }))
+    .filter(({ bytes }) => bytes > MAX_UNIX_SOCKET_PATH_BYTES);
+  return { safe: unsafePaths.length === 0, maxBytes: MAX_UNIX_SOCKET_PATH_BYTES, paths, unsafePaths };
 }
 
 const SESSION_SCOPE_PATTERN = /(?:^|\/)muxpilot-session-[a-f0-9]{24}\.scope(?:\/|$)/;

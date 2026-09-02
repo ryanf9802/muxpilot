@@ -9,11 +9,12 @@ import {
   hostScopedHeavyEnvironment,
   isMuxpilotSessionCgroup,
   isShadowExecutionCgroup,
+  shadowSocketPathSafety,
   shadowScopeUnitName,
   verifyProductionUnchanged
 } from "./shadow-environment.mjs";
 
-let shadowStarted = false;
+let shadowStartAttempted = false;
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
   console.log("Usage: start-shadow.mjs --expected-commit <sha> --prod-checkout <path> [--preflight]");
@@ -31,6 +32,11 @@ if (head !== expectedCommit) fail(`expected commit ${expectedCommit}, but shadow
 if (git(shadowRoot, ["status", "--porcelain"])) fail("shadow checkout is dirty");
 if (resolve(shadowRoot) === prodRoot) fail("shadow checkout must not be the production checkout");
 if (gitCommonDir(shadowRoot) !== gitCommonDir(prodRoot)) fail("shadow and production checkouts are not from the same Git repository");
+const socketSafety = shadowSocketPathSafety(shadowRoot);
+if (!socketSafety.safe) {
+  const unsafe = socketSafety.unsafePaths.map(({ path, bytes }) => `${path} (${bytes} bytes)`).join(", ");
+  fail(`shadow checkout path is too long for Unix sockets (maximum ${socketSafety.maxBytes} bytes): ${unsafe}`);
+}
 
 const ownCgroup = readCgroup("self");
 if (!isShadowExecutionCgroup(ownCgroup)) {
@@ -55,8 +61,8 @@ if (!existsSync(heavyRunner)) fail(`heavy command runner not found at ${heavyRun
 
 runHeavy(heavyRunner, ["pnpm", "install", "--frozen-lockfile"]);
 if (git(shadowRoot, ["status", "--porcelain"])) fail("frozen dependency installation changed the shadow checkout");
+shadowStartAttempted = true;
 runHeavy(heavyRunner, ["pnpm", "app", "start", "shadow"]);
-shadowStarted = true;
 
 const shadowHealth = await health("http://127.0.0.1:14177/healthz");
 if (!shadowHealth?.ok || shadowHealth.shadowMode !== true) fail("shadow health endpoint did not identify an active shadow server");
@@ -211,8 +217,8 @@ function readCgroup(pid) {
 }
 
 function fail(message) {
-  if (shadowStarted) {
-    shadowStarted = false;
+  if (shadowStartAttempted) {
+    shadowStartAttempted = false;
     spawnSync("pnpm", ["app", "stop", "shadow"], { cwd: shadowRoot, env: process.env, stdio: "inherit" });
   }
   console.error(`muxpilot shadow start refused: ${message}`);

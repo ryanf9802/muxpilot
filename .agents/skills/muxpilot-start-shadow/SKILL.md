@@ -10,7 +10,7 @@ Use this workflow only after the implementation workflow has printed `INTEGRATED
 ## Run
 
 1. Resolve the exact integrated commit and confirm the production checkout is healthy.
-2. Create a persistent detached worktree outside the requesting muxpilot session directory, such as:
+2. Create a persistent detached worktree outside the requesting muxpilot session directory at a deliberately short path, such as `/home/user/mp-s`:
 
    `git -C <production-checkout> worktree add --detach <shadow-checkout> <expected-commit>`
 
@@ -21,7 +21,7 @@ Use this workflow only after the implementation workflow has printed `INTEGRATED
 
 4. Treat `MUXPILOT_SHADOW_STARTED_OUTSIDE_SESSION_SCOPE` as the only success marker. Report production and shadow PIDs/cgroups plus the shadow URL.
 
-The helper refuses a dirty or mismatched checkout, the production checkout itself, a different Git repository, a muxpilot session cgroup after relaunch, missing production health, changed production PIDs/cgroups, lost or replaced production tmux panes, changed existing app-server service identities, non-shadow health, and shadow children inside a muxpilot session cgroup.
+The helper refuses a dirty or mismatched checkout, the production checkout itself, a different Git repository, any checkout too long for its owned Unix socket paths, a muxpilot session cgroup after relaunch, missing production health, changed production PIDs/cgroups, lost or replaced production tmux panes, changed existing app-server service identities, non-shadow health, and shadow children inside a muxpilot session cgroup. Once lifecycle startup is attempted, every later failure runs shadow-only cleanup before returning.
 
 Do not replace the helper with raw `pnpm install` or `pnpm app start shadow` from the requesting session. Do not copy the production database, import an active production session, or point a test session at a production-controlled Codex thread.
 
