@@ -29,7 +29,10 @@ async function main() {
     }
     learningStartedAt ??= Date.now();
 
-    const childRecords = (await Promise.all((await readChildren(runtimePid)).map(readProcess))).filter(Boolean);
+    const childRecords = (await Promise.all((await readOwnedChildren(runtimePid)).map(async ({ pid, ownerThreadId }) => {
+      const processRecord = await readProcess(pid);
+      return processRecord ? { ...processRecord, ownerThreadId } : null;
+    }))).filter(Boolean);
     await state.pruneExited(childRecords, readProcess);
     const stale = state.reconcile(childRecords, {
       now: Date.now(),
@@ -50,11 +53,17 @@ async function main() {
 
 export class ChildSupervisorState {
   seenAt = new Map();
+  ownerThreadIds = new Map();
   managedCommands = new Set();
   managedProcesses = new Map();
 
   reconcile(childRecords, { now, learningStartedAt, stableChildMs, startupLearningMs }) {
-    for (const child of childRecords) this.seenAt.set(child.pid, this.seenAt.get(child.pid) ?? now);
+    for (const child of childRecords) {
+      this.seenAt.set(child.pid, this.seenAt.get(child.pid) ?? now);
+      if (!this.ownerThreadIds.has(child.pid) && Number.isSafeInteger(child.ownerThreadId)) {
+        this.ownerThreadIds.set(child.pid, child.ownerThreadId);
+      }
+    }
     const stable = childRecords.filter((child) => now - this.seenAt.get(child.pid) >= stableChildMs);
 
     for (const child of stable) {
@@ -66,9 +75,14 @@ export class ChildSupervisorState {
     const byCommand = new Map();
     for (const child of stable) {
       if (!this.managedCommands.has(child.command)) continue;
-      const group = byCommand.get(child.command) ?? [];
+      const ownerThreadId = this.ownerThreadIds.get(child.pid);
+      // Identical MCP commands can belong to independent built-in Codex agents.
+      // Without a stable owner, destructive deduplication is not safe.
+      if (!Number.isSafeInteger(ownerThreadId)) continue;
+      const groupKey = `${ownerThreadId}\0${child.command}`;
+      const group = byCommand.get(groupKey) ?? [];
       group.push(child);
-      byCommand.set(child.command, group);
+      byCommand.set(groupKey, group);
     }
 
     const stale = [];
@@ -95,6 +109,7 @@ export class ChildSupervisorState {
 
   forget(pid) {
     this.seenAt.delete(pid);
+    this.ownerThreadIds.delete(pid);
     this.managedProcesses.delete(pid);
   }
 }
@@ -138,14 +153,28 @@ async function readProcess(pid) {
 }
 
 async function readChildren(pid) {
+  return (await readOwnedChildren(pid)).map((child) => child.pid);
+}
+
+async function readOwnedChildren(pid) {
   const taskRoot = `/proc/${pid}/task`;
-  // Native Codex worker threads can own child processes independently of the
-  // thread-group leader, so union every task's immediate child list.
-  const tids = await readdir(taskRoot).catch(() => []);
+  const tids = (await readdir(taskRoot).catch(() => []))
+    .map(Number)
+    .filter(Number.isSafeInteger)
+    .sort((left, right) => left - right);
   const values = await Promise.all(tids.map((tid) =>
     readFile(`${taskRoot}/${tid}/children`, "utf8").catch(() => "")
   ));
-  return [...new Set(values.flatMap((value) => value.trim().split(/\s+/).filter(Boolean).map(Number)))];
+  const children = new Map();
+  for (const [index, value] of values.entries()) {
+    const ownerThreadId = tids[index];
+    for (const childPid of value.trim().split(/\s+/).filter(Boolean).map(Number)) {
+      if (Number.isSafeInteger(childPid) && !children.has(childPid)) {
+        children.set(childPid, ownerThreadId);
+      }
+    }
+  }
+  return [...children].map(([childPid, ownerThreadId]) => ({ pid: childPid, ownerThreadId }));
 }
 
 async function terminateTree(processRecord, terminationGraceMs) {

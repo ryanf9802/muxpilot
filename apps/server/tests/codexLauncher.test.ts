@@ -48,7 +48,7 @@ describe("Codex launcher", () => {
     }
   });
 
-  it("retires stable startup children when Codex replaces them", async () => {
+  it("retires same-owner replacements without crossing Codex worker threads", async () => {
     const directory = await mkdtemp(resolve(tmpdir(), "muxpilot-codex-launcher-"));
     const eventsPath = resolve(directory, "events.jsonl");
     const fixturePath = resolve(directory, "fake-codex.mjs");
@@ -68,7 +68,7 @@ describe("Codex launcher", () => {
           return readFileSync(\`/proc/\${process.pid}/task/\${tid}/children\`, "utf8").trim().split(/\\s+/).includes(String(pid));
         } catch { return false; }
       }) ?? null;
-      const worker = new Worker(\`
+      const workerSource = \`
         const { spawn } = require("node:child_process");
         const { parentPort } = require("node:worker_threads");
         parentPort.on("message", ({ action, label, identity }) => {
@@ -77,27 +77,35 @@ describe("Codex launcher", () => {
             parentPort.postMessage({ label, pid: child.pid });
           }
         });
-      \`, { eval: true });
-      const launch = (label, identity = "mcp-server") => new Promise((resolve) => {
+      \`;
+      const worker = new Worker(workerSource, { eval: true });
+      const peerWorker = new Worker(workerSource, { eval: true });
+      const launch = (label, identity = "mcp-server", owner = worker) => new Promise((resolve) => {
         const handle = (message) => {
           if (message.label !== label) return;
-          worker.off("message", handle);
+          owner.off("message", handle);
           const event = { ...message, ownerTid: childOwnerTid(message.pid), runtimePid: process.pid };
           appendFile(process.argv[2], JSON.stringify(event) + "\\n").then(() => resolve(event));
         };
-        worker.on("message", handle);
-        worker.postMessage({ action: "launch", label, identity });
+        owner.on("message", handle);
+        owner.postMessage({ action: "launch", label, identity });
       });
       const initial = await launch("initial");
-      setTimeout(() => launch("replacement"), 700);
+      const replacementPromise = new Promise((resolve) => setTimeout(() => resolve(launch("replacement")), 700));
+      const peerPromise = new Promise((resolve) => setTimeout(() => resolve(launch("peer", "mcp-server", peerWorker)), 725));
       const ordinaryPromise = new Promise((resolve) => setTimeout(() => resolve(launch("ordinary", "ordinary-task")), 750));
       setTimeout(async () => {
+        const replacement = await replacementPromise;
+        const peer = await peerPromise;
         const ordinary = await ordinaryPromise;
         const initialAlive = processAlive(initial.pid);
+        const replacementAlive = processAlive(replacement.pid);
+        const peerAlive = processAlive(peer.pid);
         const ordinaryAlive = processAlive(ordinary.pid);
-        await appendFile(process.argv[2], JSON.stringify({ label: "observed", initialAlive, ordinaryAlive }) + "\\n");
+        await appendFile(process.argv[2], JSON.stringify({ label: "observed", initialAlive, replacementAlive, peerAlive, ordinaryAlive }) + "\\n");
         process.kill(ordinary.pid, "SIGTERM");
         await worker.terminate();
+        await peerWorker.terminate();
       }, 1200);
       setTimeout(() => process.exit(0), 1400);
     `);
@@ -119,16 +127,32 @@ describe("Codex launcher", () => {
     });
     const events = (await readFile(eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     await rm(directory, { recursive: true, force: true });
-    expect(events.map(({ label }) => label)).toEqual(["initial", "replacement", "ordinary", "observed"]);
-    expect(events[0].ownerTid).not.toBeNull();
-    expect(events[0].ownerTid).not.toBe(String(events[0].runtimePid));
-    expect(events[3]).toMatchObject({ initialAlive: false, ordinaryAlive: true });
-    expect(() => process.kill(events[1].pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+    const byLabel = new Map(events.map((event) => [event.label, event]));
+    expect([...byLabel.keys()].sort()).toEqual(["initial", "observed", "ordinary", "peer", "replacement"]);
+    expect(byLabel.get("initial")?.ownerTid).not.toBeNull();
+    expect(byLabel.get("initial")?.ownerTid).not.toBe(String(byLabel.get("initial")?.runtimePid));
+    expect(byLabel.get("replacement")?.ownerTid).toBe(byLabel.get("initial")?.ownerTid);
+    expect(byLabel.get("peer")?.ownerTid).not.toBe(byLabel.get("initial")?.ownerTid);
+    expect(byLabel.get("observed")).toMatchObject({
+      initialAlive: false,
+      replacementAlive: true,
+      peerAlive: true,
+      ordinaryAlive: true
+    });
+    expect(() => process.kill(byLabel.get("replacement")?.pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
+    expect(() => process.kill(byLabel.get("peer")?.pid, 0)).toThrow(expect.objectContaining({ code: "ESRCH" }));
   });
 });
 
 describe("Codex child supervisor reconciliation", () => {
-  const child = (pid: number, command = "mcp-server") => ({ pid, command, startTime: pid, name: "node", executable: "node" });
+  const child = (pid: number, command = "mcp-server", ownerThreadId = 1) => ({
+    pid,
+    command,
+    startTime: pid,
+    name: "node",
+    executable: "node",
+    ownerThreadId
+  });
   const timing = (now: number) => ({ now, learningStartedAt: 0, stableChildMs: 0, startupLearningMs: 100 });
 
   it("converges after an incomplete replacement observation", async () => {
@@ -153,6 +177,42 @@ describe("Codex child supervisor reconciliation", () => {
     expect(state.reconcile([original, firstReplacement], timing(200))).toEqual([original]);
     state.forget(original.pid);
     expect(state.reconcile([firstReplacement, secondReplacement], timing(300))).toEqual([firstReplacement]);
+  });
+
+  it("keeps identical tool servers owned by different Codex worker threads", () => {
+    const state = new ChildSupervisorState();
+    const parent = child(10, "mcp-server", 101);
+    const subagent = child(20, "mcp-server", 202);
+
+    state.reconcile([parent], timing(0));
+
+    expect(state.reconcile([parent, subagent], timing(200))).toEqual([]);
+    expect([...state.managedProcesses.keys()]).toEqual([parent.pid, subagent.pid]);
+  });
+
+  it("retires a replacement only within its stable owner thread", () => {
+    const state = new ChildSupervisorState();
+    const parent = child(10, "mcp-server", 101);
+    const subagent = child(20, "mcp-server", 202);
+    const parentReplacement = child(30, "mcp-server", 101);
+
+    state.reconcile([parent], timing(0));
+    state.reconcile([parent, subagent], timing(200));
+
+    expect(state.reconcile([parent, subagent, parentReplacement], timing(300))).toEqual([parent]);
+    expect([...state.managedProcesses.keys()]).toEqual([subagent.pid, parentReplacement.pid]);
+  });
+
+  it("preserves the first observed owner for a live process", () => {
+    const state = new ChildSupervisorState();
+    const parent = child(10, "mcp-server", 101);
+    const sameProcessObservedElsewhere = child(10, "mcp-server", 202);
+    const subagent = child(20, "mcp-server", 202);
+
+    state.reconcile([parent], timing(0));
+
+    expect(state.reconcile([sameProcessObservedElsewhere, subagent], timing(200))).toEqual([]);
+    expect(state.ownerThreadIds.get(parent.pid)).toBe(101);
   });
 
   it("does not manage commands first observed after startup", () => {
