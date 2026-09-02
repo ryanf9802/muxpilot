@@ -164,6 +164,7 @@ export class SessionManager {
   private startupRecoveryCandidates: SessionRecoveryCandidate[] = [];
   private readonly restoreLocks = new Map<string, Promise<unknown>>();
   private agentMutationQueue = Promise.resolve();
+  private appServerRecoveryRunning = false;
 
   constructor(
     private readonly db: AppDatabase,
@@ -186,6 +187,7 @@ export class SessionManager {
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
+    this.runBackgroundTask("app-server recovery", () => this.recoverAppServerSessions());
     if (options.runInitialTick ?? true) {
       this.runBackgroundTask("discovery", () => this.runDiscoverTick());
       this.runBackgroundTask("ingest", () => this.runIngestTick());
@@ -203,6 +205,31 @@ export class SessionManager {
   async reconcileNow(): Promise<void> {
     await this.runDiscoverTick();
     await this.runIngestTick();
+  }
+
+  async recoverAppServerSessions(): Promise<void> {
+    if (this.appServerRecoveryRunning) return;
+    this.appServerRecoveryRunning = true;
+    try {
+      const sessions = (await this.db.listSessions(true))
+        .filter(isRecoverableAppServerSession)
+        .sort(compareAppServerRecoveryOrder);
+      if (!this.sessionDrivers?.has("codex_app_server")) {
+        for (const session of sessions) {
+          await this.markAppServerRecoveryFailed(session.id, "App-server runtime compatibility is unavailable", false);
+        }
+        return;
+      }
+      for (const session of sessions) {
+        try {
+          await this.resumeAppServerSession(session);
+        } catch (error) {
+          console.error(`Muxpilot app-server recovery failed for ${session.id}`, error);
+        }
+      }
+    } finally {
+      this.appServerRecoveryRunning = false;
+    }
   }
 
   setResourceUsageLookup(lookup: SessionResourceUsageLookup | null): void {
@@ -463,6 +490,11 @@ export class SessionManager {
   async prepareStartupRecovery(): Promise<void> {
     const previous = await this.db.getSessionRecoveryRuntime();
     const sessions = await this.db.listSessions(true);
+    const preparingAt = nowIso();
+    for (const session of sessions.filter(isRecoverableAppServerSession)) {
+      await this.db.setSessionStatus(session.id, "unknown", preparingAt);
+      await this.db.setSessionInitializing(session.id, true, preparingAt);
+    }
     this.startupRecoveryCandidates = previous && !previous.cleanShutdown
       ? previous.sessionIds
           .map((id) => sessions.find((session) => session.id === id) ?? null)
@@ -827,7 +859,7 @@ export class SessionManager {
     }
   }
 
-  private runBackgroundTask(name: "discovery" | "ingest", task: () => Promise<void>): void {
+  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery", task: () => Promise<void>): void {
     void task().catch((error) => {
       console.error(`Muxpilot ${name} background task failed`, error);
     });
@@ -2443,6 +2475,121 @@ export class SessionManager {
       }
       throw error;
     }
+  }
+
+  private async resumeAppServerSession(session: ManagedSession): Promise<ManagedSession> {
+    try {
+      return await this.performAppServerResume(session);
+    } catch (error) {
+      const startupError = error instanceof Error ? error.message : "App-server recovery failed";
+      await this.markAppServerRecoveryFailed(session.id, startupError, error instanceof AppServerRuntimeStoppedError);
+      throw error;
+    }
+  }
+
+  private async performAppServerResume(session: ManagedSession): Promise<ManagedSession> {
+    const sourceThreadId = session.provider?.threadId ?? session.codexSessionId;
+    if (!sourceThreadId) throw new Error("App-server session does not have a Codex thread id to resume");
+    const driver = this.requireAppServerDriver();
+    const documentScopeId = await this.ensureDocumentScope(session);
+    const activeModel = session.models[session.inputMode];
+    let directory: string;
+    let launchOptions: AgentSessionLaunchOptions;
+    if (session.gitWorkspace) {
+      if (!this.gitWorkspaces) throw new Error("Managed Git workspaces are unavailable during app-server recovery");
+      const workspace = await this.gitWorkspaces.getBySession(session.id);
+      if (!workspace) throw new Error(`Managed Git workspace is missing during app-server recovery: ${session.gitWorkspace.id}`);
+      directory = await this.gitWorkspaces.ensureControlPath(workspace);
+      launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
+    } else {
+      directory = await requireExistingDirectory(session.cwd ?? session.repo.root ?? session.tmux.cwd);
+      launchOptions = { environment: this.managedEnvironment };
+    }
+    const documentOptions = await this.withDocumentLaunchOptions({
+      ...launchOptions,
+      model: activeModel.model,
+      reasoningEffort: activeModel.reasoningEffort,
+      fastMode: session.fastMode
+    }, documentScopeId);
+    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    const startedAt = nowIso();
+    await this.db.setSessionStatus(session.id, "unknown", startedAt);
+    await this.db.setSessionInitializing(session.id, true, startedAt);
+    this.publish("status.changed", session.id, { status: "unknown" });
+    this.publish("session.updated", session.id, await this.db.getSession(session.id));
+
+    let recoveredLaunch: AgentSessionLaunchResult | null = null;
+    try {
+      let launch: AgentSessionLaunchResult;
+      try {
+        launch = await driver.resume({
+          sessionId: session.id,
+          name: sessionName(session),
+          cwd: directory,
+          options: prepared.options,
+          sourceThreadId
+        });
+      } catch (error) {
+        throw new AppServerRuntimeStoppedError(error);
+      }
+      recoveredLaunch = launch;
+      if (launch.sessionId !== session.id) {
+        throw new Error(`App-server driver returned the wrong resumed session id: expected ${session.id}, received ${launch.sessionId}`);
+      }
+      if (launch.provider.threadId !== sourceThreadId) {
+        throw new Error(`App-server driver resumed the wrong Codex thread: expected ${sourceThreadId}, received ${launch.provider.threadId ?? "none"}`);
+      }
+      await launch.ready;
+      const current = requireSession(await this.db.getSession(session.id));
+      await this.db.upsertSession({
+        ...current,
+        name: session.name ?? sessionName(session),
+        cwd: directory,
+        provider: launch.provider,
+        driverKind: "codex_app_server",
+        runtime: launch.runtime,
+        capabilities: launch.capabilities,
+        codexSessionId: launch.provider.threadId,
+        codexJsonlPath: launch.provider.rolloutPath,
+        resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : current.resourceUnit,
+        startupError: null
+      }, nowIso());
+      await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
+      const reconciled = await this.db.getSession(session.id);
+      const ready = await this.db.setSessionInitializationResult(
+        session.id,
+        startupReadyStatus(reconciled?.status),
+        null,
+        nowIso()
+      );
+      if (!ready) throw new Error(`App-server session disappeared during recovery: ${session.id}`);
+      this.publish("session.updated", session.id, ready);
+      return ready;
+    } catch (error) {
+      if (recoveredLaunch) {
+        await driver.kill(appServerLaunchSession(recoveredLaunch, sessionName(session), directory)).catch(() => undefined);
+        throw new AppServerRuntimeStoppedError(error);
+      }
+      throw error;
+    }
+  }
+
+  private async markAppServerRecoveryFailed(
+    sessionId: string,
+    startupError: string,
+    markRuntimeFailed = true
+  ): Promise<void> {
+    const current = await this.db.getSession(sessionId);
+    if (!current) return;
+    await this.db.upsertSession({
+      ...current,
+      runtime: markRuntimeFailed && current.runtime?.kind === "systemd_service"
+        ? { ...current.runtime, state: "failed" }
+        : current.runtime
+    }, nowIso());
+    const failed = await this.db.setSessionInitializationResult(sessionId, "startup_failed", startupError, nowIso());
+    this.publish("status.changed", sessionId, { status: "startup_failed" });
+    if (failed) this.publish("session.updated", sessionId, failed);
   }
 
   private async persistInitializingAppServerSession(
@@ -4646,6 +4793,28 @@ function appServerLaunchSession(launch: AgentSessionLaunchResult, name: string, 
     runtime: launch.runtime,
     capabilities: launch.capabilities
   } as ManagedSession;
+}
+
+function isRecoverableAppServerSession(session: ManagedSession): boolean {
+  return session.driverKind === "codex_app_server"
+    && !session.archived
+    && session.runtime?.kind === "systemd_service"
+    && (session.runtime.state === "connected" || session.runtime.state === "starting")
+    && Boolean(session.provider?.threadId ?? session.codexSessionId);
+}
+
+function compareAppServerRecoveryOrder(left: ManagedSession, right: ManagedSession): number {
+  const leftActivity = left.lastActivityAt ? Date.parse(left.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  const rightActivity = right.lastActivityAt ? Date.parse(right.lastActivityAt) : Number.NEGATIVE_INFINITY;
+  if (leftActivity !== rightActivity) return rightActivity - leftActivity;
+  return left.id.localeCompare(right.id);
+}
+
+class AppServerRuntimeStoppedError extends Error {
+  constructor(error: unknown) {
+    super(error instanceof Error ? error.message : "App-server recovery failed");
+    this.name = "AppServerRuntimeStoppedError";
+  }
 }
 
 function inferStatusFromScreen(capture: string): SessionStatus | null {

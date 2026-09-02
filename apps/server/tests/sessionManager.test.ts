@@ -5621,6 +5621,92 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("recovers connected app-server sessions recent-first without waking stopped sessions", async () => {
+    const resumeOrder: string[] = [];
+    const resume = vi.fn(async (spec: Parameters<AgentSessionDriver["resume"]>[0]) => {
+      resumeOrder.push(spec.sessionId);
+      if (spec.sessionId === "app-recovery-failed") throw new Error("resume barrier failed");
+      return {
+        sessionId: spec.sessionId,
+        provider: { kind: "codex" as const, threadId: spec.sourceThreadId!, rolloutPath: null },
+        runtime: {
+          kind: "systemd_service" as const,
+          unit: "muxpilot-session-0123456789abcdef01234567.service",
+          socketPath: `/tmp/${spec.sessionId}.sock`,
+          state: "connected" as const,
+          codexVersion: "0.152.0"
+        },
+        capabilities: appServerCapabilities(),
+        ready: Promise.resolve()
+      };
+    });
+    const driver = { kind: "codex_app_server", resume } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const appSession = (
+      id: string,
+      threadId: string,
+      state: "connected" | "starting" | "stopped",
+      lastActivityAt: string
+    ): ManagedSession => ({
+      ...agentHierarchySession(id),
+      name: id,
+      cwd: repo,
+      tmux: testPane({ cwd: repo, paneId: "%0", windowName: id }),
+      provider: { kind: "codex", threadId, rolloutPath: null },
+      driverKind: "codex_app_server",
+      runtime: {
+        kind: "systemd_service",
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: `/tmp/${id}.sock`,
+        state,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      codexSessionId: threadId,
+      lastActivityAt
+    });
+    await harness.db.upsertSession(appSession("app-recovery-recent", "thread-recent", "connected", "2026-09-01T14:00:00.000Z"), "2026-09-01T14:00:00.000Z");
+    await harness.db.upsertSession(appSession("app-recovery-failed", "thread-failed", "starting", "2026-09-01T13:00:00.000Z"), "2026-09-01T13:00:00.000Z");
+    await harness.db.upsertSession(appSession("app-recovery-stopped", "thread-stopped", "stopped", "2026-09-01T15:00:00.000Z"), "2026-09-01T15:00:00.000Z");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await harness.manager.prepareStartupRecovery();
+    expect(await harness.manager.getSession("app-recovery-recent")).toMatchObject({ status: "unknown", initializing: true });
+    expect(await harness.manager.getSession("app-recovery-failed")).toMatchObject({ status: "unknown", initializing: true });
+    expect(await harness.manager.getSession("app-recovery-stopped")).toMatchObject({ status: "waiting", initializing: false });
+    await harness.manager.recoverAppServerSessions();
+
+    expect(resumeOrder).toEqual(["app-recovery-recent", "app-recovery-failed"]);
+    expect(resume).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      sessionId: "app-recovery-recent",
+      cwd: repo,
+      sourceThreadId: "thread-recent"
+    }));
+    expect(await harness.manager.getSession("app-recovery-recent")).toMatchObject({
+      status: "waiting",
+      initializing: false,
+      runtime: { state: "connected" }
+    });
+    expect(await harness.manager.getSession("app-recovery-failed")).toMatchObject({
+      status: "startup_failed",
+      initializing: false,
+      startupError: "resume barrier failed",
+      runtime: { state: "failed" }
+    });
+    expect(await harness.manager.getSession("app-recovery-stopped")).toMatchObject({
+      status: "waiting",
+      runtime: { state: "stopped" }
+    });
+    expect(consoleError).toHaveBeenCalledWith(
+      "Muxpilot app-server recovery failed for app-recovery-failed",
+      expect.any(Error)
+    );
+    consoleError.mockRestore();
+    harness.db.close();
+  });
+
   it("normalizes created session names before creating tmux windows", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
