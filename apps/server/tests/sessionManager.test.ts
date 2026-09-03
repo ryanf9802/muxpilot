@@ -5687,9 +5687,25 @@ describe("SessionManager transcript isolation", () => {
       text: "Choose",
       payload: {
         source: "codex_app_server",
+        method: "item/tool/requestUserInput",
         question: {
           id: "question-9",
           requestId: "question-9",
+          questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }]
+        }
+      }
+    });
+    await harness.db.appendMessage({
+      id: "question-transcript-copy",
+      sessionId: session.id,
+      sequence: await harness.db.nextSequence(session.id),
+      type: "question_request",
+      role: "system",
+      timestamp: "2026-09-01T12:01:00.001Z",
+      text: "Choose",
+      payload: {
+        question: {
+          id: "tool-call-id",
           questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }]
         }
       }

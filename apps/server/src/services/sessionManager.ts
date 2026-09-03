@@ -1507,7 +1507,10 @@ export class SessionManager {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return null;
     if (session.driverKind === "codex_app_server" && session.status !== "question") return null;
-    const latestQuestionMessage = await this.db.latestQuestionMessage(sessionId);
+    const latestQuestionMessage = await this.db.latestQuestionMessage(
+      sessionId,
+      session.driverKind === "codex_app_server"
+    );
     const message = activeQuestionMessage(
       latestQuestionMessage,
       await this.latestQuestionAnswerMessage(sessionId, latestQuestionMessage),

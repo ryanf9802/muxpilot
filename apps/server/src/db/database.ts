@@ -762,8 +762,8 @@ export class AppDatabase {
     return this.call("latestApprovalMessage", sessionId) as Promise<ChatMessage | null>;
   }
 
-  latestQuestionMessage(sessionId: string): Promise<ChatMessage | null> {
-    return this.call("latestQuestionMessage", sessionId) as Promise<ChatMessage | null>;
+  latestQuestionMessage(sessionId: string, appServerRequestOnly = false): Promise<ChatMessage | null> {
+    return this.call("latestQuestionMessage", sessionId, appServerRequestOnly) as Promise<ChatMessage | null>;
   }
 
   latestQuestionAnswerMessage(sessionId: string, questionId: string, afterSequence: number): Promise<ChatMessage | null> {
@@ -2571,15 +2571,19 @@ export class SyncAppDatabase {
     };
   }
 
-  latestQuestionMessage(sessionId: string): ChatMessage | null {
+  latestQuestionMessage(sessionId: string, appServerRequestOnly = false): ChatMessage | null {
     const row = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ? AND type = 'question_request'
+           AND (? = 0 OR (
+             json_extract(payload_json, '$.source') = 'codex_app_server'
+             AND json_extract(payload_json, '$.method') = 'item/tool/requestUserInput'
+           ))
          ORDER BY sequence DESC
          LIMIT 1`
       )
-      .get(sessionId) as MessageRow | undefined;
+      .get(sessionId, appServerRequestOnly ? 1 : 0) as MessageRow | undefined;
 
     if (!row) return null;
     return hydrateMessage(row);
