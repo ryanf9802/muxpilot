@@ -261,7 +261,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         threadId,
         PLAN_IMPLEMENTATION_MESSAGE,
         request.clientMessageId,
-        turnOptions(implementationSession)
+        await implementationTurnOptions(protocol, implementationSession)
       );
       this.activeTurns.set(session.id, response.turn.id);
       return {
@@ -286,13 +286,14 @@ export class CodexAppServerDriver implements AgentSessionDriver {
       handlers: this.handlers(session.id)
     });
     const text = `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${request.plan.trim()}`;
+    const protocol = new CodexAppServerProtocol(connection.rpc);
     let response: Awaited<ReturnType<CodexAppServerProtocol["startTurn"]>>;
     try {
-      response = await new CodexAppServerProtocol(connection.rpc).startTurn(
+      response = await protocol.startTurn(
         connection.threadId,
         text,
         request.clientMessageId,
-        turnOptions(implementationSession)
+        await implementationTurnOptions(protocol, implementationSession)
       );
     } catch (error) {
       const unresolved = await this.requestStore?.listUnresolvedAppServerRequests(session.id) ?? [];
@@ -592,6 +593,17 @@ function turnOptions(session: ManagedSession): Record<string, unknown> {
       settings: { model: selected.model, reasoning_effort: selected.reasoningEffort }
     } : null
   };
+}
+
+async function implementationTurnOptions(
+  protocol: CodexAppServerProtocol,
+  session: ManagedSession
+): Promise<Record<string, unknown>> {
+  const options = turnOptions(session);
+  if (options.collaborationMode === null) {
+    options.collaborationMode = await protocol.resolveDefaultCollaborationMode("default");
+  }
+  return options;
 }
 
 function receipt(threadId: string, turnId: string, clientMessageId: string, now: Date): DriverInputReceipt {

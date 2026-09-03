@@ -258,7 +258,16 @@ describe("CodexAppServerDriver", () => {
   it("implements plans on the current thread and in a genuinely fresh thread", async () => {
     const harness = createHarness();
     const session = managedSession();
+    session.inputMode = "plan";
+    session.models.default = { model: null, reasoningEffort: null };
+    session.models.plan = { model: null, reasoningEffort: null };
     await harness.driver.start(launchSpec());
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "turn/start") return { turn: { id: "turn-1" } };
+      if (method === "model/list") return { data: [{ model: "gpt-default", isDefault: true }] };
+      if (method === "collaborationMode/list") return { data: [{ mode: "default", reasoning_effort: "medium" }] };
+      return {};
+    });
 
     const implemented = await harness.driver.choosePlanAction(session, "implement", {
       plan: "1. Build it",
@@ -267,7 +276,15 @@ describe("CodexAppServerDriver", () => {
     expect(harness.rpc.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({
       threadId: "thread-1",
       clientUserMessageId: "implement-message",
-      input: [{ type: "text", text: "Implement the plan." }]
+      input: [{ type: "text", text: "Implement the plan." }],
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-default",
+          reasoning_effort: "medium",
+          developer_instructions: null
+        }
+      }
     }));
     expect(implemented).toMatchObject({
       provider: { threadId: "thread-1" },
@@ -291,7 +308,15 @@ describe("CodexAppServerDriver", () => {
     expect(harness.rpc.request).toHaveBeenLastCalledWith("turn/start", expect.objectContaining({
       threadId: "thread-fresh",
       clientUserMessageId: "clear-message",
-      input: [{ type: "text", text: expect.stringContaining("Implement the plan in a fresh context") }]
+      input: [{ type: "text", text: expect.stringContaining("Implement the plan in a fresh context") }],
+      collaborationMode: {
+        mode: "default",
+        settings: {
+          model: "gpt-default",
+          reasoning_effort: "medium",
+          developer_instructions: null
+        }
+      }
     }));
     expect(cleared).toMatchObject({
       provider: { threadId: "thread-fresh" },
