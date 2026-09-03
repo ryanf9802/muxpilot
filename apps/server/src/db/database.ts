@@ -616,6 +616,10 @@ export class AppDatabase {
     return this.call("updateMessagePayload", message, payload) as Promise<ChatMessage | null>;
   }
 
+  updateMuxpilotSubmission(message: ChatMessage, changes: Record<string, unknown>): Promise<ChatMessage | null> {
+    return this.call("updateMuxpilotSubmission", message, changes) as Promise<ChatMessage | null>;
+  }
+
   listMessages(sessionId: string, afterSequence = 0): Promise<ChatMessage[]> {
     return this.call("listMessages", sessionId, afterSequence) as Promise<ChatMessage[]>;
   }
@@ -1852,6 +1856,26 @@ export class SyncAppDatabase {
       )
       .run(JSON.stringify(payload), message.id, message.sessionId);
     return Number(result.changes) > 0 ? { ...message, payload } : null;
+  }
+
+  updateMuxpilotSubmission(message: ChatMessage, changes: Record<string, unknown>): ChatMessage | null {
+    const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
+      .get(message.id, message.sessionId) as MessageRow | undefined;
+    if (!row) return null;
+    const current = hydrateMessage(row);
+    const submission = recordValue(current.payload.muxpilotSubmission) ?? {};
+    const payload = {
+      ...current.payload,
+      muxpilotSubmission: { ...submission, ...changes }
+    };
+    const result = this.db
+      .prepare(
+        `UPDATE messages
+         SET payload_json = ?
+         WHERE id = ? AND session_id = ?`
+      )
+      .run(JSON.stringify(payload), current.id, current.sessionId);
+    return Number(result.changes) > 0 ? { ...current, payload } : null;
   }
 
   listMessages(sessionId: string, afterSequence = 0): ChatMessage[] {

@@ -3552,11 +3552,7 @@ export class SessionManager {
   }
 
   private async updateInputDelivery(message: ChatMessage, changes: Record<string, unknown>): Promise<ChatMessage> {
-    const current = muxpilotSubmission(message) ?? {};
-    const updated = await this.db.updateMessagePayload(message, {
-      ...message.payload,
-      muxpilotSubmission: { ...current, ...changes }
-    });
+    const updated = await this.db.updateMuxpilotSubmission(message, changes);
     if (!updated) throw new Error("Could not persist input delivery state");
     return updated;
   }

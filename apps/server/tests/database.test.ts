@@ -298,6 +298,48 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("merges input delivery state into the latest projected payload atomically", async () => {
+    const db = await tempDb();
+    const session = testSession("session-atomic-input-delivery");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Keep projected identity", "2026-07-07T00:00:01.000Z"),
+      payload: { muxpilotSubmission: { state: "pending", attemptCount: 1 } }
+    };
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.updateMessagePayload(submitted, {
+      source: "codex_app_server",
+      codexItemIdentity: {
+        threadId: "thread-atomic",
+        turnId: "turn-atomic",
+        itemId: "item-atomic",
+        clientMessageId: submitted.id
+      },
+      muxpilotSubmission: submitted.payload.muxpilotSubmission
+    })).not.toBeNull();
+
+    expect(await db.updateMuxpilotSubmission(submitted, {
+      state: "acknowledged",
+      acknowledgedBy: "app_server_receipt",
+      threadId: "thread-atomic",
+      turnId: "turn-atomic"
+    })).toMatchObject({
+      id: submitted.id,
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: { clientMessageId: submitted.id },
+        muxpilotSubmission: {
+          state: "acknowledged",
+          attemptCount: 1,
+          acknowledgedBy: "app_server_receipt",
+          threadId: "thread-atomic",
+          turnId: "turn-atomic"
+        }
+      }
+    });
+    await db.close();
+  });
+
   it("binds a receipt-acknowledged app-server submission before the rollout echo arrives", async () => {
     const db = await tempDb();
     const session = testSession("session-app-server-submission-race");
