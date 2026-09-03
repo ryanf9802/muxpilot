@@ -44,7 +44,7 @@ const events = new EventBus();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
-const gitWorkflowBrokerSocketPath = join(config.dataDir, "runtime", "git-workflow-broker.sock");
+const gitWorkflowBrokerSocketPath = join(config.dataDir, "runtime", "git-workflow-broker", "broker.sock");
 const gitWorkflowBroker = new GitWorkflowBroker(db, gitWorkflowBrokerSocketPath, app.log);
 await gitWorkflowBroker.start();
 const gitWorkspaces = new GitWorkspaceManager(db, {

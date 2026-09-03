@@ -36,7 +36,7 @@ describe("muxpilot shadow start helper", () => {
 
     const long = shadowSocketPathSafety(`/home/user/${"deep-checkout/".repeat(8)}muxpilot`);
     expect(long.safe).toBe(false);
-    expect(long.unsafePaths.some(({ path }) => path.endsWith("git-workflow-broker.sock"))).toBe(true);
+    expect(long.unsafePaths.some(({ path }) => path.endsWith("git-workflow-broker/broker.sock"))).toBe(true);
     expect(long.unsafePaths.every(({ bytes }) => bytes > long.maxBytes)).toBe(true);
   });
 

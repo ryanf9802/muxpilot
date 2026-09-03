@@ -26,7 +26,7 @@ describe("GitWorkflowBroker", () => {
     await git(root, ["add", "base.txt", ".gitignore"]);
     await git(root, ["commit", "-m", "base"]);
     const db = new AppDatabase(join(root, "muxpilot.db"));
-    const socket = join(root, "runtime", "broker.sock");
+    const socket = join(root, "runtime", "git-workflow-broker", "broker.sock");
     const broker = new GitWorkflowBroker(db, socket, { info: vi.fn(), warn: vi.fn() });
     await broker.start();
     const manager = new GitWorkspaceManager(db, {

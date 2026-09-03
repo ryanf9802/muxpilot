@@ -11,7 +11,7 @@ const CAPABILITY_ID_EXAMPLE = "f".repeat(24);
 export function shadowSocketPathSafety(shadowRoot) {
   const dataDir = resolve(shadowRoot, "data", "shadow");
   const paths = [
-    join(dataDir, "runtime", "git-workflow-broker.sock"),
+    join(dataDir, "runtime", "git-workflow-broker", "broker.sock"),
     join(dataDir, "runtime", "docker-guard.sock"),
     join(dataDir, "runtime", "session-orchestration.sock"),
     join(dataDir, "runtime", "app-server-sessions", CAPABILITY_ID_EXAMPLE, "app-server.sock")
