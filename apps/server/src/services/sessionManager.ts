@@ -4257,6 +4257,7 @@ export function managedCodexLaunchOptions(
   return {
     isolatedWorkspace: true,
     writableRoots: [
+      workspace.controlPath,
       implementationRoot,
       workspace.commonGitDir,
       worktreeRoot,

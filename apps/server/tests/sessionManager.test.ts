@@ -159,6 +159,7 @@ describe("managed Codex launch instructions", () => {
       sessionId: "session-shadow",
       sessionName: "shadow-task",
       commonGitDir: "/repo/.git",
+      controlPath: "/tmp/control/shadow-task",
       implementationRoot: "/tmp/worktrees/shadow-task",
       helperToken: "token",
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -174,6 +175,7 @@ describe("managed Codex launch instructions", () => {
       MUXPILOT_GIT_HELPER_DIR: "/opt/muxpilot-shadow/skills/muxpilot-git-workflow/scripts"
     });
     expect(options.developerInstructions).toContain("/opt/muxpilot-shadow/skills/muxpilot-git-workflow/scripts");
+    expect(options.writableRoots).toContain("/tmp/control/shadow-task");
   });
 });
 
