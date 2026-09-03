@@ -472,6 +472,53 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("reconciles a delayed app-server echo by exact client message identity", async () => {
+    const db = await tempDb();
+    const session = testSession("session-delayed-app-server-echo");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Queued during recovery", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z",
+          clientMessageId: `${session.id}-1`
+        }
+      }
+    };
+    const identity = {
+      threadId: "thread-app",
+      turnId: "turn-app",
+      itemId: "item-user-app-server",
+      clientMessageId: submitted.id
+    };
+    const delayedEcho = {
+      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:07.000Z"),
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: identity,
+        appServerIdentity: identity
+      }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(delayedEcho)).toBe(false);
+    expect(await db.listMessages(session.id, 0)).toEqual([
+      expect.objectContaining({
+        id: submitted.id,
+        sequence: submitted.sequence,
+        text: submitted.text,
+        payload: expect.objectContaining({
+          source: "codex_app_server",
+          codexItemIdentity: identity,
+          muxpilotSubmission: submitted.payload.muxpilotSubmission
+        })
+      })
+    ]);
+    await db.close();
+  });
+
   it("upgrades the same reconciled submission when the rollout echo wins the race", async () => {
     const db = await tempDb();
     const session = testSession("session-rollout-submission-race");

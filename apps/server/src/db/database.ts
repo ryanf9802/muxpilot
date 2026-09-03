@@ -1710,7 +1710,7 @@ export class SyncAppDatabase {
       !submitted ||
       !isMuxpilotSubmissionMessage(submitted) ||
       submitted.text !== message.text ||
-      !timestampsAreNear(submissionAttemptTimestamp(submitted), message.timestamp)
+      (!exactRow && !timestampsAreNear(submissionAttemptTimestamp(submitted), message.timestamp))
     ) return false;
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
