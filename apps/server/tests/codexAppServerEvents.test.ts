@@ -52,6 +52,17 @@ describe("projectAppServerEvent", () => {
     expect(first?.message?.timestamp).toBe("2026-09-01T16:00:00.000Z");
   });
 
+  it("does not regress completed-turn status for late command completion", () => {
+    expect(projectAppServerEvent({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "command-1", type: "commandExecution", processId: "process-1", status: "completed", command: "sleep 30" }
+      }
+    }, receivedAt)).toMatchObject({ status: null, message: { type: "command_output", text: "sleep 30" } });
+  });
+
   it("preserves client message correlation and normalizes completed plans", () => {
     const user = projectAppServerEvent({
       method: "item/completed",

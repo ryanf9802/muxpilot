@@ -357,6 +357,30 @@ describe("CodexAppServerDriver", () => {
     expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
   });
 
+  it("interrupts the turn and terminates surviving background terminals", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.driver.sendMessage(session, "work", "client-1");
+    await harness.handlers.notification?.({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "command-1", type: "commandExecution", processId: "process-1" }
+      }
+    });
+    harness.rpc.request.mockResolvedValue({});
+
+    await harness.driver.interrupt(session, null);
+
+    expect(harness.rpc.request.mock.calls.slice(-2)).toEqual([
+      ["turn/interrupt", { threadId: "thread-1", turnId: "turn-1" }],
+      ["thread/backgroundTerminals/terminate", { threadId: "thread-1", processId: "process-1" }]
+    ]);
+    await expect(harness.driver.interrupt(session, null)).rejects.toThrow("without an active turn id");
+  });
+
   it("blocks hibernation for background terminals and otherwise stops cleanly", async () => {
     const harness = createHarness();
     const session = managedSession();

@@ -82,6 +82,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
   private readonly subscribers = new Map<string, Set<(event: DriverEvent) => void>>();
   private readonly activeTurns = new Map<string, string>();
+  private readonly turnProcesses = new Map<string, Map<string, Set<string>>>();
   private readonly pendingRequests = new Map<string, {
     sessionId: string;
     id: string | number;
@@ -161,6 +162,12 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const turnId = expectedTurnId ?? this.activeTurns.get(session.id);
     if (!turnId) throw new Error("Cannot interrupt app-server session without an active turn id");
     await protocol.interruptTurn(threadId, turnId);
+    const processIds = [...(this.turnProcesses.get(session.id)?.get(turnId) ?? [])];
+    for (const processId of processIds) {
+      await protocol.terminateBackgroundTerminal(threadId, processId);
+    }
+    this.turnProcesses.get(session.id)?.delete(turnId);
+    this.activeTurns.delete(session.id);
   }
 
   async kill(session: ManagedSession): Promise<void> {
@@ -178,6 +185,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     }
     await this.connections.close(session.id).catch(() => undefined);
     this.activeTurns.delete(session.id);
+    this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
     await this.supervisor.stop(runtime);
   }
@@ -228,6 +236,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
       throw error;
     }
     this.activeTurns.delete(session.id);
+    this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
     return { ...stopped, state: "hibernated" };
   }
@@ -388,6 +397,10 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         if (method === "turn/started") {
           const turnId = nestedId(params, "turn");
           if (turnId) this.activeTurns.set(sessionId, turnId);
+        } else if (method === "item/started") {
+          this.trackTurnProcess(sessionId, params);
+        } else if (method === "item/completed") {
+          this.releaseTurnProcess(sessionId, params);
         } else if (method === "turn/completed") {
           const turnId = nestedId(params, "turn");
           const activeTurnId = this.activeTurns.get(sessionId);
@@ -497,6 +510,30 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     for (const [key, pending] of this.pendingRequests) {
       if (pending.sessionId === sessionId) this.pendingRequests.delete(key);
     }
+  }
+
+  private trackTurnProcess(sessionId: string, params: unknown): void {
+    const item = recordValue(params, "item");
+    const turnId = directString(params, "turnId");
+    const processId = directString(item, "processId");
+    if (item?.type !== "commandExecution" || !turnId || !processId) return;
+    const turns = this.turnProcesses.get(sessionId) ?? new Map<string, Set<string>>();
+    const processes = turns.get(turnId) ?? new Set<string>();
+    processes.add(processId);
+    turns.set(turnId, processes);
+    this.turnProcesses.set(sessionId, turns);
+  }
+
+  private releaseTurnProcess(sessionId: string, params: unknown): void {
+    const item = recordValue(params, "item");
+    const turnId = directString(params, "turnId");
+    const processId = directString(item, "processId");
+    if (!turnId || !processId) return;
+    const turns = this.turnProcesses.get(sessionId);
+    const processes = turns?.get(turnId);
+    processes?.delete(processId);
+    if (processes?.size === 0) turns?.delete(turnId);
+    if (turns?.size === 0) this.turnProcesses.delete(sessionId);
   }
 }
 

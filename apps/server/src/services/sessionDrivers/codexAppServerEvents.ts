@@ -309,7 +309,7 @@ function itemStatus(item: Record<string, unknown> | null, started: boolean): Ses
   if (type === "plan") return started ? "planning" : "plan_ready";
   if (type === "commandExecution") {
     const processId = string(item?.processId);
-    return started && processId ? "running" : "executing";
+    return started ? (processId ? "running" : "executing") : null;
   }
   if (type === "fileChange" || type === "mcpToolCall" || type === "dynamicToolCall" || type === "collabAgentToolCall") {
     return "working";
