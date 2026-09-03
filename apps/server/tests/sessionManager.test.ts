@@ -5123,6 +5123,59 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("merges initial app-server rollout ingestion without clearing a persisted submission", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "app-server-repo");
+    await mkdir(repo);
+    const rolloutPath = join(harness.codexHome, "sessions", "app-server-initial.jsonl");
+    await writeCodexSession(harness.codexHome, "app-server-initial.jsonl", {
+      sessionId: "thread-app-server-initial",
+      cwd: repo,
+      user: "submitted task",
+      assistant: "task complete",
+      mtime: new Date("2026-07-07T00:00:03.000Z")
+    });
+    const session: ManagedSession = {
+      ...appServerSession("app-server-initial", "thread-app-server-initial", "working"),
+      cwd: repo,
+      provider: { kind: "codex", threadId: "thread-app-server-initial", rolloutPath },
+      codexJsonlPath: rolloutPath
+    };
+    await harness.db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted: ChatMessage = {
+      id: "client-app-server-initial",
+      sessionId: session.id,
+      sequence: 1,
+      type: "user",
+      role: "user",
+      timestamp: "2026-07-07T00:00:01.000Z",
+      text: "submitted task",
+      payload: {
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          acknowledgedBy: "app_server_receipt",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z",
+          clientMessageId: "client-app-server-initial"
+        }
+      }
+    };
+    expect(await harness.db.appendMessage(submitted)).toBe(true);
+
+    await harness.manager.ingest();
+
+    expect((await harness.manager.listMessages(session.id, 0)).map((message) => ({
+      id: message.id,
+      text: message.text,
+      acknowledgedBy: (message.payload.muxpilotSubmission as { acknowledgedBy?: string } | undefined)?.acknowledgedBy
+    }))).toEqual([
+      { id: submitted.id, text: "submitted task", acknowledgedBy: "app_server_receipt" },
+      { id: expect.any(String), text: "task complete", acknowledgedBy: undefined }
+    ]);
+    expect(await harness.db.hasParserOffset(`${session.id}:${rolloutPath}`)).toBe(true);
+    harness.db.close();
+  });
+
   it("drains a multi-batch live transcript without revisiting caught-up missing sessions", async () => {
     const harness = await createHarness();
     const liveRepo = join(harness.dir, "live-repo");

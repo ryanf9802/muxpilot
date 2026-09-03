@@ -947,7 +947,11 @@ export class SessionManager {
     try {
       const offsetKey = parserOffsetKey(session.id, source);
       const hasOffset = await this.db.hasParserOffset(offsetKey);
-      if (!hasOffset && (await this.db.latestMessageSequence(session.id)) > 0) {
+      if (
+        session.driverKind !== "codex_app_server" &&
+        !hasOffset &&
+        (await this.db.latestMessageSequence(session.id)) > 0
+      ) {
         await this.db.clearSessionTranscript(session.id);
       }
       const offset = await this.db.getParserOffset(offsetKey);
