@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import { RawSessionEvidenceReader } from "../src/services/rawSessionEvidence.js";
-import { appServerCapabilityId } from "../src/services/sessionDrivers/appServerRuntime.js";
 
 describe("RawSessionEvidenceReader", () => {
   it("returns verbatim pane listings and captures with explicit tmux options", async () => {
@@ -106,7 +105,7 @@ describe("RawSessionEvidenceReader", () => {
     const session = appServerSession("app-evidence");
     await writeProcess(procRoot, 700, "701 ", "codex\0app-server\0", "Name:\tcodex\n", "0::/muxpilot.service\n");
     await writeProcess(procRoot, 701, "", "node\0dev-server\0", "Name:\tnode\n", "0::/muxpilot.service\n");
-    const journalDir = join(dataDir, "protocol", "app-server-sessions", appServerCapabilityId(session.id));
+    const journalDir = join(dataDir, "protocol", "app-server-sessions", "0123456789abcdef01234567");
     await mkdir(journalDir, { recursive: true });
     await writeFile(join(journalDir, "protocol.jsonl"), "one\ntwo\n");
     const runCommand = vi.fn(async (_command: string, args: string[]) => ({

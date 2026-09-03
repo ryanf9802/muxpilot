@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -43,7 +42,7 @@ const PANE_FORMAT = [
   "#{pid}",
   "#{session_created}"
 ].join("\t");
-const APP_SERVER_UNIT = /^muxpilot-session-[a-f0-9]{24}\.service$/;
+const APP_SERVER_UNIT = /^muxpilot-session-([a-f0-9]{24})\.service$/;
 
 type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string }>;
 
@@ -187,7 +186,10 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
   }> {
     if (session.driverKind !== "codex_app_server") throw new Error("Protocol journals are available only for app-server sessions");
     if (!this.dataDir) throw new Error("App-server protocol journal storage is unavailable");
-    const capabilityId = createHash("sha256").update(`muxpilot-app-server:${session.id}`).digest("hex").slice(0, 24);
+    const capabilityId = session.runtime?.kind === "systemd_service"
+      ? session.runtime.unit.match(APP_SERVER_UNIT)?.[1]
+      : null;
+    if (!capabilityId) throw new Error("App-server session has no valid owned runtime unit");
     const path = join(resolve(this.dataDir), "protocol", "app-server-sessions", capabilityId, "protocol.jsonl");
     const result = await readFileSlice(path, offset, length);
     return { sessionId: session.id, ...result };
