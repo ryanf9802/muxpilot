@@ -30,8 +30,8 @@ describe("CodexAppServerConnectionManager", () => {
       }
     });
 
-    expect(proxy.methods).toEqual(["initialize", "thread/resume", "thread/settings/update", "thread/read"]);
-    expect(proxy.requests[1]).toMatchObject({
+    expect(proxy.methods).toEqual(["initialize", "thread/backgroundTerminals/list", "thread/resume", "thread/settings/update", "thread/read"]);
+    expect(proxy.requests[2]).toMatchObject({
       method: "thread/resume",
       params: {
         threadId: "thread-1",
@@ -41,7 +41,7 @@ describe("CodexAppServerConnectionManager", () => {
         runtimeWorkspaceRoots: ["/repo/.git", "/tmp/worktrees"]
       }
     });
-    expect(proxy.requests[2]).toMatchObject({
+    expect(proxy.requests[3]).toMatchObject({
       method: "thread/settings/update",
       params: {
         threadId: "thread-1",
@@ -54,6 +54,28 @@ describe("CodexAppServerConnectionManager", () => {
     });
     expect(connected.reconciliation.current.thread.id).toBe("thread-1");
     expect(manager.get("session-1")).toBe(connected);
+  });
+
+  it("attaches without resuming when the durable service still owns a background terminal", async () => {
+    const proxy = new FakeProtocolProxy([], "thread-1", true);
+    const manager = createManager([proxy]);
+
+    const connected = await manager.reconnect({
+      sessionId: "session-1",
+      runtime,
+      threadId: "thread-1",
+      settings: { cwd: "/repo", runtimeWorkspaceRoots: ["/repo", "/repo/.git"] }
+    });
+
+    expect(proxy.methods).toEqual([
+      "initialize",
+      "thread/backgroundTerminals/list",
+      "thread/read",
+      "thread/settings/update",
+      "thread/read"
+    ]);
+    expect(proxy.methods).not.toContain("thread/resume");
+    expect(connected.threadId).toBe("thread-1");
   });
 
   it("establishes new and forked threads through the same read barrier", async () => {
@@ -172,7 +194,8 @@ class FakeProtocolProxy {
 
   constructor(
     private readonly replayRequests: Array<{ id: string; method: string; params: unknown }> = [],
-    private readonly responseThreadId = "thread-1"
+    private readonly responseThreadId = "thread-1",
+    private readonly backgroundTerminal = false
   ) {
     this.input.on("data", (chunk) => {
       this.buffer += chunk.toString("utf8");
@@ -194,6 +217,8 @@ class FakeProtocolProxy {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/start" || frame.method === "thread/fork") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
+        } else if (frame.method === "thread/backgroundTerminals/list") {
+          this.emit({ id: frame.id, result: { data: this.backgroundTerminal ? [{ processId: "process-1" }] : [] } });
         } else if (frame.method === "thread/settings/update") {
           this.emit({ id: frame.id, result: {} });
         } else if (frame.method === "thread/read") {

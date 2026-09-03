@@ -6097,7 +6097,13 @@ describe("SessionManager transcript isolation", () => {
       };
     });
     const setPreferences = vi.fn(async () => undefined);
-    const driver = { kind: "codex_app_server", resume, setPreferences } as unknown as AgentSessionDriver;
+    const sendMessage = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-recent",
+      turnId: "turn-recovery",
+      acceptedAt: "2026-09-01T15:00:00.000Z"
+    }));
+    const driver = { kind: "codex_app_server", resume, setPreferences, sendMessage } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -6137,6 +6143,8 @@ describe("SessionManager transcript isolation", () => {
     expect(await harness.manager.getSession("app-recovery-recent")).toMatchObject({ status: "unknown", initializing: true });
     expect(await harness.manager.getSession("app-recovery-failed")).toMatchObject({ status: "unknown", initializing: true });
     expect(await harness.manager.getSession("app-recovery-stopped")).toMatchObject({ status: "waiting", initializing: false });
+    const queued = await harness.manager.sendInput("app-recovery-recent", "queued during recovery");
+    expect(queued).toMatchObject({ queuedInput: { text: "queued during recovery", status: "queued" } });
     await harness.manager.recoverAppServerSessions();
 
     expect(resumeOrder).toEqual(["app-recovery-recent", "app-recovery-failed"]);
@@ -6146,10 +6154,18 @@ describe("SessionManager transcript isolation", () => {
       sourceThreadId: "thread-recent"
     }));
     expect(await harness.manager.getSession("app-recovery-recent")).toMatchObject({
-      status: "waiting",
+      status: "planning",
       initializing: false,
       runtime: { state: "connected" }
     });
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "app-recovery-recent", runtime: expect.objectContaining({ state: "connected" }) }),
+      "queued during recovery",
+      expect.any(String)
+    );
+    expect(await harness.manager.listQueuedInputs("app-recovery-recent")).toMatchObject([
+      { text: "queued during recovery", status: "sent" }
+    ]);
     expect(setPreferences).toHaveBeenCalledWith(
       expect.objectContaining({ id: "app-recovery-recent", runtime: expect.objectContaining({ state: "connected" }) }),
       { mode: "plan", fastMode: true }

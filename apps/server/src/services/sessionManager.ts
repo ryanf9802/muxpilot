@@ -2950,6 +2950,7 @@ export class SessionManager {
       );
       if (!ready) throw new Error(`App-server session disappeared during recovery: ${session.id}`);
       this.publish("session.updated", session.id, ready);
+      await this.processQueuedInputs(session.id);
       return ready;
     } catch (error) {
       if (recoveredLaunch) {
@@ -3630,7 +3631,9 @@ export class SessionManager {
         return;
       }
 
-      const readySession = await this.readyLiveSession(session);
+      const readySession = session.driverKind === "codex_app_server"
+        ? readyAppServerInputSession(session)
+        : await this.readyLiveSession(session);
       if (!readySession) return;
 
       const sending = { ...input, status: "sending" as const, error: null, updatedAt: nowIso() };
@@ -4456,6 +4459,17 @@ function isWorkingStatus(status: SessionStatus): boolean {
 
 function isInputReadyStatus(status: SessionStatus): boolean {
   return status === "waiting" || status === "idle";
+}
+
+function readyAppServerInputSession(session: ManagedSession): ManagedSession | null {
+  if (
+    session.initializing ||
+    session.startupError ||
+    session.runtime?.kind !== "systemd_service" ||
+    session.runtime.state !== "connected" ||
+    !isInputReadyStatus(session.status)
+  ) return null;
+  return session;
 }
 
 function isDeliveryAcknowledgingStatus(status: SessionStatus): boolean {
