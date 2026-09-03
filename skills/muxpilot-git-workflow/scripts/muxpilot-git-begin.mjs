@@ -32,6 +32,9 @@ try {
   const suffix = `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
   const branch = `muxpilot/${config.workspaceId}/${suffix}`;
   const worktreePath = join(config.worktreeRoot, suffix);
+  const branchAlreadyExists = await git(config.repoRoot, ["show-ref", "--verify", `refs/heads/${branch}`])
+    .then(() => true, () => false);
+  if (branchAlreadyExists) throw new Error(`Generated task branch already exists: ${branch}`);
   createdBranch = branch;
   createdWorktreePath = worktreePath;
   await git(config.repoRoot, ["worktree", "add", "-b", branch, worktreePath, targetSha]);
