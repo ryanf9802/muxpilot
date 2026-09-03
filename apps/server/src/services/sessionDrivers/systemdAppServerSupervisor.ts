@@ -97,7 +97,11 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
 
   async stop(runtime: SystemdSessionRuntimeRef): Promise<SystemdSessionRuntimeRef> {
     this.requireOwnedRuntime(runtime);
-    await this.dependencies.run("systemctl", ["--user", "stop", runtime.unit]);
+    try {
+      await this.dependencies.run("systemctl", ["--user", "stop", runtime.unit]);
+    } catch (error) {
+      if (!isMissingSystemdUnitError(error)) throw error;
+    }
     await rm(runtime.socketPath, { force: true });
     return { ...runtime, state: "stopped" };
   }
@@ -143,6 +147,14 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       throw new Error(`Refusing app-server socket outside its owned runtime path: ${runtime.socketPath}`);
     }
   }
+}
+
+function isMissingSystemdUnitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const stderr = typeof error === "object" && error !== null && "stderr" in error
+    ? String(error.stderr)
+    : "";
+  return /\bUnit\s+muxpilot-session-[0-9a-f]{24}\.service\s+not (?:found|loaded)\.\s*$/m.test(`${message}\n${stderr}`);
 }
 
 export function appServerServiceUnit(capabilityId: string): string {

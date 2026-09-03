@@ -85,6 +85,22 @@ describe("SystemdAppServerSupervisor", () => {
     expect(run).toHaveBeenCalledWith("systemctl", ["--user", "stop", runtime.unit]);
   });
 
+  it("treats an already-absent owned service as stopped but preserves unrelated failures", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-absent-stop-"));
+    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "hibernated" as const, codexVersion: "0.152.0" };
+    const absent = Object.assign(new Error(`Command failed: systemctl --user stop ${runtime.unit}`), {
+      stderr: `Failed to stop ${runtime.unit}: Unit ${runtime.unit} not loaded.\n`
+    });
+    const unrelated = Object.assign(new Error("systemd user manager unavailable"), { stderr: "Failed to connect to bus\n" });
+    const run = vi.fn()
+      .mockRejectedValueOnce(absent)
+      .mockRejectedValueOnce(unrelated);
+    const supervisor = new SystemdAppServerSupervisor(root, { run });
+
+    await expect(supervisor.stop(runtime)).resolves.toEqual({ ...runtime, state: "stopped" });
+    await expect(supervisor.stop(runtime)).rejects.toThrow("systemd user manager unavailable");
+  });
+
   it("fails closed for invalid capability ids and unavailable services", async () => {
     expect(() => appServerServiceUnit("../escape")).toThrow(/24 lowercase hexadecimal/);
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-missing-"));
