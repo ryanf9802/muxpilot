@@ -34,6 +34,7 @@ interface SupervisorDependencies {
 interface SystemdAppServerSupervisorOptions {
   startTimeoutMs?: number;
   socketPollMs?: number;
+  executablePath?: string;
 }
 
 export class SystemdAppServerSupervisor implements RuntimeSupervisor {
@@ -41,6 +42,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
   private readonly dependencies: SupervisorDependencies;
   private readonly startTimeoutMs: number;
   private readonly socketPollMs: number;
+  private readonly executablePath: string | null;
 
   constructor(
     runtimeRoot: string,
@@ -51,13 +53,18 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     this.dependencies = { ...defaultDependencies(), ...dependencies };
     this.startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.socketPollMs = options.socketPollMs ?? DEFAULT_SOCKET_POLL_MS;
+    this.executablePath = options.executablePath ?? process.env.PATH ?? null;
   }
 
   async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef> {
     const paths = runtimePaths(this.runtimeRoot, spec.capabilityId);
     await preparePrivateDirectory(this.runtimeRoot);
     await preparePrivateDirectory(paths.directory);
-    await writeEnvironmentFile(paths.environmentPath, { ...spec.environment, CODEX_HOME: spec.codexHome });
+    await writeEnvironmentFile(paths.environmentPath, {
+      ...spec.environment,
+      ...(this.executablePath ? { PATH: this.executablePath } : {}),
+      CODEX_HOME: spec.codexHome
+    });
 
     const runtime: SystemdSessionRuntimeRef = {
       kind: "systemd_service",

@@ -27,6 +27,8 @@ Shadow mode forcibly uses:
 
 An unused private tmux namespace has no server process or panes. Its missing socket is treated as an empty pane inventory; selecting the explicit legacy-tmux driver creates the namespace on demand.
 
+App-server systemd services receive the launching muxpilot server's executable search path in their private environment file. This is required when `codex` and its Node interpreter are installed through a user-level version manager such as NVM.
+
 These values override `.env` and `.env.local`. Shadow mode disables LAN/HTTPS exposure and resource governance by default, does not synchronize bundled skills into `~/.codex`, and does not read or copy the production database.
 
 ## Safety boundary

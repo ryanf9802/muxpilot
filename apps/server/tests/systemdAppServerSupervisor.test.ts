@@ -33,7 +33,7 @@ describe("SystemdAppServerSupervisor", () => {
       openProxy: vi.fn(() => proxy),
       delay: vi.fn(async () => undefined),
       now: vi.fn(() => 0)
-    });
+    }, { executablePath: "/node/bin:/usr/bin" });
 
     const runtime = await supervisor.start(spec(root));
 
@@ -56,7 +56,7 @@ describe("SystemdAppServerSupervisor", () => {
     expect((await stat(root)).mode & 0o777).toBe(0o700);
     expect((await stat(paths.directory)).mode & 0o777).toBe(0o700);
     expect((await stat(paths.environmentPath)).mode & 0o777).toBe(0o600);
-    expect(await readFile(paths.environmentPath, "utf8")).toBe(`CODEX_HOME="${root}/codex"\nMUXPILOT_DOCUMENTS_DIR="/documents"\n`);
+    expect(await readFile(paths.environmentPath, "utf8")).toBe(`CODEX_HOME="${root}/codex"\nMUXPILOT_DOCUMENTS_DIR="/documents"\nPATH="/node/bin:/usr/bin"\n`);
     await expect(supervisor.reconnect(runtime)).resolves.toBe(proxy);
     await expect(supervisor.inspect(runtime)).resolves.toMatchObject({
       mainPid: 4242,
@@ -96,6 +96,6 @@ function spec(root: string): RuntimeStartSpec {
     cwd: "/repo",
     codexHome: `${root}/codex`,
     codexVersion: "0.152.0",
-    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents" }
+    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents", PATH: "/untrusted/session/path" }
   };
 }
