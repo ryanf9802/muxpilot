@@ -100,6 +100,7 @@ if (sessionScopes.configured && !sessionScopes.available) {
 }
 const managedEnvironment: Record<string, string> = {
   ...(process.env.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {}),
+  MUXPILOT_SKILL_HOME: config.skillHome,
   MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
@@ -183,7 +184,7 @@ const heavyCommands = new HeavyCommandService(
     enabled: sessionScopes.available,
     environment: sessionScopes.environment,
     token: heavyLaunchToken,
-    runnerPath: join(config.codexHome, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"),
+    runnerPath: join(config.skillHome, "skills", "muxpilot-git-workflow", "scripts", "muxpilot-git-run.mjs"),
     logger: app.log
   }
 );

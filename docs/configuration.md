@@ -52,6 +52,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm app start dev`, `./data/prod` under `pnpm app start`, and `./data` when the server is started directly. Shadow mode forcibly uses `./data/shadow` in its launching worktree.
 - `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm app start dev`, `./data/prod/muxpilot.db` under `pnpm app start`, and `./data/muxpilot.db` when the server is started directly. Shadow mode forcibly uses `./data/shadow/muxpilot.db`.
 - `MUXPILOT_CODEX_HOME`: Codex home on the host machine, default `$HOME/.codex`.
+- `MUXPILOT_SKILL_HOME`: root containing muxpilot's installed `skills/` directory, defaulting to `MUXPILOT_CODEX_HOME`. Shadow mode forces this to its exact checkout so burn-in never updates or executes production's installed workflow helpers.
 - `MUXPILOT_SESSION_SECRET`: optional HMAC secret of at least 16 characters for persistent operator cookies across restarts.
 - `MUXPILOT_OPERATOR_TOKEN`: optional override of at least 12 characters for the generated remote access key. Normal LAN use should leave this unset.
 - `MUXPILOT_CORS_ORIGINS`: comma-separated allowlist for credentialed cross-origin API use. Not required for the normal LAN flow.

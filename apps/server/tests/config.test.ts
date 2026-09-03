@@ -7,9 +7,16 @@ describe("config LAN access validation", () => {
 
     expect(config.lanEnabled).toBe(false);
     expect(config.host).toBe("127.0.0.1");
+    expect(config.skillHome).toBe(config.codexHome);
     expect(config.defaultSessionDriver).toBe("codex_app_server");
     expect(config.operatorToken).toMatch(/^[a-z]+-[a-z]+-\d{2}-[a-z]+-[a-z]+-\d{2}$/);
     expect(requiresOperatorToken(config)).toBe(false);
+  });
+
+  it("allows workflow skills to use a separate verified root", () => {
+    const config = parseConfig({ MUXPILOT_CODEX_HOME: "/tmp/codex", MUXPILOT_SKILL_HOME: "/tmp/muxpilot-checkout" });
+    expect(config.codexHome).toBe("/tmp/codex");
+    expect(config.skillHome).toBe("/tmp/muxpilot-checkout");
   });
 
   it("allows an explicit legacy tmux creation default", () => {

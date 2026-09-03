@@ -4250,7 +4250,8 @@ export function managedCodexLaunchOptions(
   managedEnvironment: Record<string, string> = {}
 ) {
   const summary = workspace.summary;
-  const helperDir = codexHome ? join(codexHome, "skills", "muxpilot-git-workflow", "scripts") : null;
+  const skillHome = managedEnvironment.MUXPILOT_SKILL_HOME ?? codexHome;
+  const helperDir = skillHome ? join(skillHome, "skills", "muxpilot-git-workflow", "scripts") : null;
   const implementationRoot = workspace.implementationRoot ?? worktreeRoot ?? join(summary.repoRoot, ".muxpilot-worktrees", workspace.id);
   const dependencies = reusableDependencyLinks(summary.dependencyLinks ?? []);
   return {

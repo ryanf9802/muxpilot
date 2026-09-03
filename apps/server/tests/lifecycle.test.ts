@@ -125,6 +125,7 @@ describe("shadow lifecycle isolation", () => {
     });
     expect(environment.MUXPILOT_DATA_DIR).toBe(join(root, "data", "shadow"));
     expect(environment.MUXPILOT_DB_PATH).toBe(join(root, "data", "shadow", "muxpilot.db"));
+    expect(environment.MUXPILOT_SKILL_HOME).toBe(root);
     expect(environment.MUXPILOT_GIT_WORKTREE_ROOT).toBe(join(root, "data", "shadow", "git-worktrees"));
     expect(environment.MUXPILOT_GIT_SESSION_ROOT).toBe(join(root, "data", "shadow", "sessions"));
     expect(environment.MUXPILOT_HEAVY_VALIDATION_DIR).toBe(join(root, "data", "shadow", "heavy"));

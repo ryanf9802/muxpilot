@@ -299,7 +299,7 @@ export function registerRoutes(
   }));
 
   app.get("/api/codex/skills/muxpilot-git-workflow/status", { preHandler: access.requireAccess }, async (): Promise<MuxpilotGitSkillStatus> => {
-    return muxpilotGitWorkflowSkillStatus(config.codexHome);
+    return muxpilotGitWorkflowSkillStatus(config.skillHome);
   });
 
   app.get("/api/sessions/:id/skills", { preHandler: access.requireAccess }, async (request, reply): Promise<CodexSkillsResponse | void> => {
@@ -411,7 +411,7 @@ export function registerRoutes(
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {
     const body = createSessionSchema.parse(request.body) as CreateSessionRequest;
     try {
-      if (body.workspace?.mode === "git" && (await muxpilotGitWorkflowSkillStatus(config.codexHome)).status !== "current") {
+      if (body.workspace?.mode === "git" && (await muxpilotGitWorkflowSkillStatus(config.skillHome)).status !== "current") {
         return reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before creating a Git session", code: "git_skill_required" });
       }
       const session = await manager.createSession(body);
@@ -430,7 +430,7 @@ export function registerRoutes(
     try {
       const source = await manager.getSession(id);
       if (!source) throw new SessionNotFoundError("Session not found");
-      if (source.gitWorkspace && (await muxpilotGitWorkflowSkillStatus(config.codexHome)).status !== "current") {
+      if (source.gitWorkspace && (await muxpilotGitWorkflowSkillStatus(config.skillHome)).status !== "current") {
         await reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before forking a Git session", code: "git_skill_required" });
         return;
       }

@@ -152,6 +152,29 @@ describe("managed Codex launch instructions", () => {
     expect(options.writableRoots).not.toContain(dependency.sourcePath);
     expect(JSON.parse(options.environment.MUXPILOT_GIT_DEPENDENCIES)).toEqual([]);
   });
+
+  it("uses an isolated workflow skill root without changing the Codex home", () => {
+    const options = managedCodexLaunchOptions({
+      id: "workspace-shadow",
+      sessionId: "session-shadow",
+      sessionName: "shadow-task",
+      commonGitDir: "/repo/.git",
+      implementationRoot: "/tmp/worktrees/shadow-task",
+      helperToken: "token",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      summary: { id: "workspace-shadow", entryPath: "/repo", targetBranch: "main", dependencyLinks: [] }
+    } as Parameters<typeof managedCodexLaunchOptions>[0], "/home/dev/.codex", "/tmp/worktrees", {
+      MUXPILOT_SKILL_HOME: "/opt/muxpilot-shadow"
+    });
+
+    expect(options.environment).toMatchObject({
+      CODEX_HOME: "/home/dev/.codex",
+      MUXPILOT_SKILL_HOME: "/opt/muxpilot-shadow",
+      MUXPILOT_GIT_HELPER_DIR: "/opt/muxpilot-shadow/skills/muxpilot-git-workflow/scripts"
+    });
+    expect(options.developerInstructions).toContain("/opt/muxpilot-shadow/skills/muxpilot-git-workflow/scripts");
+  });
 });
 
 describe("managed Git workspace session updates", () => {
