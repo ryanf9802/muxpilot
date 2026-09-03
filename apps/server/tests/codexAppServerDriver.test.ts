@@ -90,6 +90,31 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.reconcileInput(managedSession(), "missing-client")).resolves.toBeNull();
   });
 
+  it("resolves the Codex default model when switching collaboration modes", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    session.models.plan = { model: null, reasoningEffort: null };
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "model/list") return { data: [{ model: "gpt-default", isDefault: true }] };
+      if (method === "collaborationMode/list") return { data: [{ mode: "plan", reasoning_effort: "medium" }] };
+      return {};
+    });
+
+    await harness.driver.setPreferences(session, { mode: "plan" });
+
+    expect(harness.rpc.request).toHaveBeenCalledWith("thread/settings/update", {
+      threadId: "thread-1",
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-default",
+          reasoning_effort: "medium",
+          developer_instructions: null
+        }
+      }
+    });
+  });
+
   it("fans out protocol events without allowing a subscriber to fail transport", async () => {
     const harness = createHarness();
     const observed: string[] = [];

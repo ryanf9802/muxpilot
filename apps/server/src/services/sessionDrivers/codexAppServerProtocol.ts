@@ -88,6 +88,15 @@ export interface TurnSteerResponse {
   [key: string]: unknown;
 }
 
+export interface CollaborationModeSettings {
+  mode: "default" | "plan";
+  settings: {
+    model: string;
+    reasoning_effort: string | null;
+    developer_instructions: string | null;
+  };
+}
+
 export interface ProtocolRequester {
   request<T>(method: string, params: unknown): Promise<T>;
 }
@@ -182,6 +191,31 @@ export class CodexAppServerProtocol {
     await this.rpc.request<unknown>("thread/settings/update", { ...settings, threadId });
   }
 
+  async resolveDefaultCollaborationMode(mode: "default" | "plan"): Promise<CollaborationModeSettings> {
+    const [models, modes] = await Promise.all([
+      this.rpc.request<unknown>("model/list", { limit: 100 }),
+      this.rpc.request<unknown>("collaborationMode/list", {})
+    ]);
+    const defaultModel = responseData(models).find((value) => value.isDefault === true && nonEmptyString(value.model));
+    if (!defaultModel || typeof defaultModel.model !== "string") {
+      throw new Error("Codex model list has no default model");
+    }
+    const preset = responseData(modes).find((value) => value.mode === mode);
+    if (!preset) throw new Error(`Codex collaboration mode is unavailable: ${mode}`);
+    const reasoningEffort = preset.reasoning_effort;
+    if (reasoningEffort !== null && reasoningEffort !== undefined && typeof reasoningEffort !== "string") {
+      throw new Error(`Codex collaboration mode has an invalid reasoning effort: ${mode}`);
+    }
+    return {
+      mode,
+      settings: {
+        model: defaultModel.model,
+        reasoning_effort: reasoningEffort ?? null,
+        developer_instructions: null
+      }
+    };
+  }
+
   async listBackgroundTerminals(threadId: string): Promise<unknown> {
     requireNonEmpty(threadId, "threadId");
     return this.rpc.request<unknown>("thread/backgroundTerminals/list", { threadId });
@@ -249,6 +283,15 @@ function requireTurnSteerResponse(value: unknown): TurnSteerResponse {
 
 function requireNonEmpty(value: string, name: string): void {
   if (!value.trim()) throw new Error(`${name} must not be empty`);
+}
+
+function responseData(value: unknown): Record<string, unknown>[] {
+  if (!isRecord(value) || !Array.isArray(value.data)) throw new Error("Codex list response is missing data");
+  return value.data.filter(isRecord);
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 function validateThreadSettings(settings: Partial<ThreadLaunchSettings>): void {

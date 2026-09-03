@@ -322,11 +322,16 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     if (preferences.fastMode !== undefined) settings.serviceTier = preferences.fastMode ? "fast" : null;
     if (preferences.mode) {
       const selected = preferences.model ?? session.models[preferences.mode];
-      if (!selected.model) throw new Error("Cannot select collaboration mode without a model");
-      settings.collaborationMode = {
-        mode: preferences.mode,
-        settings: { model: selected.model, reasoning_effort: selected.reasoningEffort }
-      };
+      settings.collaborationMode = selected.model
+        ? {
+            mode: preferences.mode,
+            settings: {
+              model: selected.model,
+              reasoning_effort: selected.reasoningEffort,
+              developer_instructions: null
+            }
+          }
+        : await protocol.resolveDefaultCollaborationMode(preferences.mode);
     }
     await protocol.updateThreadSettings(threadId, settings);
   }

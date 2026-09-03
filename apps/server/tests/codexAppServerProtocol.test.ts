@@ -93,6 +93,36 @@ describe("CodexAppServerProtocol", () => {
     expect(request).toHaveBeenCalledWith("turn/interrupt", { threadId: "thread-1", turnId: "turn-1" });
   });
 
+  it("resolves collaboration presets against the current default model", async () => {
+    const request = vi.fn(async (method: string) => method === "model/list"
+      ? { data: [{ model: "gpt-other", isDefault: false }, { model: "gpt-default", isDefault: true }] }
+      : { data: [{ name: "Plan", mode: "plan", model: null, reasoning_effort: "medium" }] });
+    const protocol = new CodexAppServerProtocol({ request } as ProtocolRequester);
+
+    await expect(protocol.resolveDefaultCollaborationMode("plan")).resolves.toEqual({
+      mode: "plan",
+      settings: {
+        model: "gpt-default",
+        reasoning_effort: "medium",
+        developer_instructions: null
+      }
+    });
+    expect(request).toHaveBeenCalledWith("model/list", { limit: 100 });
+    expect(request).toHaveBeenCalledWith("collaborationMode/list", {});
+  });
+
+  it("fails closed when default collaboration settings cannot be resolved", async () => {
+    const missingDefault = new CodexAppServerProtocol({
+      request: async (method) => method === "model/list" ? { data: [] } : { data: [{ mode: "plan" }] }
+    });
+    const missingMode = new CodexAppServerProtocol({
+      request: async (method) => method === "model/list" ? { data: [{ model: "gpt-default", isDefault: true }] } : { data: [] }
+    });
+
+    await expect(missingDefault.resolveDefaultCollaborationMode("plan")).rejects.toThrow("no default model");
+    await expect(missingMode.resolveDefaultCollaborationMode("plan")).rejects.toThrow("mode is unavailable");
+  });
+
   it("fails closed on malformed turn responses and unsafe empty identifiers", async () => {
     const protocol = new CodexAppServerProtocol({ request: async () => ({}) });
     await expect(protocol.startTurn("thread-1", "message", "client-1")).rejects.toThrow("missing turn.id");
