@@ -10,6 +10,7 @@ import {
   REQUIRED_SERVER_REQUESTS,
   type ProtocolRequester
 } from "../src/services/sessionDrivers/codexAppServerProtocol.js";
+import { JsonRpcResponseError } from "../src/services/sessionDrivers/jsonRpcConnection.js";
 
 describe("CodexAppServerProtocol", () => {
   it("matches the normalized Codex 0.152.0 initialize fixture", async () => {
@@ -28,6 +29,32 @@ describe("CodexAppServerProtocol", () => {
     await expect(protocol.readThread("thread-1", false)).resolves.toMatchObject({ thread: { id: "read" } });
     expect(request).toHaveBeenNthCalledWith(1, "thread/resume", { threadId: "thread-1" });
     expect(request).toHaveBeenNthCalledWith(2, "thread/read", { threadId: "thread-1", includeTurns: false });
+  });
+
+  it("falls back to identity-only reads when Codex cannot include turn history", async () => {
+    const request = vi.fn(async (_method: string, params: unknown) => {
+      if ((params as { includeTurns?: boolean }).includeTurns) {
+        throw new JsonRpcResponseError(-32601, "list_turns is not supported yet");
+      }
+      return { thread: { id: "thread-1" } };
+    });
+    const protocol = new CodexAppServerProtocol({ request } as ProtocolRequester);
+
+    await expect(protocol.readThread("thread-1", true)).resolves.toMatchObject({ thread: { id: "thread-1" } });
+    expect(request).toHaveBeenNthCalledWith(1, "thread/read", { threadId: "thread-1", includeTurns: true });
+    expect(request).toHaveBeenNthCalledWith(2, "thread/read", { threadId: "thread-1", includeTurns: false });
+  });
+
+  it("does not hide unrelated thread-read failures", async () => {
+    const unsupportedMethod = new CodexAppServerProtocol({
+      request: async () => { throw new JsonRpcResponseError(-32601, "thread/read is not supported"); }
+    });
+    const failedRead = new CodexAppServerProtocol({
+      request: async () => { throw new JsonRpcResponseError(-32000, "list_turns is not supported yet"); }
+    });
+
+    await expect(unsupportedMethod.readThread("thread-1", true)).rejects.toThrow("thread/read is not supported");
+    await expect(failedRead.readThread("thread-1", true)).rejects.toThrow("list_turns is not supported yet");
   });
 
   it("uses structured thread lifecycle and turn input shapes", async () => {

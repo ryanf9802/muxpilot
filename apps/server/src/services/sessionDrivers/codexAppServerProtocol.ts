@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { JsonRpcResponseError } from "./jsonRpcConnection.js";
 
 export const REQUIRED_CLIENT_METHODS = [
   "initialize",
@@ -121,7 +122,12 @@ export class CodexAppServerProtocol {
 
   async readThread(threadId: string, includeTurns = true): Promise<ThreadIdentityResponse> {
     requireNonEmpty(threadId, "threadId");
-    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns }));
+    try {
+      return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns }));
+    } catch (error) {
+      if (!includeTurns || !isUnsupportedTurnHistory(error)) throw error;
+      return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns: false }));
+    }
   }
 
   async startTurn(
@@ -254,4 +260,10 @@ function validateThreadSettings(settings: Partial<ThreadLaunchSettings>): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isUnsupportedTurnHistory(error: unknown): boolean {
+  return error instanceof JsonRpcResponseError
+    && error.code === -32601
+    && /\blist_turns\b.*\bnot supported\b/i.test(error.message);
 }
