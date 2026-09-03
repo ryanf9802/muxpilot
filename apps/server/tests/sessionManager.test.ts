@@ -166,7 +166,8 @@ describe("managed Codex launch instructions", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
       summary: { id: "workspace-shadow", entryPath: "/repo", targetBranch: "main", dependencyLinks: [] }
     } as Parameters<typeof managedCodexLaunchOptions>[0], "/home/dev/.codex", "/tmp/worktrees", {
-      MUXPILOT_SKILL_HOME: "/opt/muxpilot-shadow"
+      MUXPILOT_SKILL_HOME: "/opt/muxpilot-shadow",
+      MUXPILOT_GIT_BROKER_SOCKET: "/run/muxpilot/git-workflow-broker.sock"
     });
 
     expect(options.environment).toMatchObject({
@@ -176,6 +177,8 @@ describe("managed Codex launch instructions", () => {
     });
     expect(options.developerInstructions).toContain("/opt/muxpilot-shadow/skills/muxpilot-git-workflow/scripts");
     expect(options.writableRoots).toContain("/tmp/control/shadow-task");
+    expect(options.writableRoots).toContain("/run/muxpilot/git-workflow-broker.sock");
+    expect(options.writableRoots).not.toContain("/run/muxpilot");
   });
 });
 

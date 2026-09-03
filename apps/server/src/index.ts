@@ -44,7 +44,8 @@ const events = new EventBus();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
-const gitWorkflowBroker = new GitWorkflowBroker(db, join(config.dataDir, "runtime", "git-workflow-broker.sock"), app.log);
+const gitWorkflowBrokerSocketPath = join(config.dataDir, "runtime", "git-workflow-broker.sock");
+const gitWorkflowBroker = new GitWorkflowBroker(db, gitWorkflowBrokerSocketPath, app.log);
 await gitWorkflowBroker.start();
 const gitWorkspaces = new GitWorkspaceManager(db, {
   worktreeRoot: config.gitWorktreeRoot,
@@ -101,6 +102,7 @@ if (sessionScopes.configured && !sessionScopes.available) {
 const managedEnvironment: Record<string, string> = {
   ...(process.env.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {}),
   MUXPILOT_SKILL_HOME: config.skillHome,
+  MUXPILOT_GIT_BROKER_SOCKET: gitWorkflowBrokerSocketPath,
   MUXPILOT_SESSION_SCOPES_AVAILABLE: sessionScopes.available ? "1" : "0",
   ...(sessionScopes.available ? sessionScopes.environment : {}),
   MUXPILOT_HEAVY_QUEUE_ENABLED: "1",

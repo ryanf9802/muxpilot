@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
   AgentSessionOwnership,
   ApprovalDecision,
@@ -4252,12 +4252,14 @@ export function managedCodexLaunchOptions(
   const summary = workspace.summary;
   const skillHome = managedEnvironment.MUXPILOT_SKILL_HOME ?? codexHome;
   const helperDir = skillHome ? join(skillHome, "skills", "muxpilot-git-workflow", "scripts") : null;
+  const brokerSocketPath = managedEnvironment.MUXPILOT_GIT_BROKER_SOCKET;
   const implementationRoot = workspace.implementationRoot ?? worktreeRoot ?? join(summary.repoRoot, ".muxpilot-worktrees", workspace.id);
   const dependencies = reusableDependencyLinks(summary.dependencyLinks ?? []);
   return {
     isolatedWorkspace: true,
     writableRoots: [
       workspace.controlPath,
+      brokerSocketPath && isAbsolute(brokerSocketPath) ? brokerSocketPath : null,
       implementationRoot,
       workspace.commonGitDir,
       worktreeRoot,
