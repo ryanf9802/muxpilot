@@ -24,6 +24,7 @@ export interface AppServerReconnectSpec {
   sessionId: string;
   runtime: SystemdSessionRuntimeRef;
   threadId: string;
+  settings?: Partial<ThreadLaunchSettings>;
   expectedPendingRequestIds?: readonly (string | number)[];
   handlers?: AppServerSessionHandlers;
 }
@@ -95,7 +96,7 @@ export class CodexAppServerConnectionManager {
       spec.handlers,
       spec.expectedPendingRequestIds ?? [],
       async (protocol) => {
-        const established = await protocol.resumeThread(spec.threadId);
+        const established = await protocol.resumeThread(spec.threadId, spec.settings);
         requireMatchingThread(spec.threadId, established, "resume");
         return established;
       }

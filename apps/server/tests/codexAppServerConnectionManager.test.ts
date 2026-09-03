@@ -18,9 +18,29 @@ describe("CodexAppServerConnectionManager", () => {
     const manager = createManager([proxy]);
     expect(manager.get("session-1")).toBeNull();
 
-    const connected = await manager.reconnect({ sessionId: "session-1", runtime, threadId: "thread-1" });
+    const connected = await manager.reconnect({
+      sessionId: "session-1",
+      runtime,
+      threadId: "thread-1",
+      settings: {
+        cwd: "/repo",
+        model: "gpt-5.6",
+        developerInstructions: "Use repository rules.",
+        runtimeWorkspaceRoots: ["/repo/.git", "/tmp/worktrees"]
+      }
+    });
 
     expect(proxy.methods).toEqual(["initialize", "thread/resume", "thread/read"]);
+    expect(proxy.requests[1]).toMatchObject({
+      method: "thread/resume",
+      params: {
+        threadId: "thread-1",
+        cwd: "/repo",
+        model: "gpt-5.6",
+        developerInstructions: "Use repository rules.",
+        runtimeWorkspaceRoots: ["/repo/.git", "/tmp/worktrees"]
+      }
+    });
     expect(connected.reconciliation.current.thread.id).toBe("thread-1");
     expect(manager.get("session-1")).toBe(connected);
   });
@@ -136,6 +156,7 @@ class FakeProtocolProxy {
   });
   readonly connection: RuntimeProxyConnection = { input: this.input, output: this.output, close: this.close };
   readonly methods: string[] = [];
+  readonly requests: Array<{ id: number; method: string; params?: unknown }> = [];
   private buffer = "";
 
   constructor(
@@ -146,9 +167,10 @@ class FakeProtocolProxy {
       this.buffer += chunk.toString("utf8");
       let newline = this.buffer.indexOf("\n");
       while (newline >= 0) {
-        const frame = JSON.parse(this.buffer.slice(0, newline)) as { id: number; method: string };
+        const frame = JSON.parse(this.buffer.slice(0, newline)) as { id: number; method: string; params?: unknown };
         this.buffer = this.buffer.slice(newline + 1);
         this.methods.push(frame.method);
+        this.requests.push(frame);
         if (frame.method === "initialize") {
           this.emit({ id: frame.id, result: {
             userAgent: "muxpilot/0.152.0",

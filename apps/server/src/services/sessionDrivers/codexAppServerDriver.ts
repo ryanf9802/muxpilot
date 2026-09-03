@@ -274,15 +274,16 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const launchOptions = request.launchOptions;
     if (!launchOptions) throw new Error("Clear-context implementation requires fresh-thread launch options");
     const previousThreadId = requireThreadId(session);
+    const settings = {
+      cwd: session.cwd ?? session.tmux.cwd,
+      model: launchOptions.model,
+      developerInstructions: launchOptions.developerInstructions,
+      runtimeWorkspaceRoots: launchOptions.writableRoots
+    };
     const connection = await this.connections.start({
       sessionId: session.id,
       runtime,
-      settings: {
-        cwd: session.cwd ?? session.tmux.cwd,
-        model: launchOptions.model,
-        developerInstructions: launchOptions.developerInstructions,
-        runtimeWorkspaceRoots: launchOptions.writableRoots
-      },
+      settings,
       handlers: this.handlers(session.id)
     });
     const text = `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${request.plan.trim()}`;
@@ -301,6 +302,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         sessionId: session.id,
         runtime,
         threadId: previousThreadId,
+        settings,
         expectedPendingRequestIds: unresolved.map((pending) => pending.requestId),
         handlers: this.handlers(session.id)
       }).catch(() => undefined);
@@ -371,6 +373,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               sessionId: spec.sessionId,
               runtime,
               threadId: requireSourceThread(spec),
+              settings,
               expectedPendingRequestIds: unresolved.map((request) => request.requestId),
               handlers
             });

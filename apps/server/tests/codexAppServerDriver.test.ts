@@ -341,6 +341,10 @@ describe("CodexAppServerDriver", () => {
     const harness = createHarness(store as unknown as AppServerRequestStore, sink);
     await harness.driver.resume(launchSpec("thread-1"));
     expect(harness.connections.reconnect).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({
+        cwd: "/repo",
+        runtimeWorkspaceRoots: ["/repo"]
+      }),
       expectedPendingRequestIds: ["approval-1", 2]
     }));
     expect(harness.rpc.respond).toHaveBeenCalledWith(2, { decision: "accept" });
