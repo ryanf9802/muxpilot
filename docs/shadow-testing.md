@@ -15,6 +15,8 @@ Shadow startup refuses dependency links that resolve to another checkout. If the
 
 For Codex-driven live testing, use `$muxpilot-start-shadow` after the branch commit is integrated. Its helper creates a hard host-scope boundary around dependency installation and startup, then proves the production supervisor/server/web PIDs and cgroups, every pre-existing tmux pane, and every pre-existing active app-server service retained their identities. Raw `pnpm app start shadow` remains appropriate for a human shell that is already outside a muxpilot session scope.
 
+If the helper reports that frozen installation completed but its deferred-command continuation is lost before startup, rerun it with `--dependencies-installed-at <exact-installed-sha>`. Installation is skipped only when that SHA is an ancestor of the requested commit and Git proves that package manifests, pnpm lock/workspace inputs, install configuration, and patch artifacts are unchanged. Startup still takes fresh production snapshots before and after launching shadow.
+
 Shadow mode forcibly uses:
 
 - loopback-only HTTP on backend port `14177` and web port `15177`;

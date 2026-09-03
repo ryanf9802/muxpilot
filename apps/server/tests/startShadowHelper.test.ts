@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   hostScopedHeavyEnvironment,
@@ -5,6 +9,7 @@ import {
   isShadowExecutionCgroup,
   shadowSocketPathSafety,
   shadowScopeUnitName,
+  verifyReusableDependencyInstall,
   verifyProductionUnchanged
 } from "../../../.agents/skills/muxpilot-start-shadow/scripts/shadow-environment.mjs";
 
@@ -50,7 +55,42 @@ describe("muxpilot shadow start helper", () => {
     expect(() => verifyProductionUnchanged(before, { ...snapshot(), tmuxPanes: [] })).toThrow("production tmux pane changed");
     expect(() => verifyProductionUnchanged(before, { ...snapshot(), sessions: [] })).toThrow("production session identity changed");
   });
+
+  it("reuses an exact ancestor installation only when dependency inputs are unchanged", () => {
+    const root = mkdtempSync(join(tmpdir(), "muxpilot-shadow-deps-"));
+    try {
+      git(root, "init");
+      git(root, "config", "user.email", "shadow-test@example.com");
+      git(root, "config", "user.name", "Shadow Test");
+      writeFileSync(join(root, "package.json"), '{"name":"fixture"}\n');
+      writeFileSync(join(root, "source.txt"), "one\n");
+      git(root, "add", ".");
+      git(root, "commit", "-m", "initial");
+      const installed = git(root, "rev-parse", "HEAD");
+
+      writeFileSync(join(root, "source.txt"), "two\n");
+      git(root, "commit", "-am", "source only");
+      const sourceOnly = git(root, "rev-parse", "HEAD");
+      expect(verifyReusableDependencyInstall(root, installed, sourceOnly)).toEqual({
+        installedCommit: installed,
+        requestedCommit: sourceOnly
+      });
+
+      writeFileSync(join(root, "package.json"), '{"name":"fixture","dependencies":{"x":"1"}}\n');
+      git(root, "commit", "-am", "dependency change");
+      const dependencyChange = git(root, "rev-parse", "HEAD");
+      expect(() => verifyReusableDependencyInstall(root, installed, dependencyChange)).toThrow("dependency inputs changed");
+      expect(() => verifyReusableDependencyInstall(root, "not-a-sha", dependencyChange)).toThrow("exact lowercase 40-character Git SHA");
+      expect(() => verifyReusableDependencyInstall(root, dependencyChange, installed)).toThrow("is not an ancestor");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
+
+function git(root: string, ...args: string[]) {
+  return execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+}
 
 function snapshot() {
   return {

@@ -11,20 +11,23 @@ import {
   isShadowExecutionCgroup,
   shadowSocketPathSafety,
   shadowScopeUnitName,
+  verifyReusableDependencyInstall,
   verifyProductionUnchanged
 } from "./shadow-environment.mjs";
 
 let shadowStartAttempted = false;
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
-  console.log("Usage: start-shadow.mjs --expected-commit <sha> --prod-checkout <path> [--preflight]");
+  console.log("Usage: start-shadow.mjs --expected-commit <sha> --prod-checkout <path> [--dependencies-installed-at <sha>] [--preflight]");
   process.exit(0);
 }
 
 const expectedCommit = optionValue(args, "--expected-commit");
+const dependenciesInstalledAt = optionValue(args, "--dependencies-installed-at");
 const prodRoot = resolve(optionValue(args, "--prod-checkout") ?? "");
 if (!expectedCommit) fail("--expected-commit is required");
 if (!optionValue(args, "--prod-checkout")) fail("--prod-checkout is required");
+if (args.includes("--dependencies-installed-at") && !dependenciesInstalledAt) fail("--dependencies-installed-at requires a commit");
 
 const shadowRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
 const head = git(shadowRoot, ["rev-parse", "HEAD"]);
@@ -59,7 +62,16 @@ const helperDir = process.env.MUXPILOT_GIT_HELPER_DIR
 const heavyRunner = join(helperDir, "muxpilot-git-run.mjs");
 if (!existsSync(heavyRunner)) fail(`heavy command runner not found at ${heavyRunner}`);
 
-runHeavy(heavyRunner, ["pnpm", "install", "--frozen-lockfile"]);
+if (dependenciesInstalledAt) {
+  try {
+    verifyReusableDependencyInstall(shadowRoot, dependenciesInstalledAt, head);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  console.log(`Skipping dependency installation; dependency inputs are unchanged since ${dependenciesInstalledAt}.`);
+} else {
+  runHeavy(heavyRunner, ["pnpm", "install", "--frozen-lockfile"]);
+}
 if (git(shadowRoot, ["status", "--porcelain"])) fail("frozen dependency installation changed the shadow checkout");
 shadowStartAttempted = true;
 runHeavy(heavyRunner, ["pnpm", "app", "start", "shadow"]);
@@ -200,7 +212,8 @@ function gitCommonDir(root) {
 
 function optionValue(values, name) {
   const index = values.indexOf(name);
-  return index === -1 ? null : values[index + 1] ?? null;
+  const value = index === -1 ? null : values[index + 1] ?? null;
+  return value?.startsWith("--") ? null : value;
 }
 
 function readPid(path, role) {

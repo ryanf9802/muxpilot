@@ -19,6 +19,12 @@ Use this workflow only after the implementation workflow has printed `INTEGRATED
 
    `node .agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs --expected-commit <sha> --prod-checkout <production-checkout>`
 
+   If a prior invocation completed its frozen installation but lost its deferred-command continuation before startup, the exact installed commit may be supplied once:
+
+   `node .agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs --expected-commit <sha> --prod-checkout <production-checkout> --dependencies-installed-at <installed-sha>`
+
+   This resume form fails closed unless the installed SHA is exact, is an ancestor of the requested commit, and no workspace package manifest, pnpm lock/workspace file, pnpm/npm install configuration, or patch artifact changed between them. It does not skip any production preflight or before/after identity comparison.
+
 4. Treat `MUXPILOT_SHADOW_STARTED_OUTSIDE_SESSION_SCOPE` as the only success marker. Report production and shadow PIDs/cgroups plus the shadow URL.
 
 The helper refuses a dirty or mismatched checkout, the production checkout itself, a different Git repository, any checkout too long for its owned Unix socket paths, a muxpilot session cgroup after relaunch, missing production health, changed production PIDs/cgroups, lost or replaced production tmux panes, changed existing app-server service identities, non-shadow health, and shadow children inside a muxpilot session cgroup. Once lifecycle startup is attempted, every later failure runs shadow-only cleanup before returning.

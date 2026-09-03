@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 export function hostScopedHeavyEnvironment(environment) {
   return { ...environment, MUXPILOT_HEAVY_QUEUE_ENABLED: "0" };
@@ -36,6 +37,50 @@ export function shadowScopeUnitName(pid, suffix) {
   return `muxpilot-shadow-start-${pid}-${suffix}`;
 }
 
+export function verifyReusableDependencyInstall(root, installedCommit, requestedCommit) {
+  if (!/^[0-9a-f]{40}$/.test(installedCommit)) {
+    throw new Error("dependency installation commit must be an exact lowercase 40-character Git SHA");
+  }
+  const resolvedCommit = git(root, ["rev-parse", "--verify", `${installedCommit}^{commit}`]);
+  if (resolvedCommit !== installedCommit) {
+    throw new Error(`dependency installation commit resolved to unexpected identity ${resolvedCommit}`);
+  }
+  const ancestor = spawnSync("git", ["-C", root, "merge-base", "--is-ancestor", installedCommit, requestedCommit], {
+    encoding: "utf8"
+  });
+  if (ancestor.error) throw new Error(`could not compare dependency installation commit: ${ancestor.error.message}`);
+  if (ancestor.status !== 0 && ancestor.status !== 1) {
+    throw new Error(`could not compare dependency installation commit (git exited ${ancestor.status ?? "unknown"})`);
+  }
+  if (ancestor.status !== 0) {
+    throw new Error(`dependency installation commit ${installedCommit} is not an ancestor of ${requestedCommit}`);
+  }
+  const changedInputs = git(root, ["diff", "--name-only", "--no-renames", "--diff-filter=ACDMRTUXB", `${installedCommit}..${requestedCommit}`])
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .filter(isDependencyInstallInput);
+  if (changedInputs.length > 0) {
+    throw new Error(`dependency inputs changed since ${installedCommit}: ${changedInputs.join(", ")}`);
+  }
+  return { installedCommit, requestedCommit };
+}
+
+export function isDependencyInstallInput(path) {
+  const normalized = path.replaceAll("\\", "/");
+  return normalized === "package.json"
+    || normalized.endsWith("/package.json")
+    || normalized === "pnpm-lock.yaml"
+    || normalized === "pnpm-workspace.yaml"
+    || normalized === ".npmrc"
+    || normalized.endsWith("/.npmrc")
+    || normalized === "pnpmfile.cjs"
+    || normalized.endsWith("/pnpmfile.cjs")
+    || normalized === ".pnpmfile.cjs"
+    || normalized.endsWith("/.pnpmfile.cjs")
+    || normalized.startsWith("patches/")
+    || normalized.endsWith(".patch");
+}
+
 export function verifyProductionUnchanged(before, after) {
   for (const role of ["supervisor", "server", "web"]) {
     const prior = before.processes[role];
@@ -62,4 +107,10 @@ export function verifyProductionUnchanged(before, after) {
       throw new Error(`production session identity changed: ${session.id}`);
     }
   }
+}
+
+function git(root, args) {
+  const result = spawnSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  if (result.error || result.status !== 0) throw new Error(`git ${args.join(" ")} failed in ${root}`);
+  return result.stdout.trim();
 }
