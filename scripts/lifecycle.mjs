@@ -981,12 +981,22 @@ function stopShadowSystemdUnits(dataDir) {
   const units = shadowOwnedSystemdUnits(dataDir);
   for (const unit of units) {
     try {
-      execFileSync("systemctl", ["--user", "stop", unit], { stdio: "ignore" });
+      execFileSync("systemctl", ["--user", "stop", unit], { stdio: ["ignore", "ignore", "pipe"] });
       console.log(`Stopped shadow-owned unit ${unit}.`);
     } catch (error) {
-      console.warn(`Could not stop shadow-owned unit ${unit}: ${error.message}`);
+      if (isMissingSystemdUnitStopError(error)) continue;
+      console.warn(`Could not stop shadow-owned unit ${unit}: ${systemdErrorDetail(error)}`);
     }
   }
+}
+
+export function isMissingSystemdUnitStopError(error) {
+  return /\bUnit\s+\S+\s+not (?:loaded|found)\.\s*$/m.test(systemdErrorDetail(error));
+}
+
+function systemdErrorDetail(error) {
+  if (error && typeof error === "object" && "stderr" in error && error.stderr) return String(error.stderr).trim();
+  return error instanceof Error ? error.message : String(error);
 }
 
 function lanEnabled() {

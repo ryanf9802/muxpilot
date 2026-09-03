@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  isMissingSystemdUnitStopError,
   resourceGovernorSessionScopeLines,
   shadowDependencyIsolation,
   shadowIsolationEnvironment,
@@ -93,6 +94,13 @@ describe("resource governor lifecycle status", () => {
 });
 
 describe("shadow lifecycle isolation", () => {
+  it("recognizes an already-absent unit as an idempotent stop result", () => {
+    expect(isMissingSystemdUnitStopError({
+      stderr: "Failed to stop muxpilot-session-0123456789abcdef01234567.service: Unit muxpilot-session-0123456789abcdef01234567.service not loaded.\n"
+    })).toBe(true);
+    expect(isMissingSystemdUnitStopError(new Error("systemctl timed out"))).toBe(false);
+  });
+
   it("requires both application dependency links to resolve to the checkout core", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-shadow-dependencies-"));
     const core = join(root, "packages", "core");
