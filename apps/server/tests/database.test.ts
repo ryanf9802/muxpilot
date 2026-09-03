@@ -318,8 +318,12 @@ describe("AppDatabase activity summaries", () => {
       itemId: "item-user",
       clientMessageId: submitted.id
     };
+    const hiddenContext = {
+      ...testMessage(session.id, 2, "user", "<environment_context>hidden</environment_context>", "2026-07-07T00:00:01.050Z"),
+      payload: { hidden: true }
+    };
     const appServerEcho = {
-      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
+      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
       payload: {
         source: "codex_app_server",
         codexItemIdentity: identity,
@@ -327,7 +331,7 @@ describe("AppDatabase activity summaries", () => {
       }
     };
     const rolloutEcho = {
-      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
+      ...testMessage(session.id, 4, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
       payload: {
         source: "rollout",
         codexItemIdentity: identity
@@ -335,12 +339,14 @@ describe("AppDatabase activity summaries", () => {
     };
 
     expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(hiddenContext)).toBe(true);
     expect(await db.appendMessage(appServerEcho)).toBe(false);
     expect(await db.appendMessage(rolloutEcho)).toBe(false);
 
     const messages = await db.listMessages(session.id, 0);
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({
+    expect(messages).toHaveLength(2);
+    const taskMessage = messages.find((message) => message.text === submitted.text)!;
+    expect(taskMessage).toMatchObject({
       id: submitted.id,
       sequence: submitted.sequence,
       payload: {
@@ -353,10 +359,10 @@ describe("AppDatabase activity summaries", () => {
         }
       }
     });
-    expect(await db.updateMessagePayload(messages[0]!, {
-      ...messages[0]!.payload,
+    expect(await db.updateMessagePayload(taskMessage, {
+      ...taskMessage.payload,
       muxpilotSubmission: {
-        ...(messages[0]!.payload.muxpilotSubmission as Record<string, unknown>),
+        ...(taskMessage.payload.muxpilotSubmission as Record<string, unknown>),
         acknowledgedBy: "app_server_receipt"
       }
     })).toMatchObject({ id: submitted.id });
@@ -383,12 +389,16 @@ describe("AppDatabase activity summaries", () => {
       itemId: "item-user",
       clientMessageId: submitted.id
     };
+    const hiddenContext = {
+      ...testMessage(session.id, 2, "user", "<environment_context>hidden</environment_context>", "2026-07-07T00:00:01.050Z"),
+      payload: { hidden: true }
+    };
     const rolloutEcho = {
-      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
+      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
       payload: { source: "rollout", codexItemIdentity: identity }
     };
     const appServerEcho = {
-      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
+      ...testMessage(session.id, 4, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
       payload: {
         source: "codex_app_server",
         codexItemIdentity: identity,
@@ -397,17 +407,23 @@ describe("AppDatabase activity summaries", () => {
     };
 
     expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(hiddenContext)).toBe(true);
     expect(await db.appendMessage(rolloutEcho)).toBe(false);
     expect(await db.appendMessage(appServerEcho)).toBe(true);
 
     const messages = await db.listMessages(session.id, 0);
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toMatchObject({
+    expect(messages).toHaveLength(2);
+    expect(messages.find((message) => message.text === submitted.text)).toMatchObject({
       id: submitted.id,
       sequence: submitted.sequence,
       payload: {
         source: "codex_app_server",
-        appServerIdentity: identity
+        appServerIdentity: identity,
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          acknowledgedBy: "user_echo"
+        }
       }
     });
     await db.close();

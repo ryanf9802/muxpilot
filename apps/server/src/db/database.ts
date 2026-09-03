@@ -1579,11 +1579,13 @@ export class SyncAppDatabase {
     const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
       .get(existing.message_id, incoming.sessionId) as MessageRow | undefined;
     if (!row) throw new Error(`Codex item message disappeared: ${incoming.sessionId}:${existing.message_id}`);
+    const previous = hydrateMessage(row);
     const authoritative: ChatMessage = {
       ...incoming,
       id: row.id,
       sessionId: row.session_id,
-      sequence: row.sequence
+      sequence: row.sequence,
+      payload: { ...previous.payload, ...incoming.payload }
     };
     this.deletePromptIndexMessage(row.id);
     this.db.prepare(
@@ -1667,7 +1669,13 @@ export class SyncAppDatabase {
 
   private reconcileMuxpilotSubmissionEcho(message: ChatMessage): boolean {
     if (message.role !== "user" || isMuxpilotSubmissionMessage(message)) return false;
-    const submitted = this.latestUserMessage(message.sessionId);
+    const marker = recordValue(message.payload.codexItemIdentity);
+    const clientMessageId = nonemptyStringValue(marker?.clientMessageId);
+    const exactRow = clientMessageId
+      ? this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
+          .get(clientMessageId, message.sessionId) as MessageRow | undefined
+      : undefined;
+    const submitted = exactRow ? hydrateMessage(exactRow) : this.latestUserMessage(message.sessionId);
     if (
       !submitted ||
       !isMuxpilotSubmissionMessage(submitted) ||
