@@ -237,7 +237,7 @@ function sessionResourceUnit(session: ManagedSession): string | null {
 
 function isLiveSessionRuntime(session: ManagedSession): boolean {
   if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service") {
-    return session.runtime.state === "connected" || session.runtime.state === "starting";
+    return !session.initializing && (session.runtime.state === "connected" || session.runtime.state === "starting");
   }
   return session.tmux.pid > 0;
 }

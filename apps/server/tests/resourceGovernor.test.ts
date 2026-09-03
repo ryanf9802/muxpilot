@@ -141,6 +141,40 @@ describe("ResourceGovernor", () => {
     expect(governor.snapshot()).toMatchObject({ managedSessions: 0, unmanagedSessions: 0 });
   });
 
+  it("does not address an app-server unit until startup recovery is ready", async () => {
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 2048, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => undefined)
+    };
+    let initializing = true;
+    const unit = "muxpilot-session-abcdef0123456789abcdef01.service";
+    const governor = new ResourceGovernor(config, async () => [{
+      ...session("app", "unknown"),
+      initializing,
+      driverKind: "codex_app_server",
+      resourceUnit: unit,
+      resourceScope: null,
+      runtime: {
+        kind: "systemd_service",
+        unit,
+        socketPath: "/tmp/app-server.sock",
+        state: "connected",
+        codexVersion: "0.152.0"
+      }
+    }], { info: vi.fn(), warn: vi.fn() }, controller);
+
+    await governor.reconcile();
+    expect(governor.snapshot()).toMatchObject({ managedSessions: 0, unmanagedSessions: 0 });
+    expect(controller.metrics).not.toHaveBeenCalled();
+    expect(controller.setProperties).not.toHaveBeenCalled();
+
+    initializing = false;
+    await governor.reconcile();
+    expect(governor.snapshot()).toMatchObject({ managedSessions: 1, unmanagedSessions: 0 });
+    expect(controller.metrics).toHaveBeenCalledWith(unit);
+    expect(controller.setProperties).toHaveBeenCalledWith(unit, expect.any(Array));
+  });
+
   it("never manages ambient or malformed scopes", async () => {
     const controller: SystemdController = {
       metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),
