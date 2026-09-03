@@ -175,6 +175,38 @@ describe("ResourceGovernor", () => {
     expect(controller.setProperties).toHaveBeenCalledWith(unit, expect.any(Array));
   });
 
+  it("treats a service disappearing during limit application as a completed lifecycle race", async () => {
+    const unit = "muxpilot-session-abcdef0123456789abcdef01.service";
+    const missing = Object.assign(new Error(`Failed to set unit properties on ${unit}: Unit ${unit} not found.`), {
+      stderr: `Failed to set unit properties on ${unit}: Unit ${unit} not found.\n`
+    });
+    const controller: SystemdController = {
+      metrics: vi.fn(async () => ({ memoryCurrentBytes: 2048, cpuUsageNsec: 1 })),
+      setProperties: vi.fn(async () => { throw missing; })
+    };
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const governor = new ResourceGovernor(config, async () => [{
+      ...session("app", "idle"),
+      driverKind: "codex_app_server",
+      resourceUnit: unit,
+      resourceScope: null,
+      runtime: {
+        kind: "systemd_service",
+        unit,
+        socketPath: "/tmp/app-server.sock",
+        state: "connected",
+        codexVersion: "0.152.0"
+      }
+    }], logger, controller);
+
+    await governor.reconcile();
+
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(governor.usageForSession("app")).toBeNull();
+    await governor.stop();
+    expect(controller.setProperties).toHaveBeenCalledTimes(1);
+  });
+
   it("never manages ambient or malformed scopes", async () => {
     const controller: SystemdController = {
       metrics: vi.fn(async () => ({ memoryCurrentBytes: 1, cpuUsageNsec: 1 })),

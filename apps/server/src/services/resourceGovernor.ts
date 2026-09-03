@@ -176,29 +176,41 @@ export class ResourceGovernor {
         const unit = sessionResourceUnit(session)!;
         this.managedScopes.add(unit);
         sampledScopes.add(unit);
-        const allocation = allocations.get(session.id)!;
-        const sampledAtMs = Date.now();
-        const metrics = await this.controller.metrics(unit);
-        const cpuPercent = this.cpuPercentForSample(unit, metrics.cpuUsageNsec, sampledAtMs);
-        if (metrics.memoryCurrentBytes !== null) {
-          nextResourceUsage.set(session.id, {
-            memoryCurrentBytes: metrics.memoryCurrentBytes,
-            memoryHighBytes: allocation.memoryHighBytes,
-            memoryMaxBytes: allocation.memoryMaxBytes,
-            cpuPercent,
-            cpuLimitPercent: allocation.cpuPercent,
-            sampledAt: new Date(sampledAtMs).toISOString()
-          });
+        try {
+          const allocation = allocations.get(session.id)!;
+          const sampledAtMs = Date.now();
+          const metrics = await this.controller.metrics(unit);
+          const cpuPercent = this.cpuPercentForSample(unit, metrics.cpuUsageNsec, sampledAtMs);
+          await this.controller.setProperties(unit, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
+          if (metrics.memoryCurrentBytes !== null) {
+            nextResourceUsage.set(session.id, {
+              memoryCurrentBytes: metrics.memoryCurrentBytes,
+              memoryHighBytes: allocation.memoryHighBytes,
+              memoryMaxBytes: allocation.memoryMaxBytes,
+              cpuPercent,
+              cpuLimitPercent: allocation.cpuPercent,
+              sampledAt: new Date(sampledAtMs).toISOString()
+            });
+          }
+        } catch (error) {
+          if (!isMissingSystemdUnitError(error)) throw error;
+          this.managedScopes.delete(unit);
+          sampledScopes.delete(unit);
+          this.cpuSamples.delete(unit);
         }
-        await this.controller.setProperties(unit, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
       }).map((operation) => operation.catch((error) => {
         this.logger.warn({ err: error }, "could not apply resource limits to a session scope");
       })));
       await Promise.all(supplementalScopes.map(async ({ sessionId, scope }) => {
-        const allocation = allocations.get(sessionId)!;
         this.managedScopes.add(scope);
-        const metrics = await this.controller.metrics(scope);
-        await this.controller.setProperties(scope, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
+        try {
+          const allocation = allocations.get(sessionId)!;
+          const metrics = await this.controller.metrics(scope);
+          await this.controller.setProperties(scope, resourceProperties(allocation, metrics.memoryCurrentBytes, emergency));
+        } catch (error) {
+          if (!isMissingSystemdUnitError(error)) throw error;
+          this.managedScopes.delete(scope);
+        }
       }).map((operation) => operation.catch((error) => {
         this.logger.warn({ err: error }, "could not apply resource limits to a heavyweight worker scope");
       })));
@@ -240,6 +252,14 @@ function isLiveSessionRuntime(session: ManagedSession): boolean {
     return !session.initializing && (session.runtime.state === "connected" || session.runtime.state === "starting");
   }
   return session.tmux.pid > 0;
+}
+
+function isMissingSystemdUnitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const stderr = typeof error === "object" && error !== null && "stderr" in error
+    ? String(error.stderr)
+    : "";
+  return /\bUnit\s+\S+\s+not found\.\s*$/m.test(`${message}\n${stderr}`);
 }
 
 export function allocateSessionResources(
