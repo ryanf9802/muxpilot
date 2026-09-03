@@ -481,6 +481,88 @@ describe("CodexAppServerDriver", () => {
     expect(harness.connections.close).toHaveBeenCalledWith(session.id);
     expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
   });
+
+  it("clears a stale active turn only after an authoritative idle terminal read", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.sendMessage(session, "work", "client-1");
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed" }]
+          }
+        };
+      }
+      if (method === "thread/backgroundTerminals/list") return { data: [] };
+      return {};
+    });
+
+    await expect(harness.driver.hibernate(session)).resolves.toMatchObject({ state: "hibernated" });
+    expect(harness.connections.close).toHaveBeenCalledWith(session.id);
+    expect(harness.supervisor.stop).toHaveBeenCalledWith(runtime);
+  });
+
+  it.each([
+    ["a failed authoritative read", async () => { throw new Error("read failed"); }],
+    ["a mismatched thread", async () => ({
+      thread: { id: "thread-other", status: { type: "idle" }, turns: [{ id: "turn-1", status: "completed" }] }
+    })],
+    ["an active thread", async () => ({
+      thread: { id: "thread-1", status: { type: "active" }, turns: [{ id: "turn-1", status: "completed" }] }
+    })],
+    ["a missing turn", async () => ({
+      thread: { id: "thread-1", status: { type: "idle" }, turns: [] }
+    })],
+    ["a nonterminal turn", async () => ({
+      thread: { id: "thread-1", status: { type: "idle" }, turns: [{ id: "turn-1", status: "inProgress" }] }
+    })]
+  ])("keeps the active-turn blocker for %s", async (_name, readThread) => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.sendMessage(session, "work", "client-1");
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/read") return readThread();
+      if (method === "thread/backgroundTerminals/list") return { data: [] };
+      return {};
+    });
+
+    await expect(harness.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn"]);
+  });
+
+  it("does not clear a newer turn that starts during stale-turn reconciliation", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.driver.sendMessage(session, "old work", "client-1");
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/read") {
+        await harness.handlers.notification?.({
+          method: "turn/started",
+          params: { threadId: "thread-1", turn: { id: "turn-new" } }
+        });
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "idle" },
+            turns: [{ id: "turn-1", status: "completed" }]
+          }
+        };
+      }
+      if (method === "thread/backgroundTerminals/list") return { data: [] };
+      return {};
+    });
+
+    await expect(harness.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn"]);
+    harness.rpc.request.mockResolvedValue({});
+    await harness.driver.interrupt(session, null);
+    expect(harness.rpc.request).toHaveBeenLastCalledWith("turn/interrupt", {
+      threadId: "thread-1",
+      turnId: "turn-new"
+    });
+  });
 });
 
 function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServerDriverEventSink): {

@@ -208,6 +208,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   async hibernationBlockers(session: ManagedSession): Promise<string[]> {
     const { threadId, protocol } = this.protocolFor(session);
     const blockers: string[] = [];
+    await this.reconcileActiveTurnForHibernation(session.id, threadId, protocol);
     if (this.activeTurns.has(session.id)) blockers.push("active_turn");
     if ([...this.pendingRequests.values()].some((request) => request.sessionId === session.id)) {
       blockers.push("interactive_request");
@@ -215,6 +216,34 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const terminals = await protocol.listBackgroundTerminals(threadId);
     if (backgroundProcessIds(terminals).length > 0) blockers.push("background_terminal");
     return blockers;
+  }
+
+  private async reconcileActiveTurnForHibernation(
+    sessionId: string,
+    threadId: string,
+    protocol: CodexAppServerProtocol
+  ): Promise<void> {
+    const activeTurnId = this.activeTurns.get(sessionId);
+    if (!activeTurnId) return;
+    let thread: Record<string, unknown>;
+    try {
+      thread = (await protocol.readThread(threadId, true)).thread;
+    } catch {
+      return;
+    }
+    if (thread.id !== threadId || recordValue(thread, "status")?.type !== "idle") return;
+    const turns = Array.isArray(thread.turns) ? thread.turns : [];
+    const activeTurn = turns.find((value) => (
+      value !== null
+      && typeof value === "object"
+      && !Array.isArray(value)
+      && (value as Record<string, unknown>).id === activeTurnId
+    ));
+    if (!activeTurn || !isTerminalTurnStatus((activeTurn as Record<string, unknown>).status)) return;
+    if (this.activeTurns.get(sessionId) !== activeTurnId) return;
+    this.activeTurns.delete(sessionId);
+    this.turnProcesses.get(sessionId)?.delete(activeTurnId);
+    if (this.turnProcesses.get(sessionId)?.size === 0) this.turnProcesses.delete(sessionId);
   }
 
   async hibernate(session: ManagedSession): Promise<SystemdSessionRuntimeRef> {
@@ -695,4 +724,8 @@ function backgroundProcessIds(value: unknown): string[] {
     const id = (process as Record<string, unknown>).processId;
     return typeof id === "string" && id ? [id] : [];
   });
+}
+
+function isTerminalTurnStatus(value: unknown): boolean {
+  return value === "completed" || value === "interrupted" || value === "failed";
 }
