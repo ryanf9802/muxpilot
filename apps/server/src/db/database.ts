@@ -1693,28 +1693,36 @@ export class SyncAppDatabase {
       ? this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
           .get(clientMessageId, message.sessionId) as MessageRow | undefined
       : undefined;
-    const submitted = exactRow
-      ? hydrateMessage(exactRow)
+    const candidates = exactRow
+      ? []
       : (this.db.prepare(
           `SELECT * FROM messages
            WHERE session_id = ? AND role = 'user' AND text = ?
            ORDER BY sequence DESC
            LIMIT 20`
-        ).all(message.sessionId, message.text) as unknown as MessageRow[])
-          .map(hydrateMessage)
-          .find((candidate) =>
-            isMuxpilotSubmissionMessage(candidate) &&
-            timestampsAreNear(submissionAttemptTimestamp(candidate), message.timestamp)
-          );
+        ).all(message.sessionId, message.text) as unknown as MessageRow[]).map(hydrateMessage);
+    const identity = this.codexItemMessageIdentity(message);
+    const turnIdentityCandidates = identity
+      ? candidates.filter((candidate) => {
+          const submission = recordValue(candidate.payload.muxpilotSubmission);
+          return submission?.threadId === identity.threadId && submission.turnId === identity.turnId;
+        })
+      : [];
+    const turnIdentityMatch = turnIdentityCandidates.length === 1 ? turnIdentityCandidates[0] : undefined;
+    const submitted = exactRow
+      ? hydrateMessage(exactRow)
+      : turnIdentityMatch ?? candidates.find((candidate) =>
+          isMuxpilotSubmissionMessage(candidate) &&
+          timestampsAreNear(submissionAttemptTimestamp(candidate), message.timestamp)
+        );
     if (
       !submitted ||
       !isMuxpilotSubmissionMessage(submitted) ||
       submitted.text !== message.text ||
-      (!exactRow && !timestampsAreNear(submissionAttemptTimestamp(submitted), message.timestamp))
+      (!exactRow && !turnIdentityMatch && !timestampsAreNear(submissionAttemptTimestamp(submitted), message.timestamp))
     ) return false;
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
-    const identity = this.codexItemMessageIdentity(message);
     const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
     const reconciledPayload = muxpilotSubmission
       ? {

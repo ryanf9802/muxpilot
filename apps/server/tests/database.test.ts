@@ -519,6 +519,79 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("reconciles a delayed rollout echo by an unambiguous receipt turn identity", async () => {
+    const db = await tempDb();
+    const session = { ...testSession("session-delayed-rollout-echo"), codexSessionId: "thread-app" };
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Queued during recovery", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z",
+          threadId: "thread-app",
+          turnId: "turn-app"
+        }
+      }
+    };
+    const rolloutIdentity = {
+      turnId: "turn-app",
+      itemId: "item-user-rollout",
+      clientMessageId: null
+    };
+    const delayedEcho = {
+      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:07.000Z"),
+      payload: { source: "rollout", codexItemIdentity: rolloutIdentity }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(delayedEcho)).toBe(false);
+    expect(await db.listMessages(session.id, 0)).toEqual([
+      expect.objectContaining({
+        id: submitted.id,
+        sequence: submitted.sequence,
+        text: submitted.text,
+        payload: expect.objectContaining({
+          source: "rollout",
+          codexItemIdentity: rolloutIdentity,
+          muxpilotSubmission: submitted.payload.muxpilotSubmission
+        })
+      })
+    ]);
+    await db.close();
+  });
+
+  it("keeps delayed same-turn text ambiguous when multiple submissions match", async () => {
+    const db = await tempDb();
+    const session = { ...testSession("session-ambiguous-rollout-echo"), codexSessionId: "thread-app" };
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    for (const sequence of [1, 2]) {
+      expect(await db.appendMessage({
+        ...testMessage(session.id, sequence, "user", "Repeated prompt", `2026-07-07T00:00:0${sequence}.000Z`),
+        payload: {
+          muxpilotSubmission: {
+            state: "acknowledged",
+            lastAttemptAt: `2026-07-07T00:00:0${sequence}.000Z`,
+            threadId: "thread-app",
+            turnId: "turn-app"
+          }
+        }
+      })).toBe(true);
+    }
+    const delayedEcho = {
+      ...testMessage(session.id, 3, "user", "Repeated prompt", "2026-07-07T00:00:09.000Z"),
+      payload: {
+        source: "rollout",
+        codexItemIdentity: { turnId: "turn-app", itemId: "item-user-rollout", clientMessageId: null }
+      }
+    };
+
+    expect(await db.appendMessage(delayedEcho)).toBe(true);
+    expect((await db.listMessages(session.id, 0)).filter((message) => message.text === "Repeated prompt")).toHaveLength(3);
+    await db.close();
+  });
+
   it("upgrades the same reconciled submission when the rollout echo wins the race", async () => {
     const db = await tempDb();
     const session = testSession("session-rollout-submission-race");
