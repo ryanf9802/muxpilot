@@ -354,11 +354,17 @@ describe("AppDatabase activity summaries", () => {
         }
       }
     };
-    const identity = {
+    const appServerIdentity = {
       threadId: "thread-app",
       turnId: "turn-app",
-      itemId: "item-user",
+      itemId: "item-user-app-server",
       clientMessageId: submitted.id
+    };
+    const rolloutIdentity = {
+      threadId: "thread-app",
+      turnId: "turn-app",
+      itemId: "item-user-rollout",
+      clientMessageId: null
     };
     const hiddenContext = {
       ...testMessage(session.id, 2, "user", "<environment_context>hidden</environment_context>", "2026-07-07T00:00:01.050Z"),
@@ -368,15 +374,15 @@ describe("AppDatabase activity summaries", () => {
       ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
       payload: {
         source: "codex_app_server",
-        codexItemIdentity: identity,
-        appServerIdentity: identity
+        codexItemIdentity: appServerIdentity,
+        appServerIdentity
       }
     };
     const rolloutEcho = {
       ...testMessage(session.id, 4, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
       payload: {
         source: "rollout",
-        codexItemIdentity: identity
+        codexItemIdentity: rolloutIdentity
       }
     };
 
@@ -390,8 +396,8 @@ describe("AppDatabase activity summaries", () => {
         deliveryPhase: "acknowledged",
         acknowledgedBy: "app_server_receipt",
         clientMessageId: submitted.id,
-        threadId: identity.threadId,
-        turnId: identity.turnId
+        threadId: appServerIdentity.threadId,
+        turnId: appServerIdentity.turnId
       }
     })).toMatchObject({ id: submitted.id });
     expect(await db.appendMessage(appServerEcho)).toBe(false);
@@ -405,7 +411,7 @@ describe("AppDatabase activity summaries", () => {
       sequence: submitted.sequence,
       payload: {
         source: "codex_app_server",
-        codexItemIdentity: identity,
+        codexItemIdentity: appServerIdentity,
         muxpilotSubmission: {
           state: "acknowledged",
           deliveryPhase: "acknowledged",
@@ -430,11 +436,17 @@ describe("AppDatabase activity summaries", () => {
         }
       }
     };
-    const identity = {
+    const appServerIdentity = {
       threadId: "thread-app",
       turnId: "turn-app",
-      itemId: "item-user",
+      itemId: "item-user-app-server",
       clientMessageId: submitted.id
+    };
+    const rolloutIdentity = {
+      threadId: "thread-app",
+      turnId: "turn-app",
+      itemId: "item-user-rollout",
+      clientMessageId: null
     };
     const hiddenContext = {
       ...testMessage(session.id, 2, "user", "<environment_context>hidden</environment_context>", "2026-07-07T00:00:01.050Z"),
@@ -442,21 +454,21 @@ describe("AppDatabase activity summaries", () => {
     };
     const rolloutEcho = {
       ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
-      payload: { source: "rollout", codexItemIdentity: identity }
+      payload: { source: "rollout", codexItemIdentity: rolloutIdentity }
     };
     const appServerEcho = {
       ...testMessage(session.id, 4, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
       payload: {
         source: "codex_app_server",
-        codexItemIdentity: identity,
-        appServerIdentity: identity
+        codexItemIdentity: appServerIdentity,
+        appServerIdentity
       }
     };
 
     expect(await db.appendMessage(submitted)).toBe(true);
     expect(await db.appendMessage(hiddenContext)).toBe(true);
     expect(await db.appendMessage(rolloutEcho)).toBe(false);
-    expect(await db.appendMessage(appServerEcho)).toBe(true);
+    expect(await db.appendMessage(appServerEcho)).toBe(false);
 
     const messages = await db.listMessages(session.id, 0);
     expect(messages).toHaveLength(2);
@@ -465,7 +477,8 @@ describe("AppDatabase activity summaries", () => {
       sequence: submitted.sequence,
       payload: {
         source: "codex_app_server",
-        appServerIdentity: identity,
+        codexItemIdentity: appServerIdentity,
+        appServerIdentity,
         muxpilotSubmission: {
           state: "acknowledged",
           deliveryPhase: "acknowledged",

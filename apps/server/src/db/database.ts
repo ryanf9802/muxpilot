@@ -1679,7 +1679,19 @@ export class SyncAppDatabase {
       ? this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
           .get(clientMessageId, message.sessionId) as MessageRow | undefined
       : undefined;
-    const submitted = exactRow ? hydrateMessage(exactRow) : this.latestUserMessage(message.sessionId);
+    const submitted = exactRow
+      ? hydrateMessage(exactRow)
+      : (this.db.prepare(
+          `SELECT * FROM messages
+           WHERE session_id = ? AND role = 'user' AND text = ?
+           ORDER BY sequence DESC
+           LIMIT 20`
+        ).all(message.sessionId, message.text) as unknown as MessageRow[])
+          .map(hydrateMessage)
+          .find((candidate) =>
+            isMuxpilotSubmissionMessage(candidate) &&
+            timestampsAreNear(submissionAttemptTimestamp(candidate), message.timestamp)
+          );
     if (
       !submitted ||
       !isMuxpilotSubmissionMessage(submitted) ||
@@ -1689,10 +1701,7 @@ export class SyncAppDatabase {
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
     const identity = this.codexItemMessageIdentity(message);
-    if (identity && this.db.prepare(
-      `SELECT 1 FROM codex_item_messages
-       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
-    ).get(message.sessionId, identity.threadId, identity.turnId, identity.itemId)) return false;
+    const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
     const reconciledPayload = muxpilotSubmission
       ? {
           ...message.payload,
@@ -1707,6 +1716,36 @@ export class SyncAppDatabase {
               }
         }
       : message.payload;
+    const mapped = identity
+      ? this.db.prepare(
+          `SELECT * FROM codex_item_messages
+           WHERE session_id = ? AND message_id = ?`
+        ).get(message.sessionId, submitted.id) as CodexItemMessageRow | undefined
+      : undefined;
+    if (identity && mapped) {
+      if (source === "app_server" && mapped.app_server_message_id === null) {
+        this.db.prepare(
+          `UPDATE messages
+           SET type = ?, payload_json = ?
+           WHERE id = ? AND session_id = ?`
+        ).run(message.type, JSON.stringify(reconciledPayload), submitted.id, submitted.sessionId);
+      }
+      this.db.prepare(
+        `UPDATE codex_item_messages SET
+          app_server_message_id = CASE WHEN ? = 'app_server' THEN ? ELSE app_server_message_id END,
+          rollout_message_id = CASE WHEN ? = 'rollout' THEN ? ELSE rollout_message_id END,
+          app_server_observed_at = CASE WHEN ? = 'app_server' THEN ? ELSE app_server_observed_at END,
+          rollout_observed_at = CASE WHEN ? = 'rollout' THEN ? ELSE rollout_observed_at END
+         WHERE session_id = ? AND message_id = ?`
+      ).run(
+        source, message.id,
+        source, message.id,
+        source, message.timestamp,
+        source, message.timestamp,
+        message.sessionId, submitted.id
+      );
+      return true;
+    }
 
     const result = this.db
       .prepare(
@@ -1717,7 +1756,6 @@ export class SyncAppDatabase {
       .run(message.type, JSON.stringify(reconciledPayload), submitted.id, submitted.sessionId);
     if (Number(result.changes) > 0) {
       if (identity) {
-        const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
         this.db.prepare(
           `INSERT OR IGNORE INTO codex_item_messages
             (session_id, thread_id, turn_id, item_id, message_id,
