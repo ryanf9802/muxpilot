@@ -1676,6 +1676,7 @@ export class SyncAppDatabase {
     ) return false;
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
+    if (muxpilotSubmission?.state === "acknowledged") return false;
     const reconciledPayload = muxpilotSubmission
       ? {
           ...message.payload,
@@ -1696,6 +1697,28 @@ export class SyncAppDatabase {
          WHERE id = ? AND session_id = ?`
       )
       .run(message.type, JSON.stringify(reconciledPayload), submitted.id, submitted.sessionId);
+    if (Number(result.changes) > 0) {
+      const identity = this.codexItemMessageIdentity(message);
+      if (identity) {
+        const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
+        this.db.prepare(
+          `INSERT OR IGNORE INTO codex_item_messages
+            (session_id, thread_id, turn_id, item_id, message_id,
+             app_server_message_id, rollout_message_id, app_server_observed_at, rollout_observed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          message.sessionId,
+          identity.threadId,
+          identity.turnId,
+          identity.itemId,
+          submitted.id,
+          source === "app_server" ? message.id : null,
+          source === "rollout" ? message.id : null,
+          source === "app_server" ? message.timestamp : null,
+          source === "rollout" ? message.timestamp : null
+        );
+      }
+    }
     return Number(result.changes) > 0;
   }
 

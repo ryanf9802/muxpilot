@@ -298,6 +298,121 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("binds a reconciled app-server submission to its Codex item before the rollout echo arrives", async () => {
+    const db = await tempDb();
+    const session = testSession("session-app-server-submission-race");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Reply exactly CHILD_OK", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "delivering",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z"
+        }
+      }
+    };
+    const identity = {
+      threadId: "thread-app",
+      turnId: "turn-app",
+      itemId: "item-user",
+      clientMessageId: submitted.id
+    };
+    const appServerEcho = {
+      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: identity,
+        appServerIdentity: identity
+      }
+    };
+    const rolloutEcho = {
+      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
+      payload: {
+        source: "rollout",
+        codexItemIdentity: identity
+      }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(appServerEcho)).toBe(false);
+    expect(await db.appendMessage(rolloutEcho)).toBe(false);
+
+    const messages = await db.listMessages(session.id, 0);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: submitted.id,
+      sequence: submitted.sequence,
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: identity,
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          acknowledgedBy: "user_echo"
+        }
+      }
+    });
+    expect(await db.updateMessagePayload(messages[0]!, {
+      ...messages[0]!.payload,
+      muxpilotSubmission: {
+        ...(messages[0]!.payload.muxpilotSubmission as Record<string, unknown>),
+        acknowledgedBy: "app_server_receipt"
+      }
+    })).toMatchObject({ id: submitted.id });
+    await db.close();
+  });
+
+  it("upgrades the same reconciled submission when the rollout echo wins the race", async () => {
+    const db = await tempDb();
+    const session = testSession("session-rollout-submission-race");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Reply exactly CHILD_OK", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        muxpilotSubmission: {
+          state: "pending",
+          deliveryPhase: "delivering",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z"
+        }
+      }
+    };
+    const identity = {
+      threadId: "thread-app",
+      turnId: "turn-app",
+      itemId: "item-user",
+      clientMessageId: submitted.id
+    };
+    const rolloutEcho = {
+      ...testMessage(session.id, 2, "user", submitted.text, "2026-07-07T00:00:01.100Z"),
+      payload: { source: "rollout", codexItemIdentity: identity }
+    };
+    const appServerEcho = {
+      ...testMessage(session.id, 3, "user", submitted.text, "2026-07-07T00:00:01.200Z"),
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: identity,
+        appServerIdentity: identity
+      }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(rolloutEcho)).toBe(false);
+    expect(await db.appendMessage(appServerEcho)).toBe(true);
+
+    const messages = await db.listMessages(session.id, 0);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: submitted.id,
+      sequence: submitted.sequence,
+      payload: {
+        source: "codex_app_server",
+        appServerIdentity: identity
+      }
+    });
+    await db.close();
+  });
+
   it("keeps a later identical prompt distinct from an unmatched muxpilot submission", async () => {
     const db = await tempDb();
     const session = testSession("session-repeated-submitted-input");
