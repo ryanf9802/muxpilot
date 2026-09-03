@@ -30,7 +30,7 @@ describe("CodexAppServerConnectionManager", () => {
       }
     });
 
-    expect(proxy.methods).toEqual(["initialize", "thread/resume", "thread/read"]);
+    expect(proxy.methods).toEqual(["initialize", "thread/resume", "thread/settings/update", "thread/read"]);
     expect(proxy.requests[1]).toMatchObject({
       method: "thread/resume",
       params: {
@@ -39,6 +39,17 @@ describe("CodexAppServerConnectionManager", () => {
         model: "gpt-5.6",
         developerInstructions: "Use repository rules.",
         runtimeWorkspaceRoots: ["/repo/.git", "/tmp/worktrees"]
+      }
+    });
+    expect(proxy.requests[2]).toMatchObject({
+      method: "thread/settings/update",
+      params: {
+        threadId: "thread-1",
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          writableRoots: ["/repo/.git", "/tmp/worktrees"],
+          networkAccess: true
+        }
       }
     });
     expect(connected.reconciliation.current.thread.id).toBe("thread-1");
@@ -62,8 +73,8 @@ describe("CodexAppServerConnectionManager", () => {
       settings: { cwd: "/fork" }
     });
 
-    expect(started.methods).toEqual(["initialize", "thread/start", "thread/read"]);
-    expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/read"]);
+    expect(started.methods).toEqual(["initialize", "thread/start", "thread/settings/update", "thread/read"]);
+    expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/settings/update", "thread/read"]);
     expect(newConnection.threadId).toBe("new-thread");
     expect(forkConnection.threadId).toBe("forked-thread");
   });
@@ -183,6 +194,8 @@ class FakeProtocolProxy {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/start" || frame.method === "thread/fork") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
+        } else if (frame.method === "thread/settings/update") {
+          this.emit({ id: frame.id, result: {} });
         } else if (frame.method === "thread/read") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId, turns: [] } } });
         }

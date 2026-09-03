@@ -95,6 +95,7 @@ export class CodexAppServerConnectionManager {
       spec.runtime,
       spec.handlers,
       spec.expectedPendingRequestIds ?? [],
+      spec.settings,
       async (protocol) => {
         const established = await protocol.resumeThread(spec.threadId, spec.settings);
         requireMatchingThread(spec.threadId, established, "resume");
@@ -109,6 +110,7 @@ export class CodexAppServerConnectionManager {
       spec.runtime,
       spec.handlers,
       [],
+      spec.settings,
       (protocol) => protocol.startThread(spec.settings)
     ));
   }
@@ -121,6 +123,7 @@ export class CodexAppServerConnectionManager {
         spec.runtime,
         spec.handlers,
         [],
+        spec.settings,
         (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings)
       );
     });
@@ -144,6 +147,7 @@ export class CodexAppServerConnectionManager {
     runtime: SystemdSessionRuntimeRef,
     sessionHandlers: AppServerSessionHandlers | undefined,
     expectedPendingRequestIds: readonly (string | number)[],
+    settings: Partial<ThreadLaunchSettings> | undefined,
     establish: (protocol: CodexAppServerProtocol) => Promise<ThreadIdentityResponse>
   ): Promise<AppServerSessionConnection> {
     requireIdentity(sessionId, "sessionId");
@@ -181,6 +185,11 @@ export class CodexAppServerConnectionManager {
       const initialize = await protocol.initialize(this.clientVersion);
       const established = await establish(protocol);
       const threadId = established.thread.id;
+      if (settings) {
+        await protocol.updateThreadSettings(threadId, {
+          sandboxPolicy: workspaceWriteSandboxPolicy(settings)
+        });
+      }
       const current = await protocol.readThread(threadId, true);
       requireMatchingThread(threadId, current, "read");
       const missing = expectedPendingRequestIds.filter((id) => !replayedRequestIds.has(id));
@@ -238,4 +247,12 @@ function requireMatchingThread(expectedThreadId: string, response: ThreadIdentit
 
 function requireIdentity(value: string, name: string): void {
   if (!value.trim()) throw new Error(`${name} must not be empty`);
+}
+
+function workspaceWriteSandboxPolicy(settings: Partial<ThreadLaunchSettings>): Record<string, unknown> {
+  return {
+    type: "workspaceWrite",
+    writableRoots: [...new Set((settings.runtimeWorkspaceRoots ?? []).filter((root) => root !== settings.cwd))],
+    networkAccess: true
+  };
 }

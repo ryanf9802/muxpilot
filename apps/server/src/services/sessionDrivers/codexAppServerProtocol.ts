@@ -50,7 +50,10 @@ export const REQUIRED_PROTOCOL_FIELDS = [
   "cwd",
   "model",
   "reasoningEffort",
-  "serviceTier"
+  "serviceTier",
+  "runtimeWorkspaceRoots",
+  "sandboxPolicy",
+  "networkAccess"
 ] as const;
 
 export interface AppServerProtocolCompatibility {
