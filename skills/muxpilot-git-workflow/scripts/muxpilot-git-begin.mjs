@@ -10,6 +10,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 
 let releaseWorkspace = null;
 let config = null;
+let createdBranch = null;
+let createdWorktreePath = null;
 try {
   config = await configuration();
   releaseWorkspace = await acquireWorkspaceLock(config.statusFile);
@@ -30,6 +32,8 @@ try {
   const suffix = `${Date.now().toString(36)}-${randomBytes(3).toString("hex")}`;
   const branch = `muxpilot/${config.workspaceId}/${suffix}`;
   const worktreePath = join(config.worktreeRoot, suffix);
+  createdBranch = branch;
+  createdWorktreePath = worktreePath;
   await git(config.repoRoot, ["worktree", "add", "-b", branch, worktreePath, targetSha]);
   const links = await linkDependencies(config, worktreePath);
   await ignoreSharedDependencies(config, worktreePath);
@@ -40,6 +44,10 @@ try {
   for (const link of links) process.stdout.write(`DEPENDENCY_REUSED kind=${link.kind} path=${link.relativePath} source=${link.sourcePath}\n`);
   writeGitWorkflowEvent("worktree_created", "begin", config, { targetSha, sessionBranch: branch, worktreePath });
 } catch (error) {
+  if (config && createdBranch && createdWorktreePath) {
+    await git(config.repoRoot, ["worktree", "remove", "--force", createdWorktreePath]).catch(() => undefined);
+    await git(config.repoRoot, ["branch", "-D", createdBranch]).catch(() => undefined);
+  }
   if (releaseWorkspace) await releaseWorkspace().catch(() => undefined);
   writeGitWorkflowEvent("workflow_failed", "begin", config, { error: error.message });
   process.stderr.write(`${error.message}\n`);

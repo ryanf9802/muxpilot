@@ -136,6 +136,27 @@ describe("standalone local Git workflow helpers", () => {
     expect(JSON.parse(await readFile(environment.MUXPILOT_GIT_STATUS_FILE, "utf8"))).toMatchObject({ state: "idle", worktreePath: null });
   });
 
+  it("removes the generated worktree and branch when dependency setup fails", async () => {
+    const root = await repository();
+    const dependencies = join(root, "shared-node-modules");
+    await mkdir(dependencies);
+    await writeFile(join(root, "blocked"), "tracked file prevents dependency directory creation\n");
+    await git(root, ["add", "blocked"]);
+    await git(root, ["commit", "-m", "add blocking file"]);
+    const environment = helperEnvironment(root, [{
+      kind: "node",
+      relativePath: "blocked/node_modules",
+      sourcePath: dependencies,
+      linked: true
+    }]);
+
+    await expect(node("muxpilot-git-begin.mjs", environment)).rejects.toThrow();
+
+    expect(await git(root, ["branch", "--list", "muxpilot/test-session/*"])).toBe("");
+    expect(await readdir(environment.MUXPILOT_GIT_WORKTREE_ROOT)).toEqual([]);
+    expect(await git(root, ["worktree", "list", "--porcelain"])).not.toContain(environment.MUXPILOT_GIT_WORKTREE_ROOT);
+  });
+
   it("blocks integration when the checked-out target is dirty", async () => {
     const root = await repository();
     const environment = helperEnvironment(root, []);
