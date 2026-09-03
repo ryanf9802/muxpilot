@@ -5840,7 +5840,8 @@ describe("SessionManager transcript isolation", () => {
       capabilities: appServerCapabilities(),
       ready: Promise.resolve()
     }));
-    const driver = { kind: "codex_app_server", hibernationBlockers, hibernate, resume } as unknown as AgentSessionDriver;
+    const setPreferences = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", hibernationBlockers, hibernate, resume, setPreferences } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -5866,6 +5867,10 @@ describe("SessionManager transcript isolation", () => {
       runtime: { state: "connected" },
       codexSessionId: "thread-hibernate"
     });
+    expect(setPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, runtime: expect.objectContaining({ state: "connected" }) }),
+      { mode: "default" }
+    );
 
     await harness.db.setSessionStatus(session.id, "idle", "2026-09-01T12:01:00.000Z");
     hibernationBlockers.mockResolvedValueOnce(["background_terminal"]);
@@ -5975,7 +5980,8 @@ describe("SessionManager transcript isolation", () => {
         ready: Promise.resolve()
       };
     });
-    const driver = { kind: "codex_app_server", resume } as unknown as AgentSessionDriver;
+    const setPreferences = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", resume, setPreferences } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -6002,7 +6008,11 @@ describe("SessionManager transcript isolation", () => {
       codexSessionId: threadId,
       lastActivityAt
     });
-    await harness.db.upsertSession(appSession("app-recovery-recent", "thread-recent", "connected", "2026-09-01T14:00:00.000Z"), "2026-09-01T14:00:00.000Z");
+    await harness.db.upsertSession({
+      ...appSession("app-recovery-recent", "thread-recent", "connected", "2026-09-01T14:00:00.000Z"),
+      inputMode: "plan",
+      fastMode: true
+    }, "2026-09-01T14:00:00.000Z");
     await harness.db.upsertSession(appSession("app-recovery-failed", "thread-failed", "starting", "2026-09-01T13:00:00.000Z"), "2026-09-01T13:00:00.000Z");
     await harness.db.upsertSession(appSession("app-recovery-stopped", "thread-stopped", "stopped", "2026-09-01T15:00:00.000Z"), "2026-09-01T15:00:00.000Z");
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -6024,6 +6034,10 @@ describe("SessionManager transcript isolation", () => {
       initializing: false,
       runtime: { state: "connected" }
     });
+    expect(setPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "app-recovery-recent", runtime: expect.objectContaining({ state: "connected" }) }),
+      { mode: "plan", fastMode: true }
+    );
     expect(await harness.manager.getSession("app-recovery-failed")).toMatchObject({
       status: "startup_failed",
       initializing: false,
@@ -6632,7 +6646,8 @@ describe("SessionManager transcript isolation", () => {
       capabilities: appServerCapabilities(),
       ready: Promise.resolve()
     }));
-    const driver = { kind: "codex_app_server", resume, runtimeEvidence } as unknown as AgentSessionDriver;
+    const setPreferences = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", resume, runtimeEvidence, setPreferences } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -6657,6 +6672,10 @@ describe("SessionManager transcript isolation", () => {
       cwd: repo
     }));
     expect(tmuxResume).not.toHaveBeenCalled();
+    expect(setPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ id: source.id, runtime: expect.objectContaining({ state: "connected" }) }),
+      { mode: "default" }
+    );
     expect(restored).toMatchObject({
       restored: true,
       session: {

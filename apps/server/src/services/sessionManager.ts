@@ -2915,8 +2915,9 @@ export class SessionManager {
       }
       await launch.ready;
       const current = requireSession(await this.db.getSession(session.id));
+      const currentActiveModel = current.models[current.inputMode];
       const rolloutPath = launch.provider.rolloutPath ?? current.provider?.rolloutPath ?? current.codexJsonlPath;
-      await this.db.upsertSession({
+      const resumedSession: ManagedSession = {
         ...current,
         name: session.name ?? sessionName(session),
         cwd: directory,
@@ -2928,7 +2929,13 @@ export class SessionManager {
         codexJsonlPath: rolloutPath,
         resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : current.resourceUnit,
         startupError: null
-      }, nowIso());
+      };
+      await driver.setPreferences(resumedSession, {
+        mode: current.inputMode,
+        ...(currentActiveModel.model ? { model: currentActiveModel } : {}),
+        ...(current.fastMode === null ? {} : { fastMode: current.fastMode })
+      });
+      await this.db.upsertSession(resumedSession, nowIso());
       await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
       const reconciled = await this.db.getSession(session.id);
       const ready = await this.db.setSessionInitializationResult(
