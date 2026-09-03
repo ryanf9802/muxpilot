@@ -72,6 +72,11 @@ export interface PersistedAgentWait {
   readyAt: number | null;
 }
 
+export interface ApprovalContextState {
+  messages: ChatMessage[];
+  hasContext: boolean;
+}
+
 interface SessionRow {
   id: string;
   data_json: string;
@@ -592,8 +597,8 @@ export class AppDatabase {
     return this.call("latestUserMessage", sessionId) as Promise<ChatMessage | null>;
   }
 
-  latestMessage(sessionId: string): Promise<ChatMessage | null> {
-    return this.call("latestMessage", sessionId) as Promise<ChatMessage | null>;
+  activeApprovalContext(sessionId: string): Promise<ApprovalContextState> {
+    return this.call("activeApprovalContext", sessionId) as Promise<ApprovalContextState>;
   }
 
   latestTurnLifecycleMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -1799,16 +1804,38 @@ export class SyncAppDatabase {
     return row ? hydrateMessage(row) : null;
   }
 
-  latestMessage(sessionId: string): ChatMessage | null {
-    const row = this.db
+  activeApprovalContext(sessionId: string): ApprovalContextState {
+    const rows = this.db
       .prepare(
         `SELECT * FROM messages
          WHERE session_id = ?
-         ORDER BY sequence DESC
-         LIMIT 1`
+           AND sequence > COALESCE(
+             (SELECT MAX(sequence) FROM messages WHERE session_id = ? AND role IN ('user', 'assistant')),
+             0
+           )
+           AND type IN ('approval_request', 'tool_call', 'tool_output', 'command_output')
+         ORDER BY sequence ASC`
       )
-      .get(sessionId) as MessageRow | undefined;
-    return row ? hydrateMessage(row) : null;
+      .all(sessionId, sessionId) as unknown as MessageRow[];
+    const messages = rows.map(hydrateMessage);
+    const completedCallIds = new Set(
+      messages
+        .filter((message) => message.type === "tool_output" || message.type === "command_output")
+        .map(toolCallId)
+        .filter((callId): callId is string => Boolean(callId))
+    );
+    const activeMessages = messages
+      .filter((message) => {
+        if (message.type === "approval_request") return true;
+        if (message.type !== "tool_call") return false;
+        const callId = toolCallId(message);
+        return !callId || !completedCallIds.has(callId);
+      })
+      .reverse();
+    return {
+      messages: activeMessages,
+      hasContext: messages.some((message) => message.type === "approval_request" || message.type === "tool_call")
+    };
   }
 
   latestTurnLifecycleMessage(sessionId: string): ChatMessage | null {
@@ -3408,6 +3435,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
+    this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
@@ -3461,6 +3489,22 @@ export class SyncAppDatabase {
       .all() as unknown as MessageRow[];
     for (const row of rows) this.upsertPromptIndexMessage(hydrateMessage(row));
     this.setSetting(PROMPT_INDEX_BACKFILLED_SETTING, "true", new Date().toISOString());
+  }
+
+  private removePersistedContextGuards(): void {
+    const rows = this.db.prepare("SELECT id, data_json, status FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json" | "status">>;
+    const update = this.db.prepare("UPDATE managed_sessions SET data_json = ?, status = ? WHERE id = ?");
+    for (const row of rows) {
+      const session = JSON.parse(row.data_json) as ManagedSession;
+      const ownership = session.agentOwnership as (AgentSessionOwnership & Record<string, unknown>) | null | undefined;
+      if (!ownership || (!("contextPausedAt" in ownership) && !("highContextApprovedAt" in ownership))) continue;
+      const wasContextPaused = typeof ownership.contextPausedAt === "string" && ownership.contextPausedAt.length > 0;
+      delete ownership.contextPausedAt;
+      delete ownership.highContextApprovedAt;
+      const status = wasContextPaused && !ownership.budgetExhaustedAt && row.status === "blocked" ? "waiting" : row.status;
+      session.status = status;
+      update.run(JSON.stringify(session), status, row.id);
+    }
   }
 
   private normalizePersistedSessionWaitMessages(): void {
@@ -4075,6 +4119,10 @@ function isResponseItemUserMessage(message: ChatMessage): boolean {
   const payload = message.payload;
   const item = recordValue(payload.payload);
   return payload.type === "response_item" && item?.type === "message" && item.role === "user";
+}
+
+function toolCallId(message: ChatMessage): string | null {
+  return stringValue(recordValue(message.payload.payload)?.call_id);
 }
 
 function isMuxpilotSubmissionMessage(message: ChatMessage): boolean {

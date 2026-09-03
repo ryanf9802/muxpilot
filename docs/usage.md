@@ -66,7 +66,7 @@ The workflow:
 6. Locally fast-forwards the selected target branch after final validation.
 7. Removes the completed task worktree and temporary branch.
 
-The target branch must already exist locally. Selecting or creating a different implementation branch requires explicit confirmation because current and future task commits will integrate there. muxpilot does not automatically fetch, pull, push, or publish changes. A dirty target checkout blocks integration.
+The target branch must already exist locally. Selecting or creating a different implementation branch requires explicit confirmation because current and future task commits will integrate there, unless a directly invoked skill explicitly directs that guarded action. In that case the invocation supplies operation-scoped authorization, while automatic skill selection and undeclared actions do not. muxpilot does not automatically fetch, pull, push, or publish changes. A dirty target checkout blocks integration.
 
 Heavy validation—such as repository-wide checks, production builds, scanners, Docker workloads, or multi-worker tests—uses a shared resource lease. That scheduler controls concurrency but does not authorize broader validation than the user requested.
 
@@ -122,7 +122,7 @@ Nested muxpilot sessions are reserved for work the operator explicitly requests 
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
-Created children inherit the source runtime, repository/target, model settings, and Fast setting but start with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context/work-token guardrails, waits, and raw evidence.
+Created children inherit the source runtime, repository/target, model settings, and Fast setting but start with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
 
 ## Moving sessions between hosts
 

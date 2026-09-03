@@ -5,7 +5,7 @@ description: Run isolated local Git tasks in short-lived worktrees, self-review 
 
 # Muxpilot Local Git Workflow
 
-Managed muxpilot sessions supply a repository entry path and an initial existing local target branch. Direct Codex sessions running in tmux can initialize the standalone mode below. The application observes workflow events but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific confirmation process below.
+Managed muxpilot sessions supply a repository entry path and an initial existing local target branch. Direct Codex sessions running in tmux can initialize the standalone mode below. The application observes workflow events but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific authorization process below.
 
 ## Read-only work
 
@@ -60,9 +60,9 @@ Treat `muxpilot-git-status.mjs` as authoritative for the current target. The lau
 
 Infer target intent before beginning a change task. When a user asks to create or select a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the muxpilot target. In a request to create `feature` from `origin/dev`, `feature` is the intended target and `origin/dev` is only its start point.
 
-If the intended target differs from workflow status, changing it is a `fixed-target` guard bypass. The original request is not itself confirmation. Before creating the requested branch or beginning implementation, name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. If confirmation is declined, leave the branch and workflow state unchanged.
+If the intended target differs from workflow status, changing it is a `fixed-target` guard bypass. When "Skill-declared authorization" below does not apply, the original request is not itself confirmation. Before creating the requested branch or beginning implementation, name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. If confirmation is declined, leave the branch and workflow state unchanged.
 
-After confirmation, create a requested local branch from the supplied locally available start point without checking it out, fetching, pulling, or pushing. Then run `node <helper-dir>/muxpilot-git-target.mjs <existing-local-branch> --bypass=fixed-target`. If the start point is unavailable locally, report the blocker rather than fetching implicitly. If the intended branch is already the current target, no bypass or additional confirmation is required.
+After authorization, create a requested local branch from the supplied locally available start point without checking it out, fetching, pulling, or pushing. Then run `node <helper-dir>/muxpilot-git-target.mjs <existing-local-branch> --bypass=fixed-target`. If the start point is unavailable locally, report the blocker rather than fetching implicitly. If the intended branch is already the current target, no bypass or additional authorization is required.
 
 The helper never creates or fetches a branch. If a task worktree exists, it is preserved and finalization rebases it onto the new target when necessary. Any active-worktree retarget invalidates prior validation and review; rerun focused checks and the complete self-review loop before integration, even when Git does not need to rebase.
 
@@ -70,11 +70,38 @@ The helper never creates or fetches a branch. If a task worktree exists, it is p
 
 Muxpilot guards are: `worktree-isolation`, `same-agent-review`, `focused-validation`, `atomic-commits`, `clean-target`, `fixed-target`, `local-target-only`, `automatic-cleanup`, and `no-pull-push`.
 
-When a user instruction conflicts with one or more guards:
+### Skill-declared authorization
+
+A user directly invokes a skill when the current request names it, either with
+the `$skill-name` form or unambiguous wording such as "use the review skill."
+Description-based or otherwise automatic skill selection is not a direct
+invocation.
+
+When a directly invoked skill's instruction body explicitly directs an action
+that conflicts with a muxpilot guard, the invocation itself is
+operation-scoped authorization for that action. The skill does not need to name
+the guard. Map the action to every affected guard, name each guard and its
+consequence, announce that the skill invocation supplies authorization, and
+continue without pausing for redundant confirmation. Pass the exact
+`--bypass=<guard>` option when a helper supports it. This also satisfies a
+skill's own instruction to obtain separate operation-scoped authorization for
+the same explicitly directed action.
+
+Authorization covers only the named skill, its current invocation, and the
+actions its instruction body explicitly directs. A broad capability
+description, an undeclared action, a later operation, or an automatically
+selected skill does not qualify.
+
+### Other guard conflicts
+
+When skill-declared authorization does not apply and a user instruction
+conflicts with one or more guards:
 
 1. Name each conflicting guard and explain the concrete consequence of bypassing it.
 2. Obtain explicit confirmation for those exact guards before acting. Do not infer confirmation from the original conflicting request.
 3. Scope confirmation to that operation only; every unrelated guard remains active.
 4. Pass an exact `--bypass=<guard>` option when a helper supports the confirmed exception. There is no blanket force option.
 
-Platform safety, sandbox, permission, and approval requirements are not muxpilot guards and cannot be bypassed through this process.
+Platform safety, sandbox, permission, and security approval requirements are
+not muxpilot guards and cannot be bypassed through either authorization
+process.

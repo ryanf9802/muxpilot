@@ -105,16 +105,23 @@ describe("managed Codex launch instructions", () => {
     expect(options.developerInstructions).toContain("/home/dev/.codex/skills/muxpilot-git-workflow/scripts");
     expect(options.developerInstructions).toContain("short-lived worktree");
     expect(options.developerInstructions).toContain("first resolve the intended target");
-    expect(options.developerInstructions).toContain("confirmation and retarget, then announce");
+    expect(options.developerInstructions).toContain("authorization and retarget, then announce");
     expect(options.developerInstructions).toContain("muxpilot-git-begin");
     expect(options.developerInstructions).toContain("muxpilot-git-target");
     expect(options.developerInstructions).toContain("branch for implementation");
     expect(options.developerInstructions).toContain("source ref such as origin/dev is only the start point");
     expect(options.developerInstructions).toContain("before creating the branch or beginning implementation");
     expect(options.developerInstructions).toContain("name the fixed-target guard");
-    expect(options.developerInstructions).toContain("confirmation for the fixed-target bypass");
+    expect(options.developerInstructions).toContain("confirmation for the fixed-target bypass unless a directly invoked skill explicitly directs that retarget");
     expect(options.developerInstructions).toContain("Initial target branch: main");
-    expect(options.developerInstructions).toContain("obtain explicit confirmation for those guards");
+    expect(options.developerInstructions).toContain("direct invocation names a skill with $skill-name");
+    expect(options.developerInstructions).toContain("automatic skill selection is not direct invocation");
+    expect(options.developerInstructions).toContain("The skill need not name the guard");
+    expect(options.developerInstructions).toContain("even if the skill asks for separate authorization");
+    expect(options.developerInstructions).toContain("announce that the skill invocation supplies authorization");
+    expect(options.developerInstructions).toContain("proceed without pausing for redundant confirmation");
+    expect(options.developerInstructions).toContain("For every other guard conflict, obtain explicit confirmation");
+    expect(options.developerInstructions).toContain("security approval");
     expect(options.developerInstructions).toContain("Never use an implementation worktree's state to claim that another checkout is clean or dirty");
     expect(options.developerInstructions).toContain("use normal approval or escalation instead of refusing it as out of scope");
     expect(options.developerInstructions).toContain("focused file/module checks");
@@ -984,6 +991,16 @@ describe("SessionManager transcript isolation", () => {
             ].join("\n")
           }
         }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.100Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.200Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
         ""
       ].join("\n")
     );
@@ -1014,7 +1031,11 @@ describe("SessionManager transcript isolation", () => {
     expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
     expect(publishedStatuses).toContain("approval");
 
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session.id))?.status).toBe("approval");
+
     expect(await harness.manager.getPendingApproval(session.id)).toMatchObject({
+      id: "call-command-approval",
       kind: "command",
       title: "Would you like to run the following command?",
       command: "pnpm app restart prod",
@@ -1033,6 +1054,59 @@ describe("SessionManager transcript isolation", () => {
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
     expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
     unsubscribe();
+    harness.db.close();
+  });
+
+  it("rejects an approval-shaped screen after the matching tool call completed", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const path = join(harness.codexHome, "sessions", "completed-command-approval.jsonl");
+    await writeFile(
+      path,
+      [
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:00.000Z",
+          type: "session_meta",
+          payload: { session_id: "codex-session", cwd: repo, cli_version: "test" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call",
+            name: "exec_command",
+            call_id: "call-completed-command",
+            arguments: JSON.stringify({ cmd: "pnpm app restart prod" })
+          }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:01.100Z",
+          type: "event_msg",
+          payload: { type: "item_completed" }
+        }),
+        JSON.stringify({
+          timestamp: "2026-07-09T00:00:02.000Z",
+          type: "response_item",
+          payload: {
+            type: "function_call_output",
+            call_id: "call-completed-command",
+            output: "Process exited with code 0"
+          }
+        }),
+        ""
+      ].join("\n")
+    );
+    harness.tmux.listPanes = async () => [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.capturePane = async () => commandApprovalCapture(1);
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0]!;
+    await harness.manager.ingest();
+    await harness.manager.discover();
+
+    expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
+    expect(await harness.manager.getPendingApproval(session.id)).toBeNull();
     harness.db.close();
   });
 
@@ -1383,6 +1457,7 @@ describe("SessionManager transcript isolation", () => {
     await harness.manager.resolveApproval(session.id, { decision: "approve_for_prefix" });
 
     expect(await harness.db.hasRepositoryApprovalRule(join(repo, ".git"), ["pnpm", "test"])).toBe(true);
+    expect((await harness.db.activeApprovalContext(session.id)).messages).toHaveLength(1);
     await harness.manager.discover();
     expect(sentKeys).toEqual([["Enter"], ["Enter"]]);
     expect((await harness.manager.getSession(session.id))?.status).toBe("waiting");
@@ -7006,11 +7081,7 @@ describe("agent-managed session hierarchy", () => {
     const child = agentHierarchySession("finish-child");
     await harness.db.upsertSession(root, "2026-08-25T00:00:00.000Z");
     await harness.db.upsertSession(child, "2026-08-25T00:00:00.000Z");
-    const claimed = await harness.manager.agentClaim(root.id, child.id);
-    await harness.db.setSessionAgentOwnership(child.id, {
-      ...claimed.agentOwnership!,
-      contextPausedAt: "2026-08-25T00:01:00.000Z"
-    }, "2026-08-25T00:01:00.000Z");
+    await harness.manager.agentClaim(root.id, child.id);
 
     await Promise.all([
       harness.manager.agentFinish(root.id, child.id),
@@ -7022,8 +7093,7 @@ describe("agent-managed session hierarchy", () => {
       status: "missing",
       agentOwnership: {
         parentSessionId: root.id,
-        completedAt: expect.any(String),
-        contextPausedAt: "2026-08-25T00:01:00.000Z"
+        completedAt: expect.any(String)
       }
     });
     const visible = await harness.manager.listSessions(false, false);
@@ -7037,7 +7107,7 @@ describe("agent-managed session hierarchy", () => {
     await harness.db.close();
   });
 
-  it("interrupts an owned session when active context reaches 85 percent", async () => {
+  it("keeps active context informational for an owned session", async () => {
     const harness = await createHarness();
     const transcript = join(harness.codexHome, "sessions", "agent-context.jsonl");
     const parent = agentHierarchySession("context-parent");
@@ -7061,7 +7131,7 @@ describe("agent-managed session hierarchy", () => {
         type: "token_count",
         info: {
           model_context_window: 100_000,
-          last_token_usage: { total_tokens: 85_000 },
+          last_token_usage: { total_tokens: 99_000 },
           total_token_usage: { input_tokens: 90_000, cached_input_tokens: 10_000, output_tokens: 5_000, total_tokens: 95_000 }
         }
       }
@@ -7073,48 +7143,15 @@ describe("agent-managed session hierarchy", () => {
 
     await harness.manager.catchUpIngest();
 
-    expect(interrupted).toEqual([child.tmux.paneId]);
+    expect(interrupted).toEqual([]);
     expect(await harness.manager.getSession(child.id)).toMatchObject({
-      status: "blocked",
-      contextUsage: { contextPercent: 85 },
-      agentOwnership: { contextPausedAt: expect.any(String) }
+      contextUsage: { contextPercent: 99 },
+      agentOwnership: { workTokenBudget: 1_000_000 }
     });
     await harness.db.close();
   });
 
-  it("lets the operator acknowledge a high-context guard for the next turn", async () => {
-    const harness = await createHarness();
-    const parent = agentHierarchySession("guard-parent");
-    const child = agentHierarchySession("guard-child");
-    await harness.db.upsertSession(parent, "2026-08-31T00:00:00.000Z");
-    await harness.db.upsertSession(child, "2026-08-31T00:00:00.000Z");
-    const claimed = await harness.manager.agentClaim(parent.id, child.id);
-    await harness.db.setSessionAgentOwnership(child.id, {
-      ...claimed.agentOwnership!,
-      contextPausedAt: "2026-08-31T00:01:00.000Z"
-    }, "2026-08-31T00:01:00.000Z");
-    await harness.db.setSessionStatus(child.id, "blocked", "2026-08-31T00:01:00.000Z");
-    const events: string[] = [];
-    harness.events.subscribe((event) => events.push(`${event.type}:${event.sessionId}`));
-
-    const updated = await harness.manager.act(child.id, {
-      type: "acknowledgeAgentHighContext",
-      reason: "Operator accepts the next high-context turn"
-    });
-
-    expect(updated).toMatchObject({
-      status: "waiting",
-      agentOwnership: { contextPausedAt: null, highContextApprovedAt: expect.any(String) }
-    });
-    expect(events).toContain(`session.updated:${child.id}`);
-    await expect(harness.manager.act(child.id, {
-      type: "acknowledgeAgentHighContext",
-      reason: "stale retry"
-    })).rejects.toThrow("not paused");
-    await harness.db.close();
-  });
-
-  it("extends an exhausted budget but preserves another active guard", async () => {
+  it("extends an exhausted budget and resumes the child", async () => {
     const harness = await createHarness();
     const parent = agentHierarchySession("budget-parent");
     const child = agentHierarchySession("budget-child");
@@ -7123,8 +7160,7 @@ describe("agent-managed session hierarchy", () => {
     const claimed = await harness.manager.agentClaim(parent.id, child.id);
     await harness.db.setSessionAgentOwnership(child.id, {
       ...claimed.agentOwnership!,
-      budgetExhaustedAt: "2026-08-31T00:01:00.000Z",
-      contextPausedAt: "2026-08-31T00:01:00.000Z"
+      budgetExhaustedAt: "2026-08-31T00:01:00.000Z"
     }, "2026-08-31T00:01:00.000Z");
     await harness.db.setSessionStatus(child.id, "blocked", "2026-08-31T00:01:00.000Z");
 
@@ -7135,18 +7171,12 @@ describe("agent-managed session hierarchy", () => {
     });
 
     expect(budgetUpdated).toMatchObject({
-      status: "blocked",
+      status: "waiting",
       agentOwnership: {
         workTokenBudget: 1_500_000,
-        budgetExhaustedAt: null,
-        contextPausedAt: "2026-08-31T00:01:00.000Z"
+        budgetExhaustedAt: null
       }
     });
-    const unblocked = await harness.manager.act(child.id, {
-      type: "acknowledgeAgentHighContext",
-      reason: "Continue after extending the budget"
-    });
-    expect(unblocked).toMatchObject({ status: "waiting" });
     await expect(harness.manager.agentExtendBudget(parent.id, child.id, 2_000_001, "too much"))
       .rejects.toThrow("between 1 and 2,000,000");
     await harness.db.close();

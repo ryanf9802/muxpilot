@@ -71,13 +71,7 @@ export function childAttentionDetail(session: ManagedSession): string {
   if (session.status === "question") return "Answer requested";
   if (session.status === "plan_ready") return "Plan decision required";
   if (session.status === "input_failed") return "Input delivery needs recovery";
-  const contextBlocked = Boolean(session.agentOwnership?.contextPausedAt);
   const budgetBlocked = Boolean(session.agentOwnership?.budgetExhaustedAt);
-  if (contextBlocked && budgetBlocked) return "High context and work-token budget need attention";
-  if (contextBlocked) {
-    const percent = session.contextUsage?.contextPercent;
-    return typeof percent === "number" && Number.isFinite(percent) ? `Paused at ${Math.round(percent)}% context` : "Paused by the high-context guard";
-  }
   if (budgetBlocked) return "Work-token budget exhausted";
   return "Child session is blocked";
 }

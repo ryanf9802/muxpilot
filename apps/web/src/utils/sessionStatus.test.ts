@@ -75,7 +75,7 @@ describe("countSessionStatuses", () => {
     const root = session("root", "waiting");
     const child = {
       ...session("child", "blocked"),
-      agentOwnership: { ...ownership(root.id), completedAt: "2026-08-25T01:00:00.000Z", contextPausedAt: "2026-08-25T00:59:00.000Z" }
+      agentOwnership: { ...ownership(root.id), completedAt: "2026-08-25T01:00:00.000Z", budgetExhaustedAt: "2026-08-25T00:59:00.000Z" }
     };
 
     expect(sessionStatusPresentation(root, [root, child]).status).toBe("waiting");
@@ -96,12 +96,12 @@ describe("countSessionStatuses", () => {
 });
 
 describe("childSessionAttentionItems", () => {
-  it("returns actionable descendants with guard-specific details in priority order", () => {
+  it("returns actionable descendants with budget-specific details in priority order", () => {
     const root = session("root", "waiting");
     const blocked = {
       ...session("blocked", "blocked"),
       contextUsage: { contextPercent: 86 },
-      agentOwnership: { ...ownership(root.id), contextPausedAt: "2026-08-25T00:01:00.000Z" }
+      agentOwnership: { ...ownership(root.id), budgetExhaustedAt: "2026-08-25T00:01:00.000Z" }
     } as ManagedSession;
     const approval = {
       ...session("approval", "approval"),
@@ -117,7 +117,7 @@ describe("childSessionAttentionItems", () => {
       detail: item.detail
     }))).toEqual([
       { id: "approval", detail: "Approval required" },
-      { id: "blocked", detail: "Paused at 86% context" }
+      { id: "blocked", detail: "Work-token budget exhausted" }
     ]);
   });
 });

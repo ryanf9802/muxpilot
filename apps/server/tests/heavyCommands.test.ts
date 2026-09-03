@@ -319,7 +319,10 @@ describe("HeavyCommandService", () => {
       lastActivityAt: new Date().toISOString(),
       activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
     }));
-    const service = new HeavyCommandService(leases, sessions);
+    const service = new HeavyCommandService(leases, sessions, 2, 120_000, null, {
+      ownerProcessState: async () => "inactive",
+      stopResourceUnit: async () => undefined
+    });
     expect(await service.hasRunning("workspace-a")).toBe(true);
     expect(await service.runningWorkspaceIds()).toEqual(new Set(["workspace-a"]));
     expect(await service.runningResourceUnits()).toEqual([{
@@ -341,6 +344,173 @@ describe("HeavyCommandService", () => {
     expect(await service.hasActive("workspace-a")).toBe(true);
     expect(await service.hasRunning("workspace-a")).toBe(false);
     expect(await service.runningWorkspaceIds()).toEqual(new Set());
+  });
+
+  it("keeps a stale process-live owner visible, resource-busy, and slot-owning", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const activeRunId = "mabc123-686868686868";
+    const waitingRunId = "mabc123-696969696969";
+    const resourceUnit = "muxpilot-heavy-mabc123-686868686868-a1b2c3.service";
+    const activeRunDir = join(leases, "runs", activeRunId);
+    const controlSocket = join(activeRunDir, "control.sock");
+    await mkdir(activeRunDir, { recursive: true });
+    await writeFile(join(activeRunDir, "owner.json"), JSON.stringify({
+      ...owner(activeRunId, "workspace-active", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      wrapperPid: 123,
+      resourceUnit,
+      controlSocket,
+      heartbeatAt: "2026-01-01T00:00:00.000Z",
+      lastActivityAt: "2026-01-01T00:00:00.000Z",
+      activity: { processCount: 1, cpuTicks: 1, ioBytes: 0, runningContainers: 0, createdContainers: 0 }
+    }));
+    await writeQueueOwner(leases, waitingRunId, new Date().toISOString());
+    await mkdir(join(leases, "slot-0"));
+    await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({
+      version: 3,
+      runId: activeRunId,
+      wrapperPid: 123,
+      resourceUnit,
+      controlSocket,
+      heartbeatAt: Date.now() - 120_000
+    }));
+    const service = new HeavyCommandService(leases, sessions, 1, 120_000, null, {
+      ownerProcessState: async () => "active",
+      stopResourceUnit: async () => undefined
+    });
+    const messages: string[] = [];
+    await service.start({
+      sessionIdForWorkspace: async () => "session-waiting",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
+    });
+    try {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 350));
+      expect((await service.list("workspace-active")).commands[0]).toMatchObject({ state: "stalled" });
+      expect(await service.sessionStatusForWorkspace("workspace-active")).toBe("running");
+      expect(await service.runningWorkspaceIds()).toContain("workspace-active");
+      expect(await service.runningResourceUnits()).toEqual([{ workspaceId: "workspace-active", unit: resourceUnit }]);
+      expect(messages).toEqual([]);
+      expect(JSON.parse(await readFile(join(leases, "runs", waitingRunId, "owner.json"), "utf8"))).toMatchObject({ state: "waiting", slot: null });
+      expect(JSON.parse(await readFile(join(leases, "slot-0", "owner.json"), "utf8"))).toMatchObject({ runId: activeRunId });
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("recovers an over-deadline live worker through its exact unit and normal completion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const runId = "mabc123-707070707070";
+    const resourceUnit = "muxpilot-heavy-mabc123-707070707070-a1b2c3.service";
+    await writeReportingOwner(leases, sessions, runId, 0, "worker output before timeout");
+    const ownerPath = join(leases, "runs", runId, "owner.json");
+    const current = JSON.parse(await readFile(ownerPath, "utf8"));
+    const controlSocket = join(leases, "runs", runId, "control.sock");
+    await writeFile(ownerPath, JSON.stringify({
+      ...current,
+      state: "running",
+      wrapperPid: 123,
+      resourceUnit,
+      controlSocket,
+      slot: 0,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      heartbeatAt: "2026-01-01T00:00:00.000Z",
+      deadlines: { inactivityWarnMs: 10, inactivityTimeoutMs: 20, runtimeTimeoutMs: 30, terminationGraceMs: 10 },
+      exitCode: null,
+      finishedAt: null,
+      completionSentAt: null
+    }));
+    await mkdir(join(leases, "slot-0"));
+    await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({ version: 3, runId, wrapperPid: 123, resourceUnit, controlSocket, heartbeatAt: Date.now() }));
+    const stopped: string[] = [];
+    const messages: string[] = [];
+    const service = new HeavyCommandService(leases, sessions, 1, 120_000, null, {
+      ownerProcessState: async () => "active",
+      stopResourceUnit: async (unit) => { stopped.push(unit); }
+    });
+    await service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async (_sessionId, message) => { messages.push(message); return true; },
+      syncHeavyCommandSessionStatus: async () => undefined
+    });
+    try {
+      await waitFor(() => messages.some((message) => normalizeHeavyCommandQueueEvent(message)?.event.kind === "run_completed"));
+      expect(stopped).toEqual([resourceUnit]);
+      expect(JSON.parse(await readFile(ownerPath, "utf8"))).toMatchObject({
+        state: "completed",
+        slot: null,
+        exitCode: 124,
+        terminationReason: "runtime exceeded 30ms while the heavyweight worker remained active",
+        completionSentAt: expect.any(String)
+      });
+      await expect(stat(join(leases, "slot-0"))).rejects.toThrow();
+      expect(normalizeHeavyCommandQueueEvent(messages[0] ?? "")?.event).toMatchObject({
+        kind: "run_completed",
+        runId,
+        outcome: "terminated",
+        exitCode: 124
+      });
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it("retains an over-deadline owner and slot when exact-unit stopping fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const sessions = join(root, "sessions");
+    const runId = "mabc123-717171717171";
+    const resourceUnit = "muxpilot-heavy-mabc123-717171717171-a1b2c3.service";
+    await writeReportingOwner(leases, sessions, runId, 0, "worker output");
+    const ownerPath = join(leases, "runs", runId, "owner.json");
+    const current = JSON.parse(await readFile(ownerPath, "utf8"));
+    const controlSocket = join(leases, "runs", runId, "control.sock");
+    await writeFile(ownerPath, JSON.stringify({
+      ...current,
+      state: "running",
+      wrapperPid: 123,
+      resourceUnit,
+      controlSocket,
+      slot: 0,
+      startedAt: "2026-01-01T00:00:00.000Z",
+      heartbeatAt: "2026-01-01T00:00:00.000Z",
+      deadlines: { inactivityWarnMs: 10, inactivityTimeoutMs: 20, runtimeTimeoutMs: 30, terminationGraceMs: 10 },
+      exitCode: null,
+      finishedAt: null,
+      completionSentAt: null
+    }));
+    await mkdir(join(leases, "slot-0"));
+    await writeFile(join(leases, "slot-0", "owner.json"), JSON.stringify({ version: 3, runId, wrapperPid: 123, resourceUnit, controlSocket, heartbeatAt: Date.now() }));
+    let stopAttempts = 0;
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = new HeavyCommandService(leases, sessions, 1, 120_000, null, {
+      ownerProcessState: async () => "active",
+      stopResourceUnit: async () => { stopAttempts += 1; throw new Error("systemd unavailable"); }
+    });
+    await service.start({
+      sessionIdForWorkspace: async () => "session-a",
+      resumeHeavyCommand: async () => true,
+      syncHeavyCommandSessionStatus: async () => undefined
+    });
+    try {
+      await waitFor(() => stopAttempts > 0);
+      expect(JSON.parse(await readFile(ownerPath, "utf8"))).toMatchObject({ state: "running", slot: 0, completionSentAt: null });
+      expect(JSON.parse(await readFile(join(leases, "slot-0", "owner.json"), "utf8"))).toMatchObject({ runId });
+      expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("running");
+      expect(consoleError).toHaveBeenCalledWith("Muxpilot heavyweight deadline recovery failed", expect.objectContaining({ runId, resourceUnit }));
+    } finally {
+      await service.stop();
+      consoleError.mockRestore();
+    }
   });
 
   it("corroborates a stale active owner through its private control socket", async () => {
@@ -388,8 +558,8 @@ describe("HeavyCommandService", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    expect(await service.sessionStatusForWorkspace("workspace-a")).toBeNull();
-    expect(await service.runningWorkspaceIds()).toEqual(new Set());
+    expect(await service.sessionStatusForWorkspace("workspace-a")).toBe("running");
+    expect(await service.runningWorkspaceIds()).toEqual(new Set(["workspace-a"]));
   });
 
   it("durably suppresses completion before cancelling a running worker", async () => {

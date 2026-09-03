@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
+import type { CodexGoalReader } from "../src/codex/codexGoalStore.js";
 import type { AppDatabase } from "../src/db/database.js";
 import type { SessionManager } from "../src/services/sessionManager.js";
 import { SessionOrchestrationBroker } from "../src/services/sessionOrchestrationBroker.js";
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
-  it("ignores advisory context pressure but wakes after the 85-percent guard blocks work", async () => {
+  it("keeps context pressure informational while a child is working", async () => {
     const child: ManagedSession = {
       ...managedSession(),
       id: "context-child",
@@ -53,11 +54,10 @@ describe("SessionOrchestrationBroker raw evidence", () => {
 
     expect(manager.resumeAgentWait).not.toHaveBeenCalled();
 
-    child.status = "blocked";
-    child.contextUsage!.contextPercent = 85;
+    child.contextUsage!.contextPercent = 99;
     await (broker as unknown as { tick(): Promise<void> }).tick();
 
-    expect(manager.resumeAgentWait).toHaveBeenCalledWith("parent-1", expect.stringContaining('"effectiveStatus":"blocked"'));
+    expect(manager.resumeAgentWait).not.toHaveBeenCalled();
   });
 
   it("keeps waiting for a working descendant and wakes with its attention status", async () => {
@@ -226,13 +226,30 @@ describe("SessionOrchestrationBroker raw evidence", () => {
         text: "raw"
       }))
     };
+    const goal = {
+      objective: "Finish the architecture refactor",
+      status: "active" as const,
+      elapsedSeconds: 321,
+      tokensUsed: 12_345,
+      tokenBudget: null,
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:05:00.000Z",
+      sampledAt: "2026-08-25T00:05:21.000Z"
+    };
+    const readGoals = vi.fn(() => ({
+      available: true,
+      sampledAt: goal.sampledAt,
+      goals: new Map([[session.codexSessionId!, goal]])
+    }));
+    const goalReader: CodexGoalReader = { read: readGoals };
     const broker = new SessionOrchestrationBroker(
       db,
       manager,
       "/tmp/muxpilot-unused.sock",
       "/tmp/muxpilot-unused-capabilities",
       { info: vi.fn(), warn: vi.fn() },
-      rawEvidence
+      rawEvidence,
+      goalReader
     );
     const token = "token";
     const capabilityId = "0123456789abcdef01234567";
@@ -260,10 +277,18 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     expect(rawEvidence.readCodexSessionFile).toHaveBeenCalledWith("rollout.jsonl", null, 64 * 1024);
 
     await expect(call("read_session", { sessionId: session.id, limit: 5 })).resolves.toMatchObject({
+      goalTelemetry: { available: true, sampledAt: goal.sampledAt },
+      session: { id: session.id, goal },
       muxpilotRecord: { id: session.id, codexSessionId: session.codexSessionId },
       queuedInputs: [{ id: "queued-1", text: "pending" }],
       messages: [{ text: "task_complete", payload: { rawLifecycle: { type: "task_complete" } } }]
     });
+    await expect(call("list_sessions")).resolves.toMatchObject({
+      goalTelemetry: { available: true, sampledAt: goal.sampledAt },
+      sessions: [{ id: session.id, goal }]
+    });
+    readGoals.mockReturnValueOnce({ available: true, sampledAt: goal.sampledAt, goals: new Map() });
+    await expect(call("list_sessions")).resolves.toMatchObject({ sessions: [{ id: session.id, goal: null }] });
   });
 
   it("advertises every raw read-only primitive through MCP", async () => {
@@ -286,7 +311,8 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`);
     const result = await response;
     child.kill("SIGTERM");
-    const tools = (result.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name);
+    const definitions = (result.result as { tools: Array<{ name: string; description: string }> }).tools;
+    const tools = definitions.map((tool) => tool.name);
 
     expect(tools).toEqual(expect.arrayContaining([
       "list_tmux_panes",
@@ -295,6 +321,8 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       "list_codex_session_files",
       "read_codex_session_file"
     ]));
+    expect(definitions.find((tool) => tool.name === "list_sessions")?.description).toContain("goal telemetry");
+    expect(definitions.find((tool) => tool.name === "read_session")?.description).toContain("goal telemetry");
   });
 });
 

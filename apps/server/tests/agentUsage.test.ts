@@ -33,8 +33,7 @@ function testOwnership(): AgentSessionOwnership {
     workTokenBaseline: 1_000,
     workTokenBudget: 1_000_000,
     completedAt: null,
-    budgetExhaustedAt: null,
-    contextPausedAt: null
+    budgetExhaustedAt: null
   };
 }
 

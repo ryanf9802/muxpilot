@@ -11,6 +11,7 @@ import { isMuxpilotSessionResourceUnit } from "./sessionScopes.js";
 import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 import { agentWorkTokensUsed } from "./agentUsage.js";
 import type { McpServerLaunchConfig } from "./sessionDrivers/types.js";
+import type { CodexGoalReader, CodexGoalSnapshot, CodexGoalTelemetry } from "../codex/codexGoalStore.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TERMINAL_OR_ATTENTION = new Set(["idle", "waiting", "question", "approval", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);
@@ -29,6 +30,10 @@ interface Capability {
   actorSessionId: string | null;
 }
 
+const UNAVAILABLE_GOAL_READER: CodexGoalReader = {
+  read: () => ({ available: false, sampledAt: nowIso(), goals: new Map() })
+};
+
 type AgentWait = PersistedAgentWait;
 
 export class SessionOrchestrationBroker {
@@ -44,7 +49,8 @@ export class SessionOrchestrationBroker {
     private readonly socketPath: string,
     private readonly capabilityRoot: string,
     private readonly logger: Logger,
-    private readonly rawEvidence: RawSessionEvidence
+    private readonly rawEvidence: RawSessionEvidence,
+    private readonly goalReader: CodexGoalReader = UNAVAILABLE_GOAL_READER
   ) {}
 
   async start(): Promise<void> {
@@ -154,7 +160,7 @@ export class SessionOrchestrationBroker {
       case "create_session": return summarizeSession(await this.manager.agentCreateChild(actorId, requiredString(args.name, "name"), requiredString(args.task, "task"), collaborationMode(args.mode)));
       case "claim_session": return summarizeSession(await this.manager.agentClaim(actorId, requiredString(args.sessionId, "sessionId")));
       case "release_session": return summarizeSession(await this.manager.agentRelease(actorId, requiredString(args.sessionId, "sessionId")));
-      case "send_message": return summarizeSession(await this.manager.agentSendInput(actorId, requiredString(args.sessionId, "sessionId"), requiredString(args.text, "text"), collaborationMode(args.mode), args.allowHighContext === true, typeof args.reason === "string" ? args.reason : ""));
+      case "send_message": return summarizeSession(await this.manager.agentSendInput(actorId, requiredString(args.sessionId, "sessionId"), requiredString(args.text, "text"), collaborationMode(args.mode)));
       case "answer_question": {
         const target = requiredString(args.sessionId, "sessionId");
         const answers = recordValue(args.answers);
@@ -197,7 +203,12 @@ export class SessionOrchestrationBroker {
       const root = actor.agentOwnership?.rootSessionId ?? actor.id;
       sessions = sessions.filter((session) => session.id === root || session.agentOwnership?.rootSessionId === root);
     }
-    return { actorSessionId: actorId, sessions: sessions.map((session) => summarizeSession(session, sessions)) };
+    const goalTelemetry = this.goalReader.read(codexThreadIds(sessions));
+    return {
+      actorSessionId: actorId,
+      goalTelemetry: goalTelemetrySummary(goalTelemetry),
+      sessions: sessions.map((session) => summarizeSession(session, sessions, goalForSession(session, goalTelemetry)))
+    };
   }
 
   private async authorizedEvidenceSession(actorId: string, sessionId: string): Promise<ManagedSession> {
@@ -215,6 +226,7 @@ export class SessionOrchestrationBroker {
       this.db.listQueuedInputs(sessionId),
       this.manager.listSessions(true, true)
     ]);
+    const goalTelemetry = this.goalReader.read(codexThreadIds([session]));
     let remainingCharacters = 24_000;
     const messages: Array<Record<string, unknown>> = [];
     for (const item of [...page.items].reverse()) {
@@ -236,7 +248,8 @@ export class SessionOrchestrationBroker {
       });
     }
     return {
-      session: summarizeSession(session, sessions),
+      goalTelemetry: goalTelemetrySummary(goalTelemetry),
+      session: summarizeSession(session, sessions, goalForSession(session, goalTelemetry)),
       muxpilotRecord: session,
       messages,
       queuedInputs,
@@ -328,7 +341,7 @@ export class SessionOrchestrationBroker {
   }
 }
 
-function summarizeSession(session: ManagedSession, allSessions: ManagedSession[] = [session]) {
+function summarizeSession(session: ManagedSession, allSessions: ManagedSession[] = [session], goal: CodexGoalSnapshot | null = null) {
   const ownership = session.agentOwnership;
   const usage = session.contextUsage;
   const used = ownership ? agentWorkTokensUsed(ownership, usage) : null;
@@ -348,6 +361,7 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
     context: usage ? { activeTokens: usage.activeTokens, windowTokens: usage.contextWindowTokens, percent: Math.round(usage.contextPercent * 10) / 10 } : null,
     lifetimeTokens: usage ? { total: usage.lifetimeTotalTokens, work: usage.lifetimeWorkTokens, cachedInput: usage.lifetimeCachedInputTokens } : null,
     budget: ownership ? { used, limit: ownership.workTokenBudget, remaining: Math.max(0, ownership.workTokenBudget - (used ?? 0)) } : null,
+    goal,
     lastActivityAt: session.lastActivityAt,
     preview: session.preview.slice(0, 500),
     orchestrationAvailable: session.orchestrationAvailable === true,
@@ -358,6 +372,18 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
         : null
     }
   };
+}
+
+function codexThreadIds(sessions: ManagedSession[]): string[] {
+  return sessions.flatMap((session) => session.codexSessionId ? [session.codexSessionId] : []);
+}
+
+function goalForSession(session: ManagedSession, telemetry: CodexGoalTelemetry): CodexGoalSnapshot | null {
+  return session.codexSessionId ? telemetry.goals.get(session.codexSessionId) ?? null : null;
+}
+
+function goalTelemetrySummary(telemetry: CodexGoalTelemetry) {
+  return { available: telemetry.available, sampledAt: telemetry.sampledAt };
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {

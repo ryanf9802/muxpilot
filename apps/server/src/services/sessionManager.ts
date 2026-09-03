@@ -716,15 +716,12 @@ export class SessionManager {
         existing?.inputMode ??
         "default";
       const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-      const latestMessage = await this.db.latestMessage(lookupId);
       const liveApprovalPrompt =
         rawInferredStatus !== "approval"
           ? null
-          : latestMessage?.type === "approval_request"
-            ? await this.capturePaneApprovalPrompt(pane)
-            : await this.corroboratedLiveApproval(pane, latestMessage);
+          : await this.corroboratedLiveApproval(pane, (await this.db.activeApprovalContext(lookupId)).messages);
       const inferredStatus =
-        rawInferredStatus === "approval" && latestMessage?.type !== "approval_request" && !liveApprovalPrompt
+        rawInferredStatus === "approval" && !liveApprovalPrompt
           ? rejectedApprovalFallbackStatus(pane, existing?.status)
           : rawInferredStatus;
       let latestUserMessage = await this.db.latestUserMessage(lookupId);
@@ -811,7 +808,10 @@ export class SessionManager {
       };
 
       if (effectiveStatus === "approval" && liveApprovalPrompt) {
-        this.liveApprovals.set(sessionId, materializeInteractiveApproval(session, liveApprovalPrompt, latestMessage));
+        this.liveApprovals.set(
+          sessionId,
+          materializeInteractiveApproval(session, liveApprovalPrompt.prompt, liveApprovalPrompt.contextMessage)
+        );
       } else {
         this.liveApprovals.delete(sessionId);
       }
@@ -835,7 +835,7 @@ export class SessionManager {
       if (changed) this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? session);
       await this.processQueuedInputs(session.id);
       if (liveApprovalPrompt) {
-        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt);
+        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt.prompt);
       }
     }
 
@@ -959,7 +959,7 @@ export class SessionManager {
       if (result.contextUsage) {
         const updated = await this.db.setSessionContextUsage(session.id, result.contextUsage, nowIso());
         if (updated) {
-          await this.enforceAgentUsageGuardrails(updated);
+          await this.enforceAgentWorkTokenBudget(updated);
           this.publish("session.updated", session.id, await this.db.getSession(session.id));
         }
       }
@@ -995,7 +995,6 @@ export class SessionManager {
         });
         const appended = await this.db.appendMessage(message);
         if (isTurnCompletionMessage(message)) this.pendingPlanActionStatuses.delete(session.id);
-        if (isTurnCompletionMessage(message)) await this.clearAgentHighContextApproval(session.id);
         if (appended) {
           this.publish("message.appended", session.id, message);
           if (message.role === "user") this.activitySummarizer?.schedule(session.id);
@@ -1140,7 +1139,7 @@ export class SessionManager {
     const worstDescendant = highestPrioritySession(liveDescendants);
     return this.withResourceUsage({
       ...withOrigin,
-      status: !withOrigin.agentOwnership?.completedAt && (withOrigin.agentOwnership?.budgetExhaustedAt || withOrigin.agentOwnership?.contextPausedAt)
+      status: !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
         ? "blocked"
         : withOrigin.status,
       agentSummary: descendants.length > 0 ? {
@@ -1472,7 +1471,16 @@ export class SessionManager {
     }
     const interactive = await this.captureInteractiveApprovalPrompt(session);
     if (interactive) {
-      const approval = materializeInteractiveApproval(session, interactive, await this.db.latestMessage(sessionId));
+      const context = await this.db.activeApprovalContext(sessionId);
+      const contextMessage = matchingInteractiveApprovalContext(
+        interactive,
+        context.messages
+      );
+      if (!contextMessage && context.hasContext) {
+        this.liveApprovals.delete(sessionId);
+        return null;
+      }
+      const approval = materializeInteractiveApproval(session, interactive, contextMessage);
       this.liveApprovals.set(sessionId, approval);
       if (session.status !== "approval") {
         const now = nowIso();
@@ -1630,7 +1638,7 @@ export class SessionManager {
     return message;
   }
 
-  async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode, allowHighContext = false, reason = ""): Promise<ManagedSession> {
+  async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode): Promise<ManagedSession> {
     requireSession(await this.db.getSession(actorSessionId));
     const target = requireSession(await this.db.getSession(targetSessionId));
     if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
@@ -1640,26 +1648,11 @@ export class SessionManager {
     if (ownership && used >= ownership.workTokenBudget) {
       throw new AgentSessionError(`Work-token budget exhausted (${used} of ${ownership.workTokenBudget}); extend it before sending more work`);
     }
-    if (usage && usage.contextPercent >= 85 && !allowHighContext) {
-      throw new AgentSessionError(`Active context is ${usage.contextPercent.toFixed(1)}%; compact or explicitly acknowledge high context before sending more work`);
-    }
-    if (usage && usage.contextPercent >= 85 && !reason.trim()) throw new AgentSessionError("High-context acknowledgement requires a reason");
-    if (usage && usage.contextPercent >= 85) {
-      const approvedAt = nowIso();
-      await this.db.addAudit(`session:${actorSessionId}`, "high_context_override", targetSessionId, reason.trim(), approvedAt);
-      if (ownership) {
-        await this.db.setSessionAgentOwnership(target.id, {
-          ...ownership,
-          highContextApprovedAt: approvedAt,
-          contextPausedAt: null
-        }, approvedAt);
-      }
-    }
     const result = await this.sendInput(targetSessionId, text, mode, actorSessionId);
     return result && "session" in result ? result.session : target;
   }
 
-  private async enforceAgentUsageGuardrails(session: ManagedSession): Promise<void> {
+  private async enforceAgentWorkTokenBudget(session: ManagedSession): Promise<void> {
     let ownership = session.agentOwnership;
     const usage = session.contextUsage;
     if (!ownership || !usage || ownership.completedAt) return;
@@ -1667,30 +1660,6 @@ export class SessionManager {
     if (accounted !== ownership) {
       ownership = accounted;
       await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
-    }
-    if (usage.contextPercent < 85 && ownership.contextPausedAt) {
-      ownership = { ...ownership, contextPausedAt: null };
-      await this.db.setSessionAgentOwnership(session.id, ownership, nowIso());
-    }
-    if (usage.contextPercent >= 85 && !ownership.highContextApprovedAt && !ownership.contextPausedAt) {
-      const pausedAt = nowIso();
-      try {
-        await this.interruptSessionRuntime(session);
-      } catch (error) {
-        await this.db.addAudit(
-          "muxpilot",
-          "agent_context_interrupt_failed",
-          session.id,
-          error instanceof Error ? error.message : String(error),
-          pausedAt
-        );
-        return;
-      }
-      await this.db.setSessionAgentOwnership(session.id, { ...ownership, contextPausedAt: pausedAt }, pausedAt);
-      await this.db.setSessionStatus(session.id, "blocked", pausedAt);
-      await this.db.addAudit("muxpilot", "agent_context_paused", session.id, usage.contextPercent.toFixed(1), pausedAt);
-      this.publish("status.changed", session.id, { status: "blocked" });
-      return;
     }
     if (ownership.budgetExhaustedAt) return;
     const used = agentWorkTokensUsed(ownership, usage);
@@ -1712,15 +1681,6 @@ export class SessionManager {
     await this.db.setSessionStatus(session.id, "blocked", exhaustedAt);
     await this.db.addAudit("muxpilot", "agent_budget_exhausted", session.id, `${used}:${ownership.workTokenBudget}`, exhaustedAt);
     this.publish("status.changed", session.id, { status: "blocked" });
-  }
-
-  private async clearAgentHighContextApproval(sessionId: string): Promise<void> {
-    const session = await this.db.getSession(sessionId);
-    if (!session?.agentOwnership?.highContextApprovedAt) return;
-    await this.db.setSessionAgentOwnership(sessionId, {
-      ...session.agentOwnership,
-      highContextApprovedAt: null
-    }, nowIso());
   }
 
   async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
@@ -1752,9 +1712,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
-        budgetExhaustedAt: null,
-        highContextApprovedAt: null,
-        contextPausedAt: null
+        budgetExhaustedAt: null
       };
       await this.db.setSessionAgentOwnership(child.id, ownership, nowIso());
       for (const selection of ["default", "plan"] as const) {
@@ -1803,9 +1761,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
-        budgetExhaustedAt: null,
-        highContextApprovedAt: null,
-        contextPausedAt: null
+        budgetExhaustedAt: null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
       for (const descendant of claimedSubtree.slice(1)) {
@@ -1886,9 +1842,7 @@ export class SessionManager {
         workTokenLastSampledAt: child.agentOwnership?.workTokenLastSampledAt ?? null,
         workTokenBudget: child.agentOwnership?.workTokenBudget ?? DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: child.agentOwnership?.completedAt ?? null,
-        budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null,
-        highContextApprovedAt: child.agentOwnership?.highContextApprovedAt ?? null,
-        contextPausedAt: child.agentOwnership?.contextPausedAt ?? null
+        budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
       for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
@@ -1908,25 +1862,6 @@ export class SessionManager {
     return this.withAgentMutation(async () => {
       const child = await this.requireAgentControl(actorSessionId, childSessionId);
       return this.extendAgentBudget(child, additionalTokens, reason, `session:${actorSessionId}`, false);
-    });
-  }
-
-  async operatorAcknowledgeAgentHighContext(sessionId: string, reason: string): Promise<ManagedSession> {
-    return this.withAgentMutation(async () => {
-      const child = requireLiveAgentSession(await this.db.getSession(sessionId));
-      const ownership = child.agentOwnership!;
-      if (!ownership.contextPausedAt) throw new AgentSessionError("This session is not paused by the high-context guard");
-      const normalizedReason = requireAgentGuardReason(reason);
-      const now = nowIso();
-      let updated = requireSession(await this.db.setSessionAgentOwnership(child.id, {
-        ...ownership,
-        contextPausedAt: null,
-        highContextApprovedAt: now
-      }, now));
-      updated = await this.restoreAgentGuardStatus(updated, now);
-      await this.db.addAudit("local", "acknowledge_agent_high_context", child.id, normalizedReason, now);
-      this.publish("session.updated", child.id, updated);
-      return updated;
     });
   }
 
@@ -1968,7 +1903,7 @@ export class SessionManager {
 
   private async restoreAgentGuardStatus(session: ManagedSession, updatedAt: string): Promise<ManagedSession> {
     const ownership = session.agentOwnership;
-    const nextStatus = ownership?.budgetExhaustedAt || ownership?.contextPausedAt
+    const nextStatus = ownership?.budgetExhaustedAt
       ? "blocked"
       : session.status === "blocked" ? "waiting" : session.status;
     if (nextStatus === session.status) return session;
@@ -3116,9 +3051,6 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const session = requireSession(await this.db.getSession(sessionId));
-    if (action.type === "acknowledgeAgentHighContext") {
-      return this.operatorAcknowledgeAgentHighContext(sessionId, action.reason);
-    }
     if (action.type === "extendAgentBudget") {
       return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     }
@@ -3707,21 +3639,15 @@ export class SessionManager {
     }
   }
 
-  private async capturePaneApprovalPrompt(pane: TmuxPane): Promise<InteractiveApprovalPrompt | null> {
-    try {
-      return parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
-    } catch {
-      return null;
-    }
-  }
-
   private async corroboratedLiveApproval(
     pane: TmuxPane,
-    latestMessage: ChatMessage | null
-  ): Promise<InteractiveApprovalPrompt | null> {
+    contextMessages: ChatMessage[]
+  ): Promise<{ prompt: InteractiveApprovalPrompt; contextMessage: ChatMessage } | null> {
     try {
       const prompt = parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
-      return prompt && interactiveApprovalHasTranscriptContext(prompt, latestMessage) ? prompt : null;
+      if (!prompt) return null;
+      const contextMessage = matchingInteractiveApprovalContext(prompt, contextMessages);
+      return contextMessage ? { prompt, contextMessage } : null;
     } catch {
       return null;
     }
@@ -4279,7 +4205,7 @@ export function managedCodexLaunchOptions(
       "Use $muxpilot-git-workflow for every change task.",
       `Repository entry path: ${summary.entryPath}.`,
       `Initial target branch: ${summary.targetBranch}.`,
-      "For change or build tasks, first resolve the intended target and complete any required fixed-target confirmation and retarget, then announce the workflow action, run the begin helper, and perform every repository content write in its short-lived worktree.",
+      "For change or build tasks, first resolve the intended target and complete any required fixed-target authorization and retarget, then announce the workflow action, run the begin helper, and perform every repository content write in its short-lived worktree.",
       helperDir
         ? `Workflow helpers: begin with node ${JSON.stringify(join(helperDir, "muxpilot-git-begin.mjs"))}; inspect status with node ${JSON.stringify(join(helperDir, "muxpilot-git-status.mjs"))}; change target with node ${JSON.stringify(join(helperDir, "muxpilot-git-target.mjs"))}; finalize with node ${JSON.stringify(join(helperDir, "muxpilot-git-finish.mjs"))}.`
         : "Use the helper directory provided by the workflow environment.",
@@ -4290,8 +4216,8 @@ export function managedCodexLaunchOptions(
       "Treat a command as heavyweight if it covers an entire repository, workspace, application, package, or multi-project configuration; performs static-analysis, security, dependency, or container-image scanning such as Semgrep, CodeQL, or Trivy; starts Docker or Docker Compose; launches multiple workers, shards, or projects; produces a production bundle; or is reasonably expected to run longer than one minute, use more than about 1 GiB of memory, or sustain multiple CPU cores. Selected-file lint, syntax-only checks, and one explicitly selected test file or test case without parallel workers are normally not heavyweight. When uncertain, treat the command as heavyweight. Run every heavyweight command through muxpilot-git-run.mjs --heavy -- <command>. The wrapper schedules an already-authorized command; it does not authorize repository-wide validation, and its availability is not a reason to broaden a focused check.",
       "If the heavyweight wrapper reports QUEUED_NOT_RUN, use $muxpilot-heavy-command-queue. The command did not run; do not poll or retry it.",
       "If the heavyweight wrapper reports RUNNING_DEFERRED, use $muxpilot-heavy-command-queue, preserve its run_released event, end the turn immediately, and wait for muxpilot's run_completed continuation. Do not poll or overlap repository work.",
-      "User instructions take priority over muxpilot guardrails. If an instruction conflicts with a muxpilot guard, name each exact guard and consequence and obtain explicit confirmation for those guards before bypassing them. Confirmation is operation-scoped; platform safety rules are not muxpilot guards.",
-      "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard, explain that current and future task commits will integrate there, and obtain separate explicit confirmation for the fixed-target bypass. An active worktree must repeat focused checks and self-review after retargeting before integration.",
+      "User instructions take priority over muxpilot guardrails. A direct invocation names a skill with $skill-name or unambiguous wording such as 'use the review skill'; automatic skill selection is not direct invocation. When a directly invoked skill's instruction body explicitly directs an action that conflicts with a muxpilot guard, treat the invocation itself as operation-scoped authorization for that action even if the skill asks for separate authorization. The skill need not name the guard. Map the action to every affected guard, name each exact guard and consequence, announce that the skill invocation supplies authorization, and proceed without pausing for redundant confirmation. This authorization covers only the named skill's current invocation and its explicitly directed actions; broad capability descriptions, undeclared actions, later operations, and automatically selected skills do not qualify. For every other guard conflict, obtain explicit confirmation for the exact guards before bypassing them. Platform safety, sandbox, permission, and security approval requirements are not muxpilot guards and cannot be bypassed this way.",
+      "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard and explain that current and future task commits will integrate there. Obtain separate explicit confirmation for the fixed-target bypass unless a directly invoked skill explicitly directs that retarget, in which case its invocation supplies operation-scoped authorization. An active worktree must repeat focused checks and self-review after retargeting before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "Shared dependency links are writable for test caches. Before installing or changing dependencies, localize the relevant link with the dependency helper.",
@@ -5525,6 +5451,21 @@ function interactiveApprovalHasTranscriptContext(
   if (!input || !/tools\.exec_command\s*\(/.test(input)) return false;
   if (/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return true;
   return nestedExecCommandMatchesPrompt(input, prompt);
+}
+
+function matchingInteractiveApprovalContext(
+  prompt: InteractiveApprovalPrompt,
+  contextMessages: ChatMessage[]
+): ChatMessage | null {
+  return contextMessages.find((message) => {
+    if (message.type === "approval_request") {
+      const approval = materializeApproval(message);
+      if (!approval || approval.kind !== prompt.kind) return false;
+      if (!approval.command || !prompt.command) return true;
+      return commandMatchesVisibleText(normalizeCommandText(approval.command), prompt.command);
+    }
+    return interactiveApprovalHasTranscriptContext(prompt, message);
+  }) ?? null;
 }
 
 function nestedExecCommandMatchesPrompt(input: string, prompt: InteractiveApprovalPrompt): boolean {

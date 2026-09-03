@@ -36,6 +36,12 @@ describe("production bundled skill startup", () => {
       expect(installedSkill).toContain("create or select a local branch for implementation");
       expect(installedSkill).toContain("`feature` is the intended target and `origin/dev` is only its start point");
       expect(installedSkill).toContain("Before creating the requested branch or beginning implementation");
+      expect(installedSkill).toContain("### Skill-declared authorization");
+      expect(installedSkill).toContain("Description-based or otherwise automatic skill selection is not a direct");
+      expect(installedSkill).toContain("The skill does not need to name");
+      expect(installedSkill).toContain("continue without pausing for redundant confirmation");
+      expect(installedSkill).toContain("This also satisfies a");
+      expect(installedSkill).toContain("security approval");
       expect(installedSkill).toContain("explicitly requests a PR-style review of a branch or ref");
       expect(installedSkill).toContain("muxpilot-git-run.mjs");
       expect(installedSkill).toContain("Treat a command as heavyweight when any of these conditions applies");

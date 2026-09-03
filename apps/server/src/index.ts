@@ -33,6 +33,7 @@ import { BtwService } from "./services/btwService.js";
 import { probeAppServerCompatibility } from "./services/appServerCompatibility.js";
 import { randomBytes } from "node:crypto";
 import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
+import { CodexGoalStore } from "./codex/codexGoalStore.js";
 
 const config = loadConfig();
 const app = Fastify({ logger: { level: config.logLevel } });
@@ -173,7 +174,8 @@ const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   join(config.dataDir, "runtime", "session-orchestration.sock"),
   join(config.dataDir, "runtime", "session-capabilities"),
   app.log,
-  rawSessionEvidence
+  rawSessionEvidence,
+  new CodexGoalStore(config.codexHome)
 );
 await sessionOrchestrationBroker.start();
 manager.setOrchestrationProvider(sessionOrchestrationBroker);
