@@ -167,7 +167,10 @@ export function runtimePaths(runtimeRoot: string, capabilityId: string): {
 }
 
 function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtimePaths>): string[] {
-  const configArgs = ["-c", "check_for_update_on_startup=false"];
+  const configArgs = [
+    "-c", "check_for_update_on_startup=false",
+    "-c", "sandbox_workspace_write.network_access=true"
+  ];
   for (const server of spec.mcpServers) {
     configArgs.push(
       "-c", `mcp_servers.${server.name}.command=${JSON.stringify(server.command)}`,

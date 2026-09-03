@@ -53,6 +53,8 @@ describe("SystemdAppServerSupervisor", () => {
       "-c",
       "check_for_update_on_startup=false",
       "-c",
+      "sandbox_workspace_write.network_access=true",
+      "-c",
       "mcp_servers.muxpilot_sessions.command=\"/usr/bin/node\"",
       "-c",
       "mcp_servers.muxpilot_sessions.args=[\"/opt/muxpilot-session-mcp.mjs\",\"/run/capability.json\"]",
