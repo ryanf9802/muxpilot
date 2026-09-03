@@ -1,8 +1,6 @@
-import { execFile, spawn } from "node:child_process";
-import { once } from "node:events";
+import { execFile } from "node:child_process";
 import { chmod, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import type { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
 import type {
   RuntimeEvidence,
@@ -11,6 +9,7 @@ import type {
   RuntimeSupervisor,
   SystemdSessionRuntimeRef
 } from "./types.js";
+import { openUnixWebSocketJsonLineConnection } from "./unixWebSocketConnection.js";
 
 const CAPABILITY_ID = /^[a-f0-9]{24}$/;
 const APP_SERVER_UNIT = /^muxpilot-session-([a-f0-9]{24})\.service$/;
@@ -25,7 +24,7 @@ interface CommandResult {
 
 interface SupervisorDependencies {
   run(command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }): Promise<CommandResult>;
-  openProxy(socketPath: string): RuntimeProxyConnection;
+  openProxy(socketPath: string): RuntimeProxyConnection | Promise<RuntimeProxyConnection>;
   socketReady(socketPath: string): Promise<boolean>;
   delay(ms: number): Promise<void>;
   now(): number;
@@ -91,7 +90,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     if (evidence.activeState !== "active" || !evidence.socketPresent) {
       throw new Error(`App-server runtime is not connectable: ${runtime.unit}`);
     }
-    return this.dependencies.openProxy(runtime.socketPath);
+    return await this.dependencies.openProxy(runtime.socketPath);
   }
 
   async stop(runtime: SystemdSessionRuntimeRef): Promise<SystemdSessionRuntimeRef> {
@@ -226,32 +225,9 @@ function defaultDependencies(): SupervisorDependencies {
     run: async (command, args, options) => {
       return execFileAsync(command, args, options);
     },
-    openProxy: (socketPath) => childProxyConnection(socketPath),
+    openProxy: (socketPath) => openUnixWebSocketJsonLineConnection(socketPath),
     socketReady: async (socketPath) => lstat(socketPath).then((value) => value.isSocket()).catch(() => false),
     delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now()
-  };
-}
-
-function childProxyConnection(socketPath: string): RuntimeProxyConnection {
-  const child = spawn("codex", ["app-server", "proxy", "--sock", socketPath], {
-    stdio: ["pipe", "pipe", "pipe"]
-  });
-  const input: Writable = child.stdin;
-  const output: Readable = child.stdout;
-  child.stderr.resume();
-  child.once("error", (error) => {
-    child.stdin.destroy(error);
-    child.stdout.destroy(error);
-  });
-  return {
-    input,
-    output,
-    close: async () => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill("SIGTERM");
-      await Promise.race([once(child, "exit"), new Promise((resolve) => setTimeout(resolve, 2_000))]);
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }
   };
 }

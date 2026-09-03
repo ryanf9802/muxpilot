@@ -78,25 +78,43 @@ describe("JsonRpcConnection", () => {
     })).rejects.toThrow("journal unavailable");
     expect(proxy.close).toHaveBeenCalledOnce();
   });
+
+  it("fails the connection when an unanswered request exceeds its bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = await createHarness({}, 1024, 25);
+      const timedOut = harness.connection.request("initialize", {});
+      const timedOutAssertion = expect(timedOut).rejects.toThrow("timed out after 25ms: initialize");
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOutAssertion;
+      expect(harness.close).toHaveBeenCalledOnce();
+      expect(() => harness.connection.request("thread/read", { threadId: "thread-1" })).toThrow("connection is closed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 async function createHarness(
   handlers: JsonRpcConnectionHandlers = {},
-  maxFrameBytes = 1024
+  maxFrameBytes = 1024,
+  requestTimeoutMs = 30_000
 ): Promise<{
   connection: JsonRpcConnection;
   input: PassThrough;
   output: PassThrough;
   entries: ProtocolJournalEntry[];
+  close: ReturnType<typeof vi.fn>;
 }> {
   const input = new PassThrough();
   const output = new PassThrough();
   const entries: ProtocolJournalEntry[] = [];
-  const proxy: RuntimeProxyConnection = { input, output, close: vi.fn(async () => undefined) };
+  const close = vi.fn(async () => undefined);
+  const proxy: RuntimeProxyConnection = { input, output, close };
   const connection = await JsonRpcConnection.connect("connection-1", proxy, {
     append: async (entry) => { entries.push(entry); }
-  }, handlers, { maxFrameBytes });
-  return { connection, input, output, entries };
+  }, handlers, { maxFrameBytes, requestTimeoutMs });
+  return { connection, input, output, entries, close };
 }
 
 function lines(stream: PassThrough): unknown[] {

@@ -3,6 +3,7 @@ import type { ProtocolJournal, ProtocolJournalEntry } from "./protocolJournal.js
 import type { RuntimeProxyConnection } from "./types.js";
 
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 type JsonRpcId = string | number;
 
@@ -29,6 +30,7 @@ export interface JsonRpcConnectionHandlers {
 
 export interface JsonRpcConnectionOptions {
   maxFrameBytes?: number;
+  requestTimeoutMs?: number;
 }
 
 type JournalWriter = Pick<ProtocolJournal, "append">;
@@ -45,9 +47,10 @@ export class JsonRpcConnection {
   private buffer = Buffer.alloc(0);
   private frameTail: Promise<void> = Promise.resolve();
   private writeTail: Promise<void> = Promise.resolve();
-  private readonly pending = new Map<JsonRpcId, { resolve(value: unknown): void; reject(error: Error): void }>();
+  private readonly pending = new Map<JsonRpcId, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   private closed = false;
   private readonly maxFrameBytes: number;
+  private readonly requestTimeoutMs: number;
   private readonly onData = (chunk: Buffer | string) => this.receive(chunk);
   private readonly onEnd = () => this.finishOutput();
   private readonly onOutputError = (error: Error) => this.endFromTransport(error);
@@ -60,6 +63,7 @@ export class JsonRpcConnection {
     options: JsonRpcConnectionOptions
   ) {
     this.maxFrameBytes = positiveInteger(options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES, "maxFrameBytes");
+    this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS, "requestTimeoutMs");
     proxy.output.on("data", this.onData);
     proxy.output.once("end", this.onEnd);
     proxy.output.once("error", this.onOutputError);
@@ -88,8 +92,13 @@ export class JsonRpcConnection {
     this.requireOpen();
     const id = this.nextRequestId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { resolve: (value) => resolve(value as T), reject });
+      const timer = setTimeout(() => {
+        this.fail(new Error(`App-server request timed out after ${this.requestTimeoutMs}ms: ${method}`));
+      }, this.requestTimeoutMs);
+      this.pending.set(id, { resolve: (value) => resolve(value as T), reject, timer });
       void this.sendFrame({ jsonrpc: "2.0", id, method, params }, "request").catch((error) => {
+        const pending = this.pending.get(id);
+        if (pending) clearTimeout(pending.timer);
         this.pending.delete(id);
         reject(asError(error));
       });
@@ -174,6 +183,7 @@ export class JsonRpcConnection {
       await this.record({ direction: "server_to_client", kind: "response", id, payload: value });
       const pending = this.pending.get(id);
       if (!pending) return;
+      clearTimeout(pending.timer);
       if (Object.hasOwn(value, "error")) {
         const error = jsonRpcError(value.error);
         if (!error) throw new Error("App-server proxy emitted an invalid JSON-RPC error response");
@@ -237,7 +247,10 @@ export class JsonRpcConnection {
   }
 
   private rejectPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
     this.pending.clear();
   }
 
