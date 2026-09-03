@@ -525,7 +525,8 @@ function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServ
         cwd: spec.cwd,
         codexHome: "/codex",
         codexVersion: "0.152.0",
-        environment: {}
+        environment: {},
+        mcpServers: spec.options.mcpServers ?? []
       } satisfies RuntimeStartSpec),
       requestStore,
       eventSink,

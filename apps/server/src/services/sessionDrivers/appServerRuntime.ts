@@ -56,7 +56,8 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
         ...options.environment,
         ...(spec.options.environment ?? {}),
         ...(options.environment.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {})
-      }
+      },
+      mcpServers: spec.options.mcpServers ?? []
     })
   }));
   return registry;

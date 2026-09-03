@@ -50,6 +50,14 @@ describe("SystemdAppServerSupervisor", () => {
       "--property=StartLimitBurst=3",
       `--property=EnvironmentFile=${paths.environmentPath}`,
       "codex",
+      "-c",
+      "check_for_update_on_startup=false",
+      "-c",
+      "mcp_servers.muxpilot_sessions.command=\"/usr/bin/node\"",
+      "-c",
+      "mcp_servers.muxpilot_sessions.args=[\"/opt/muxpilot-session-mcp.mjs\",\"/run/capability.json\"]",
+      "-c",
+      "mcp_servers.muxpilot_sessions.default_tools_approval_mode=\"approve\"",
       "app-server",
       `unix://${paths.socketPath}`
     ]));
@@ -87,6 +95,21 @@ describe("SystemdAppServerSupervisor", () => {
     await expect(supervisor.stop({ ...runtime, unit: "ssh.service" })).rejects.toThrow("Refusing non-muxpilot app-server unit");
     await expect(supervisor.stop({ ...runtime, socketPath: "/tmp/other.sock" })).rejects.toThrow("outside its owned runtime path");
   });
+
+  it("rejects invalid or duplicate MCP configuration before starting a service", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-invalid-mcp-"));
+    const run = vi.fn(async () => ({ stdout: "" }));
+    const supervisor = new SystemdAppServerSupervisor(root, { run });
+    const invalid = spec(root);
+    invalid.mcpServers = [{ name: "muxpilot.sessions", command: "/usr/bin/node", args: [] }];
+    await expect(supervisor.start(invalid)).rejects.toThrow("Invalid app-server MCP server name");
+    expect(run).not.toHaveBeenCalled();
+
+    const duplicate = spec(root);
+    duplicate.mcpServers.push({ ...duplicate.mcpServers[0]! });
+    await expect(supervisor.start(duplicate)).rejects.toThrow("Duplicate app-server MCP server name");
+    expect(run).not.toHaveBeenCalled();
+  });
 });
 
 function spec(root: string): RuntimeStartSpec {
@@ -96,6 +119,12 @@ function spec(root: string): RuntimeStartSpec {
     cwd: "/repo",
     codexHome: `${root}/codex`,
     codexVersion: "0.152.0",
-    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents", PATH: "/untrusted/session/path" }
+    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents", PATH: "/untrusted/session/path" },
+    mcpServers: [{
+      name: "muxpilot_sessions",
+      command: "/usr/bin/node",
+      args: ["/opt/muxpilot-session-mcp.mjs", "/run/capability.json"],
+      defaultToolsApprovalMode: "approve"
+    }]
   };
 }

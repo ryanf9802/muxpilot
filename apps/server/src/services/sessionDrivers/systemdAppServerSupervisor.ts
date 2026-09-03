@@ -14,6 +14,7 @@ import { openUnixWebSocketJsonLineConnection } from "./unixWebSocketConnection.j
 const CAPABILITY_ID = /^[a-f0-9]{24}$/;
 const APP_SERVER_UNIT = /^muxpilot-session-([a-f0-9]{24})\.service$/;
 const ENVIRONMENT_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MCP_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_START_TIMEOUT_MS = 30_000;
 const DEFAULT_SOCKET_POLL_MS = 50;
 const execFileAsync = promisify(execFile);
@@ -56,6 +57,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
   }
 
   async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef> {
+    validateMcpServers(spec.mcpServers);
     const paths = runtimePaths(this.runtimeRoot, spec.capabilityId);
     await preparePrivateDirectory(this.runtimeRoot);
     await preparePrivateDirectory(paths.directory);
@@ -165,6 +167,19 @@ export function runtimePaths(runtimeRoot: string, capabilityId: string): {
 }
 
 function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtimePaths>): string[] {
+  const configArgs = ["-c", "check_for_update_on_startup=false"];
+  for (const server of spec.mcpServers) {
+    configArgs.push(
+      "-c", `mcp_servers.${server.name}.command=${JSON.stringify(server.command)}`,
+      "-c", `mcp_servers.${server.name}.args=${JSON.stringify(server.args)}`
+    );
+    if (server.defaultToolsApprovalMode) {
+      configArgs.push(
+        "-c",
+        `mcp_servers.${server.name}.default_tools_approval_mode=${JSON.stringify(server.defaultToolsApprovalMode)}`
+      );
+    }
+  }
   return [
     "--user",
     `--unit=${paths.unit}`,
@@ -179,10 +194,21 @@ function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtime
     "--property=KillMode=control-group",
     `--property=EnvironmentFile=${paths.environmentPath}`,
     "codex",
+    ...configArgs,
     "app-server",
     "--listen",
     `unix://${paths.socketPath}`
   ];
+}
+
+function validateMcpServers(servers: RuntimeStartSpec["mcpServers"]): void {
+  const names = new Set<string>();
+  for (const server of servers) {
+    if (!MCP_SERVER_NAME.test(server.name)) throw new Error(`Invalid app-server MCP server name: ${server.name}`);
+    if (!server.command.trim()) throw new Error(`Missing command for app-server MCP server: ${server.name}`);
+    if (names.has(server.name)) throw new Error(`Duplicate app-server MCP server name: ${server.name}`);
+    names.add(server.name);
+  }
 }
 
 async function preparePrivateDirectory(path: string): Promise<void> {

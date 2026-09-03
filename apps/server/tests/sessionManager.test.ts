@@ -5946,6 +5946,11 @@ describe("SessionManager transcript isolation", () => {
 
     await expect(harness.manager.createSessionInDirectory(repo, "binding-failure", undefined, "codex_app_server"))
       .rejects.toThrow("binding failed");
+    expect(start.mock.calls[0]![0].options.mcpServers).toEqual([{
+      name: "muxpilot_sessions",
+      command: "/usr/bin/node",
+      args: ["/tmp/mcp.mjs"]
+    }]);
     const sessionId = start.mock.calls[0]![0].sessionId;
     expect(kill).toHaveBeenCalledWith(expect.objectContaining({
       id: sessionId,

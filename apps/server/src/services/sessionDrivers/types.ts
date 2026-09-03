@@ -115,6 +115,7 @@ export interface RuntimeStartSpec {
   codexHome: string;
   codexVersion: string | null;
   environment: Record<string, string>;
+  mcpServers: McpServerLaunchConfig[];
 }
 
 export interface RuntimeProxyConnection {
