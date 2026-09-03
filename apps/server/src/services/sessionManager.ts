@@ -2749,10 +2749,10 @@ export class SessionManager {
       this.answeredPlanMessageIds.add(planMessage.id);
       const now = nowIso();
       await this.db.setSessionInputMode(session.id, "plan", now);
-      await this.db.setSessionStatus(session.id, "planning", now);
-      this.pendingPlanActionStatuses.set(session.id, { status: "planning", expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
+      await this.db.setSessionStatus(session.id, "idle", now);
+      this.pendingPlanActionStatuses.delete(session.id);
       await this.db.addAudit("local", "plan_action:stay_in_plan", session.id, "ok", now);
-      this.publish("status.changed", session.id, { status: "planning" });
+      this.publish("status.changed", session.id, { status: "idle" });
       this.publish("session.updated", session.id, await this.db.getSession(session.id));
       return;
     }

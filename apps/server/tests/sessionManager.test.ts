@@ -5741,7 +5741,13 @@ describe("SessionManager transcript isolation", () => {
         acceptedAt: "2026-09-01T12:00:00.000Z"
       }
     }));
-    const driver = { kind: "codex_app_server", choosePlanAction } as unknown as AgentSessionDriver;
+    const sendMessage = vi.fn(async (activeSession: ManagedSession, _text: string, clientMessageId: string) => ({
+      acceptedAt: "2026-09-01T12:02:01.000Z",
+      clientMessageId,
+      threadId: activeSession.codexSessionId!,
+      turnId: "turn-continue-plan"
+    }));
+    const driver = { kind: "codex_app_server", choosePlanAction, sendMessage } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -5816,7 +5822,14 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.setSessionStatus(session.id, "plan_ready", "2026-09-01T12:02:00.000Z");
     await harness.manager.act(session.id, { type: "choosePlanAction", action: "stay_in_plan" });
     expect((await harness.db.listRecentMessages(session.id, 20)).items.filter((message) => message.type === "user")).toHaveLength(inputCount);
-    expect(await harness.manager.getSession(session.id)).toMatchObject({ inputMode: "plan", status: "planning" });
+    expect(await harness.manager.getSession(session.id)).toMatchObject({ inputMode: "plan", status: "idle" });
+    const continuation = await harness.manager.sendInput(session.id, "Continue refining the plan.");
+    expect(continuation).not.toHaveProperty("queuedInput");
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, inputMode: "plan" }),
+      "Continue refining the plan.",
+      expect.any(String)
+    );
     expect(sendKeys).not.toHaveBeenCalled();
     harness.db.close();
   });
