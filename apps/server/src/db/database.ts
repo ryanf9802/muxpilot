@@ -1684,17 +1684,23 @@ export class SyncAppDatabase {
     ) return false;
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
-    if (muxpilotSubmission?.state === "acknowledged") return false;
+    const identity = this.codexItemMessageIdentity(message);
+    if (identity && this.db.prepare(
+      `SELECT 1 FROM codex_item_messages
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+    ).get(message.sessionId, identity.threadId, identity.turnId, identity.itemId)) return false;
     const reconciledPayload = muxpilotSubmission
       ? {
           ...message.payload,
-          muxpilotSubmission: {
-            ...muxpilotSubmission,
-            state: "acknowledged",
-            deliveryPhase: "acknowledged",
-            acknowledgedBy: "user_echo",
-            failureReason: null
-          }
+          muxpilotSubmission: muxpilotSubmission.state === "acknowledged"
+            ? muxpilotSubmission
+            : {
+                ...muxpilotSubmission,
+                state: "acknowledged",
+                deliveryPhase: "acknowledged",
+                acknowledgedBy: "user_echo",
+                failureReason: null
+              }
         }
       : message.payload;
 
@@ -1706,7 +1712,6 @@ export class SyncAppDatabase {
       )
       .run(message.type, JSON.stringify(reconciledPayload), submitted.id, submitted.sessionId);
     if (Number(result.changes) > 0) {
-      const identity = this.codexItemMessageIdentity(message);
       if (identity) {
         const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
         this.db.prepare(

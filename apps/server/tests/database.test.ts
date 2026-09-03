@@ -298,7 +298,7 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
-  it("binds a reconciled app-server submission to its Codex item before the rollout echo arrives", async () => {
+  it("binds a receipt-acknowledged app-server submission before the rollout echo arrives", async () => {
     const db = await tempDb();
     const session = testSession("session-app-server-submission-race");
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
@@ -340,6 +340,18 @@ describe("AppDatabase activity summaries", () => {
 
     expect(await db.appendMessage(submitted)).toBe(true);
     expect(await db.appendMessage(hiddenContext)).toBe(true);
+    expect(await db.updateMessagePayload(submitted, {
+      ...submitted.payload,
+      muxpilotSubmission: {
+        ...submitted.payload.muxpilotSubmission,
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy: "app_server_receipt",
+        clientMessageId: submitted.id,
+        threadId: identity.threadId,
+        turnId: identity.turnId
+      }
+    })).toMatchObject({ id: submitted.id });
     expect(await db.appendMessage(appServerEcho)).toBe(false);
     expect(await db.appendMessage(rolloutEcho)).toBe(false);
 
@@ -355,17 +367,10 @@ describe("AppDatabase activity summaries", () => {
         muxpilotSubmission: {
           state: "acknowledged",
           deliveryPhase: "acknowledged",
-          acknowledgedBy: "user_echo"
+          acknowledgedBy: "app_server_receipt"
         }
       }
     });
-    expect(await db.updateMessagePayload(taskMessage, {
-      ...taskMessage.payload,
-      muxpilotSubmission: {
-        ...(taskMessage.payload.muxpilotSubmission as Record<string, unknown>),
-        acknowledgedBy: "app_server_receipt"
-      }
-    })).toMatchObject({ id: submitted.id });
     await db.close();
   });
 
