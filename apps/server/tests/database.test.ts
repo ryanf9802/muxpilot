@@ -300,6 +300,25 @@ describe("AppDatabase activity summaries", () => {
     await db.close();
   });
 
+  it("allocates and appends a message sequence in one database operation", async () => {
+    const db = await tempDb();
+    const session = testSession("session-atomic-sequence");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    await db.appendMessage(testMessage(session.id, 1, "assistant", "Existing event"));
+    const { sequence: _ignored, ...candidate } = testMessage(
+      session.id,
+      999,
+      "user",
+      "Persist without a split sequence allocation"
+    );
+
+    const appended = await db.appendMessageWithNextSequence(candidate);
+
+    expect(appended).toMatchObject({ sequence: 2, text: "Persist without a split sequence allocation" });
+    expect((await db.listMessages(session.id, 0)).map((message) => message.sequence)).toEqual([1, 2]);
+    await db.close();
+  });
+
   it("reconciles a delayed retry echo against the latest delivery attempt without duplicating the prompt", async () => {
     const db = await tempDb();
     const session = testSession("session-retried-input");

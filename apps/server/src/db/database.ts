@@ -593,6 +593,10 @@ export class AppDatabase {
     return this.call("appendMessage", message) as Promise<boolean>;
   }
 
+  appendMessageWithNextSequence(message: Omit<ChatMessage, "sequence">): Promise<ChatMessage | null> {
+    return this.call("appendMessageWithNextSequence", message) as Promise<ChatMessage | null>;
+  }
+
   latestUserMessage(sessionId: string): Promise<ChatMessage | null> {
     return this.call("latestUserMessage", sessionId) as Promise<ChatMessage | null>;
   }
@@ -1479,6 +1483,11 @@ export class SyncAppDatabase {
 
   appendMessage(message: ChatMessage): boolean {
     return this.writeMessage(message).changed;
+  }
+
+  appendMessageWithNextSequence(message: Omit<ChatMessage, "sequence">): ChatMessage | null {
+    const sequenced = { ...message, sequence: this.nextSequence(message.sessionId) };
+    return this.appendMessage(sequenced) ? sequenced : null;
   }
 
   private writeMessage(message: ChatMessage): MessageWriteResult {

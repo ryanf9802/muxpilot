@@ -2857,6 +2857,8 @@ describe("SessionManager transcript isolation", () => {
       }
     };
     await harness.db.upsertSession(session, "2026-09-01T11:59:00.000Z");
+    const splitSequenceAllocation = vi.spyOn(harness.db, "nextSequence")
+      .mockRejectedValue(new Error("submitted input must not allocate its sequence separately"));
     harness.tmux.sendInput = async () => { throw new Error("tmux input must not be used"); };
     harness.tmux.interrupt = async () => { throw new Error("tmux interrupt must not be used"); };
     harness.tmux.renameWindow = async () => { throw new Error("tmux rename must not be used"); };
@@ -2864,6 +2866,7 @@ describe("SessionManager transcript isolation", () => {
 
     const result = await harness.manager.sendInput(session.id, "structured prompt", "plan");
     expect(result).toMatchObject({ session: { status: "planning", inputMode: "plan" } });
+    expect(splitSequenceAllocation).not.toHaveBeenCalled();
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ id: session.id, inputMode: "plan" }),
       "structured prompt",

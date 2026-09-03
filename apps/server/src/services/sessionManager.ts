@@ -1607,10 +1607,9 @@ export class SessionManager {
     queuedInputId: string | null = null,
     actorSessionId: string | null = null
   ): Promise<ChatMessage> {
-    const message: ChatMessage = {
+    const message: Omit<ChatMessage, "sequence"> = {
       id: eventId(),
       sessionId: session.id,
-      sequence: await this.db.nextSequence(session.id),
       type: "user",
       role: "user",
       timestamp,
@@ -1634,8 +1633,9 @@ export class SessionManager {
         }
       }
     };
-    if (!await this.db.appendMessage(message)) throw new Error("Could not persist submitted input");
-    return message;
+    const persisted = await this.db.appendMessageWithNextSequence(message);
+    if (!persisted) throw new Error("Could not persist submitted input");
+    return persisted;
   }
 
   async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode): Promise<ManagedSession> {
