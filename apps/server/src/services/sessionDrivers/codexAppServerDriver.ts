@@ -448,7 +448,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         });
         const key = pendingKey(sessionId, id);
         const existing = this.pendingRequests.get(key);
-        const responded = existing?.responded ?? (persisted?.state === "responded");
+        const responded = persisted ? persisted.state === "responded" : (existing?.responded ?? false);
         this.pendingRequests.set(key, { sessionId, id, method, params, responded });
         if (responded) return;
         const event = { method, params: { requestId: id, params }, receivedAt };

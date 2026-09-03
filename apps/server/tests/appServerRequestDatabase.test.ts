@@ -87,6 +87,41 @@ describe("app-server request persistence", () => {
     expect(await db.listUnresolvedAppServerRequests(sessionId)).toEqual([]);
     await db.close();
   });
+
+  it("resets reused wire request ids for a different turn and item", async () => {
+    const { db, sessionId } = await requestDb("reused-id");
+    await db.upsertAppServerRequest({
+      sessionId,
+      requestId: 0,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1" },
+      threadId: "thread-1",
+      turnId: "turn-1",
+      receivedAt: "2026-09-01T00:00:01.000Z",
+      lastSeenAt: "2026-09-01T00:00:01.000Z"
+    });
+    await db.claimAppServerRequestResponse(sessionId, 0, { decision: "decline" }, "2026-09-01T00:00:02.000Z");
+    await db.resolveAppServerRequest(sessionId, 0, "2026-09-01T00:00:03.000Z");
+
+    expect(await db.upsertAppServerRequest({
+      sessionId,
+      requestId: 0,
+      method: "item/tool/requestUserInput",
+      params: { threadId: "thread-1", turnId: "turn-2", itemId: "question-1" },
+      threadId: "thread-1",
+      turnId: "turn-2",
+      receivedAt: "2026-09-01T00:00:04.000Z",
+      lastSeenAt: "2026-09-01T00:00:04.000Z"
+    })).toMatchObject({
+      requestId: 0,
+      method: "item/tool/requestUserInput",
+      turnId: "turn-2",
+      state: "pending",
+      response: null,
+      receivedAt: "2026-09-01T00:00:04.000Z"
+    });
+    await db.close();
+  });
 });
 
 async function requestDb(suffix: string): Promise<{ db: AppDatabase; path: string; sessionId: string }> {

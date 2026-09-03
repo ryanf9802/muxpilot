@@ -227,6 +227,34 @@ describe("CodexAppServerDriver", () => {
     expect(harness.rpc.respond).toHaveBeenCalledWith("permission-deny", { permissions: {}, scope: "turn" });
   });
 
+  it("accepts a new pending request when Codex reuses a responded wire id", async () => {
+    const store = requestStore();
+    store.upsertAppServerRequest.mockResolvedValue({ state: "pending", response: null });
+    const harness = createHarness(store as unknown as AppServerRequestStore);
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.handlers.serverRequest?.({
+      id: 0,
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1" }
+    });
+    await harness.driver.answerApproval(session, 0, "deny");
+
+    await harness.handlers.serverRequest?.({
+      id: 0,
+      method: "item/tool/requestUserInput",
+      params: { threadId: "thread-1", turnId: "turn-2", itemId: "question-1" }
+    });
+    await expect(harness.driver.answerQuestion(
+      session,
+      0,
+      { answers: { choice: { answers: ["yes"] } } }
+    )).resolves.toBeUndefined();
+    expect(harness.rpc.respond).toHaveBeenLastCalledWith(0, {
+      answers: { choice: { answers: ["yes"] } }
+    });
+  });
+
   it("implements plans on the current thread and in a genuinely fresh thread", async () => {
     const harness = createHarness();
     const session = managedSession();

@@ -2650,6 +2650,28 @@ export class SyncAppDatabase {
   upsertAppServerRequest(request: ReceivedAppServerRequest): PersistedAppServerRequest {
     validateAppServerRequest(request);
     const requestIdJson = appServerRequestIdJson(request.requestId);
+    const paramsJson = serializeAppServerJson(request.params, "params");
+    const existing = this.db.prepare(
+      "SELECT * FROM app_server_requests WHERE session_id = ? AND request_id_json = ?"
+    ).get(request.sessionId, requestIdJson) as AppServerRequestRow | undefined;
+    if (existing && !sameAppServerRequest(existing, request)) {
+      this.db.prepare(
+        `UPDATE app_server_requests
+         SET method = ?, params_json = ?, thread_id = ?, turn_id = ?, state = 'pending', response_json = NULL,
+             received_at = ?, last_seen_at = ?, responded_at = NULL, resolved_at = NULL
+         WHERE session_id = ? AND request_id_json = ?`
+      ).run(
+        request.method,
+        paramsJson,
+        request.threadId,
+        request.turnId,
+        request.receivedAt,
+        request.lastSeenAt,
+        request.sessionId,
+        requestIdJson
+      );
+      return this.requireAppServerRequest(request.sessionId, request.requestId);
+    }
     this.db.prepare(
       `INSERT INTO app_server_requests
         (session_id, request_id_json, method, params_json, thread_id, turn_id, state, response_json,
@@ -2665,7 +2687,7 @@ export class SyncAppDatabase {
       request.sessionId,
       requestIdJson,
       request.method,
-      serializeAppServerJson(request.params, "params"),
+      paramsJson,
       request.threadId,
       request.turnId,
       request.receivedAt,
@@ -3901,6 +3923,17 @@ function parseJsonObject(text: unknown): Record<string, unknown> | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function sameAppServerRequest(existing: AppServerRequestRow, request: ReceivedAppServerRequest): boolean {
+  if (
+    existing.method !== request.method ||
+    existing.thread_id !== request.threadId ||
+    existing.turn_id !== request.turnId
+  ) return false;
+  const existingItemId = stringValue(parseJsonObject(existing.params_json)?.itemId);
+  const receivedItemId = stringValue(recordValue(request.params)?.itemId);
+  return existingItemId === null && receivedItemId === null ? true : existingItemId === receivedItemId;
 }
 
 function nonemptyStringValue(value: unknown): string | null {
