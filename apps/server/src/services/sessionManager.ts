@@ -475,6 +475,29 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
+    const appServerDriver = this.appServerDriver(session);
+    if (appServerDriver) {
+      if (
+        session.archived ||
+        session.initializing ||
+        session.runtime?.kind !== "systemd_service" ||
+        session.runtime.state !== "connected" ||
+        (!isInputReadyStatus(session.status) && session.status !== "queued" && session.status !== "running" && session.status !== "working")
+      ) return false;
+      if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+      this.deliveringInputSessionIds.add(sessionId);
+      try {
+        await appServerDriver.sendMessage(session, message, eventId());
+        const now = nowIso();
+        const status = activeInputStatus(session.inputMode);
+        await this.db.setSessionStatus(sessionId, status, now);
+        await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
+        this.publish("status.changed", sessionId, { status });
+        return true;
+      } finally {
+        this.deliveringInputSessionIds.delete(sessionId);
+      }
+    }
     const ready = await this.readyLiveSession(session);
     if (!ready) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;

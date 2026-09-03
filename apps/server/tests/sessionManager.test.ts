@@ -3673,6 +3673,34 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("delivers a heavyweight completion to a connected app-server session with a projected working status", async () => {
+    const sendMessage = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-heavy",
+      turnId: "turn-heavy",
+      acceptedAt: "2026-09-03T21:34:26.888Z"
+    }));
+    const driver = { kind: "codex_app_server", sendMessage } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-heavy", "thread-heavy", "working");
+    await harness.db.upsertSession(session, "2026-09-03T21:34:26.888Z");
+    const message = "<muxpilot_heavy_command>completed</muxpilot_heavy_command>";
+
+    await expect(harness.manager.resumeHeavyCommand(session.id, message)).resolves.toBe(true);
+
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, status: "working", runtime: expect.objectContaining({ state: "connected" }) }),
+      message,
+      expect.any(String)
+    );
+    expect((await harness.manager.getSession(session.id))?.status).toBe("working");
+
+    await harness.db.setSessionStatus(session.id, "generating", "2026-09-03T21:34:27.000Z");
+    await expect(harness.manager.resumeHeavyCommand(session.id, message)).resolves.toBe(false);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    harness.db.close();
+  });
+
   it("submits an exact heavyweight event already staged after a composer race", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
