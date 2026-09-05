@@ -782,26 +782,39 @@ function backgroundProcessIdsForTurn(
   thread: Record<string, unknown>,
   turnId: string
 ): string[] {
-  const turns = Array.isArray(thread.turns) ? thread.turns : [];
-  const turn = turns.find((value) => directString(value, "id") === turnId);
-  if (!turn || typeof turn !== "object" || Array.isArray(turn)) return [];
-  const items = Array.isArray((turn as Record<string, unknown>).items)
-    ? (turn as Record<string, unknown>).items as unknown[]
+  const turns = Array.isArray(thread.turns)
+    ? thread.turns.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value))
     : [];
-  const itemIds = new Set(items.flatMap((item) => {
-    const itemId = directString(item, "id");
-    return itemId ? [itemId] : [];
-  }));
-  if (itemIds.size === 0 || !terminals || typeof terminals !== "object" || Array.isArray(terminals)) return [];
+  const turn = turns.find((value) => directString(value, "id") === turnId);
+  if (!turn || turn.status !== "inProgress") return [];
+  const activeItemIds = itemIdsFromTurn(turn);
+  const otherTurns = turns.filter((value) => directString(value, "id") !== turnId);
+  const otherTurnsAreComplete = turns.filter((value) => value.status === "inProgress").length === 1
+    && otherTurns.every((value) => isTerminalTurnStatus(value.status) && value.itemsView === "full");
+  const otherItemIds = new Set(otherTurns.flatMap((value) => [...itemIdsFromTurn(value)]));
+  if (!terminals || typeof terminals !== "object" || Array.isArray(terminals)) return [];
   const processes = (terminals as Record<string, unknown>).data;
   if (!Array.isArray(processes)) return [];
-  return processes.flatMap((process) => {
+  return [...new Set(processes.flatMap((process) => {
     if (!process || typeof process !== "object" || Array.isArray(process)) return [];
     const record = process as Record<string, unknown>;
     const itemId = directString(record, "itemId");
     const processId = directString(record, "processId");
-    return itemId && processId && itemIds.has(itemId) ? [processId] : [];
-  });
+    if (!itemId || !processId) return [];
+    if (activeItemIds.has(itemId)) return [processId];
+    // Codex 0.152 can omit an in-progress command item from an otherwise-full
+    // thread/read snapshot. When every other turn is fully enumerated, an
+    // unclaimed live terminal can only belong to the sole in-progress turn.
+    return otherTurnsAreComplete && !otherItemIds.has(itemId) ? [processId] : [];
+  }))];
+}
+
+function itemIdsFromTurn(turn: Record<string, unknown>): Set<string> {
+  const items = Array.isArray(turn.items) ? turn.items : [];
+  return new Set(items.flatMap((item) => {
+    const itemId = directString(item, "id");
+    return itemId ? [itemId] : [];
+  }));
 }
 
 function activeTurnIdFromThread(threadId: string, thread: Record<string, unknown>): string | null {

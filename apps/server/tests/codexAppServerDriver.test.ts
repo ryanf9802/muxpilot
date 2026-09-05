@@ -467,7 +467,7 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.interrupt(session, null)).rejects.toThrow("without an active turn id");
   });
 
-  it("restores active interruption state and background cleanup after reconnect", async () => {
+  it("restores active interruption state when Codex omits its running command from a full reconnect snapshot", async () => {
     const harness = createHarness();
     harness.connections.reconnect.mockImplementationOnce(async () => ({
       ...harness.connection,
@@ -477,11 +477,20 @@ describe("CodexAppServerDriver", () => {
           thread: {
             id: "thread-1",
             status: { type: "active" },
-            turns: [{
-              id: "turn-restored",
-              status: "inProgress",
-              items: [{ id: "item-restored", type: "commandExecution" }]
-            }]
+            turns: [
+              {
+                id: "turn-completed",
+                status: "completed",
+                itemsView: "full",
+                items: [{ id: "item-persistent", type: "commandExecution" }]
+              },
+              {
+                id: "turn-restored",
+                status: "inProgress",
+                itemsView: "full",
+                items: [{ id: "item-user", type: "userMessage" }]
+              }
+            ]
           }
         }
       }
@@ -510,6 +519,43 @@ describe("CodexAppServerDriver", () => {
     expect(harness.rpc.request).not.toHaveBeenCalledWith(
       "thread/backgroundTerminals/terminate",
       { threadId: "thread-1", processId: "process-persistent" }
+    );
+  });
+
+  it("does not infer terminal ownership from a partial reconnect snapshot", async () => {
+    const harness = createHarness();
+    harness.connections.reconnect.mockImplementationOnce(async () => ({
+      ...harness.connection,
+      reconciliation: {
+        ...harness.connection.reconciliation,
+        current: {
+          thread: {
+            id: "thread-1",
+            status: { type: "active" },
+            turns: [
+              { id: "turn-completed", status: "completed", itemsView: "summary", items: [] },
+              { id: "turn-restored", status: "inProgress", itemsView: "full", items: [] }
+            ]
+          }
+        }
+      }
+    }));
+    harness.rpc.request.mockImplementation(async (method: string) =>
+      method === "thread/backgroundTerminals/list"
+        ? { data: [{ itemId: "item-unknown", processId: "process-unknown" }] }
+        : {}
+    );
+
+    await harness.driver.resume(launchSpec("thread-1"));
+    await harness.driver.interrupt(managedSession(), null);
+
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "turn/interrupt",
+      { threadId: "thread-1", turnId: "turn-restored" }
+    );
+    expect(harness.rpc.request).not.toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      expect.anything()
     );
   });
 
