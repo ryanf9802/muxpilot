@@ -5811,7 +5811,13 @@ describe("SessionManager transcript isolation", () => {
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
-    const root = { ...appServerSession("app-parent", "thread-parent", "idle"), cwd: repo, repo: { ...appServerSession("app-parent", "thread-parent", "idle").repo, root: repo } };
+    const rootTemplate = appServerSession("app-parent", "thread-parent", "idle");
+    const root = {
+      ...rootTemplate,
+      cwd: undefined,
+      tmux: { ...rootTemplate.tmux, cwd: repo },
+      repo: { ...rootTemplate.repo, root: null }
+    };
     await harness.db.upsertSession(root, "2026-09-01T12:00:00.000Z");
     const createTmux = vi.fn(async () => { throw new Error("tmux must not be used for app-server children"); });
     harness.tmux.createCodexWindowInMuxpilotSession = createTmux;

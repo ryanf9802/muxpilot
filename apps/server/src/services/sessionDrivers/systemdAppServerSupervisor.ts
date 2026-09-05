@@ -108,7 +108,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
 
   async inspect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeEvidence> {
     this.requireOwnedRuntime(runtime);
-    const properties = await this.dependencies.run("systemctl", [
+    const properties: Record<string, string> = await this.dependencies.run("systemctl", [
       "--user", "show", runtime.unit,
       "--property=ActiveState",
       "--property=SubState",
@@ -264,7 +264,8 @@ function shellQuote(value: string): string {
 function defaultDependencies(): SupervisorDependencies {
   return {
     run: async (command, args, options) => {
-      return execFileAsync(command, args, options);
+      const { stdout } = await execFileAsync(command, args, options);
+      return { stdout: typeof stdout === "string" ? stdout : stdout.toString() };
     },
     openProxy: (socketPath) => openUnixWebSocketJsonLineConnection(socketPath),
     socketReady: async (socketPath) => lstat(socketPath).then((value) => value.isSocket()).catch(() => false),

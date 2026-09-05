@@ -1717,7 +1717,7 @@ export class SessionManager {
       if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
         throw new AgentSessionError(`This root already has ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
       }
-      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd;
+      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd ?? actor.tmux.cwd;
       const request: CreateSessionRequest = actor.gitWorkspace
         ? { cwd, name, driverKind: actor.driverKind, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
         : { cwd, name, driverKind: actor.driverKind, workspace: { mode: "directory" } };
