@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, stat } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -54,6 +54,24 @@ describe("ProtocolJournal", () => {
     expect(await stat(path).then((metadata) => metadata.size)).toBeLessThanOrEqual(300);
   });
 
+  it("rebuilds exact active command ownership and ignores malformed journal lines", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-protocol-processes-"));
+    const path = protocolJournalPath(root, capabilityId);
+    const journal = new ProtocolJournal(path);
+    await journal.append(notification("item/started", "turn-old", "item-old", "process-old"));
+    await journal.append(notification("item/started", "turn-active", "item-active", "process-active"));
+    await journal.append(notification("item/completed", "turn-old", "item-old", "process-old"));
+    await journal.append(notification("item/started", "other-turn", "other-item", "other-process", "other-thread"));
+    await appendFile(path, "{truncated\n", "utf8");
+
+    expect(await journal.listActiveCommandProcesses("thread-1")).toEqual([{
+      threadId: "thread-1",
+      turnId: "turn-active",
+      itemId: "item-active",
+      processId: "process-active"
+    }]);
+  });
+
   it("rejects traversal identifiers and invalid bounds", () => {
     expect(() => protocolJournalPath("/tmp/journal", "../escape")).toThrow(/24 lowercase hexadecimal/);
     expect(() => new ProtocolJournal("/tmp/protocol.jsonl", { maxFiles: 0 })).toThrow("maxFiles must be a positive integer");
@@ -70,5 +88,30 @@ function entry(id: number, payload: unknown = { text: "hello" }): ProtocolJourna
     id,
     method: "turn/start",
     payload
+  };
+}
+
+function notification(
+  method: "item/started" | "item/completed",
+  turnId: string,
+  itemId: string,
+  processId: string,
+  threadId = "thread-1"
+): ProtocolJournalEntry {
+  return {
+    timestamp: "2026-09-01T12:00:00.000Z",
+    direction: "server_to_client",
+    kind: "notification",
+    connectionId: "connection-1",
+    method,
+    payload: {
+      jsonrpc: "2.0",
+      method,
+      params: {
+        threadId,
+        turnId,
+        item: { id: itemId, type: "commandExecution", processId }
+      }
+    }
   };
 }

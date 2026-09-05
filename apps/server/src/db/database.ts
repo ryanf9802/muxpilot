@@ -224,6 +224,24 @@ export interface AppServerProjectionResult {
   state: AppServerReconciliationState;
 }
 
+export interface AppServerCommandProcess {
+  sessionId: string;
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  processId: string;
+  observedAt: string;
+}
+
+interface AppServerCommandProcessRow {
+  session_id: string;
+  thread_id: string;
+  turn_id: string;
+  item_id: string;
+  process_id: string;
+  observed_at: string;
+}
+
 interface AppServerReconciliationRow {
   session_id: string;
   thread_id: string;
@@ -828,6 +846,26 @@ export class AppDatabase {
     return this.call("getAppServerReconciliationState", sessionId) as Promise<AppServerReconciliationState | null>;
   }
 
+  upsertAppServerCommandProcess(process: AppServerCommandProcess): Promise<void> {
+    return this.call("upsertAppServerCommandProcess", process) as Promise<void>;
+  }
+
+  removeAppServerCommandProcess(sessionId: string, threadId: string, itemId: string, processId: string): Promise<boolean> {
+    return this.call("removeAppServerCommandProcess", sessionId, threadId, itemId, processId) as Promise<boolean>;
+  }
+
+  removeAppServerTurnCommandProcesses(sessionId: string, threadId: string, turnId: string): Promise<number> {
+    return this.call("removeAppServerTurnCommandProcesses", sessionId, threadId, turnId) as Promise<number>;
+  }
+
+  clearAppServerCommandProcesses(sessionId: string): Promise<number> {
+    return this.call("clearAppServerCommandProcesses", sessionId) as Promise<number>;
+  }
+
+  listAppServerCommandProcesses(sessionId: string, threadId: string): Promise<AppServerCommandProcess[]> {
+    return this.call("listAppServerCommandProcesses", sessionId, threadId) as Promise<AppServerCommandProcess[]>;
+  }
+
   updateQueuedInput(input: QueuedInput): Promise<void> {
     return this.call("updateQueuedInput", input) as Promise<void>;
   }
@@ -1060,6 +1098,7 @@ export class SyncAppDatabase {
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_requests SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_reconciliation SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
+    this.db.prepare("UPDATE app_server_command_processes SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE codex_item_messages SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE btw_exchanges SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE agent_session_waits SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
@@ -2954,6 +2993,54 @@ export class SyncAppDatabase {
     return row ? hydrateAppServerReconciliation(row) : null;
   }
 
+  upsertAppServerCommandProcess(process: AppServerCommandProcess): void {
+    validateAppServerCommandProcess(process);
+    this.db.prepare(
+      `INSERT INTO app_server_command_processes
+        (session_id, thread_id, turn_id, item_id, process_id, observed_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id, thread_id, item_id) DO UPDATE SET
+        turn_id=excluded.turn_id,
+        process_id=excluded.process_id,
+        observed_at=excluded.observed_at`
+    ).run(process.sessionId, process.threadId, process.turnId, process.itemId, process.processId, process.observedAt);
+  }
+
+  removeAppServerCommandProcess(sessionId: string, threadId: string, itemId: string, processId: string): boolean {
+    const result = this.db.prepare(
+      `DELETE FROM app_server_command_processes
+       WHERE session_id = ? AND thread_id = ? AND item_id = ? AND process_id = ?`
+    ).run(sessionId, threadId, itemId, processId);
+    return result.changes === 1;
+  }
+
+  removeAppServerTurnCommandProcesses(sessionId: string, threadId: string, turnId: string): number {
+    return Number(this.db.prepare(
+      `DELETE FROM app_server_command_processes WHERE session_id = ? AND thread_id = ? AND turn_id = ?`
+    ).run(sessionId, threadId, turnId).changes);
+  }
+
+  clearAppServerCommandProcesses(sessionId: string): number {
+    return Number(this.db.prepare(
+      "DELETE FROM app_server_command_processes WHERE session_id = ?"
+    ).run(sessionId).changes);
+  }
+
+  listAppServerCommandProcesses(sessionId: string, threadId: string): AppServerCommandProcess[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM app_server_command_processes
+       WHERE session_id = ? AND thread_id = ? ORDER BY observed_at, item_id`
+    ).all(sessionId, threadId) as unknown as AppServerCommandProcessRow[];
+    return rows.map((row) => ({
+      sessionId: row.session_id,
+      threadId: row.thread_id,
+      turnId: row.turn_id,
+      itemId: row.item_id,
+      processId: row.process_id,
+      observedAt: row.observed_at
+    }));
+  }
+
   private requireAppServerRequest(sessionId: string, requestId: string | number): PersistedAppServerRequest {
     const row = this.db.prepare(
       "SELECT * FROM app_server_requests WHERE session_id = ? AND request_id_json = ?"
@@ -3326,6 +3413,17 @@ export class SyncAppDatabase {
         status TEXT,
         evidence_json TEXT NOT NULL,
         observed_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS app_server_command_processes (
+        session_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        process_id TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        PRIMARY KEY(session_id, thread_id, item_id),
         FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
       );
 
@@ -3984,6 +4082,12 @@ function validateAppServerProjection(projection: AppServerProjectionInput): void
     throw new Error(`App-server projection status is invalid: ${String(projection.status)}`);
   }
   if (projection.message) serializeAppServerJson(projection.message.payload, "projection message payload");
+}
+
+function validateAppServerCommandProcess(process: AppServerCommandProcess): void {
+  for (const [name, value] of Object.entries(process)) {
+    if (typeof value !== "string" || !value.trim()) throw new Error(`App-server command process ${name} must not be empty`);
+  }
 }
 
 function appServerRequestIdJson(requestId: string | number): string {

@@ -11,7 +11,7 @@ import {
   type JsonRpcNotification,
   type JsonRpcServerRequest
 } from "./jsonRpcConnection.js";
-import type { ProtocolJournal } from "./protocolJournal.js";
+import type { AppServerCommandProcessOwnership, ProtocolJournal } from "./protocolJournal.js";
 import type { RuntimeSupervisor, SystemdSessionRuntimeRef } from "./types.js";
 
 export interface AppServerSessionHandlers {
@@ -45,6 +45,7 @@ export interface AppServerReconciliation {
   established: ThreadIdentityResponse;
   current: ThreadIdentityResponse;
   replayedRequestIds: readonly (string | number)[];
+  journalProcessOwnership: readonly AppServerCommandProcessOwnership[];
 }
 
 export interface AppServerSessionConnection {
@@ -73,7 +74,7 @@ export class CodexAppServerConnectionManager {
 
   constructor(
     private readonly supervisor: RuntimeSupervisor,
-    private readonly journalForSession: (sessionId: string) => Pick<ProtocolJournal, "append">,
+    private readonly journalForSession: (sessionId: string) => Pick<ProtocolJournal, "append" | "listActiveCommandProcesses">,
     private readonly clientVersion: string,
     dependencies: Partial<ConnectionManagerDependencies> = {}
   ) {
@@ -96,6 +97,7 @@ export class CodexAppServerConnectionManager {
       spec.handlers,
       spec.expectedPendingRequestIds ?? [],
       spec.settings,
+      true,
       async (protocol) => {
         const backgroundTerminals = await protocol.listBackgroundTerminals(spec.threadId).catch(() => null);
         if (hasBackgroundTerminals(backgroundTerminals)) {
@@ -117,6 +119,7 @@ export class CodexAppServerConnectionManager {
       spec.handlers,
       [],
       spec.settings,
+      false,
       (protocol) => protocol.startThread(spec.settings)
     ));
   }
@@ -130,6 +133,7 @@ export class CodexAppServerConnectionManager {
         spec.handlers,
         [],
         spec.settings,
+        false,
         (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings)
       );
     });
@@ -154,6 +158,7 @@ export class CodexAppServerConnectionManager {
     sessionHandlers: AppServerSessionHandlers | undefined,
     expectedPendingRequestIds: readonly (string | number)[],
     settings: Partial<ThreadLaunchSettings> | undefined,
+    recoverProcessOwnership: boolean,
     establish: (protocol: CodexAppServerProtocol) => Promise<ThreadIdentityResponse>
   ): Promise<AppServerSessionConnection> {
     requireIdentity(sessionId, "sessionId");
@@ -181,10 +186,11 @@ export class CodexAppServerConnectionManager {
 
     try {
       proxy = await this.supervisor.reconnect(runtime);
+      const journal = this.journalForSession(sessionId);
       connection = await this.dependencies.createConnection(
         connectionId,
         proxy,
-        this.journalForSession(sessionId),
+        journal,
         handlers
       );
       const protocol = new CodexAppServerProtocol(connection);
@@ -198,6 +204,9 @@ export class CodexAppServerConnectionManager {
       }
       const current = await protocol.readThread(threadId, true);
       requireMatchingThread(threadId, current, "read");
+      const journalProcessOwnership = recoverProcessOwnership
+        ? await journal.listActiveCommandProcesses(threadId)
+        : [];
       const missing = expectedPendingRequestIds.filter((id) => !replayedRequestIds.has(id));
       if (missing.length > 0) {
         throw new Error(`Codex did not replay pending server requests during reconnect: ${missing.join(", ")}`);
@@ -211,7 +220,8 @@ export class CodexAppServerConnectionManager {
           initialize,
           established,
           current,
-          replayedRequestIds: [...replayedRequestIds]
+          replayedRequestIds: [...replayedRequestIds],
+          journalProcessOwnership
         },
         close: () => this.closeIfCurrent(sessionId, connectionId)
       };

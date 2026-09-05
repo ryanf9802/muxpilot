@@ -174,6 +174,40 @@ describe("app-server projection persistence", () => {
     raw.close();
   });
 
+  it("persists exact live command ownership across database reopen and session rekey", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    const process = {
+      sessionId,
+      threadId: "thread-1",
+      turnId: "turn-active",
+      itemId: "item-active",
+      processId: "process-active",
+      observedAt: "2026-09-01T00:00:01.000Z"
+    };
+    await db.upsertAppServerCommandProcess(process);
+    expect(await db.listAppServerCommandProcesses(sessionId, "thread-1")).toEqual([process]);
+    await db.close();
+
+    const reopened = new AppDatabase(path);
+    expect(await reopened.listAppServerCommandProcesses(sessionId, "thread-1")).toEqual([process]);
+    const session = await reopened.getSession(sessionId);
+    expect(session).not.toBeNull();
+    const rekeyedId = "session-process-rekeyed";
+    await reopened.rekeySession(sessionId, { ...session!, id: rekeyedId }, null, "2026-09-01T00:00:02.000Z");
+    expect(await reopened.listAppServerCommandProcesses(rekeyedId, "thread-1")).toEqual([
+      { ...process, sessionId: rekeyedId }
+    ]);
+    expect(await reopened.removeAppServerCommandProcess(
+      rekeyedId, "thread-1", "item-active", "process-active"
+    )).toBe(true);
+    expect(await reopened.listAppServerCommandProcesses(rekeyedId, "thread-1")).toEqual([]);
+    await reopened.upsertAppServerCommandProcess({ ...process, sessionId: rekeyedId });
+    expect(await reopened.removeAppServerTurnCommandProcesses(rekeyedId, "thread-1", "turn-active")).toBe(1);
+    await reopened.upsertAppServerCommandProcess({ ...process, sessionId: rekeyedId });
+    expect(await reopened.clearAppServerCommandProcesses(rekeyedId)).toBe(1);
+    await reopened.close();
+  });
+
   it("rejects invalid reconciliation state without mutating transcript or status", async () => {
     const { db, path, sessionId } = await projectionDb();
     expect(() => db.applyAppServerProjection({

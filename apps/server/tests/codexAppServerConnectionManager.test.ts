@@ -1,7 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { CodexAppServerConnectionManager } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
-import type { ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
+import type { ProtocolJournal, ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
 import type { RuntimeProxyConnection, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
 
 const runtime: SystemdSessionRuntimeRef = {
@@ -76,6 +76,22 @@ describe("CodexAppServerConnectionManager", () => {
     ]);
     expect(proxy.methods).not.toContain("thread/resume");
     expect(connected.threadId).toBe("thread-1");
+  });
+
+  it("returns journal-derived command ownership only during reconnect reconciliation", async () => {
+    const ownership = [{
+      threadId: "thread-1",
+      turnId: "turn-active",
+      itemId: "item-active",
+      processId: "process-active"
+    }];
+    const manager = createManager([new FakeProtocolProxy(), new FakeProtocolProxy()], ownership);
+
+    const reconnected = await manager.reconnect({ sessionId: "session-1", runtime, threadId: "thread-1" });
+    const started = await manager.start({ sessionId: "session-2", runtime, settings: { cwd: "/repo" } });
+
+    expect(reconnected.reconciliation.journalProcessOwnership).toEqual(ownership);
+    expect(started.reconciliation.journalProcessOwnership).toEqual([]);
   });
 
   it("establishes new and forked threads through the same read barrier", async () => {
@@ -165,7 +181,10 @@ describe("CodexAppServerConnectionManager", () => {
   });
 });
 
-function createManager(proxies: FakeProtocolProxy[]): CodexAppServerConnectionManager {
+function createManager(
+  proxies: FakeProtocolProxy[],
+  journalProcessOwnership: Awaited<ReturnType<ProtocolJournal["listActiveCommandProcesses"]>> = []
+): CodexAppServerConnectionManager {
   let connection = 0;
   const supervisor = {
     reconnect: vi.fn(async () => {
@@ -176,7 +195,8 @@ function createManager(proxies: FakeProtocolProxy[]): CodexAppServerConnectionMa
   } as unknown as RuntimeSupervisor;
   const entries: ProtocolJournalEntry[] = [];
   return new CodexAppServerConnectionManager(supervisor, () => ({
-    append: async (entry) => { entries.push(entry); }
+    append: async (entry) => { entries.push(entry); },
+    listActiveCommandProcesses: async () => journalProcessOwnership
   }), "0.1.0", { connectionId: () => `connection-${++connection}` });
 }
 

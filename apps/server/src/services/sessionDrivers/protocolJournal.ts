@@ -25,6 +25,13 @@ export interface StoredProtocolJournalEntry extends ProtocolJournalEntry {
   originalBytes?: number;
 }
 
+export interface AppServerCommandProcessOwnership {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  processId: string;
+}
+
 interface ProtocolJournalOptions {
   maxFileBytes?: number;
   maxFiles?: number;
@@ -74,6 +81,36 @@ export class ProtocolJournal {
     return Buffer.concat(chunks).toString("utf8");
   }
 
+  async listActiveCommandProcesses(threadId: string): Promise<AppServerCommandProcessOwnership[]> {
+    await this.tail;
+    const active = new Map<string, AppServerCommandProcessOwnership>();
+    for (let index = this.maxFiles - 1; index >= 0; index -= 1) {
+      const path = rotatedPath(this.path, index);
+      await secureExistingJournal(path);
+      const content = await readFile(path, "utf8").catch(() => null);
+      if (!content) continue;
+      for (const line of content.split("\n")) {
+        if (!line) continue;
+        const entry = parseJournalEntry(line);
+        if (!entry) continue;
+        const notification = appServerNotification(entry);
+        if (!notification || notification.threadId !== threadId) continue;
+        const key = `${notification.itemId}\0${notification.processId}`;
+        if (entry.method === "item/started" && notification.itemType === "commandExecution") {
+          active.set(key, {
+            threadId: notification.threadId,
+            turnId: notification.turnId,
+            itemId: notification.itemId,
+            processId: notification.processId
+          });
+        } else if (entry.method === "item/completed") {
+          active.delete(key);
+        }
+      }
+    }
+    return [...active.values()];
+  }
+
   private async appendNow(entry: ProtocolJournalEntry): Promise<void> {
     await preparePrivateDirectory(dirname(this.path));
     await secureExistingJournal(this.path);
@@ -92,6 +129,45 @@ export class ProtocolJournal {
       });
     }
   }
+}
+
+function parseJournalEntry(line: string): StoredProtocolJournalEntry | null {
+  try {
+    const value = JSON.parse(line) as unknown;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as StoredProtocolJournalEntry
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function appServerNotification(entry: StoredProtocolJournalEntry | null): {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  processId: string;
+  itemType: string | null;
+} | null {
+  if (!entry || entry.direction !== "server_to_client" || entry.kind !== "notification") return null;
+  if (entry.method !== "item/started" && entry.method !== "item/completed") return null;
+  const frame = record(entry.payload);
+  const params = record(frame?.params);
+  const item = record(params?.item);
+  const threadId = stringValue(params?.threadId);
+  const turnId = stringValue(params?.turnId);
+  const itemId = stringValue(item?.id) ?? stringValue(params?.itemId);
+  const processId = stringValue(item?.processId) ?? stringValue(params?.processId);
+  if (!threadId || !turnId || !itemId || !processId) return null;
+  return { threadId, turnId, itemId, processId, itemType: stringValue(item?.type) };
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
 }
 
 export function protocolJournalPath(root: string, capabilityId: string): string {

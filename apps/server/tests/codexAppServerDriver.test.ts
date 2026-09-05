@@ -3,6 +3,7 @@ import type { ManagedSession } from "@muxpilot/core";
 import {
   CodexAppServerDriver,
   type AppServerDriverEventSink,
+  type AppServerProcessStore,
   type AppServerRequestStore
 } from "../src/services/sessionDrivers/codexAppServerDriver.js";
 import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
@@ -467,7 +468,40 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.interrupt(session, null)).rejects.toThrow("without an active turn id");
   });
 
-  it("restores active interruption state when Codex omits its running command from a full reconnect snapshot", async () => {
+  it("persists command ownership before exposing lifecycle events and removes it on completion", async () => {
+    const processStore = processStoreHarness();
+    const sink = {
+      handle: vi.fn(async () => undefined),
+      restore: vi.fn(async () => undefined)
+    } satisfies AppServerDriverEventSink;
+    const harness = createHarness(undefined, sink, processStore);
+    await harness.driver.start(launchSpec());
+    const params = {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: { id: "command-1", type: "commandExecution", processId: "process-1" }
+    };
+
+    await harness.handlers.notification?.({ method: "item/started", params });
+    expect(processStore.upsertAppServerCommandProcess).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "command-1",
+      processId: "process-1",
+      observedAt: "2026-09-01T12:00:00.000Z"
+    });
+    expect(processStore.upsertAppServerCommandProcess.mock.invocationCallOrder[0]).toBeLessThan(
+      sink.handle.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY
+    );
+
+    await harness.handlers.notification?.({ method: "item/completed", params });
+    expect(processStore.removeAppServerCommandProcess).toHaveBeenCalledWith(
+      "session-1", "thread-1", "command-1", "process-1"
+    );
+  });
+
+  it("restores exact active interruption ownership when Codex omits all live commands from reconnect", async () => {
     const harness = createHarness();
     harness.connections.reconnect.mockImplementationOnce(async () => ({
       ...harness.connection,
@@ -482,7 +516,7 @@ describe("CodexAppServerDriver", () => {
                 id: "turn-completed",
                 status: "completed",
                 itemsView: "full",
-                items: [{ id: "item-persistent", type: "commandExecution" }]
+                items: [{ id: "item-completed-output", type: "agentMessage" }]
               },
               {
                 id: "turn-restored",
@@ -492,7 +526,11 @@ describe("CodexAppServerDriver", () => {
               }
             ]
           }
-        }
+        },
+        journalProcessOwnership: [
+          { threadId: "thread-1", turnId: "turn-completed", itemId: "item-persistent", processId: "process-persistent" },
+          { threadId: "thread-1", turnId: "turn-restored", itemId: "item-restored", processId: "process-restored" }
+        ]
       }
     }));
     harness.rpc.request.mockImplementation(async (method: string) => {
@@ -522,7 +560,7 @@ describe("CodexAppServerDriver", () => {
     );
   });
 
-  it("does not infer terminal ownership from a partial reconnect snapshot", async () => {
+  it("does not infer terminal ownership without durable correlation", async () => {
     const harness = createHarness();
     harness.connections.reconnect.mockImplementationOnce(async () => ({
       ...harness.connection,
@@ -556,6 +594,58 @@ describe("CodexAppServerDriver", () => {
     expect(harness.rpc.request).not.toHaveBeenCalledWith(
       "thread/backgroundTerminals/terminate",
       expect.anything()
+    );
+  });
+
+  it("uses database ownership when the corresponding journal entry has rotated away", async () => {
+    const processStore = processStoreHarness();
+    processStore.listAppServerCommandProcesses.mockResolvedValue([
+      {
+        sessionId: "session-1", threadId: "thread-1", turnId: "turn-completed",
+        itemId: "item-persistent", processId: "process-persistent", observedAt: "2026-09-01T11:00:00.000Z"
+      },
+      {
+        sessionId: "session-1", threadId: "thread-1", turnId: "turn-restored",
+        itemId: "item-restored", processId: "process-restored", observedAt: "2026-09-01T12:00:00.000Z"
+      }
+    ]);
+    const harness = createHarness(undefined, undefined, processStore);
+    harness.connections.reconnect.mockImplementationOnce(async () => ({
+      ...harness.connection,
+      reconciliation: {
+        ...harness.connection.reconciliation,
+        current: {
+          thread: {
+            id: "thread-1",
+            status: { type: "active" },
+            turns: [
+              { id: "turn-completed", status: "completed", itemsView: "full", items: [] },
+              { id: "turn-restored", status: "inProgress", itemsView: "full", items: [] }
+            ]
+          }
+        }
+      }
+    }));
+    harness.rpc.request.mockImplementation(async (method: string) => method === "thread/backgroundTerminals/list"
+      ? { data: [
+          { itemId: "item-restored", processId: "process-restored" },
+          { itemId: "item-persistent", processId: "process-persistent" }
+        ] }
+      : {});
+
+    await harness.driver.resume(launchSpec("thread-1"));
+    await harness.driver.interrupt(managedSession(), null);
+
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-restored" }
+    );
+    expect(harness.rpc.request).not.toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-persistent" }
+    );
+    expect(processStore.removeAppServerTurnCommandProcesses).toHaveBeenCalledWith(
+      "session-1", "thread-1", "turn-restored"
     );
   });
 
@@ -688,7 +778,11 @@ describe("CodexAppServerDriver", () => {
   });
 });
 
-function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServerDriverEventSink): {
+function createHarness(
+  requestStore?: AppServerRequestStore,
+  eventSink?: AppServerDriverEventSink,
+  processStore?: AppServerProcessStore
+): {
   driver: CodexAppServerDriver;
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   connections: Record<string, ReturnType<typeof vi.fn>>;
@@ -709,7 +803,8 @@ function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServ
       initialize: { userAgent: "codex", codexHome: "/codex", platformFamily: "unix", platformOs: "linux" },
       established: { thread: { id: "thread-1" } },
       current: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } },
-      replayedRequestIds: []
+      replayedRequestIds: [],
+      journalProcessOwnership: []
     },
     close: vi.fn(async () => undefined)
   } as unknown as AppServerSessionConnection & { threadId: string };
@@ -743,6 +838,7 @@ function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServ
         mcpServers: spec.options.mcpServers ?? []
       } satisfies RuntimeStartSpec),
       requestStore,
+      processStore,
       eventSink,
       now: () => new Date("2026-09-01T12:00:00.000Z")
     }
@@ -761,6 +857,16 @@ function requestStore() {
     resolveAppServerRequest: vi.fn(async () => true),
     resolveAppServerTurnRequests: vi.fn(async () => 0)
   };
+}
+
+function processStoreHarness() {
+  return {
+    upsertAppServerCommandProcess: vi.fn(async () => undefined),
+    removeAppServerCommandProcess: vi.fn(async () => true),
+    removeAppServerTurnCommandProcesses: vi.fn(async () => 0),
+    clearAppServerCommandProcesses: vi.fn(async () => 0),
+    listAppServerCommandProcesses: vi.fn(async () => [])
+  } satisfies AppServerProcessStore;
 }
 
 function launchSpec(sourceThreadId?: string) {

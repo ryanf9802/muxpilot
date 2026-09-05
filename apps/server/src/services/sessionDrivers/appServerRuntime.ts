@@ -45,6 +45,7 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
   const reconciler = new CodexAppServerReconciler(options.db, options.events);
   registry.register(new CodexAppServerDriver(supervisor, connections, {
     requestStore: options.db,
+    processStore: options.db,
     eventSink: reconciler,
     runtimeSpec: (spec) => ({
       sessionId: spec.sessionId,

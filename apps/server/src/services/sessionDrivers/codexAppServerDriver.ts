@@ -42,8 +42,27 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
 export interface CodexAppServerDriverOptions {
   runtimeSpec(spec: AgentSessionLaunchSpec): RuntimeStartSpec | Promise<RuntimeStartSpec>;
   requestStore?: AppServerRequestStore;
+  processStore?: AppServerProcessStore;
   eventSink?: AppServerDriverEventSink;
   now?(): Date;
+}
+
+export interface AppServerProcessStore {
+  upsertAppServerCommandProcess(process: AppServerProcessOwnership & { sessionId: string; observedAt: string }): Promise<void>;
+  removeAppServerCommandProcess(sessionId: string, threadId: string, itemId: string, processId: string): Promise<boolean>;
+  removeAppServerTurnCommandProcesses(sessionId: string, threadId: string, turnId: string): Promise<number>;
+  clearAppServerCommandProcesses(sessionId: string): Promise<number>;
+  listAppServerCommandProcesses(sessionId: string, threadId: string): Promise<Array<AppServerProcessOwnership & {
+    sessionId: string;
+    observedAt: string;
+  }>>;
+}
+
+interface AppServerProcessOwnership {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  processId: string;
 }
 
 export interface AppServerDriverEventSink {
@@ -92,6 +111,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   }>();
   private readonly now: () => Date;
   private readonly requestStore: AppServerRequestStore | null;
+  private readonly processStore: AppServerProcessStore | null;
   private readonly eventSink: AppServerDriverEventSink | null;
 
   constructor(
@@ -101,6 +121,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   ) {
     this.now = options.now ?? (() => new Date());
     this.requestStore = options.requestStore ?? null;
+    this.processStore = options.processStore ?? null;
     this.eventSink = options.eventSink ?? null;
   }
 
@@ -166,6 +187,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     for (const processId of processIds) {
       await protocol.terminateBackgroundTerminal(threadId, processId);
     }
+    await this.processStore?.removeAppServerTurnCommandProcesses(session.id, threadId, turnId).catch(() => undefined);
     this.turnProcesses.get(session.id)?.delete(turnId);
     this.activeTurns.delete(session.id);
   }
@@ -188,6 +210,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
     await this.supervisor.stop(runtime);
+    await this.processStore?.clearAppServerCommandProcesses(session.id).catch(() => undefined);
   }
 
   async answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void> {
@@ -267,6 +290,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.activeTurns.delete(session.id);
     this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
+    await this.processStore?.clearAppServerCommandProcesses(session.id).catch(() => undefined);
     return { ...stopped, state: "hibernated" };
   }
 
@@ -418,11 +442,12 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           const terminals = await new CodexAppServerProtocol(connection.rpc)
             .listBackgroundTerminals(connection.threadId)
             .catch(() => null);
-          this.restoreTurnProcessesAfterReconnect(
+          await this.restoreTurnProcessesAfterReconnect(
             spec.sessionId,
+            connection.threadId,
             restoredTurnId,
-            connection.reconciliation.current.thread,
-            terminals
+            terminals,
+            connection.reconciliation.journalProcessOwnership
           );
         }
         for (const request of unresolved) {
@@ -454,8 +479,10 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           const turnId = nestedId(params, "turn");
           if (turnId) this.activeTurns.set(sessionId, turnId);
         } else if (method === "item/started") {
+          await this.persistTurnProcess(sessionId, params, receivedAt);
           this.trackTurnProcess(sessionId, params);
         } else if (method === "item/completed") {
+          await this.removePersistedTurnProcess(sessionId, params);
           this.releaseTurnProcess(sessionId, params);
         } else if (method === "turn/completed") {
           const turnId = nestedId(params, "turn");
@@ -585,20 +612,42 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return null;
   }
 
-  private restoreTurnProcessesAfterReconnect(
+  private async restoreTurnProcessesAfterReconnect(
     sessionId: string,
+    threadId: string,
     turnId: string,
-    thread: Record<string, unknown>,
-    terminals: unknown
-  ): void {
+    terminals: unknown,
+    journalOwnership: readonly AppServerProcessOwnership[]
+  ): Promise<void> {
     if (this.activeTurns.get(sessionId) !== turnId) return;
-    const restoredProcessIds = backgroundProcessIdsForTurn(terminals, thread, turnId);
+    const storedOwnership = this.processStore
+      ? await this.processStore.listAppServerCommandProcesses(sessionId, threadId)
+      : [];
+    if (this.activeTurns.get(sessionId) !== turnId) return;
+    const restoredProcessIds = backgroundProcessIdsForTurn(terminals, turnId, [...journalOwnership, ...storedOwnership]);
     if (restoredProcessIds.length === 0) return;
     const turns = this.turnProcesses.get(sessionId) ?? new Map<string, Set<string>>();
     const processes = turns.get(turnId) ?? new Set<string>();
     for (const processId of restoredProcessIds) processes.add(processId);
     turns.set(turnId, processes);
     this.turnProcesses.set(sessionId, turns);
+  }
+
+  private async persistTurnProcess(sessionId: string, params: unknown, observedAt: string): Promise<void> {
+    const ownership = commandProcessOwnership(params);
+    if (!ownership) return;
+    await this.processStore?.upsertAppServerCommandProcess({ sessionId, ...ownership, observedAt });
+  }
+
+  private async removePersistedTurnProcess(sessionId: string, params: unknown): Promise<void> {
+    const ownership = commandProcessOwnership(params);
+    if (!ownership) return;
+    await this.processStore?.removeAppServerCommandProcess(
+      sessionId,
+      ownership.threadId,
+      ownership.itemId,
+      ownership.processId
+    );
   }
 
   private trackTurnProcess(sessionId: string, params: unknown): void {
@@ -779,19 +828,13 @@ function backgroundProcessIds(value: unknown): string[] {
 
 function backgroundProcessIdsForTurn(
   terminals: unknown,
-  thread: Record<string, unknown>,
-  turnId: string
+  turnId: string,
+  ownership: readonly AppServerProcessOwnership[]
 ): string[] {
-  const turns = Array.isArray(thread.turns)
-    ? thread.turns.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value))
-    : [];
-  const turn = turns.find((value) => directString(value, "id") === turnId);
-  if (!turn || turn.status !== "inProgress") return [];
-  const activeItemIds = itemIdsFromTurn(turn);
-  const otherTurns = turns.filter((value) => directString(value, "id") !== turnId);
-  const otherTurnsAreComplete = turns.filter((value) => value.status === "inProgress").length === 1
-    && otherTurns.every((value) => isTerminalTurnStatus(value.status) && value.itemsView === "full");
-  const otherItemIds = new Set(otherTurns.flatMap((value) => [...itemIdsFromTurn(value)]));
+  const exactOwnership = new Map(ownership.map((value) => [`${value.itemId}\0${value.processId}`, value]));
+  const active = new Set([...exactOwnership.values()]
+    .filter((value) => value.turnId === turnId)
+    .map((value) => `${value.itemId}\0${value.processId}`));
   if (!terminals || typeof terminals !== "object" || Array.isArray(terminals)) return [];
   const processes = (terminals as Record<string, unknown>).data;
   if (!Array.isArray(processes)) return [];
@@ -800,21 +843,19 @@ function backgroundProcessIdsForTurn(
     const record = process as Record<string, unknown>;
     const itemId = directString(record, "itemId");
     const processId = directString(record, "processId");
-    if (!itemId || !processId) return [];
-    if (activeItemIds.has(itemId)) return [processId];
-    // Codex 0.152 can omit an in-progress command item from an otherwise-full
-    // thread/read snapshot. When every other turn is fully enumerated, an
-    // unclaimed live terminal can only belong to the sole in-progress turn.
-    return otherTurnsAreComplete && !otherItemIds.has(itemId) ? [processId] : [];
+    return itemId && processId && active.has(`${itemId}\0${processId}`) ? [processId] : [];
   }))];
 }
 
-function itemIdsFromTurn(turn: Record<string, unknown>): Set<string> {
-  const items = Array.isArray(turn.items) ? turn.items : [];
-  return new Set(items.flatMap((item) => {
-    const itemId = directString(item, "id");
-    return itemId ? [itemId] : [];
-  }));
+function commandProcessOwnership(params: unknown): AppServerProcessOwnership | null {
+  const item = recordValue(params, "item");
+  const threadId = directString(params, "threadId");
+  const turnId = directString(params, "turnId");
+  const itemId = directString(item, "id") ?? directString(params, "itemId");
+  const processId = directString(item, "processId") ?? directString(params, "processId");
+  if (!threadId || !turnId || !itemId || !processId) return null;
+  if (item?.type !== "commandExecution") return null;
+  return { threadId, turnId, itemId, processId };
 }
 
 function activeTurnIdFromThread(threadId: string, thread: Record<string, unknown>): string | null {
