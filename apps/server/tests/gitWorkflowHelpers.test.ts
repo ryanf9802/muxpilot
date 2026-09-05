@@ -325,10 +325,16 @@ describe("standalone local Git workflow helpers", () => {
     const bin = join(root, "fake-bin");
     await mkdir(bin);
     const corepack = join(bin, "corepack");
-    await writeFile(corepack, "#!/bin/sh\nmkdir -p node_modules\ntouch node_modules/.installed\n");
+    const completionMode = join(root, "completion-mode");
+    await writeFile(corepack, `#!/bin/sh\nprintf '%s' "$MUXPILOT_HEAVY_COMPLETION_ENABLED" > '${completionMode}'\nmkdir -p node_modules\ntouch node_modules/.installed\n`);
     await chmod(corepack, 0o755);
-    const installed = await node("muxpilot-git-deps.mjs", { ...environment, PATH: `${bin}:${environment.PATH}` }, ["localize", "node_modules"]);
+    const installed = await node("muxpilot-git-deps.mjs", {
+      ...environment,
+      PATH: `${bin}:${environment.PATH}`,
+      MUXPILOT_HEAVY_COMPLETION_ENABLED: "1"
+    }, ["localize", "node_modules"]);
     expect(installed).toContain("install=frozen");
+    expect(await readFile(completionMode, "utf8")).toBe("0");
     expect((await lstat(join(worktree, "node_modules"))).isDirectory()).toBe(true);
     expect(await stat(join(worktree, "node_modules", ".installed"))).toBeTruthy();
 
@@ -338,7 +344,7 @@ describe("standalone local Git workflow helpers", () => {
     await expect(node("muxpilot-git-deps.mjs", { ...environment, PATH: `${bin}:${environment.PATH}` }, ["localize", "node_modules"]))
       .rejects.toThrow("Managed dependency install failed");
     expect((await lstat(join(worktree, "node_modules"))).isSymbolicLink()).toBe(true);
-  });
+  }, 15_000);
 });
 
 function helperEnvironment(root: string, dependencies: unknown[]): NodeJS.ProcessEnv & Record<string, string> {

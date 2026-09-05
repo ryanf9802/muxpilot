@@ -58,6 +58,7 @@ async function localizeNodeDependency(config, worktree, relativePath) {
     const runner = join(import.meta.dirname, "muxpilot-git-run.mjs");
     const environment = {
       ...process.env,
+      MUXPILOT_HEAVY_COMPLETION_ENABLED: "0",
       COREPACK_HOME: join(cacheRoot, "corepack"),
       XDG_CACHE_HOME: join(cacheRoot, "xdg"),
       PNPM_HOME: join(cacheRoot, "pnpm-home"),
