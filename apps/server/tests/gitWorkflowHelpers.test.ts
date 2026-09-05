@@ -355,7 +355,8 @@ function helperEnvironment(root: string, dependencies: unknown[]): NodeJS.Proces
     MUXPILOT_GIT_TARGET_BRANCH: "main",
     MUXPILOT_GIT_WORKTREE_ROOT: join(root, "task-worktrees"),
     MUXPILOT_GIT_STATUS_FILE: join(root, "session", "git-workflow-status.json"),
-    MUXPILOT_GIT_DEPENDENCIES: JSON.stringify(dependencies)
+    MUXPILOT_GIT_DEPENDENCIES: JSON.stringify(dependencies),
+    MUXPILOT_HEAVY_COMPLETION_ENABLED: "0"
   } as NodeJS.ProcessEnv & Record<string, string>;
 }
 
@@ -373,7 +374,8 @@ function standaloneEnvironment(root: string): NodeJS.ProcessEnv & Record<string,
   return {
     ...environment,
     MUXPILOT_GIT_STANDALONE_ROOT: join(root, "session", "standalone-state"),
-    MUXPILOT_GIT_STANDALONE_ID: "test-pane"
+    MUXPILOT_GIT_STANDALONE_ID: "test-pane",
+    MUXPILOT_HEAVY_COMPLETION_ENABLED: "0"
   } as NodeJS.ProcessEnv & Record<string, string>;
 }
 

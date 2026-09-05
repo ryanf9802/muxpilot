@@ -4,15 +4,26 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createConnection, createServer } from "node:net";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { normalizeHeavyCommandQueueEvent } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 const helper = resolve(import.meta.dirname, "../../../skills/muxpilot-git-workflow/scripts/muxpilot-git-run.mjs");
+let inheritedCompletionMode: string | undefined;
+
+beforeEach(() => {
+  inheritedCompletionMode = process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED;
+  process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED = "0";
+});
 
 afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  try {
+    await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  } finally {
+    if (inheritedCompletionMode === undefined) delete process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED;
+    else process.env.MUXPILOT_HEAVY_COMPLETION_ENABLED = inheritedCompletionMode;
+  }
 });
 
 describe("heavyweight validation helper", () => {
