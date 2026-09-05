@@ -456,11 +456,88 @@ describe("CodexAppServerDriver", () => {
 
     await harness.driver.interrupt(session, null);
 
-    expect(harness.rpc.request.mock.calls.slice(-2)).toEqual([
-      ["turn/interrupt", { threadId: "thread-1", turnId: "turn-1" }],
-      ["thread/backgroundTerminals/terminate", { threadId: "thread-1", processId: "process-1" }]
-    ]);
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "turn/interrupt",
+      { threadId: "thread-1", turnId: "turn-1" }
+    );
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-1" }
+    );
     await expect(harness.driver.interrupt(session, null)).rejects.toThrow("without an active turn id");
+  });
+
+  it("restores active interruption state and background cleanup after reconnect", async () => {
+    const harness = createHarness();
+    harness.connections.reconnect.mockImplementationOnce(async () => ({
+      ...harness.connection,
+      reconciliation: {
+        ...harness.connection.reconciliation,
+        current: {
+          thread: {
+            id: "thread-1",
+            status: { type: "active" },
+            turns: [{
+              id: "turn-restored",
+              status: "inProgress",
+              items: [{ id: "item-restored", type: "commandExecution" }]
+            }]
+          }
+        }
+      }
+    }));
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/backgroundTerminals/list") {
+        return { data: [
+          { itemId: "item-restored", processId: "process-restored" },
+          { itemId: "item-persistent", processId: "process-persistent" }
+        ] };
+      }
+      return {};
+    });
+
+    await harness.driver.resume(launchSpec("thread-1"));
+    await harness.driver.interrupt(managedSession(), null);
+
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "turn/interrupt",
+      { threadId: "thread-1", turnId: "turn-restored" }
+    );
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-restored" }
+    );
+    expect(harness.rpc.request).not.toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-persistent" }
+    );
+  });
+
+  it("preserves a newer turn notification that races reconnect reconciliation", async () => {
+    const harness = createHarness();
+    await harness.driver.sendMessage(managedSession(), "old work", "client-old");
+    harness.connections.reconnect.mockImplementationOnce(async (spec: { handlers?: AppServerSessionHandlers }) => {
+      await spec.handlers?.notification?.({
+        method: "turn/started",
+        params: { threadId: "thread-1", turn: { id: "turn-new" } }
+      });
+      return {
+        ...harness.connection,
+        reconciliation: {
+          ...harness.connection.reconciliation,
+          current: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } }
+        }
+      };
+    });
+
+    await harness.driver.resume(launchSpec("thread-1"));
+    harness.rpc.request.mockResolvedValue({});
+    await harness.driver.interrupt(managedSession(), null);
+
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "turn/interrupt",
+      { threadId: "thread-1", turnId: "turn-new" }
+    );
   });
 
   it("blocks hibernation for background terminals and otherwise stops cleanly", async () => {
@@ -558,7 +635,7 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn"]);
     harness.rpc.request.mockResolvedValue({});
     await harness.driver.interrupt(session, null);
-    expect(harness.rpc.request).toHaveBeenLastCalledWith("turn/interrupt", {
+    expect(harness.rpc.request).toHaveBeenCalledWith("turn/interrupt", {
       threadId: "thread-1",
       turnId: "turn-new"
     });
@@ -569,7 +646,7 @@ function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServ
   driver: CodexAppServerDriver;
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
   connections: Record<string, ReturnType<typeof vi.fn>>;
-  connection: { threadId: string; rpc: JsonRpcConnection };
+  connection: AppServerSessionConnection & { threadId: string };
   rpc: { request: ReturnType<typeof vi.fn>; respond: ReturnType<typeof vi.fn> };
   handlers: AppServerSessionHandlers;
 } {
@@ -582,7 +659,12 @@ function createHarness(requestStore?: AppServerRequestStore, eventSink?: AppServ
     threadId: "thread-1",
     connectionId: "connection-1",
     rpc: rpc as unknown as JsonRpcConnection,
-    reconciliation: {},
+    reconciliation: {
+      initialize: { userAgent: "codex", codexHome: "/codex", platformFamily: "unix", platformOs: "linux" },
+      established: { thread: { id: "thread-1" } },
+      current: { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } },
+      replayedRequestIds: []
+    },
     close: vi.fn(async () => undefined)
   } as unknown as AppServerSessionConnection & { threadId: string };
   let handlers: AppServerSessionHandlers = {};

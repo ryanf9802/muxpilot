@@ -162,7 +162,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const turnId = expectedTurnId ?? this.activeTurns.get(session.id);
     if (!turnId) throw new Error("Cannot interrupt app-server session without an active turn id");
     await protocol.interruptTurn(threadId, turnId);
-    const processIds = [...(this.turnProcesses.get(session.id)?.get(turnId) ?? [])];
+    const processIds = this.turnProcesses.get(session.id)?.get(turnId) ?? [];
     for (const processId of processIds) {
       await protocol.terminateBackgroundTerminal(threadId, processId);
     }
@@ -374,6 +374,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   }
 
   private async launch(spec: AgentSessionLaunchSpec, operation: "start" | "resume" | "fork"): Promise<AgentSessionLaunchResult> {
+    const activeTurnBeforeLaunch = this.activeTurns.get(spec.sessionId);
     const runtimeSpec = await this.options.runtimeSpec(spec);
     if (runtimeSpec.sessionId !== spec.sessionId) throw new Error("Runtime spec session id does not match launch spec");
     const runtime = await this.supervisor.start(runtimeSpec);
@@ -407,6 +408,23 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               handlers
             });
       if (operation === "resume") {
+        const restoredTurnId = this.restoreActiveTurnAfterReconnect(
+          spec.sessionId,
+          connection.threadId,
+          connection.reconciliation.current.thread,
+          activeTurnBeforeLaunch
+        );
+        if (restoredTurnId) {
+          const terminals = await new CodexAppServerProtocol(connection.rpc)
+            .listBackgroundTerminals(connection.threadId)
+            .catch(() => null);
+          this.restoreTurnProcessesAfterReconnect(
+            spec.sessionId,
+            restoredTurnId,
+            connection.reconciliation.current.thread,
+            terminals
+          );
+        }
         for (const request of unresolved) {
           if (request.state !== "responded") continue;
           if (request.response === null) throw new Error(`Responded app-server request has no durable response: ${request.requestId}`);
@@ -548,6 +566,39 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     for (const [key, pending] of this.pendingRequests) {
       if (pending.sessionId === sessionId) this.pendingRequests.delete(key);
     }
+  }
+
+  private restoreActiveTurnAfterReconnect(
+    sessionId: string,
+    threadId: string,
+    thread: Record<string, unknown>,
+    activeTurnBeforeLaunch: string | undefined
+  ): string | null {
+    if (this.activeTurns.get(sessionId) !== activeTurnBeforeLaunch) return null;
+    const restoredTurnId = activeTurnIdFromThread(threadId, thread);
+    if (restoredTurnId) {
+      this.activeTurns.set(sessionId, restoredTurnId);
+      return restoredTurnId;
+    }
+    this.activeTurns.delete(sessionId);
+    this.turnProcesses.delete(sessionId);
+    return null;
+  }
+
+  private restoreTurnProcessesAfterReconnect(
+    sessionId: string,
+    turnId: string,
+    thread: Record<string, unknown>,
+    terminals: unknown
+  ): void {
+    if (this.activeTurns.get(sessionId) !== turnId) return;
+    const restoredProcessIds = backgroundProcessIdsForTurn(terminals, thread, turnId);
+    if (restoredProcessIds.length === 0) return;
+    const turns = this.turnProcesses.get(sessionId) ?? new Map<string, Set<string>>();
+    const processes = turns.get(turnId) ?? new Set<string>();
+    for (const processId of restoredProcessIds) processes.add(processId);
+    turns.set(turnId, processes);
+    this.turnProcesses.set(sessionId, turns);
   }
 
   private trackTurnProcess(sessionId: string, params: unknown): void {
@@ -724,6 +775,47 @@ function backgroundProcessIds(value: unknown): string[] {
     const id = (process as Record<string, unknown>).processId;
     return typeof id === "string" && id ? [id] : [];
   });
+}
+
+function backgroundProcessIdsForTurn(
+  terminals: unknown,
+  thread: Record<string, unknown>,
+  turnId: string
+): string[] {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const turn = turns.find((value) => directString(value, "id") === turnId);
+  if (!turn || typeof turn !== "object" || Array.isArray(turn)) return [];
+  const items = Array.isArray((turn as Record<string, unknown>).items)
+    ? (turn as Record<string, unknown>).items as unknown[]
+    : [];
+  const itemIds = new Set(items.flatMap((item) => {
+    const itemId = directString(item, "id");
+    return itemId ? [itemId] : [];
+  }));
+  if (itemIds.size === 0 || !terminals || typeof terminals !== "object" || Array.isArray(terminals)) return [];
+  const processes = (terminals as Record<string, unknown>).data;
+  if (!Array.isArray(processes)) return [];
+  return processes.flatMap((process) => {
+    if (!process || typeof process !== "object" || Array.isArray(process)) return [];
+    const record = process as Record<string, unknown>;
+    const itemId = directString(record, "itemId");
+    const processId = directString(record, "processId");
+    return itemId && processId && itemIds.has(itemId) ? [processId] : [];
+  });
+}
+
+function activeTurnIdFromThread(threadId: string, thread: Record<string, unknown>): string | null {
+  if (thread.id !== threadId || recordValue(thread, "status")?.type !== "active") return null;
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (!turn || typeof turn !== "object" || Array.isArray(turn)) continue;
+    const record = turn as Record<string, unknown>;
+    if (record.status !== "inProgress") continue;
+    const turnId = directString(record, "id");
+    if (turnId) return turnId;
+  }
+  return null;
 }
 
 function isTerminalTurnStatus(value: unknown): boolean {
