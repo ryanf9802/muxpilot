@@ -835,12 +835,86 @@ export function dashboardSessionSummary(session: ManagedSession): DashboardSessi
     ? []
     : session.recentUserPrompts.slice(0, 2).map(boundedDashboardPreview);
   return {
-    ...session,
+    id: session.id,
+    name: session.name,
+    cwd: session.cwd,
+    driverKind: session.driverKind,
+    tmux: {
+      sessionId: "",
+      sessionName: session.tmux.sessionName,
+      windowId: session.tmux.windowId,
+      windowIndex: session.tmux.windowIndex,
+      windowName: session.tmux.windowName,
+      paneId: session.tmux.paneId,
+      paneIndex: session.tmux.paneIndex,
+      paneActive: false,
+      cwd: session.tmux.cwd,
+      currentCommand: "",
+      title: "",
+      pid: 0,
+      size: ""
+    },
+    repo: {
+      root: session.repo.root,
+      name: session.repo.name,
+      branch: session.repo.branch,
+      dirty: session.repo.dirty,
+      worktree: null
+    },
+    codexSessionId: session.codexSessionId,
+    codexJsonlPath: null,
+    discoveryConfidence: session.discoveryConfidence,
+    status: session.status,
+    initializing: session.initializing,
+    startupError: session.startupError,
+    runtimeUnavailableReason: session.runtimeUnavailableReason,
+    lastActivityAt: session.lastActivityAt,
     preview: "",
     recentUserPrompts,
     activitySummary: completedChild || !session.activitySummary ? null : boundedDashboardPreview(session.activitySummary),
+    activitySummaryGeneratedAt: null,
+    activitySummarySourceSequence: null,
+    inputMode: session.inputMode,
+    models: {
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    },
+    fastMode: session.fastMode,
+    transcriptSize: session.transcriptSize,
+    unreadCount: session.unreadCount,
+    pinned: session.pinned,
+    archived: session.archived,
+    forkedFrom: session.forkedFrom,
+    resourceUsage: session.resourceUsage,
+    contextUsage: session.contextUsage,
+    agentOwnership: session.agentOwnership
+      ? {
+          parentSessionId: session.agentOwnership.parentSessionId,
+          rootSessionId: session.agentOwnership.rootSessionId,
+          origin: session.agentOwnership.origin,
+          createdAt: "",
+          workTokenBaseline: session.agentOwnership.workTokenBaseline,
+          workTokenBudget: session.agentOwnership.workTokenBudget,
+          completedAt: session.agentOwnership.completedAt,
+          budgetExhaustedAt: session.agentOwnership.budgetExhaustedAt ?? null
+        }
+      : null,
+    capabilities: session.capabilities?.kill === false ? session.capabilities : undefined,
     gitWorkspace: session.gitWorkspace
-      ? { ...session.gitWorkspace, dependencyLinks: [] }
+      ? {
+          workflowVersion: 1,
+          id: session.gitWorkspace.id,
+          state: session.gitWorkspace.state,
+          entryPath: session.gitWorkspace.entryPath,
+          repoRoot: session.gitWorkspace.repoRoot,
+          targetBranch: session.gitWorkspace.targetBranch,
+          targetSha: "",
+          sessionBranch: session.gitWorkspace.sessionBranch,
+          worktreePath: session.gitWorkspace.worktreePath,
+          lastError: session.gitWorkspace.lastError,
+          updatedAt: "",
+          dependencyLinks: []
+        }
       : null
   };
 }

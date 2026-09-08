@@ -31,6 +31,21 @@ describe("dashboard session summaries", () => {
     expect(summary.activitySummary).toBe("y".repeat(512));
     expect(summary.gitWorkspace?.dependencyLinks).toEqual([]);
     expect(session.gitWorkspace.dependencyLinks).toHaveLength(1);
+    expect(summary).not.toHaveProperty("provider");
+    expect(summary).not.toHaveProperty("runtime");
+    expect(summary).not.toHaveProperty("resourceUnit");
+    expect(summary.codexJsonlPath).toBeNull();
+    expect(summary.models).toEqual({
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    });
+    expect(summary.tmux).toMatchObject({
+      cwd: session.tmux.cwd,
+      windowName: session.tmux.windowName,
+      currentCommand: "",
+      title: "",
+      pid: 0
+    });
   });
 
   it("preserves completed children while suppressing their large preview fields", () => {
@@ -51,7 +66,11 @@ describe("dashboard session summaries", () => {
       id: session.id,
       recentUserPrompts: [],
       activitySummary: null,
-      agentOwnership: session.agentOwnership
+      agentOwnership: expect.objectContaining({
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        completedAt: "2026-09-08T01:00:00.000Z"
+      })
     });
   });
 
