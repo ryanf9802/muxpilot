@@ -1,7 +1,7 @@
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import type { SessionDriverCompatibilityResponse } from "@muxpilot/core";
 import { loadConfig } from "./config/config.js";
 import { AppDatabase } from "./db/database.js";
@@ -41,7 +41,10 @@ import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLoggi
 const config = loadConfig();
 const tmuxCompatibility = await probeTmuxCompatibility();
 assertConfiguredTmuxAvailable(config.defaultSessionDriver, tmuxCompatibility);
-const app = Fastify({ logger: { level: config.logLevel }, disableRequestLogging: true });
+const app = Fastify({
+  logger: { level: config.logLevel },
+  logController: new LogController({ disableRequestLogging: true })
+});
 const slowRequestMs = slowRequestThresholdMs();
 app.addHook("onResponse", (request, reply, done) => {
   const elapsedMs = reply.elapsedTime;
