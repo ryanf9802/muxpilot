@@ -2045,6 +2045,10 @@ export class SessionManager {
       current = await this.updateInputDelivery(current, { deliveryPhase: "delivering" });
       const appServerDriver = this.appServerDriver(session);
       if (appServerDriver) {
+        if (session.inputMode !== mode) {
+          await appServerDriver.setPreferences(session, { mode });
+          await this.db.setSessionInputMode(session.id, mode, nowIso());
+        }
         const receipt = await appServerDriver.sendMessage(
           { ...session, inputMode: mode },
           message.text,

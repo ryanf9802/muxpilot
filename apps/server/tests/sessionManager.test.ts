@@ -2867,6 +2867,10 @@ describe("SessionManager transcript isolation", () => {
     const result = await harness.manager.sendInput(session.id, "structured prompt", "plan");
     expect(result).toMatchObject({ session: { status: "planning", inputMode: "plan" } });
     expect(splitSequenceAllocation).not.toHaveBeenCalled();
+    expect(setPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, inputMode: "default" }),
+      { mode: "plan" }
+    );
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ id: session.id, inputMode: "plan" }),
       "structured prompt",
@@ -5807,7 +5811,8 @@ describe("SessionManager transcript isolation", () => {
       turnId: "turn-child"
     }));
     const kill = vi.fn(async () => undefined);
-    const driver = { kind: "codex_app_server", start, sendMessage, kill } as unknown as AgentSessionDriver;
+    const setPreferences = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", start, sendMessage, kill, setPreferences } as unknown as AgentSessionDriver;
     const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
@@ -5823,10 +5828,14 @@ describe("SessionManager transcript isolation", () => {
     harness.tmux.createCodexWindowInMuxpilotSession = createTmux;
     harness.tmux.listPanes = async () => [];
 
-    const child = await harness.manager.agentCreateChild(root.id, "app-child", "Do child work");
+    const child = await harness.manager.agentCreateChild(root.id, "app-child", "Do child work", "plan");
 
     expect(start).toHaveBeenCalledWith(expect.objectContaining({ name: "app-child", cwd: repo }));
     expect(createTmux).not.toHaveBeenCalled();
+    expect(setPreferences).toHaveBeenCalledWith(
+      expect.objectContaining({ id: child.id, inputMode: "default" }),
+      { mode: "plan" }
+    );
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ id: child.id, driverKind: "codex_app_server" }), "Do child work", expect.any(String));
     expect(child).toMatchObject({
       driverKind: "codex_app_server",
