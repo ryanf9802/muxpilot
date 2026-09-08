@@ -6198,6 +6198,142 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("preserves unavailable tmux sessions read-only and restores them through app-server", async () => {
+    const resume = vi.fn(async (spec: Parameters<AgentSessionDriver["resume"]>[0]) => ({
+      sessionId: spec.sessionId,
+      provider: { kind: "codex" as const, threadId: spec.sourceThreadId!, rolloutPath: null },
+      runtime: {
+        kind: "systemd_service" as const,
+        unit: "muxpilot-session-0123456789abcdef01234567.service",
+        socketPath: `/tmp/${spec.sessionId}.sock`,
+        state: "connected" as const,
+        codexVersion: "0.152.0"
+      },
+      capabilities: appServerCapabilities(),
+      ready: Promise.resolve()
+    }));
+    const driver = {
+      kind: "codex_app_server",
+      resume,
+      setPreferences: vi.fn(async () => undefined)
+    } as unknown as AgentSessionDriver;
+    const harness = await createHarness({
+      sessionDrivers: new SessionDriverRegistry([driver]),
+      tmuxAvailable: false
+    });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const legacy = {
+      ...agentHierarchySession("legacy-unavailable"),
+      cwd: repo,
+      repo: { root: repo, name: "repo", branch: "main", dirty: false, worktree: null },
+      tmux: testPane({ cwd: repo, paneId: "%71", windowName: "legacy-unavailable" }),
+      driverKind: "codex_tmux" as const,
+      codexSessionId: "thread-legacy-unavailable",
+      documentScopeId: "legacy-documents",
+      agentOwnership: {
+        parentSessionId: "parent-session",
+        rootSessionId: "parent-session",
+        origin: "created" as const,
+        createdAt: "2026-09-08T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 100_000,
+        completedAt: null,
+        budgetExhaustedAt: null
+      }
+    };
+    const appServer = {
+      ...appServerSession("app-still-visible", "thread-app-still-visible", "idle"),
+      cwd: repo,
+      repo: { root: repo, name: "repo", branch: "main", dirty: false, worktree: null }
+    };
+    const documentsRoot = join(harness.dir, "sessions", "legacy-documents", "documents");
+    await mkdir(documentsRoot, { recursive: true });
+    await writeFile(join(documentsRoot, "INDEX.md"), "# Preserved legacy notes\n");
+    await harness.db.upsertSession(legacy, "2026-09-08T00:00:00.000Z");
+    await harness.db.upsertSession(appServer, "2026-09-08T00:00:01.000Z");
+    await harness.db.appendMessage({
+      id: "legacy-preserved-message",
+      sessionId: legacy.id,
+      sequence: 1,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-08T00:00:02.000Z",
+      text: "Preserved transcript evidence",
+      payload: {}
+    });
+    await harness.manager.discoverNow();
+
+    expect(await harness.db.getSession(legacy.id)).toMatchObject({ status: "missing", codexSessionId: legacy.codexSessionId });
+    expect(await harness.db.getSession(appServer.id)).toMatchObject({ status: "idle", driverKind: "codex_app_server" });
+
+    expect(await harness.manager.getSession(legacy.id)).toMatchObject({
+      id: legacy.id,
+      codexSessionId: legacy.codexSessionId,
+      status: "missing",
+      runtimeUnavailableReason: expect.stringContaining("tmux is not installed"),
+      capabilities: { sendMessage: false, interrupt: false, kill: false, terminalAttach: false }
+    });
+    expect(await harness.manager.getSession(appServer.id)).toMatchObject({
+      status: "idle",
+      driverKind: "codex_app_server",
+      runtimeUnavailableReason: null
+    });
+    const sessionCount = (await harness.db.listSessions(true)).length;
+    await expect(harness.manager.createSessionInDirectory(repo, "unavailable-create", undefined, "codex_tmux"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.forkSession(legacy.id, "unavailable-fork", "codex_tmux"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.restoreSession(legacy.id, "codex_tmux"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.restoreSessionRecovery("unavailable-recovery", [legacy.id], "codex_tmux"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.importPortableSession(
+      {} as Parameters<SessionManager["importPortableSession"]>[0],
+      Buffer.alloc(0),
+      { sourceCwd: repo, destinationCwd: repo, driverKind: "codex_tmux" }
+    )).rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.sendInput(legacy.id, "must not persist"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.enqueueInput(legacy.id, "must not queue"))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.act(legacy.id, { type: "interrupt" }))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.resolveApproval(legacy.id, { decision: "approve_once" }))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    await expect(harness.manager.answerQuestion(legacy.id, { answers: {} }))
+      .rejects.toMatchObject({ code: "session_driver_unavailable", statusCode: 503 });
+    expect(await harness.manager.listMessages(legacy.id, 0)).toEqual([
+      expect.objectContaining({ id: "legacy-preserved-message", text: "Preserved transcript evidence" })
+    ]);
+    expect(await harness.manager.listQueuedInputs(legacy.id)).toEqual([]);
+    expect((await harness.db.listSessions(true))).toHaveLength(sessionCount);
+
+    const restored = await harness.manager.restoreSession(legacy.id, "codex_app_server");
+    expect(restored).toMatchObject({
+      restored: true,
+      session: {
+        id: legacy.id,
+        driverKind: "codex_app_server",
+        codexSessionId: legacy.codexSessionId,
+        documentScopeId: legacy.documentScopeId,
+        agentOwnership: legacy.agentOwnership
+      }
+    });
+    expect(await harness.manager.getSession(legacy.id)).toMatchObject({ runtimeUnavailableReason: null });
+    await expect(harness.manager.readDocument(legacy.id, "INDEX.md")).resolves.toMatchObject({
+      document: { content: "# Preserved legacy notes\n" }
+    });
+    expect(await harness.manager.listMessages(legacy.id, 0)).toEqual([
+      expect.objectContaining({ id: "legacy-preserved-message", text: "Preserved transcript evidence" })
+    ]);
+    expect(resume).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: legacy.id,
+      sourceThreadId: legacy.codexSessionId
+    }));
+    harness.db.close();
+  });
+
   it("recovers connected app-server sessions recent-first without waking stopped sessions", async () => {
     const resumeOrder: string[] = [];
     const resume = vi.fn(async (spec: Parameters<AgentSessionDriver["resume"]>[0]) => {
@@ -7341,6 +7477,7 @@ async function createHarness(options: {
   sessionDrivers?: SessionDriverRegistry;
   appServerHibernateMs?: number;
   defaultSessionDriver?: ManagedSession["driverKind"];
+  tmuxAvailable?: boolean;
 } = {}): Promise<{
   dir: string;
   codexHome: string;
@@ -7356,7 +7493,7 @@ async function createHarness(options: {
   const codexHome = join(dir, "codex-home");
   await mkdir(join(codexHome, "sessions"), { recursive: true });
   const db = new AppDatabase(join(dir, "test.db"));
-  const tmux = new TmuxAdapter();
+  const tmux = new TmuxAdapter(["Enter"], {}, options.tmuxAvailable !== false);
   const activitySummarizer = new FakeActivitySummarizer();
   const processLookup = new FakeCodexProcessLookup();
   tmux.listPanes = async () => [];

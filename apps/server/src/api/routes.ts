@@ -4,6 +4,7 @@ import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
   AppServerCompatibility,
+  SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CreateSessionRequest,
   ForkSessionRequest,
@@ -188,7 +189,8 @@ export function registerRoutes(
   heavyCommands?: HeavyCommandService,
   btw?: BtwService,
   appServerCompatibility?: AppServerCompatibility,
-  rawEvidence?: RawSessionEvidence
+  rawEvidence?: RawSessionEvidence,
+  sessionDriverCompatibility?: SessionDriverCompatibilityResponse
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -197,6 +199,12 @@ export function registerRoutes(
   if (appServerCompatibility) {
     app.get("/api/app-server/compatibility", { preHandler: access.requireAccess }, async (): Promise<AppServerCompatibility> =>
       appServerCompatibility
+    );
+  }
+
+  if (sessionDriverCompatibility) {
+    app.get("/api/session-drivers/compatibility", { preHandler: access.requireAccess }, async (): Promise<SessionDriverCompatibilityResponse> =>
+      sessionDriverCompatibility
     );
   }
 

@@ -23,6 +23,7 @@ import type {
   RestoreSessionRecoveryResponse,
   RestoreSessionRecoveryResult,
   SessionAction,
+  SessionCapabilities,
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionDirectorySuggestion,
@@ -602,6 +603,7 @@ export class SessionManager {
     sessionIds: string[],
     driverKind?: SessionDriverKind
   ): Promise<RestoreSessionRecoveryResponse> {
+    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
     const incident = await this.getSessionRecoveryIncident();
     if (!incident || incident.id !== incidentId) throw new SessionRestoreError("Recovery batch is no longer available");
     const selected = new Set(sessionIds);
@@ -1164,11 +1166,18 @@ export class SessionManager {
     const descendants = agentDescendants(allSessions, session.id);
     const liveDescendants = descendants.filter(isLiveAgentSession);
     const worstDescendant = highestPrioritySession(liveDescendants);
+    const tmuxUnavailableReason = withOrigin.driverKind !== "codex_app_server"
+      ? this.tmux.unavailableReason()
+      : null;
     return this.withResourceUsage({
       ...withOrigin,
-      status: !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
-        ? "blocked"
-        : withOrigin.status,
+      status: tmuxUnavailableReason
+        ? "missing"
+        : !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
+          ? "blocked"
+          : withOrigin.status,
+      runtimeUnavailableReason: tmuxUnavailableReason,
+      capabilities: tmuxUnavailableReason ? unavailableSessionCapabilities() : withOrigin.capabilities,
       agentSummary: descendants.length > 0 ? {
         liveDescendantCount: liveDescendants.length,
         totalDescendantCount: descendants.length,
@@ -1184,6 +1193,7 @@ export class SessionManager {
   }
 
   async restoreSession(sessionId: string, driverKind?: SessionDriverKind): Promise<{ session: ManagedSession; restored: boolean }> {
+    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
     const initial = await this.db.getSession(sessionId);
     if (!initial) throw new SessionNotFoundError("Session not found");
     if (!initial.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
@@ -1238,6 +1248,8 @@ export class SessionManager {
       return { session: updated, restored: true };
     }
 
+    this.tmux.requireAvailable();
+
     const storedGitWorkspace = await this.gitWorkspaces?.getBySession(source.id) ?? null;
     const cwd = storedGitWorkspace
       ? await this.gitWorkspaces!.ensureControlPath(storedGitWorkspace)
@@ -1274,6 +1286,7 @@ export class SessionManager {
     mapping: SessionTransferImportMapping,
     importedDocuments: SessionDocumentSnapshot[] | null = null
   ): Promise<SessionTransferImportResult> {
+    this.assertPortableRuntimeAvailable(mapping);
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     const existing = (await this.db.listSessions(true)).find((session) => session.codexSessionId === portable.codexSessionId) ?? null;
     let selectedTranscript = transcript;
@@ -1381,6 +1394,7 @@ export class SessionManager {
   }
 
   async validatePortableMapping(portable: PortableSession, mapping: SessionTransferImportMapping): Promise<void> {
+    this.assertPortableRuntimeAvailable(mapping);
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     if (portable.workspaceMode !== "git") return;
     if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
@@ -1391,13 +1405,19 @@ export class SessionManager {
     if (!probe.localBranches.includes(targetBranch)) throw new SessionRestoreError(`Local target branch '${targetBranch}' does not exist for '${portable.sessionName}'`);
   }
 
+  assertPortableRuntimeAvailable(mapping: Pick<SessionTransferImportMapping, "driverKind">): void {
+    if (mapping.driverKind === "codex_tmux") this.tmux.requireAvailable();
+  }
+
   async enqueueInput(
     sessionId: string,
     text: string,
     mode?: CollaborationMode,
     actorSessionId: string | null = null
   ): Promise<QueuedInput> {
-    const session = requireSession(await this.db.getSession(sessionId));
+    const storedSession = await this.db.getSession(sessionId);
+    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
+    const session = requireSession(storedSession);
     if (session.status === "input_failed") {
       throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
     }
@@ -1568,7 +1588,9 @@ export class SessionManager {
     mode?: CollaborationMode,
     actorSessionId: string | null = null
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
-    const session = requireSession(await this.db.getSession(sessionId));
+    const storedSession = await this.db.getSession(sessionId);
+    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
+    const session = requireSession(storedSession);
     if (session.driverKind !== "codex_app_server") {
       return this.sendInputExclusive(sessionId, text, mode, actorSessionId);
     }
@@ -1676,7 +1698,9 @@ export class SessionManager {
 
   async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode): Promise<ManagedSession> {
     requireSession(await this.db.getSession(actorSessionId));
-    const target = requireSession(await this.db.getSession(targetSessionId));
+    const storedTarget = await this.db.getSession(targetSessionId);
+    if (storedTarget && storedTarget.driverKind !== "codex_app_server") this.tmux.requireAvailable();
+    const target = requireSession(storedTarget);
     if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
     const usage = target.contextUsage;
     const ownership = target.agentOwnership;
@@ -1972,6 +1996,9 @@ export class SessionManager {
       const target = await this.requireAgentControlRecord(actorSessionId, targetSessionId);
       if (target.agentOwnership?.completedAt) return;
       const descendants = agentDescendants(await this.db.listSessions(true), target.id).reverse();
+      if ([...descendants, target].some((session) => session.driverKind !== "codex_app_server")) {
+        this.tmux.requireAvailable();
+      }
       for (const session of [...descendants, target]) {
         const current = await this.db.getSession(session.id);
         if (!current?.agentOwnership || current.agentOwnership.completedAt) continue;
@@ -2133,7 +2160,9 @@ export class SessionManager {
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
-    const session = requireSession(await this.db.getSession(sessionId));
+    const storedSession = await this.db.getSession(sessionId);
+    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
+    const session = requireSession(storedSession);
     const approval = await this.getPendingApproval(sessionId);
     if (!approval) throw new ApprovalResolutionError("No pending approval for this session");
     if (!approval.options.some((option) => option.decision === request.decision)) {
@@ -2235,7 +2264,9 @@ export class SessionManager {
   }
 
   async answerQuestion(sessionId: string, request: QuestionAnswerRequest): Promise<void> {
-    const session = requireSession(await this.db.getSession(sessionId));
+    const storedSession = await this.db.getSession(sessionId);
+    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
+    const session = requireSession(storedSession);
     const question = await this.getPendingQuestion(sessionId);
     if (!question) throw new QuestionResolutionError("No pending question for this session");
     const normalized = normalizeQuestionAnswer(question, request);
@@ -2316,6 +2347,7 @@ export class SessionManager {
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
     driverKind: SessionDriverKind = this.defaultSessionDriver
   ): Promise<ManagedSession> {
+    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
     if (driverKind === "codex_app_server") this.requireAppServerDriver();
@@ -2356,6 +2388,7 @@ export class SessionManager {
     const sessionName = requireSessionName(request.name);
     const driverKind = request.driverKind ?? this.defaultSessionDriver;
     if (driverKind === "codex_app_server") this.requireAppServerDriver();
+    else this.tmux.requireAvailable();
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
@@ -2425,6 +2458,7 @@ export class SessionManager {
       this.requireAppServerDriver();
       return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
     }
+    this.tmux.requireAvailable();
 
     let launch;
     let orchestrationCapabilityId: string | null = null;
@@ -3090,7 +3124,11 @@ export class SessionManager {
   }
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
-    const session = requireSession(await this.db.getSession(sessionId));
+    const storedSession = await this.db.getSession(sessionId);
+    if (storedSession && storedSession.driverKind !== "codex_app_server" && tmuxRuntimeAction(action)) {
+      this.tmux.requireAvailable();
+    }
+    const session = requireSession(storedSession);
     if (action.type === "extendAgentBudget") {
       return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     }
@@ -3803,6 +3841,7 @@ export class SessionManager {
   }
 
   private async livePane(session: ManagedSession): Promise<TmuxPane> {
+    this.tmux.requireAvailable();
     const panes = await this.tmux.listPanes();
     const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === session.id);
     if (pane) return pane;
@@ -5327,8 +5366,19 @@ function looksLikeBlockedStatus(text: string): boolean {
 
 function requireSession(session: ManagedSession | null): ManagedSession {
   if (!session) throw new Error("Session not found");
-  if (session.status === "missing") throw new Error("Session is no longer available in tmux");
+  if (session.status === "missing") throw new Error("Session runtime is no longer available");
   return session;
+}
+
+function tmuxRuntimeAction(action: SessionAction): boolean {
+  return action.type === "interrupt" ||
+    action.type === "choosePlanAction" ||
+    action.type === "rename" ||
+    action.type === "kill" ||
+    action.type === "setInputMode" ||
+    action.type === "setFastMode" ||
+    action.type === "retryInputDelivery" ||
+    action.type === "detach";
 }
 
 function requireLiveAgentSession(session: ManagedSession | null): ManagedSession {
@@ -5850,4 +5900,24 @@ function latestTranscriptTimestamp(transcript: Buffer): number {
     }
   }
   return 0;
+}
+
+function unavailableSessionCapabilities(): SessionCapabilities {
+  return {
+    start: false,
+    sendMessage: false,
+    steer: false,
+    resume: false,
+    fork: false,
+    verifiedInput: false,
+    interrupt: false,
+    kill: false,
+    approvals: false,
+    questions: false,
+    planActions: false,
+    fastMode: false,
+    rawTerminalCapture: false,
+    terminalAttach: false,
+    hibernate: false
+  };
 }

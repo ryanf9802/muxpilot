@@ -4,6 +4,7 @@ import type {
   BtwExchangesResponse,
   ActivitySummarySettingsResponse,
   AppServerCompatibility,
+  SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
@@ -107,6 +108,7 @@ export const api = {
   logout: () => json<{ ok: true }>("/api/logout", { method: "POST" }),
   connectivity: () => json<ConnectivityResponse>("/api/connectivity"),
   appServerCompatibility: () => json<AppServerCompatibility>("/api/app-server/compatibility"),
+  sessionDriverCompatibility: () => json<SessionDriverCompatibilityResponse>("/api/session-drivers/compatibility"),
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>

@@ -39,6 +39,7 @@ const HEAVY_RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\
 const RUNTIME_ENV_KEYS = [
   "MUXPILOT_SHADOW",
   "MUXPILOT_SHADOW_RESOURCE_GOVERNOR",
+  "MUXPILOT_SHADOW_RUNTIME_PATH",
   "MUXPILOT_LAN_ENABLED",
   "MUXPILOT_HOST",
   "MUXPILOT_PORT",
@@ -73,7 +74,8 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS",
   "TMUX",
   "TMUX_TMPDIR",
-  "VITE_MUXPILOT_SHADOW"
+  "VITE_MUXPILOT_SHADOW",
+  "PATH"
 ];
 
 const MODE_CONFIG = {
@@ -438,6 +440,12 @@ function printStatus(mode, details, status) {
   console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
   console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
   console.log(`  runtime: ${state.dir}`);
+  const driverCompatibility = status.backendHealth?.sessionDriverCompatibility;
+  if (driverCompatibility) {
+    console.log(`  default session driver: ${driverCompatibility.defaultDriver}`);
+    console.log(`    app-server: ${driverCompatibility.drivers.codex_app_server.available ? "available" : driverCompatibility.drivers.codex_app_server.status}`);
+    console.log(`    legacy tmux: ${driverCompatibility.drivers.codex_tmux.available ? driverCompatibility.drivers.codex_tmux.version ?? "available" : driverCompatibility.drivers.codex_tmux.status}`);
+  }
   if (mode === "shadow") {
     console.log(`  isolation: active (loopback-only; new shadow sessions only)`);
     console.log(`  data: ${process.env.MUXPILOT_DATA_DIR}`);
@@ -916,7 +924,8 @@ export function shadowIsolationEnvironment(root, source = process.env) {
     MUXPILOT_RESOURCE_GOVERNOR: governor,
     MUXPILOT_HEAVY_VALIDATION_DIR: join(dataDir, "heavy"),
     TMUX_TMPDIR: join(dataDir, "tmux"),
-    VITE_MUXPILOT_SHADOW: "1"
+    VITE_MUXPILOT_SHADOW: "1",
+    ...(source.MUXPILOT_SHADOW_RUNTIME_PATH ? { PATH: source.MUXPILOT_SHADOW_RUNTIME_PATH } : {})
   };
 }
 

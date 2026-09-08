@@ -6,6 +6,18 @@ import type { ManagedSession } from "@muxpilot/core";
 import { RawSessionEvidenceReader } from "../src/services/rawSessionEvidence.js";
 
 describe("RawSessionEvidenceReader", () => {
+  it("rejects tmux evidence without executing tmux when the runtime is unavailable", async () => {
+    const runCommand = vi.fn(async () => ({ stdout: "must not run" }));
+    const reader = new RawSessionEvidenceReader("/tmp/codex", runCommand, "/proc", null, false);
+
+    await expect(reader.listTmuxPanes()).rejects.toMatchObject({
+      code: "session_driver_unavailable",
+      driverKind: "codex_tmux",
+      statusCode: 503
+    });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
   it("returns verbatim pane listings and captures with explicit tmux options", async () => {
     const runCommand = vi.fn(async (_command: string, args: string[]) => {
       if (args[0] === "list-panes" && args.at(-1) === "#{pane_id}\t#{pane_pid}") return { stdout: "%7\t700\n" };

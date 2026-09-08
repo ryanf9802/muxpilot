@@ -75,13 +75,36 @@ export class InputTransportError extends Error {
   }
 }
 
+export class TmuxUnavailableError extends Error {
+  readonly statusCode = 503;
+  readonly code = "session_driver_unavailable";
+  readonly driverKind = "codex_tmux" as const;
+
+  constructor(message = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.") {
+    super(message);
+    this.name = "TmuxUnavailableError";
+  }
+}
+
 export class TmuxAdapter {
   constructor(
     private readonly inputSubmitKeys: string[] = ["Enter"],
-    private readonly inputVerification: InputVerificationOptions = {}
+    private readonly inputVerification: InputVerificationOptions = {},
+    readonly available = true,
+    private readonly unavailableMessage = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime."
   ) {}
 
+  requireAvailable(): this {
+    if (!this.available) throw new TmuxUnavailableError(this.unavailableMessage);
+    return this;
+  }
+
+  unavailableReason(): string | null {
+    return this.available ? null : this.unavailableMessage;
+  }
+
   async listPanes(): Promise<TmuxPane[]> {
+    if (!this.available) return [];
     let stdout: string;
     try {
       ({ stdout } = await execFileAsync("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]));
@@ -97,16 +120,19 @@ export class TmuxAdapter {
   }
 
   async createCodexWindowInMuxpilotSession(cwd: string, name: string, options: CodexLaunchOptions = {}): Promise<CodexPaneLaunch> {
+    this.requireAvailable();
     if (await this.hasSession("muxpilot")) return this.createCodexWindow("muxpilot", cwd, name, options);
     return this.createMuxpilotSession(cwd, name, options);
   }
 
   async createCodexResumeWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): Promise<CodexPaneLaunch> {
+    this.requireAvailable();
     if (await this.hasSession("muxpilot")) return this.createCodexResumeWindow("muxpilot", cwd, name, codexSessionId, options);
     return this.createMuxpilotResumeSession(cwd, name, codexSessionId, options);
   }
 
   async createCodexForkWindowInMuxpilotSession(cwd: string, name: string, codexSessionId: string, options: CodexLaunchOptions = {}): Promise<CodexPaneLaunch> {
+    this.requireAvailable();
     if (await this.hasSession("muxpilot")) return this.createCodexForkWindow("muxpilot", cwd, name, codexSessionId, options);
     return this.createMuxpilotForkSession(cwd, name, codexSessionId, options);
   }
@@ -236,6 +262,7 @@ export class TmuxAdapter {
   }
 
   async capturePane(paneId: string, lines = 160, includeAnsi = false): Promise<string> {
+    this.requireAvailable();
     const args = ["capture-pane", "-p", "-J", "-S", `-${lines}`, "-t", paneId];
     if (includeAnsi) args.splice(2, 0, "-e");
     const { stdout } = await execFileAsync("tmux", args, { maxBuffer: 4 * 1024 * 1024 });
@@ -243,6 +270,7 @@ export class TmuxAdapter {
   }
 
   async sendInput(paneId: string, text: string): Promise<InputTransportResult | void> {
+    this.requireAvailable();
     const result: InputTransportResult = { pasteReplayCount: 0, submitKeyRetryCount: 0 };
     try {
       const initialCapture = await this.capturePane(paneId, 100, true);
@@ -276,6 +304,7 @@ export class TmuxAdapter {
   }
 
   async pasteText(paneId: string, text: string): Promise<void> {
+    this.requireAvailable();
     const bufferName = `muxpilot-${Date.now()}`;
     await this.loadBuffer(bufferName, text);
     try {
@@ -286,15 +315,18 @@ export class TmuxAdapter {
   }
 
   async sendKeys(paneId: string, keys: string[]): Promise<void> {
+    this.requireAvailable();
     if (keys.length === 0) throw new Error("At least one tmux key is required");
     await execFileAsync("tmux", ["send-keys", "-t", paneId, ...keys]);
   }
 
   async submitInput(paneId: string): Promise<void> {
+    this.requireAvailable();
     await this.sendKeys(paneId, this.inputSubmitKeys);
   }
 
   async submitComposedInput(paneId: string, text: string): Promise<InputTransportResult> {
+    this.requireAvailable();
     const result: InputTransportResult = { pasteReplayCount: 0, submitKeyRetryCount: 0 };
     try {
       const capture = await this.capturePane(paneId, inputVerificationCaptureLines(text), true);
@@ -320,14 +352,17 @@ export class TmuxAdapter {
   }
 
   async interrupt(paneId: string): Promise<void> {
+    this.requireAvailable();
     await execFileAsync("tmux", ["send-keys", "-t", paneId, "C-c"]);
   }
 
   async renameWindow(paneId: string, name: string): Promise<void> {
+    this.requireAvailable();
     await execFileAsync("tmux", ["rename-window", "-t", paneId, name]);
   }
 
   async killPane(paneId: string): Promise<void> {
+    this.requireAvailable();
     await execFileAsync("tmux", ["kill-pane", "-t", paneId]);
   }
 

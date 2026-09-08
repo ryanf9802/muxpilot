@@ -163,6 +163,24 @@ export interface AppServerCompatibility {
   missingCapabilities: string[];
 }
 
+export type TmuxCompatibilityStatus = "available" | "executable_missing" | "probe_failed";
+
+export interface TmuxCompatibility {
+  status: TmuxCompatibilityStatus;
+  available: boolean;
+  version: string | null;
+  detail: string;
+  checkedAt: string;
+}
+
+export interface SessionDriverCompatibilityResponse {
+  defaultDriver: SessionDriverKind;
+  drivers: {
+    codex_app_server: AppServerCompatibility;
+    codex_tmux: TmuxCompatibility;
+  };
+}
+
 export interface RepoMetadata {
   root: string | null;
   name: string;
@@ -353,6 +371,7 @@ export interface ManagedSession {
   status: SessionStatus;
   initializing?: boolean;
   startupError?: string | null;
+  runtimeUnavailableReason?: string | null;
   lastActivityAt: string | null;
   preview: string;
   recentUserPrompts: string[];

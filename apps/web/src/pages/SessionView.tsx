@@ -1383,7 +1383,7 @@ export function SessionView() {
     ? "This agent-managed session is complete. Its transcript is read-only."
     : session?.status === "input_failed"
     ? "Resolve the failed input delivery before sending another message."
-    : composerLockReason(Boolean(question), Boolean(pendingPlan), session?.startupError);
+    : composerLockReason(Boolean(question), Boolean(pendingPlan), session?.runtimeUnavailableReason ?? session?.startupError);
   const composerLocked = Boolean(composerLock);
   const effectiveVimEnabled = vimAvailable && vimEnabled;
   const currentTranscriptFindMatch = transcriptFindMatches[transcriptFindMatchIndex] ?? null;
@@ -2806,13 +2806,13 @@ export function SessionView() {
             compact
             session={readySession}
             copied={copiedTmuxCommand}
-            copyEnabled={!completed && accessMode === "local"}
+            copyEnabled={!completed && accessMode === "local" && readySession.capabilities?.terminalAttach !== false}
             onCopy={() => void copyTmuxCommand()}
           />
           <button
             className="icon-button"
             type="button"
-            disabled={accessMode !== "local"}
+            disabled={accessMode !== "local" || readySession.capabilities?.rawTerminalCapture === false}
             onClick={() => void openRuntimeEvidence()}
             aria-label="Open raw runtime evidence"
             title={accessMode === "local" ? "Raw runtime evidence" : "Raw runtime evidence is available only from the local browser"}
@@ -2829,6 +2829,10 @@ export function SessionView() {
 
       {readySession.startupError ? (
         <p className="session-startup-error-banner" role="alert">{readySession.startupError}</p>
+      ) : null}
+
+      {readySession.runtimeUnavailableReason ? (
+        <p className="session-startup-error-banner" role="alert">{readySession.runtimeUnavailableReason}</p>
       ) : null}
 
       {readySession.status === "input_failed" ? (
@@ -2904,7 +2908,7 @@ export function SessionView() {
             type="button"
             className="btw-button"
             onClick={openBtwDrawer}
-            disabled={readySession.initializing === true || !readySession.codexSessionId || Boolean(readySession.startupError)}
+            disabled={readySession.initializing === true || !readySession.codexSessionId || Boolean(readySession.startupError) || Boolean(readySession.runtimeUnavailableReason)}
             aria-haspopup="dialog"
             aria-expanded={btwOpen}
             aria-label="Open BTW side questions"

@@ -1,7 +1,7 @@
 {
   "name": "muxpilot",
   "short_name": "muxpilot",
-  "description": "A local operator console for managing Codex tmux sessions.",
+  "description": "A local operator console for managing durable Codex sessions.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

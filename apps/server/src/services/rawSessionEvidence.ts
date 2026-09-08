@@ -3,6 +3,7 @@ import { open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ManagedSession } from "@muxpilot/core";
+import { TmuxUnavailableError } from "../tmux/tmuxAdapter.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FILE_READ_BYTES = 64 * 1024;
@@ -93,12 +94,15 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     codexHome: string,
     private readonly runCommand: CommandRunner = async (command, args) => execFileAsync(command, args, { maxBuffer: 4 * 1024 * 1024 }),
     private readonly procRoot = "/proc",
-    private readonly dataDir: string | null = null
+    private readonly dataDir: string | null = null,
+    private readonly tmuxAvailable = true,
+    private readonly tmuxUnavailableMessage = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime."
   ) {
     this.codexSessionsRoot = resolve(codexHome, "sessions");
   }
 
   async listTmuxPanes(): Promise<{ fields: readonly string[]; output: string }> {
+    this.requireTmux();
     const { stdout } = await this.runCommand("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]);
     return { fields: PANE_FIELDS, output: stdout };
   }
@@ -109,6 +113,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     includeAnsi: boolean,
     joinWrappedLines: boolean
   ): Promise<{ paneId: string; output: string }> {
+    this.requireTmux();
     await this.panePid(paneId);
     const args = ["capture-pane", "-p", "-N", "-S", `-${lines}`, "-t", paneId];
     if (includeAnsi) args.splice(2, 0, "-e");
@@ -123,6 +128,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     processes: RawProcessRecord[];
     truncated: boolean;
   }> {
+    this.requireTmux();
     const rootPid = await this.panePid(paneId);
     const tree = await this.readProcessTree(rootPid);
     return { paneId, rootPid, ...tree };
@@ -130,6 +136,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
 
   async readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>> {
     if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      this.requireTmux();
       return {
         sessionId: session.id,
         driverKind: session.driverKind,
@@ -165,6 +172,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     truncated: boolean;
   }> {
     if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+      this.requireTmux();
       const tree = await this.readTmuxProcessTree(session.tmux.paneId);
       return { sessionId: session.id, rootPid: tree.rootPid, processes: tree.processes, truncated: tree.truncated };
     }
@@ -175,6 +183,10 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
       return { sessionId: session.id, rootPid: null, processes: [], truncated: false };
     }
     return { sessionId: session.id, rootPid, ...await this.readProcessTree(rootPid) };
+  }
+
+  private requireTmux(): void {
+    if (!this.tmuxAvailable) throw new TmuxUnavailableError(this.tmuxUnavailableMessage);
   }
 
   async readSessionProtocolJournal(session: ManagedSession, offset: number | null, length: number): Promise<{

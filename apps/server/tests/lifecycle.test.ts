@@ -154,6 +154,13 @@ describe("shadow lifecycle isolation", () => {
       .toMatchObject({ MUXPILOT_RESOURCE_GOVERNOR: "auto" });
   });
 
+  it("can isolate the shadow runtime from host-only executables", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-shadow-path-"));
+    expect(shadowIsolationEnvironment(root, { MUXPILOT_SHADOW_RUNTIME_PATH: "/tmp/muxpilot-no-tmux-bin" }))
+      .toMatchObject({ PATH: "/tmp/muxpilot-no-tmux-bin" });
+    expect(shadowIsolationEnvironment(root, {})).not.toHaveProperty("PATH");
+  });
+
   it("discovers only exact units proven by shadow-owned metadata", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "muxpilot-shadow-data-"));
     const markedId = "0123456789abcdef01234567";

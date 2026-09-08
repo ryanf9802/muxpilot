@@ -109,6 +109,16 @@ describe("sessionNameValidationMessage", () => {
 });
 
 describe("SessionCard", () => {
+  it("shows the runtime-unavailable reason without hiding preserved history", () => {
+    const session = testSession({ id: "legacy", paneId: "%171", windowName: "legacy" });
+    session.runtimeUnavailableReason = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.";
+
+    const html = renderSessionCard(session);
+
+    expect(html).toContain("tmux is not installed");
+    expect(html).toContain("Transcript size");
+  });
+
   it("lets prompt preview height follow the rendered prompt lines", () => {
     const twoPrompts = testSession({
       id: "a",

@@ -10,6 +10,7 @@ import type { ManagedSession } from "@muxpilot/core";
 import type { AppDatabase } from "../src/db/database.js";
 import type { SessionManager } from "../src/services/sessionManager.js";
 import { SessionTransferError, SessionTransferService, sessionTransferFilename } from "../src/services/sessionTransfer.js";
+import { TmuxUnavailableError } from "../src/tmux/tmuxAdapter.js";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -111,6 +112,7 @@ describe.sequential("SessionTransferService", () => {
     }));
     const manager = {
       snapshotDocuments: async () => documents,
+      assertPortableRuntimeAvailable: () => undefined,
       validatePortableMapping: async () => undefined,
       importPortableSession
     } as unknown as SessionManager;
@@ -125,6 +127,34 @@ describe.sequential("SessionTransferService", () => {
     expect(importPortableSession).toHaveBeenCalledTimes(1);
     expect(importPortableSession.mock.calls[0]?.[2]).toMatchObject({ driverKind: "codex_tmux" });
     expect(importPortableSession.mock.calls[0]?.[3]).toEqual([expect.objectContaining({ name: "plan.md", contents: Buffer.from("- [ ] ship\n") })]);
+  });
+
+  it("rejects unavailable tmux imports before validation or session mutation", async () => {
+    const fixture = await createFixture(1);
+    const archive = await transferService(fixture.sessions).export([fixture.sessions[0]!.id]);
+    const validatePortableMapping = vi.fn();
+    const importPortableSession = vi.fn();
+    const manager = {
+      assertPortableRuntimeAvailable: () => {
+        throw new TmuxUnavailableError("tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.");
+      },
+      validatePortableMapping,
+      importPortableSession
+    } as unknown as SessionManager;
+    const service = new SessionTransferService({} as AppDatabase, manager);
+    const preview = await service.inspect(archive.contents);
+
+    await expect(service.import(preview.token, [{
+      sourceCwd: fixture.root,
+      destinationCwd: fixture.root,
+      driverKind: "codex_tmux"
+    }])).rejects.toMatchObject({
+      statusCode: 503,
+      code: "session_driver_unavailable",
+      driverKind: "codex_tmux"
+    });
+    expect(validatePortableMapping).not.toHaveBeenCalled();
+    expect(importPortableSession).not.toHaveBeenCalled();
   });
 
   it("encrypts exports and rejects missing, wrong, and tampered keys", async () => {

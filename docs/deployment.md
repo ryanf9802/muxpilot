@@ -28,7 +28,7 @@ Production defaults:
 - PIDs: `supervisor.pid`, `server.pid`, `web.pid`
 - New-session runtime: `codex_app_server`; set `MUXPILOT_DEFAULT_SESSION_DRIVER=codex_tmux` only for a deliberate legacy default.
 
-The app-server runtime requires an available systemd user manager. muxpilot probes Codex protocol compatibility before enabling it and reports missing systemd or incompatible Codex versions without silently creating tmux sessions. Enable user lingering when needed with `sudo loginctl enable-linger "$USER"`, then restart muxpilot. Existing tmux sessions remain intact and can be used or restored explicitly.
+The app-server runtime requires an available systemd user manager. muxpilot probes Codex protocol compatibility before enabling it and reports missing systemd or incompatible Codex versions without silently creating tmux sessions. Enable user lingering when needed with `sudo loginctl enable-linger "$USER"`, then restart muxpilot. tmux is optional and detected once at startup. Existing tmux sessions remain intact when it is absent, are shown as unavailable, and can be restored through app-server; install tmux and restart muxpilot to use the legacy runtime again.
 
 You can close the terminal after startup. The supervisor keeps running while the Linux/WSL instance stays running, and it restarts the backend or web process if one crashes. If the WSL distro, Linux session, or host machine stops, start muxpilot again with `pnpm app start`.
 

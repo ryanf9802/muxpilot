@@ -2,9 +2,10 @@ import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import type { SessionDriverCompatibilityResponse } from "@muxpilot/core";
 import { loadConfig } from "./config/config.js";
 import { AppDatabase } from "./db/database.js";
-import { TmuxAdapter } from "./tmux/tmuxAdapter.js";
+import { TmuxAdapter, TmuxUnavailableError } from "./tmux/tmuxAdapter.js";
 import { CodexSessionStore } from "./codex/codexSessionStore.js";
 import { CodexProcessResolver } from "./codex/codexProcessResolver.js";
 import { EventBus } from "./services/eventBus.js";
@@ -34,11 +35,20 @@ import { probeAppServerCompatibility } from "./services/appServerCompatibility.j
 import { randomBytes } from "node:crypto";
 import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
 import { CodexGoalStore } from "./codex/codexGoalStore.js";
+import { assertConfiguredTmuxAvailable, probeTmuxCompatibility } from "./services/tmuxCompatibility.js";
 
 const config = loadConfig();
+const tmuxCompatibility = await probeTmuxCompatibility();
+assertConfiguredTmuxAvailable(config.defaultSessionDriver, tmuxCompatibility);
 const app = Fastify({ logger: { level: config.logLevel } });
+app.setErrorHandler((error, _request, reply) => {
+  if (error instanceof TmuxUnavailableError) {
+    return reply.code(error.statusCode).send({ error: error.message, code: error.code, driverKind: error.driverKind });
+  }
+  return reply.send(error);
+});
 const db = new AppDatabase(config.dbPath);
-const tmux = new TmuxAdapter(config.inputSubmitKeys);
+const tmux = new TmuxAdapter(config.inputSubmitKeys, {}, tmuxCompatibility.available, tmuxCompatibility.detail);
 const codex = new CodexSessionStore(config.codexHome);
 const codexProcessResolver = new CodexProcessResolver();
 const events = new EventBus();
@@ -87,10 +97,25 @@ const sessionScopes = config.resourceGovernor === "off"
   ? { ...userSystemd, configured: false, available: false, unavailableReason: "disabled" as const }
   : userSystemd;
 const appServerCompatibility = await probeAppServerCompatibility(userSystemd.available);
+const sessionDriverCompatibility = {
+  defaultDriver: config.defaultSessionDriver,
+  drivers: {
+    codex_app_server: appServerCompatibility,
+    codex_tmux: tmuxCompatibility
+  }
+} satisfies SessionDriverCompatibilityResponse;
 if (!appServerCompatibility.available) {
   app.log.warn(
     { status: appServerCompatibility.status, detail: appServerCompatibility.detail },
-    "Codex app-server sessions are unavailable; legacy tmux sessions remain enabled"
+    tmuxCompatibility.available
+      ? "Codex app-server sessions are unavailable; legacy tmux sessions remain enabled"
+      : "No session runtime is available; muxpilot is running in read-only history mode"
+  );
+}
+if (!tmuxCompatibility.available) {
+  app.log.warn(
+    { status: tmuxCompatibility.status, detail: tmuxCompatibility.detail },
+    "Legacy tmux sessions are unavailable; app-server workflows remain enabled when compatible"
   );
 }
 const heavyLaunchToken = randomBytes(32).toString("hex");
@@ -167,7 +192,14 @@ const manager = new SessionManager(
   config.defaultSessionDriver
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
-const rawSessionEvidence = new RawSessionEvidenceReader(config.codexHome, undefined, undefined, config.dataDir);
+const rawSessionEvidence = new RawSessionEvidenceReader(
+  config.codexHome,
+  undefined,
+  undefined,
+  config.dataDir,
+  tmuxCompatibility.available,
+  tmuxCompatibility.detail
+);
 const sessionOrchestrationBroker = new SessionOrchestrationBroker(
   db,
   manager,
@@ -246,12 +278,13 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, rawSessionEvidence);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, rawSessionEvidence, sessionDriverCompatibility);
 
 app.get("/healthz", async () => ({
   ok: true,
   shadowMode: process.env.MUXPILOT_SHADOW === "1",
   appServerCompatibility,
+  sessionDriverCompatibility,
   resourceGovernor: resourceGovernor.snapshot(),
   dockerGuardActive: Boolean(dockerProxy)
 }));

@@ -138,6 +138,17 @@ describe("api client request headers", () => {
     );
   });
 
+  it("loads aggregate runtime compatibility status", async () => {
+    const fetchMock = mockJsonResponse({ defaultDriver: "codex_app_server", drivers: {} });
+
+    await api.sessionDriverCompatibility();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/session-drivers/compatibility",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("revokes remote access with a bodyless post", async () => {
     const fetchMock = mockJsonResponse({ urls: [], accessUrls: [], accessKey: "river-slate-42-orbit-copper-18" });
 

@@ -37,6 +37,8 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
+  runtimeDriverAvailable,
+  runtimeDriverUnavailableLabel,
   sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
@@ -74,6 +76,28 @@ describe("shell connection state", () => {
     })).toBe("A persistent user-systemd manager is required.");
   });
 
+  it("requires detected availability for either runtime and explains missing tmux", () => {
+    const appServer: AppServerCompatibility = {
+      status: "available",
+      available: true,
+      codexVersion: "0.152.0",
+      detail: "ready",
+      checkedAt: "2026-09-01T12:00:00.000Z",
+      missingCapabilities: []
+    };
+    const tmux = {
+      status: "executable_missing" as const,
+      available: false,
+      version: null,
+      detail: "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.",
+      checkedAt: "2026-09-01T12:00:00.000Z"
+    };
+
+    expect(runtimeDriverAvailable("codex_app_server", appServer, tmux)).toBe(true);
+    expect(runtimeDriverAvailable("codex_tmux", appServer, tmux)).toBe(false);
+    expect(runtimeDriverUnavailableLabel("codex_tmux", appServer, tmux)).toBe(tmux.detail);
+  });
+
   it("renders every interrupted session selected with crash limitations and failures", () => {
     const incident: SessionRecoveryIncident = {
       id: "incident-1",
@@ -109,6 +133,13 @@ describe("shell connection state", () => {
         checkedAt: "2026-09-01T20:00:00.000Z",
         missingCapabilities: []
       },
+      tmuxCompatibility: {
+        status: "executable_missing",
+        available: false,
+        version: null,
+        detail: "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.",
+        checkedAt: "2026-09-01T20:00:00.000Z"
+      },
       onDriverChange: () => undefined,
       onToggle: () => undefined,
       onDismiss: () => undefined,
@@ -121,6 +152,7 @@ describe("shell connection state", () => {
     expect(html).toContain("checked=\"\"");
     expect(html).toContain("Restore selected (1)");
     expect(html).toContain("Directory is unavailable");
+    expect(html).toContain('<option value="codex_tmux" disabled="">Legacy tmux</option>');
   });
 
   it("builds a valid editable name for a fork", () => {

@@ -31,6 +31,8 @@ An unused private tmux namespace has no server process or panes. Its missing soc
 
 App-server systemd services receive the launching muxpilot server's executable search path in their private environment file. This is required when `codex` and its Node interpreter are installed through a user-level version manager such as NVM.
 
+For a tmux-absent acceptance run, set `MUXPILOT_SHADOW_RUNTIME_PATH` to an executable allowlist that contains the required `node`, `pnpm`, `codex`, `git`, and `systemctl` commands but no `tmux`. The host-side `$muxpilot-start-shadow` verifier keeps its normal `PATH` so it can snapshot production tmux panes before and after startup; only the shadow supervisor and its descendants receive the allowlisted path.
+
 These values override `.env` and `.env.local`. Shadow mode disables LAN/HTTPS exposure and resource governance by default, does not synchronize bundled skills into `~/.codex`, and does not read or copy the production database.
 
 ## Safety boundary

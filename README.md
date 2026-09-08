@@ -25,7 +25,7 @@ Running one coding agent in a terminal is easy. Running several across repositor
 
 muxpilot adds an operator layer without replacing the tools already doing the work:
 
-- **One dashboard for every session.** Group Codex/tmux sessions by repository and see their branch, worktree, activity, and attention state.
+- **One dashboard for every session.** Group Codex sessions by repository and see their branch, worktree, activity, and attention state, including preserved legacy tmux sessions when present.
 - **Structured conversations.** Read Codex JSONL as a focused transcript instead of a raw terminal dump.
 - **Interactive control.** Send or queue prompts with verified delivery, answer questions and approvals, act on proposed plans, switch Normal, Plan, Fast, and Vim controls, interrupt work, and start or fork sessions.
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
@@ -110,7 +110,7 @@ muxpilot is intentionally local-first:
 - Loopback access is trusted and does not require an access key.
 - LAN access is opt-in and requires a generated access key by default.
 - The browser talks to constrained HTTP and WebSocket endpoints; it cannot submit arbitrary shell commands.
-- The server runs as the current user because it needs that user's tmux socket and Codex session files.
+- The server runs as the current user because it owns app-server services and reads that user's Codex session files. When the optional legacy runtime is enabled, it also uses that user's tmux socket.
 - HTTPS support uses a local certificate authority. Keep its private key private.
 - Internet-reachable deployment, multi-user isolation, and remote shell access are out of scope.
 
@@ -175,7 +175,7 @@ The workspace contains a React/Vite web app, a Fastify server, and a shared Type
 
 ## Project status
 
-muxpilot is early-stage, maintainer-built software shaped around a specific Codex + tmux workflow. Interfaces and behavior may change as that workflow evolves.
+muxpilot is early-stage, maintainer-built software shaped around a durable, local Codex workflow. Interfaces and behavior may change as that workflow evolves.
 
 ## License
 

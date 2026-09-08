@@ -1,6 +1,6 @@
 # Usage Guide
 
-muxpilot is an operator console for Codex CLI sessions running in tmux. This guide covers the session workflows and controls available after [setup](setup.md).
+muxpilot is an operator console for durable Codex sessions. New sessions use Codex app-server by default; tmux is an optional legacy runtime. This guide covers the workflows and controls available after [setup](setup.md).
 
 ## Dashboard
 
@@ -45,12 +45,12 @@ Open the new-session dialog or press `Ctrl+N`.
 The Create tab asks for:
 
 - **Directory:** the repository or working directory in which Codex should start
-- **Name:** the tmux window name for the session
+- **Name:** the muxpilot display name (also used as the window name for a legacy tmux session)
 - **Target branch:** an existing local branch used as the integration destination for managed Git work
 
 Directory suggestions come from active sessions and recently touched repositories. Names are normalized to 2–32 lowercase letters, numbers, or hyphens.
 
-New sessions run in the shared tmux session named `muxpilot`. Existing Codex panes can also be discovered when muxpilot can match them to local Codex session logs.
+New sessions use Codex app-server by default. When the optional legacy runtime is selected, muxpilot creates a window in the shared tmux session named `muxpilot`; existing Codex panes can also be discovered when muxpilot can match them to local Codex session logs.
 
 ### Managed Git sessions
 
@@ -232,9 +232,9 @@ An installed PWA checks for a newer web build at startup and when it returns to 
 
 ## Session discovery
 
-muxpilot periodically reads tmux panes and recent Codex session files. For each session it tracks:
+muxpilot periodically reconciles managed app-server services, optional legacy tmux panes, and recent Codex session files. Depending on the runtime, it tracks:
 
-- tmux session, window, and pane identifiers
+- App-server service/socket identity or tmux session, window, and pane identifiers
 - Working directory and current command
 - Repository root, branch, worktree, and dirty state
 - Matched Codex session and JSONL file
@@ -266,5 +266,5 @@ Common status labels include:
 | `input_failed` | The last submitted message is preserved but delivery needs retry or dismissal |
 | `startup_failed` | A managed session could not start |
 | `completed` | An agent-managed session was explicitly finished |
-| `missing` | The tmux pane is no longer discoverable |
+| `missing` | The stored runtime is stopped, unavailable, or no longer discoverable |
 | `unknown` | muxpilot cannot confidently infer the state |

@@ -33,6 +33,20 @@ describe("parsePaneLine", () => {
   });
 });
 
+describe("optional tmux runtime", () => {
+  it("returns an empty discovery inventory and rejects explicit operations when unavailable", async () => {
+    const adapter = new TmuxAdapter(["Enter"], {}, false, "tmux probe failed; restart muxpilot after fixing it");
+
+    await expect(adapter.listPanes()).resolves.toEqual([]);
+    await expect(adapter.capturePane("%1")).rejects.toMatchObject({
+      message: "tmux probe failed; restart muxpilot after fixing it",
+      code: "session_driver_unavailable",
+      driverKind: "codex_tmux",
+      statusCode: 503
+    });
+  });
+});
+
 describe("isMissingTmuxServerError", () => {
   it("treats only an absent private tmux server as an empty pane inventory", () => {
     expect(isMissingTmuxServerError({

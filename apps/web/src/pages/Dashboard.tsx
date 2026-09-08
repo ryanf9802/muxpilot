@@ -423,7 +423,7 @@ export function Dashboard() {
           >
             {menu.session.pinned ? "Unpin" : "Pin"}
           </ContextMenuItem>
-          <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction) || menu.session.initializing === true}>
+          <ContextMenuItem icon={<Pencil size={16} />} onClick={() => openRename(menu.session)} disabled={Boolean(busyAction) || menu.session.initializing === true || Boolean(menu.session.runtimeUnavailableReason)}>
             Rename
           </ContextMenuItem>
           <ContextMenuItem
@@ -459,11 +459,11 @@ export function Dashboard() {
             className="danger"
             icon={<Skull size={16} />}
             onClick={() => void killPane(menu.session)}
-            disabled={Boolean(busyAction) || menu.session.initializing === true}
+            disabled={Boolean(busyAction) || menu.session.initializing === true || menu.session.capabilities?.kill === false}
             aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill"}
             data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? true : undefined}
           >
-            {busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? "Killing" : "Kill pane"}
+            {busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? "Killing" : "Kill runtime"}
           </ContextMenuItem>
           {notifySubmenuOpen ? (
             <ContextMenu
@@ -783,7 +783,9 @@ export function SessionCard({
           </span>
         </div>
         <div className="preview">
-          {session.startupError ? (
+          {session.runtimeUnavailableReason ? (
+            <p className="preview-line session-startup-error" role="alert">{session.runtimeUnavailableReason}</p>
+          ) : session.startupError ? (
             <p className="preview-line session-startup-error" role="alert">{session.startupError}</p>
           ) : previewLines.length > 0 ? (
             previewLines.map((line, index) => (
