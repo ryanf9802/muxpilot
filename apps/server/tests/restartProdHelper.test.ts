@@ -11,6 +11,7 @@ describe("muxpilot production restart helper", () => {
   it("runs production lifecycle directly instead of through a heavyweight worker", () => {
     const source = readFileSync(new URL("../../../.agents/skills/muxpilot-restart-prod/scripts/restart-prod.mjs", import.meta.url), "utf8");
     expect(source).toContain('spawnSync("pnpm", ["app", "restart", "prod"]');
+    expect(source).toContain('import { join, resolve } from "node:path"');
     expect(source).not.toContain("muxpilot-git-run.mjs");
     expect(source).not.toContain('"--heavy"');
   });
