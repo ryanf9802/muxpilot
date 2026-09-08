@@ -3125,6 +3125,16 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const storedSession = await this.db.getSession(sessionId);
+    if (action.type === "kill" && storedSession?.status === "missing") {
+      const timestamp = nowIso();
+      if (storedSession.agentOwnership?.completedAt && !storedSession.archived) {
+        await this.db.markSessionArchived(sessionId, true, timestamp);
+      }
+      const updatedSession = await this.db.getSession(sessionId) ?? storedSession;
+      await this.db.addAudit("local", action.type, sessionId, "already_missing", timestamp);
+      this.publish("session.updated", sessionId, updatedSession);
+      return updatedSession;
+    }
     if (storedSession && storedSession.driverKind !== "codex_app_server" && tmuxRuntimeAction(action)) {
       this.tmux.requireAvailable();
     }
@@ -3249,6 +3259,9 @@ export class SessionManager {
       this.publish("notification.created", sessionId, { title: "Detach requested", body: "Detach is managed by tmux clients." });
     }
     if (action.type === "kill" && session.driverKind !== "codex_app_server") await this.discover();
+    if (action.type === "kill" && session.agentOwnership?.completedAt) {
+      await this.db.markSessionArchived(sessionId, true, nowIso());
+    }
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);

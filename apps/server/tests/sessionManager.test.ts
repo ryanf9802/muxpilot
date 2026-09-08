@@ -7208,13 +7208,15 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
-  it("marks the session missing before kill returns", async () => {
+  it("marks the session missing before kill returns and treats repeated kills as successful", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
     await mkdir(repo);
     let panes = [testPane({ cwd: repo, paneId: "%1" })];
+    let killCount = 0;
     harness.tmux.listPanes = async () => panes;
     harness.tmux.killPane = async (paneId) => {
+      killCount += 1;
       panes = panes.filter((pane) => pane.paneId !== paneId);
     };
 
@@ -7226,6 +7228,47 @@ describe("SessionManager transcript isolation", () => {
 
     expect(harness.manager.getSession(session.id)?.status).toBe("missing");
     expect(harness.manager.listSessions().filter((candidate) => candidate.status !== "missing")).toEqual([]);
+
+    const repeated = await harness.manager.act(session.id, { type: "kill" });
+
+    expect(repeated?.status).toBe("missing");
+    expect(killCount).toBe(1);
+    harness.db.close();
+  });
+
+  it("archives an explicitly killed completed child after its runtime is gone", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    let panes = [testPane({ cwd: repo, paneId: "%1" })];
+    harness.tmux.listPanes = async () => panes;
+    harness.tmux.killPane = async (paneId) => {
+      panes = panes.filter((pane) => pane.paneId !== paneId);
+    };
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    await harness.db.upsertSession({
+      ...session,
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created",
+        createdAt: "2026-09-08T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: "2026-09-08T01:00:00.000Z"
+      }
+    }, "2026-09-08T01:00:00.000Z");
+
+    const killed = await harness.manager.act(session.id, { type: "kill" });
+
+    expect(killed).toMatchObject({ status: "missing", archived: true });
+
+    await harness.db.markSessionArchived(session.id, false, "2026-09-08T02:00:00.000Z");
+    const repeated = await harness.manager.act(session.id, { type: "kill" });
+
+    expect(repeated).toMatchObject({ status: "missing", archived: true });
     harness.db.close();
   });
 });
