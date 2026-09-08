@@ -4,7 +4,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openUnixWebSocketJsonLineConnection } from "../src/services/sessionDrivers/unixWebSocketConnection.js";
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -54,6 +54,25 @@ describe("openUnixWebSocketJsonLineConnection", () => {
     await listen(server, socketPath);
 
     await expect(openUnixWebSocketJsonLineConnection(socketPath)).rejects.toThrow("invalid WebSocket accept value");
+    server.close();
+    await once(server, "close");
+  });
+
+  it("reports oversized server frames without emitting an unhandled input-stream error", async () => {
+    const socketPath = await testSocketPath();
+    const server = createServer((socket) => {
+      acceptUpgrade(socket, () => socket.write(oversizedServerFrameHeader(4 * 1024 * 1024 + 1)));
+    });
+    await listen(server, socketPath);
+
+    const connection = await openUnixWebSocketJsonLineConnection(socketPath);
+    const inputError = vi.fn();
+    connection.input.on("error", inputError);
+    const outputError = once(connection.output, "error");
+    connection.input.write('{"method":"trigger"}\n');
+
+    await expect(outputError).resolves.toMatchObject([{ message: "App-server WebSocket frame exceeded its size limit" }]);
+    expect(inputError).not.toHaveBeenCalled();
     server.close();
     await once(server, "close");
   });
@@ -119,6 +138,14 @@ function readClientFrame(frame: Buffer): { payload: Buffer } {
 function serverFrame(opcode: number, payload: Buffer, final: boolean): Buffer {
   expect(payload.length).toBeLessThan(126);
   return Buffer.concat([Buffer.from([(final ? 0x80 : 0) | opcode, payload.length]), payload]);
+}
+
+function oversizedServerFrameHeader(payloadLength: number): Buffer {
+  const header = Buffer.alloc(10);
+  header[0] = 0x81;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(payloadLength), 2);
+  return header;
 }
 
 function readLine(output: NodeJS.ReadableStream): Promise<string> {

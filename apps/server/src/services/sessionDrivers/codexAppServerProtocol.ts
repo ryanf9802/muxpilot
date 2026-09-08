@@ -1,5 +1,4 @@
 import { isAbsolute } from "node:path";
-import { JsonRpcResponseError } from "./jsonRpcConnection.js";
 
 export const REQUIRED_CLIENT_METHODS = [
   "initialize",
@@ -7,6 +6,7 @@ export const REQUIRED_CLIENT_METHODS = [
   "thread/resume",
   "thread/fork",
   "thread/read",
+  "thread/turns/list",
   "thread/name/set",
   "thread/settings/update",
   "thread/backgroundTerminals/list",
@@ -73,6 +73,11 @@ export interface ThreadIdentityResponse {
   [key: string]: unknown;
 }
 
+interface ThreadTurnsPageResponse {
+  data: Record<string, unknown>[];
+  nextCursor: string | null;
+}
+
 export interface ThreadLaunchSettings {
   cwd: string;
   model?: string | null;
@@ -123,23 +128,51 @@ export class CodexAppServerProtocol {
   async resumeThread(threadId: string, settings: Partial<ThreadLaunchSettings> = {}): Promise<ThreadIdentityResponse> {
     requireNonEmpty(threadId, "threadId");
     validateThreadSettings(settings);
-    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/resume", { ...settings, threadId }));
+    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/resume", {
+      ...settings,
+      threadId,
+      excludeTurns: true
+    }));
   }
 
   async forkThread(threadId: string, settings: Partial<ThreadLaunchSettings> = {}): Promise<ThreadIdentityResponse> {
     requireNonEmpty(threadId, "threadId");
     validateThreadSettings(settings);
-    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/fork", { ...settings, threadId }));
+    return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/fork", {
+      ...settings,
+      threadId,
+      excludeTurns: true
+    }));
   }
 
   async readThread(threadId: string, includeTurns = true): Promise<ThreadIdentityResponse> {
     requireNonEmpty(threadId, "threadId");
-    try {
-      return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns }));
-    } catch (error) {
-      if (!includeTurns || !isUnsupportedTurnHistory(error)) throw error;
-      return requireThreadIdentityResponse(await this.rpc.request<unknown>("thread/read", { threadId, includeTurns: false }));
-    }
+    const response = requireThreadIdentityResponse(
+      await this.rpc.request<unknown>("thread/read", { threadId, includeTurns: false })
+    );
+    if (!includeTurns) return response;
+    const turns = await this.listThreadTurns(threadId);
+    return { ...response, thread: { ...response.thread, turns } };
+  }
+
+  private async listThreadTurns(threadId: string): Promise<Record<string, unknown>[]> {
+    const newestFirst: Record<string, unknown>[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    do {
+      const page = requireThreadTurnsPageResponse(await this.rpc.request<unknown>("thread/turns/list", {
+        threadId,
+        cursor,
+        limit: 20,
+        itemsView: "summary",
+        sortDirection: "desc"
+      }));
+      newestFirst.push(...page.data);
+      cursor = page.nextCursor;
+      if (cursor && seenCursors.has(cursor)) throw new Error("Codex thread turn pagination repeated a cursor");
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return newestFirst.reverse();
   }
 
   async startTurn(
@@ -270,6 +303,16 @@ function requireThreadIdentityResponse(value: unknown): ThreadIdentityResponse {
   return value as ThreadIdentityResponse;
 }
 
+function requireThreadTurnsPageResponse(value: unknown): ThreadTurnsPageResponse {
+  if (!isRecord(value) || !Array.isArray(value.data) || value.data.some((turn) => !isRecord(turn))) {
+    throw new Error("Codex thread turns response is missing data");
+  }
+  if (value.nextCursor !== null && value.nextCursor !== undefined && typeof value.nextCursor !== "string") {
+    throw new Error("Codex thread turns response has an invalid nextCursor");
+  }
+  return { data: value.data as Record<string, unknown>[], nextCursor: value.nextCursor ?? null };
+}
+
 function requireTurnIdentityResponse(value: unknown): TurnIdentityResponse {
   if (!isRecord(value) || !isRecord(value.turn) || typeof value.turn.id !== "string" || !value.turn.id) {
     throw new Error("Codex turn response is missing turn.id");
@@ -306,10 +349,4 @@ function validateThreadSettings(settings: Partial<ThreadLaunchSettings>): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function isUnsupportedTurnHistory(error: unknown): boolean {
-  return error instanceof JsonRpcResponseError
-    && error.code === -32601
-    && /\blist_turns\b.*\bnot supported\b/i.test(error.message);
 }

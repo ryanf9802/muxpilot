@@ -30,11 +30,19 @@ describe("CodexAppServerConnectionManager", () => {
       }
     });
 
-    expect(proxy.methods).toEqual(["initialize", "thread/backgroundTerminals/list", "thread/resume", "thread/settings/update", "thread/read"]);
+    expect(proxy.methods).toEqual([
+      "initialize",
+      "thread/backgroundTerminals/list",
+      "thread/resume",
+      "thread/settings/update",
+      "thread/read",
+      "thread/turns/list"
+    ]);
     expect(proxy.requests[2]).toMatchObject({
       method: "thread/resume",
       params: {
         threadId: "thread-1",
+        excludeTurns: true,
         cwd: "/repo",
         model: "gpt-5.6",
         developerInstructions: "Use repository rules.",
@@ -71,8 +79,10 @@ describe("CodexAppServerConnectionManager", () => {
       "initialize",
       "thread/backgroundTerminals/list",
       "thread/read",
+      "thread/turns/list",
       "thread/settings/update",
-      "thread/read"
+      "thread/read",
+      "thread/turns/list"
     ]);
     expect(proxy.methods).not.toContain("thread/resume");
     expect(connected.threadId).toBe("thread-1");
@@ -111,8 +121,8 @@ describe("CodexAppServerConnectionManager", () => {
       settings: { cwd: "/fork" }
     });
 
-    expect(started.methods).toEqual(["initialize", "thread/start", "thread/settings/update", "thread/read"]);
-    expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/settings/update", "thread/read"]);
+    expect(started.methods).toEqual(["initialize", "thread/start", "thread/settings/update", "thread/read", "thread/turns/list"]);
+    expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/settings/update", "thread/read", "thread/turns/list"]);
     expect(newConnection.threadId).toBe("new-thread");
     expect(forkConnection.threadId).toBe("forked-thread");
   });
@@ -243,6 +253,8 @@ class FakeProtocolProxy {
           this.emit({ id: frame.id, result: {} });
         } else if (frame.method === "thread/read") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId, turns: [] } } });
+        } else if (frame.method === "thread/turns/list") {
+          this.emit({ id: frame.id, result: { data: [], nextCursor: null } });
         }
         newline = this.buffer.indexOf("\n");
       }

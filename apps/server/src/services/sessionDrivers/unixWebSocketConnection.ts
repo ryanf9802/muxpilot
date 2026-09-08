@@ -24,7 +24,7 @@ export async function openUnixWebSocketJsonLineConnection(socketPath: string): P
     closed = true;
     socket.destroy();
     output.destroy(error);
-    input.destroy(error);
+    input.destroy();
   };
 
   const input = new Writable({

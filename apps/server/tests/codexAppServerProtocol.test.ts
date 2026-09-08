@@ -10,7 +10,6 @@ import {
   REQUIRED_SERVER_REQUESTS,
   type ProtocolRequester
 } from "../src/services/sessionDrivers/codexAppServerProtocol.js";
-import { JsonRpcResponseError } from "../src/services/sessionDrivers/jsonRpcConnection.js";
 
 describe("CodexAppServerProtocol", () => {
   it("matches the normalized Codex 0.152.0 initialize fixture", async () => {
@@ -27,34 +26,48 @@ describe("CodexAppServerProtocol", () => {
     const protocol = new CodexAppServerProtocol({ request } as ProtocolRequester);
     await expect(protocol.resumeThread("thread-1")).resolves.toMatchObject({ thread: { id: "resumed" } });
     await expect(protocol.readThread("thread-1", false)).resolves.toMatchObject({ thread: { id: "read" } });
-    expect(request).toHaveBeenNthCalledWith(1, "thread/resume", { threadId: "thread-1" });
+    expect(request).toHaveBeenNthCalledWith(1, "thread/resume", { threadId: "thread-1", excludeTurns: true });
     expect(request).toHaveBeenNthCalledWith(2, "thread/read", { threadId: "thread-1", includeTurns: false });
   });
 
-  it("falls back to identity-only reads when Codex cannot include turn history", async () => {
-    const request = vi.fn(async (_method: string, params: unknown) => {
-      if ((params as { includeTurns?: boolean }).includeTurns) {
-        throw new JsonRpcResponseError(-32601, "list_turns is not supported yet");
-      }
-      return { thread: { id: "thread-1" } };
+  it("hydrates turn summaries in bounded pages without requesting full history", async () => {
+    const request = vi.fn(async (method: string, params: unknown) => {
+      if (method === "thread/read") return { thread: { id: "thread-1", status: { type: "idle" } } };
+      const cursor = (params as { cursor: string | null }).cursor;
+      return cursor === null
+        ? { data: [{ id: "turn-3" }, { id: "turn-2" }], nextCursor: "older" }
+        : { data: [{ id: "turn-1" }], nextCursor: null };
     });
     const protocol = new CodexAppServerProtocol({ request } as ProtocolRequester);
 
-    await expect(protocol.readThread("thread-1", true)).resolves.toMatchObject({ thread: { id: "thread-1" } });
-    expect(request).toHaveBeenNthCalledWith(1, "thread/read", { threadId: "thread-1", includeTurns: true });
-    expect(request).toHaveBeenNthCalledWith(2, "thread/read", { threadId: "thread-1", includeTurns: false });
+    await expect(protocol.readThread("thread-1", true)).resolves.toMatchObject({
+      thread: { id: "thread-1", turns: [{ id: "turn-1" }, { id: "turn-2" }, { id: "turn-3" }] }
+    });
+    expect(request).toHaveBeenNthCalledWith(1, "thread/read", { threadId: "thread-1", includeTurns: false });
+    expect(request).toHaveBeenNthCalledWith(2, "thread/turns/list", {
+      threadId: "thread-1",
+      cursor: null,
+      limit: 20,
+      itemsView: "summary",
+      sortDirection: "desc"
+    });
+    expect(request).toHaveBeenNthCalledWith(3, "thread/turns/list", {
+      threadId: "thread-1",
+      cursor: "older",
+      limit: 20,
+      itemsView: "summary",
+      sortDirection: "desc"
+    });
   });
 
-  it("does not hide unrelated thread-read failures", async () => {
-    const unsupportedMethod = new CodexAppServerProtocol({
-      request: async () => { throw new JsonRpcResponseError(-32601, "thread/read is not supported"); }
-    });
-    const failedRead = new CodexAppServerProtocol({
-      request: async () => { throw new JsonRpcResponseError(-32000, "list_turns is not supported yet"); }
+  it("fails closed on repeated turn pagination cursors", async () => {
+    const protocol = new CodexAppServerProtocol({
+      request: async (method: string) => method === "thread/read"
+        ? { thread: { id: "thread-1" } }
+        : { data: [], nextCursor: "repeated" }
     });
 
-    await expect(unsupportedMethod.readThread("thread-1", true)).rejects.toThrow("thread/read is not supported");
-    await expect(failedRead.readThread("thread-1", true)).rejects.toThrow("list_turns is not supported yet");
+    await expect(protocol.readThread("thread-1", true)).rejects.toThrow("repeated a cursor");
   });
 
   it("uses structured thread lifecycle and turn input shapes", async () => {
@@ -77,7 +90,7 @@ describe("CodexAppServerProtocol", () => {
     await protocol.updateThreadSettings("thread-1", { model: "gpt-5.6" });
 
     expect(request).toHaveBeenCalledWith("thread/start", { cwd: "/repo", model: "gpt-5.6" });
-    expect(request).toHaveBeenCalledWith("thread/fork", { threadId: "thread-1", cwd: "/fork" });
+    expect(request).toHaveBeenCalledWith("thread/fork", { threadId: "thread-1", cwd: "/fork", excludeTurns: true });
     expect(request).toHaveBeenCalledWith("turn/start", {
       threadId: "thread-1",
       input: [{ type: "text", text: "hello" }],
