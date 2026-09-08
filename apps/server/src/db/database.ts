@@ -2119,7 +2119,7 @@ export class SyncAppDatabase {
     if (!prompt) return this.listRecentMessages(sessionId, fallbackLimit);
 
     const previousOutput = this.latestAssistantOutputBefore(sessionId, prompt.sequence);
-    const activeItems = this.compactActiveTailItems(sessionId, prompt, previousOutput);
+    const activeItems = this.compactActiveTailItems(sessionId, prompt, previousOutput, fallbackLimit);
     const activePageItems = activeTailPageItems(activeItems, fallbackLimit);
     const remaining = Math.max(0, fallbackLimit - topLevelTranscriptItemCount(activePageItems));
     const olderItems =
@@ -2196,16 +2196,14 @@ export class SyncAppDatabase {
     return row?.role === "assistant" ? this.activeTailOutputAnchorSequence(sessionId, row) : sequence;
   }
 
-  private compactActiveTailItems(sessionId: string, prompt: MessageRow, previousOutput: MessageRow | null): TranscriptItem[] {
+  private compactActiveTailItems(
+    sessionId: string,
+    prompt: MessageRow,
+    previousOutput: MessageRow | null,
+    limit: number
+  ): TranscriptItem[] {
     const firstSequence = previousOutput ? this.activeTailOutputAnchorSequence(sessionId, previousOutput) : prompt.sequence;
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM messages
-         WHERE session_id = ? AND sequence >= ?
-         ORDER BY sequence ASC`
-      )
-      .all(sessionId, firstSequence) as unknown as MessageRow[];
-    return buildTranscriptItems(rows.map(hydrateMessage));
+    return this.scanTranscriptItemsBackwardWithin(sessionId, firstSequence, limit);
   }
 
   private listTranscriptItemsBefore(sessionId: string, beforeSequence: number, limit: number): TranscriptItem[] {
@@ -2300,6 +2298,30 @@ export class SyncAppDatabase {
       const enough = countMode === "topLevel"
         ? topLevelTranscriptItemCount(selected) >= limit
         : selected.length >= limit;
+      const stableBoundary = selected.length > 0 && items[0] !== selected[0];
+      if (batch.length < TRANSCRIPT_SCAN_CHUNK_SIZE || (enough && stableBoundary)) return selected;
+    }
+  }
+
+  private scanTranscriptItemsBackwardWithin(sessionId: string, minimumSequence: number, limit: number): TranscriptItem[] {
+    if (limit <= 0) return [];
+    let cursor = Number.MAX_SAFE_INTEGER;
+    let rows: MessageRow[] = [];
+    while (true) {
+      const batch = this.db
+        .prepare(
+          `SELECT * FROM messages
+           WHERE session_id = ? AND sequence >= ? AND sequence < ?
+           ORDER BY sequence DESC
+           LIMIT ?`
+        )
+        .all(sessionId, minimumSequence, cursor, TRANSCRIPT_SCAN_CHUNK_SIZE) as unknown as MessageRow[];
+      if (batch.length === 0) return activeTailPageItems(buildTranscriptItems(rows.map(hydrateMessage)), limit);
+      rows = [...batch.reverse(), ...rows];
+      cursor = rows[0]!.sequence;
+      const items = buildTranscriptItems(rows.map(hydrateMessage));
+      const selected = activeTailPageItems(items, limit);
+      const enough = topLevelTranscriptItemCount(selected) >= limit;
       const stableBoundary = selected.length > 0 && items[0] !== selected[0];
       if (batch.length < TRANSCRIPT_SCAN_CHUNK_SIZE || (enough && stableBoundary)) return selected;
     }
