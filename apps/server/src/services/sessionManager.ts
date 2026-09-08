@@ -3994,15 +3994,24 @@ export class SessionManager {
     existing: ManagedSession | null
   ): Promise<boolean> {
     if (processInfo) return true;
-    if (existing && sameLivePaneProcess(existing, pane)) return true;
+    const sameExistingProcess = Boolean(existing && sameLivePaneProcess(existing, pane));
+    if (sameExistingProcess && (existing?.initializing || existing?.startupError)) return true;
+    if (isShellCommand(pane.currentCommand)) {
+      try {
+        const capture = await this.tmux.capturePane(pane.paneId, 80, false);
+        return looksLikeCodexScreen(visibleTail(capture));
+      } catch {
+        return sameExistingProcess;
+      }
+    }
     if (looksLikeCodexPane(pane)) return true;
-    if (pane.currentCommand !== "node") return false;
+    if (!sameExistingProcess && pane.currentCommand !== "node") return false;
 
     try {
       const capture = await this.tmux.capturePane(pane.paneId, 80, false);
-      return looksLikeCodexScreen(capture);
+      return looksLikeCodexScreen(visibleTail(capture));
     } catch {
-      return false;
+      return sameExistingProcess;
     }
   }
 
@@ -5224,6 +5233,10 @@ function delay(ms: number): Promise<void> {
 function looksLikeCodexPane(pane: TmuxPane): boolean {
   const haystack = `${pane.title} ${pane.windowName} ${pane.currentCommand}`.toLowerCase();
   return haystack.includes("codex") || haystack.includes("action required") || haystack.includes("plan mode");
+}
+
+function isShellCommand(command: string): boolean {
+  return ["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "pwsh"].includes(command.toLowerCase());
 }
 
 function looksLikeCodexScreen(capture: string): boolean {

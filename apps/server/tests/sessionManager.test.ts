@@ -5157,6 +5157,59 @@ describe("SessionManager transcript isolation", () => {
     harness.db.close();
   });
 
+  it("marks a tracked Codex pane missing after it returns to an idle shell", async () => {
+    const harness = await createHarness();
+    const repo = join(harness.dir, "shared-repo");
+    await mkdir(repo);
+
+    await writeCodexSession(harness.codexHome, "session.jsonl", {
+      sessionId: "codex-session",
+      cwd: repo,
+      user: "prompt",
+      assistant: "answer",
+      mtime: new Date("2026-07-07T00:00:00.000Z")
+    });
+
+    const codexPane = testPane({
+      cwd: repo,
+      paneId: "%1",
+      pid: 456,
+      currentCommand: "codex",
+      windowName: "codex",
+      title: "Codex"
+    });
+    harness.tmux.listPanes = async () => [codexPane];
+
+    await harness.manager.discover();
+    const session = harness.manager.listSessions(true)[0];
+    expect(session).toMatchObject({ codexSessionId: "codex-session", status: "waiting" });
+
+    let trackedPane = {
+      ...codexPane,
+      currentCommand: "node",
+      windowName: "codex",
+      title: "Codex"
+    };
+    harness.tmux.listPanes = async () => [trackedPane];
+    harness.tmux.capturePane = async () => { throw new Error("transient capture failure"); };
+
+    await harness.manager.discover();
+    expect((await harness.manager.getSession(session!.id))?.status).not.toBe("missing");
+
+    trackedPane = { ...trackedPane, currentCommand: "bash" };
+    harness.tmux.capturePane = async () => [
+      ">_ OpenAI Codex (stale scrollback)",
+      ...Array.from({ length: 30 }, (_, index) => `shell output ${index}`),
+      "user@host:~/shared-repo$"
+    ].join("\n");
+
+    await harness.manager.discover();
+
+    expect(await harness.manager.listSessions(false, false)).toEqual([]);
+    expect(await harness.manager.getSession(session!.id)).toMatchObject({ status: "missing" });
+    harness.db.close();
+  });
+
   it("rejects input when the tmux pane is no longer live", async () => {
     const harness = await createHarness();
     const repo = join(harness.dir, "repo");
