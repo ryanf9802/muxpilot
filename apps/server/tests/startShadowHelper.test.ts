@@ -17,6 +17,8 @@ describe("muxpilot shadow start helper", () => {
   it("runs persistent shadow lifecycle without the heavyweight runner", () => {
     const source = readFileSync(new URL("../../../.agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs", import.meta.url), "utf8");
     expect(source).toContain('spawnSync("pnpm", pnpmArgs');
+    expect(source).toContain('MUXPILOT_SHADOW_STOPPED_OUTSIDE_SESSION_SCOPE');
+    expect(source).toContain('waitForPortAvailable(port)');
     expect(source).not.toContain("muxpilot-git-run.mjs");
     expect(source).not.toContain('"--heavy"');
   });

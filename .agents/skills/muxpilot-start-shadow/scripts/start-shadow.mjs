@@ -18,23 +18,28 @@ import {
 let shadowStartAttempted = false;
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
-  console.log("Usage: start-shadow.mjs --expected-commit <sha> --prod-checkout <path> [--dependencies-installed-at <sha>] [--preflight]");
+  console.log("Usage: start-shadow.mjs --expected-commit <sha> --prod-checkout <path> [--dependencies-installed-at <sha>] [--preflight] [--stop-checkout <path>]");
   process.exit(0);
 }
 
 const expectedCommit = optionValue(args, "--expected-commit");
 const dependenciesInstalledAt = optionValue(args, "--dependencies-installed-at");
 const prodRoot = resolve(optionValue(args, "--prod-checkout") ?? "");
+const stopCheckout = optionValue(args, "--stop-checkout");
 if (!expectedCommit) fail("--expected-commit is required");
 if (!optionValue(args, "--prod-checkout")) fail("--prod-checkout is required");
 if (args.includes("--dependencies-installed-at") && !dependenciesInstalledAt) fail("--dependencies-installed-at requires a commit");
+if (args.includes("--stop-checkout") && !stopCheckout) fail("--stop-checkout requires a path");
+if (stopCheckout && dependenciesInstalledAt) fail("--dependencies-installed-at cannot be used with --stop-checkout");
 
-const shadowRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+const helperRoot = git(process.cwd(), ["rev-parse", "--show-toplevel"]);
+const shadowRoot = stopCheckout ? resolve(stopCheckout) : helperRoot;
 const head = git(shadowRoot, ["rev-parse", "HEAD"]);
 if (head !== expectedCommit) fail(`expected commit ${expectedCommit}, but shadow checkout is at ${head}`);
 if (git(shadowRoot, ["status", "--porcelain"])) fail("shadow checkout is dirty");
 if (resolve(shadowRoot) === prodRoot) fail("shadow checkout must not be the production checkout");
 if (gitCommonDir(shadowRoot) !== gitCommonDir(prodRoot)) fail("shadow and production checkouts are not from the same Git repository");
+if (gitCommonDir(helperRoot) !== gitCommonDir(prodRoot)) fail("shadow helper and production checkouts are not from the same Git repository");
 const socketSafety = shadowSocketPathSafety(shadowRoot);
 if (!socketSafety.safe) {
   const unsafe = socketSafety.unsafePaths.map(({ path, bytes }) => `${path} (${bytes} bytes)`).join(", ");
@@ -48,6 +53,22 @@ if (!isShadowExecutionCgroup(ownCgroup)) {
 }
 
 const before = await productionSnapshot(prodRoot);
+if (stopCheckout) {
+  runDirectPnpm(["app", "stop", "shadow"], "shadow stop");
+  for (const port of [14177, 15177]) {
+    if (!await waitForPortAvailable(port)) fail(`shadow port ${port} remained occupied after stop`);
+  }
+  const after = await productionSnapshot(prodRoot);
+  try {
+    verifyProductionUnchanged(before, after);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
+  console.log(
+    `MUXPILOT_SHADOW_STOPPED_OUTSIDE_SESSION_SCOPE commit=${expectedCommit} checkout=${shadowRoot} cgroup=${ownCgroup} prodSupervisor=${after.processes.supervisor.pid} prodServer=${after.processes.server.pid} prodWeb=${after.processes.web.pid}`
+  );
+  process.exit(0);
+}
 if (args.includes("--preflight")) {
   console.log(`MUXPILOT_SHADOW_START_PREFLIGHT_OK commit=${head} cgroup=${ownCgroup} prodServer=${before.processes.server.pid}`);
   process.exit(0);
@@ -179,6 +200,15 @@ function portAvailable(port) {
     server.once("listening", () => server.close(() => resolveAvailable(true)));
     server.listen(port, "127.0.0.1");
   });
+}
+
+async function waitForPortAvailable(port) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await portAvailable(port)) return true;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+  }
+  return portAvailable(port);
 }
 
 function relaunchInHostScope() {

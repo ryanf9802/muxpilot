@@ -33,4 +33,8 @@ The helper refuses a dirty or mismatched checkout, the production checkout itsel
 
 Do not replace the helper with raw `pnpm install` or `pnpm app start shadow` from the requesting session. Do not route persistent shadow lifecycle through the heavyweight queue. Do not copy the production database, import an active production session, or point a test session at a production-controlled Codex thread.
 
-Keep the detached checkout while shadow is running. Stop it from that checkout with `pnpm app stop shadow` under host/elevated execution before removing the worktree.
+Keep the detached checkout while shadow is running. Stop it under the same host-scoped workflow before removing the worktree. The helper may run from another clean checkout of the same repository so it remains available even when the running shadow checkout is on an older commit:
+
+`node .agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs --expected-commit <running-shadow-sha> --prod-checkout <production-checkout> --stop-checkout <shadow-checkout>`
+
+Treat `MUXPILOT_SHADOW_STOPPED_OUTSIDE_SESSION_SCOPE` as the only successful stop marker. The stop path verifies the exact clean shadow checkout, runs lifecycle cleanup in a host scope, waits for both shadow ports to be released, and proves production process, pane, app-server service, and session identities were unchanged.
