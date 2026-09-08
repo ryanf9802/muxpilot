@@ -6,12 +6,33 @@ import {
   formatStartupWaitProgress,
   isMissingSystemdUnitStopError,
   resourceGovernorSessionScopeLines,
+  rotateRuntimeLog,
+  runtimeLogPolicy,
   shadowDependencyIsolation,
   shadowIsolationEnvironment,
   shadowOwnedSystemdUnits,
   startupTimeoutMs,
   syncBundledSkillForMode
 } from "../../../scripts/lifecycle.mjs";
+
+describe("runtime log rotation", () => {
+  it("keeps a bounded sequence of rotated files before a new process starts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-log-rotation-"));
+    const logPath = join(root, "server.log");
+    await writeFile(`${logPath}.1`, "previous");
+    await writeFile(logPath, "12345678");
+
+    expect(runtimeLogPolicy({})).toEqual({ maxBytes: 64 * 1024 * 1024, retainedFiles: 3 });
+    expect(rotateRuntimeLog(logPath, {
+      MUXPILOT_RUNTIME_LOG_MAX_BYTES: "8",
+      MUXPILOT_RUNTIME_LOG_RETAINED_FILES: "3"
+    })).toBe(true);
+
+    await expect(access(logPath)).rejects.toThrow();
+    expect(await readFile(`${logPath}.1`, "utf8")).toBe("12345678");
+    expect(await readFile(`${logPath}.2`, "utf8")).toBe("previous");
+  });
+});
 
 describe("application startup wait", () => {
   it("allows production recovery five minutes while keeping local modes fast", () => {

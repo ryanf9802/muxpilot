@@ -36,11 +36,26 @@ import { randomBytes } from "node:crypto";
 import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
 import { CodexGoalStore } from "./codex/codexGoalStore.js";
 import { assertConfiguredTmuxAvailable, probeTmuxCompatibility } from "./services/tmuxCompatibility.js";
+import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
 
 const config = loadConfig();
 const tmuxCompatibility = await probeTmuxCompatibility();
 assertConfiguredTmuxAvailable(config.defaultSessionDriver, tmuxCompatibility);
-const app = Fastify({ logger: { level: config.logLevel } });
+const app = Fastify({ logger: { level: config.logLevel }, disableRequestLogging: true });
+const slowRequestMs = slowRequestThresholdMs();
+app.addHook("onResponse", (request, reply, done) => {
+  const elapsedMs = reply.elapsedTime;
+  const level = requestLogLevel(reply.statusCode, elapsedMs, slowRequestMs);
+  if (level) {
+    request.log[level]({
+      method: request.method,
+      url: request.url,
+      statusCode: reply.statusCode,
+      elapsedMs: Math.round(elapsedMs)
+    }, level === "error" ? "request failed" : "request was slow or unsuccessful");
+  }
+  done();
+});
 app.setErrorHandler((error, _request, reply) => {
   if (error instanceof TmuxUnavailableError) {
     return reply.code(error.statusCode).send({ error: error.message, code: error.code, driverKind: error.driverKind });

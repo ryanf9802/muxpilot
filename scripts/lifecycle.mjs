@@ -11,6 +11,7 @@ import {
   readFileSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   unwatchFile,
@@ -36,6 +37,8 @@ const DEFAULT_PROD_PORTS = ["12777", "12778"];
 const DEFAULT_SHADOW_PORTS = ["14177", "15177"];
 const MODES = ["dev", "prod", "shadow"];
 const PROCESSES = ["supervisor", "server", "web"];
+const DEFAULT_RUNTIME_LOG_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_RUNTIME_LOG_RETAINED_FILES = 3;
 const APP_SERVER_CAPABILITY_ID = /^[a-f0-9]{24}$/;
 const HEAVY_RESOURCE_UNIT = /^muxpilot-heavy-[a-z0-9]+-[a-f0-9]{12}-[a-f0-9]{6}\.service$/;
 const RUNTIME_ENV_KEYS = [
@@ -348,6 +351,7 @@ export function appendSupervisorLog(state, message) {
 export function spawnService(name, args, state) {
   const logPath = name === "server" ? state.serverLogPath : state.webLogPath;
   const pidPath = name === "server" ? state.serverPidPath : state.webPidPath;
+  rotateRuntimeLog(logPath);
   appendFileSync(logPath, `\n--- ${new Date().toISOString()} starting ${name}: pnpm ${args.join(" ")} ---\n`);
   const logFd = openSync(logPath, "a");
 
@@ -362,6 +366,26 @@ export function spawnService(name, args, state) {
   } finally {
     closeSync(logFd);
   }
+}
+
+export function runtimeLogPolicy(env = process.env) {
+  return {
+    maxBytes: positiveInteger(env.MUXPILOT_RUNTIME_LOG_MAX_BYTES, DEFAULT_RUNTIME_LOG_MAX_BYTES),
+    retainedFiles: positiveInteger(env.MUXPILOT_RUNTIME_LOG_RETAINED_FILES, DEFAULT_RUNTIME_LOG_RETAINED_FILES)
+  };
+}
+
+export function rotateRuntimeLog(logPath, env = process.env) {
+  const { maxBytes, retainedFiles } = runtimeLogPolicy(env);
+  if (!existsSync(logPath) || statSync(logPath).size < maxBytes) return false;
+
+  rmSync(`${logPath}.${retainedFiles}`, { force: true });
+  for (let index = retainedFiles - 1; index >= 1; index -= 1) {
+    const source = `${logPath}.${index}`;
+    if (existsSync(source)) renameSync(source, `${logPath}.${index + 1}`);
+  }
+  renameSync(logPath, `${logPath}.1`);
+  return true;
 }
 
 export function runtimeState(mode) {
@@ -492,6 +516,7 @@ function printStatus(mode, details, status) {
 
 function spawnSupervisor(mode, state) {
   const supervisorPath = fileURLToPath(new URL("./supervisor.mjs", import.meta.url));
+  rotateRuntimeLog(state.supervisorLogPath);
   appendFileSync(state.supervisorLogPath, `\n--- ${new Date().toISOString()} starting supervisor: node ${supervisorPath} ${mode} ---\n`);
   const logFd = openSync(state.supervisorLogPath, "a");
 
@@ -510,6 +535,12 @@ function spawnSupervisor(mode, state) {
   } finally {
     closeSync(logFd);
   }
+}
+
+function positiveInteger(raw, fallback) {
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function modeConfig(mode) {

@@ -57,6 +57,9 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_OPERATOR_TOKEN`: optional override of at least 12 characters for the generated remote access key. Normal LAN use should leave this unset.
 - `MUXPILOT_CORS_ORIGINS`: comma-separated allowlist for credentialed cross-origin API use. Not required for the normal LAN flow.
 - `MUXPILOT_LOG_LEVEL`: Pino log level, default `info`.
+- `MUXPILOT_SLOW_REQUEST_MS`: response-time threshold for request logging, default `250`. Successful requests below the threshold are not logged; failed requests are always logged.
+- `MUXPILOT_RUNTIME_LOG_MAX_BYTES`: lifecycle rotation threshold for each supervisor, backend, and web log, default `67108864` (64 MiB). Rotation occurs before a managed process starts.
+- `MUXPILOT_RUNTIME_LOG_RETAINED_FILES`: number of rotated files retained per runtime log, default `3`. Values must be positive integers.
 - `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
 - `MUXPILOT_DEFAULT_SESSION_DRIVER`: runtime for new sessions, `codex_app_server` (default) or `codex_tmux`. tmux is an optional dependency detected once at startup. Configuring `codex_tmux` while tmux is unavailable fails startup instead of silently changing the default; installing or removing tmux takes effect after restarting muxpilot. The UI never silently falls back between runtimes.
