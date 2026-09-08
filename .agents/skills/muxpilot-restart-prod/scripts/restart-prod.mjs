@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  hostScopedHeavyEnvironment,
+  hostScopedRestartEnvironment,
   isMuxpilotSessionCgroup,
   isRestartExecutionCgroup,
   restartScopeUnitName
@@ -34,22 +33,16 @@ if (!isRestartExecutionCgroup(ownCgroup)) {
   relaunchInHostScope();
 }
 
-const helperDir = process.env.MUXPILOT_GIT_HELPER_DIR
-  ?? join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "skills", "muxpilot-git-workflow", "scripts");
-const heavyRunner = join(helperDir, "muxpilot-git-run.mjs");
-if (!existsSync(heavyRunner)) fail(`heavy command runner not found at ${heavyRunner}`);
-
 if (args.includes("--preflight")) {
   console.log(`MUXPILOT_PROD_RESTART_PREFLIGHT_OK commit=${head} cgroup=${ownCgroup}`);
   process.exit(0);
 }
 
-const restart = spawnSync(process.execPath, [heavyRunner, "--heavy", "--", "pnpm", "app", "restart", "prod"], {
+const restart = spawnSync("pnpm", ["app", "restart", "prod"], {
   cwd: repoRoot,
-  // Keep the scheduler wait and the restart attached to this host-scoped verifier.
-  // A deferred continuation would resume inside the requesting Codex session and
-  // skip the commit, health, PID, and cgroup checks below.
-  env: hostScopedHeavyEnvironment(process.env),
+  // Production lifecycle is persistent host state. Keep it in this dedicated
+  // scope instead of a temporary heavyweight worker whose exit would reap it.
+  env: hostScopedRestartEnvironment(process.env),
   stdio: "inherit"
 });
 if (restart.error) fail(`restart failed: ${restart.error.message}`);

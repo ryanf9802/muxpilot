@@ -16,6 +16,6 @@ Use the bundled helper only after the implementation workflow has printed `INTEG
 
 3. Treat `MUXPILOT_PROD_RESTARTED_OUTSIDE_SESSION_SCOPE` as the success marker. Report the supervisor, server, and web PIDs and their verified non-session cgroup placement.
 
-The helper remains attached in its dedicated restart scope while the heavyweight scheduler waits for a slot. It must never return a resumable raw `pnpm app restart prod` command to the requesting Codex session, because that would lose both host-scope placement and the post-restart verifier.
+The helper runs `pnpm app restart prod` directly inside its dedicated restart scope and removes inherited heavyweight queue, completion, broker, token, and run ownership variables. Production lifecycle must never enter the heavyweight scheduler: a deferred continuation would resume inside the requesting Codex session, skip the post-restart verifier, and allow the temporary worker scope to reap the production processes when it exits.
 
 Do not call this helper from an implementation worktree, bypass `--expected-commit`, or substitute a raw lifecycle command. If host/elevated execution is unavailable, stop and ask for permission rather than starting production inside the session resource pool.

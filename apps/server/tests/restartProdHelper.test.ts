@@ -1,18 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
-  hostScopedHeavyEnvironment,
+  hostScopedRestartEnvironment,
   isMuxpilotSessionCgroup,
   isRestartExecutionCgroup,
   restartScopeUnitName
 } from "../../../.agents/skills/muxpilot-restart-prod/scripts/restart-environment.mjs";
 
 describe("muxpilot production restart helper", () => {
-  it("keeps heavyweight scheduler waiting attached to the host-scoped verifier", () => {
-    expect(hostScopedHeavyEnvironment({
+  it("runs production lifecycle directly instead of through a heavyweight worker", () => {
+    const source = readFileSync(new URL("../../../.agents/skills/muxpilot-restart-prod/scripts/restart-prod.mjs", import.meta.url), "utf8");
+    expect(source).toContain('spawnSync("pnpm", ["app", "restart", "prod"]');
+    expect(source).not.toContain("muxpilot-git-run.mjs");
+    expect(source).not.toContain('"--heavy"');
+  });
+
+  it("removes inherited heavyweight ownership from the host-scoped lifecycle", () => {
+    expect(hostScopedRestartEnvironment({
+      MUXPILOT_HEAVY_BROKER_SOCKET: "/tmp/broker.sock",
+      MUXPILOT_HEAVY_BROKER_TOKEN: "secret",
+      MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
       MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+      MUXPILOT_HEAVY_RUN_ID: "run-1",
       EXISTING: "value"
     })).toEqual({
-      MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
       EXISTING: "value"
     });
   });
