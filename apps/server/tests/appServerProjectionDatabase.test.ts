@@ -208,6 +208,58 @@ describe("app-server projection persistence", () => {
     await reopened.close();
   });
 
+  it("removes foreign-thread projections while preserving the root transcript", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    await db.applyAppServerProjection(projectionInput(sessionId));
+    await db.applyAppServerProjection({
+      ...projectionInput(sessionId),
+      threadId: "thread-child",
+      turnId: "turn-child",
+      itemId: "agent-child",
+      message: {
+        ...projectionInput(sessionId).message,
+        id: "stable-agent-child",
+        text: "Child-only answer",
+        payload: {
+          source: "codex_app_server",
+          codexItemIdentity: {
+            threadId: "thread-child",
+            turnId: "turn-child",
+            itemId: "agent-child",
+            clientMessageId: null
+          }
+        }
+      }
+    });
+    await db.upsertAppServerCommandProcess({
+      sessionId,
+      threadId: "thread-child",
+      turnId: "turn-child",
+      itemId: "command-child",
+      processId: "process-child",
+      observedAt: "2026-09-01T00:00:03.000Z"
+    });
+
+    expect(await db.repairAppServerProjectionThread(sessionId, "thread-1")).toEqual({
+      messagesRemoved: 1,
+      processesRemoved: 1,
+      reconciliationReset: true
+    });
+    expect(await db.listMessages(sessionId)).toMatchObject([
+      { id: "stable-agent-1", text: "Authoritative answer" }
+    ]);
+    expect(await db.getAppServerReconciliationState(sessionId)).toBeNull();
+    expect(await db.listAppServerCommandProcesses(sessionId, "thread-child")).toEqual([]);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM codex_item_messages WHERE session_id = ?")
+      .get(sessionId)).toEqual({ count: 1 });
+    expect(raw.prepare("SELECT COUNT(*) AS count FROM messages WHERE session_id = ?")
+      .get(sessionId)).toEqual({ count: 1 });
+    raw.close();
+  });
+
   it("rejects invalid reconciliation state without mutating transcript or status", async () => {
     const { db, path, sessionId } = await projectionDb();
     expect(() => db.applyAppServerProjection({

@@ -1,6 +1,7 @@
 import type { ManagedSession } from "@muxpilot/core";
 import type {
   AppServerProjectionInput,
+  AppServerProjectionRepairResult,
   AppServerProjectionResult,
   AppServerReconciliationState
 } from "../../db/database.js";
@@ -14,6 +15,7 @@ export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
   getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null>;
   getSession(sessionId: string): Promise<ManagedSession | null>;
+  repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult>;
 }
 
 export class CodexAppServerReconciler implements AppServerDriverEventSink {
@@ -25,6 +27,9 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
   async handle(sessionId: string, event: DriverEvent): Promise<void> {
     const projection = projectAppServerEvent({ method: event.method, params: event.params }, event.receivedAt);
     if (!projection || projection.transient) return;
+    const existingSession = await this.requireSession(sessionId);
+    const rootThreadId = existingSession.provider?.kind === "codex" ? existingSession.provider.threadId : null;
+    if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return;
     const current = await this.store.getAppServerReconciliationState(sessionId);
     const applied = await this.store.applyAppServerProjection(input(sessionId, preservePlanReady(projection, current), event.receivedAt));
     const session = applied.messageChanged || applied.statusChanged
@@ -37,15 +42,13 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     if (session) this.publish("session.updated", sessionId, session, event.receivedAt);
   }
 
-  async restore(sessionId: string, threadId: string, restoredAt: string): Promise<void> {
-    const state = await this.store.getAppServerReconciliationState(sessionId);
-    if (!state) return;
-    if (state.threadId !== threadId) {
-      throw new Error(`App-server reconciliation thread mismatch: expected ${threadId}, found ${state.threadId}`);
-    }
-    const session = await this.requireSession(sessionId);
-    if (state.status) this.publish("status.changed", sessionId, { status: state.status }, restoredAt);
-    this.publish("session.updated", sessionId, session, restoredAt);
+  async restore(sessionId: string, threadId: string, status: unknown, restoredAt: string): Promise<void> {
+    await this.store.repairAppServerProjectionThread(sessionId, threadId);
+    await this.handle(sessionId, {
+      method: "thread/status/changed",
+      params: { threadId, status },
+      receivedAt: restoredAt
+    });
   }
 
   private async requireSession(sessionId: string): Promise<ManagedSession> {
@@ -57,6 +60,23 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
   private publish(type: "message.appended" | "status.changed" | "session.updated", sessionId: string, payload: unknown, timestamp: string): void {
     this.events.publish({ id: eventId(), type, sessionId, payload, timestamp });
   }
+}
+
+function isInteractiveServerRequest(event: DriverEvent): boolean {
+  const params = event.params;
+  return Boolean(
+    [
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval",
+      "item/permissions/requestApproval",
+      "item/tool/requestUserInput"
+    ].includes(event.method)
+    && params
+    && typeof params === "object"
+    && !Array.isArray(params)
+    && "requestId" in params
+    && "params" in params
+  );
 }
 
 function input(sessionId: string, projection: AppServerEventProjection, observedAt: string): AppServerProjectionInput {

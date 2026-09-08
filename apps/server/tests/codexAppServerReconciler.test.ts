@@ -26,7 +26,15 @@ describe("CodexAppServerReconciler", () => {
       receivedAt: "2026-09-01T12:00:00.000Z"
     });
 
-    expect(order).toEqual(["read", "apply", "session", "publish:message.appended", "publish:status.changed", "publish:session.updated"]);
+    expect(order).toEqual([
+      "session",
+      "read",
+      "apply",
+      "session",
+      "publish:message.appended",
+      "publish:status.changed",
+      "publish:session.updated"
+    ]);
     expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "session-1",
       threadId: "thread-1",
@@ -58,22 +66,72 @@ describe("CodexAppServerReconciler", () => {
     expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: null }));
   });
 
-  it("restores only a checkpoint owned by the resumed thread", async () => {
+  it("rejects foreign thread projections as a durable defense in depth", async () => {
     const store = projectionStore([]);
     const publish = vi.fn();
     const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish });
-    store.getAppServerReconciliationState.mockResolvedValue(reconciliationState("working"));
-    await reconciler.restore("session-1", "thread-1", "2026-09-01T12:05:00.000Z");
+
+    await reconciler.handle("session-1", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-child",
+        turnId: "turn-child",
+        item: { id: "agent-child", type: "agentMessage", text: "child-only answer" }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it("keeps a foreign subagent approval actionable through the parent session", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "item/commandExecution/requestApproval",
+      params: {
+        requestId: "child-approval",
+        params: {
+          threadId: "thread-child",
+          turnId: "turn-child",
+          itemId: "command-child",
+          command: ["git", "status"]
+        }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      threadId: "thread-child",
+      turnId: "turn-child",
+      status: "approval",
+      message: expect.objectContaining({ type: "approval_request" })
+    }));
+  });
+
+  it("repairs foreign projections and restores status from the resumed root thread", async () => {
+    const store = projectionStore([]);
+    const publish = vi.fn();
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish });
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "active", activeFlags: [] },
+      "2026-09-01T12:05:00.000Z"
+    );
+    expect(store.repairAppServerProjectionThread).toHaveBeenCalledWith("session-1", "thread-1");
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "session-1",
+      threadId: "thread-1",
+      status: "working"
+    }));
     expect(publish.mock.calls.map(([event]) => event.type)).toEqual(["status.changed", "session.updated"]);
     expect(publish.mock.calls.map(([event]) => event.timestamp)).toEqual([
       "2026-09-01T12:05:00.000Z",
       "2026-09-01T12:05:00.000Z"
     ]);
-    await expect(reconciler.restore(
-      "session-1",
-      "different-thread",
-      "2026-09-01T12:06:00.000Z"
-    )).rejects.toThrow("thread mismatch");
   });
 });
 
@@ -90,7 +148,19 @@ function projectionStore(order: string[]) {
       };
     }),
     getAppServerReconciliationState: vi.fn(async () => { order.push("read"); return null; }),
-    getSession: vi.fn(async () => { order.push("session"); return { id: "session-1", status: "generating" }; })
+    getSession: vi.fn(async () => {
+      order.push("session");
+      return {
+        id: "session-1",
+        status: "generating",
+        provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
+      };
+    }),
+    repairAppServerProjectionThread: vi.fn(async () => ({
+      messagesRemoved: 0,
+      processesRemoved: 0,
+      reconciliationReset: false
+    }))
   };
 }
 

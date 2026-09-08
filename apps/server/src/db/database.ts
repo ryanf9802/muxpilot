@@ -224,6 +224,12 @@ export interface AppServerProjectionResult {
   state: AppServerReconciliationState;
 }
 
+export interface AppServerProjectionRepairResult {
+  messagesRemoved: number;
+  processesRemoved: number;
+  reconciliationReset: boolean;
+}
+
 export interface AppServerCommandProcess {
   sessionId: string;
   threadId: string;
@@ -844,6 +850,10 @@ export class AppDatabase {
 
   getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null> {
     return this.call("getAppServerReconciliationState", sessionId) as Promise<AppServerReconciliationState | null>;
+  }
+
+  repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult> {
+    return this.call("repairAppServerProjectionThread", sessionId, threadId) as Promise<AppServerProjectionRepairResult>;
   }
 
   upsertAppServerCommandProcess(process: AppServerCommandProcess): Promise<void> {
@@ -2991,6 +3001,40 @@ export class SyncAppDatabase {
     const row = this.db.prepare("SELECT * FROM app_server_reconciliation WHERE session_id = ?")
       .get(sessionId) as AppServerReconciliationRow | undefined;
     return row ? hydrateAppServerReconciliation(row) : null;
+  }
+
+  repairAppServerProjectionThread(sessionId: string, threadId: string): AppServerProjectionRepairResult {
+    if (!sessionId.trim() || !threadId.trim()) throw new Error("App-server projection repair requires session and thread identity");
+    const foreignMessages = this.db.prepare(
+      `SELECT messages.id, messages.role
+       FROM messages
+       JOIN codex_item_messages ON codex_item_messages.message_id = messages.id
+       WHERE codex_item_messages.session_id = ? AND codex_item_messages.thread_id != ?`
+    ).all(sessionId, threadId) as unknown as Array<Pick<MessageRow, "id" | "role">>;
+    const reconciliation = this.db.prepare(
+      "SELECT thread_id FROM app_server_reconciliation WHERE session_id = ?"
+    ).get(sessionId) as { thread_id: string } | undefined;
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const message of foreignMessages) {
+        this.deletePromptIndexMessage(message.id);
+        this.db.prepare("DELETE FROM messages WHERE id = ? AND session_id = ?").run(message.id, sessionId);
+      }
+      if (foreignMessages.some((message) => message.role === "user")) this.recentUserPromptsCache.delete(sessionId);
+      const processesRemoved = Number(this.db.prepare(
+        "DELETE FROM app_server_command_processes WHERE session_id = ? AND thread_id != ?"
+      ).run(sessionId, threadId).changes);
+      const reconciliationReset = reconciliation !== undefined && reconciliation.thread_id !== threadId;
+      if (reconciliationReset) {
+        this.db.prepare("DELETE FROM app_server_reconciliation WHERE session_id = ?").run(sessionId);
+      }
+      this.db.exec("COMMIT");
+      return { messagesRemoved: foreignMessages.length, processesRemoved, reconciliationReset };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   upsertAppServerCommandProcess(process: AppServerCommandProcess): void {

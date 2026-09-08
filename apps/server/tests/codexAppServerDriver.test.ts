@@ -77,8 +77,11 @@ describe("CodexAppServerDriver", () => {
     harness.rpc.request.mockResolvedValueOnce({
       thread: {
         id: "thread-1",
-        turns: [{ id: "turn-existing", items: [{ type: "userMessage", clientId: "client-1" }] }]
+        status: { type: "idle" }
       }
+    }).mockResolvedValueOnce({
+      data: [{ id: "turn-existing", items: [{ type: "userMessage", clientId: "client-1" }] }],
+      nextCursor: null
     });
     await expect(harness.driver.reconcileInput(managedSession(), "client-1")).resolves.toEqual({
       clientMessageId: "client-1",
@@ -87,7 +90,8 @@ describe("CodexAppServerDriver", () => {
       acceptedAt: "2026-09-01T12:00:00.000Z"
     });
 
-    harness.rpc.request.mockResolvedValueOnce({ thread: { id: "thread-1", turns: [] } });
+    harness.rpc.request.mockResolvedValueOnce({ thread: { id: "thread-1", status: { type: "idle" } } })
+      .mockResolvedValueOnce({ data: [], nextCursor: null });
     await expect(harness.driver.reconcileInput(managedSession(), "missing-client")).resolves.toBeNull();
   });
 
@@ -135,6 +139,82 @@ describe("CodexAppServerDriver", () => {
     await subscription.close();
   });
 
+  it("isolates built-in subagent activity while preserving its interactive requests", async () => {
+    const store = requestStore();
+    store.upsertAppServerRequest.mockResolvedValue({ state: "pending", response: null });
+    const processStore = processStoreHarness();
+    const sink = {
+      handle: vi.fn(async () => undefined),
+      restore: vi.fn(async () => undefined)
+    } satisfies AppServerDriverEventSink;
+    const harness = createHarness(
+      store as unknown as AppServerRequestStore,
+      sink,
+      processStore
+    );
+    await harness.driver.start(launchSpec());
+    await harness.handlers.notification?.({
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-root" } }
+    });
+    sink.handle.mockClear();
+
+    await harness.handlers.notification?.({
+      method: "turn/started",
+      params: { threadId: "thread-child", turn: { id: "turn-child" } }
+    });
+    await harness.handlers.notification?.({
+      method: "item/started",
+      params: {
+        threadId: "thread-child",
+        turnId: "turn-child",
+        item: { id: "command-child", type: "commandExecution", processId: "process-child" }
+      }
+    });
+    await harness.handlers.notification?.({
+      method: "item/completed",
+      params: {
+        threadId: "thread-child",
+        turnId: "turn-child",
+        item: { id: "agent-child", type: "agentMessage", text: "child-only answer" }
+      }
+    });
+    expect(sink.handle).not.toHaveBeenCalled();
+    expect(processStore.upsertAppServerCommandProcess).not.toHaveBeenCalled();
+
+    await harness.handlers.serverRequest?.({
+      id: "child-approval",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thread-child", turnId: "turn-child", itemId: "command-child" }
+    });
+    expect(store.upsertAppServerRequest).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "session-1",
+      threadId: "thread-child",
+      turnId: "turn-child"
+    }));
+    expect(sink.handle).toHaveBeenCalledOnce();
+    await harness.driver.answerApproval(managedSession(), "child-approval", "deny");
+    expect(harness.rpc.respond).toHaveBeenCalledWith("child-approval", { decision: "decline" });
+
+    await harness.handlers.notification?.({
+      method: "turn/completed",
+      params: { threadId: "thread-child", turn: { id: "turn-child", status: "completed" } }
+    });
+    expect(store.resolveAppServerTurnRequests).toHaveBeenCalledWith(
+      "session-1",
+      "thread-child",
+      "turn-child",
+      "2026-09-01T12:00:00.000Z"
+    );
+    await expect(harness.driver.answerApproval(managedSession(), "child-approval", "deny")).rejects.toThrow("Unknown");
+
+    await harness.driver.interrupt(managedSession(), null);
+    expect(harness.rpc.request).toHaveBeenCalledWith("turn/interrupt", {
+      threadId: "thread-1",
+      turnId: "turn-root"
+    });
+  });
+
   it("awaits durable event reconciliation before subscriber delivery and restores resume state", async () => {
     const order: string[] = [];
     const sink = {
@@ -155,7 +235,12 @@ describe("CodexAppServerDriver", () => {
     }));
 
     await harness.driver.resume(launchSpec("thread-1"));
-    expect(sink.restore).toHaveBeenCalledWith("session-1", "thread-1", "2026-09-01T12:00:00.000Z");
+    expect(sink.restore).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      "2026-09-01T12:00:00.000Z"
+    );
     expect(order).toContain("restored");
 
     sink.restore.mockRejectedValueOnce(new Error("checkpoint mismatch"));
@@ -704,10 +789,12 @@ describe("CodexAppServerDriver", () => {
         return {
           thread: {
             id: "thread-1",
-            status: { type: "idle" },
-            turns: [{ id: "turn-1", status: "completed" }]
+            status: { type: "idle" }
           }
         };
+      }
+      if (method === "thread/turns/list") {
+        return { data: [{ id: "turn-1", status: "completed" }], nextCursor: null };
       }
       if (method === "thread/backgroundTerminals/list") return { data: [] };
       return {};
@@ -736,8 +823,20 @@ describe("CodexAppServerDriver", () => {
     const harness = createHarness();
     const session = managedSession();
     await harness.driver.sendMessage(session, "work", "client-1");
+    let inspectedThread: Awaited<ReturnType<typeof readThread>> | null = null;
     harness.rpc.request.mockImplementation(async (method: string) => {
-      if (method === "thread/read") return readThread();
+      if (method === "thread/read") {
+        inspectedThread = await readThread();
+        return inspectedThread;
+      }
+      if (method === "thread/turns/list") {
+        return {
+          data: inspectedThread && "thread" in inspectedThread && Array.isArray(inspectedThread.thread.turns)
+            ? inspectedThread.thread.turns
+            : [],
+          nextCursor: null
+        };
+      }
       if (method === "thread/backgroundTerminals/list") return { data: [] };
       return {};
     });
@@ -759,10 +858,12 @@ describe("CodexAppServerDriver", () => {
         return {
           thread: {
             id: "thread-1",
-            status: { type: "idle" },
-            turns: [{ id: "turn-1", status: "completed" }]
+            status: { type: "idle" }
           }
         };
+      }
+      if (method === "thread/turns/list") {
+        return { data: [{ id: "turn-1", status: "completed" }], nextCursor: null };
       }
       if (method === "thread/backgroundTerminals/list") return { data: [] };
       return {};

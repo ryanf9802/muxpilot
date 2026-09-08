@@ -67,7 +67,7 @@ interface AppServerProcessOwnership {
 
 export interface AppServerDriverEventSink {
   handle(sessionId: string, event: DriverEvent): Promise<void>;
-  restore(sessionId: string, threadId: string, restoredAt: string): Promise<void>;
+  restore(sessionId: string, threadId: string, status: unknown, restoredAt: string): Promise<void>;
 }
 
 export interface AppServerRequestStore {
@@ -101,12 +101,15 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
   private readonly subscribers = new Map<string, Set<(event: DriverEvent) => void>>();
   private readonly activeTurns = new Map<string, string>();
+  private readonly sessionThreads = new Map<string, string>();
   private readonly turnProcesses = new Map<string, Map<string, Set<string>>>();
   private readonly pendingRequests = new Map<string, {
     sessionId: string;
     id: string | number;
     method: string;
     params: unknown;
+    threadId: string;
+    turnId: string;
     responded: boolean;
   }>();
   private readonly now: () => Date;
@@ -207,6 +210,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     }
     await this.connections.close(session.id).catch(() => undefined);
     this.activeTurns.delete(session.id);
+    this.sessionThreads.delete(session.id);
     this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
     await this.supervisor.stop(runtime);
@@ -333,11 +337,15 @@ export class CodexAppServerDriver implements AgentSessionDriver {
       developerInstructions: launchOptions.developerInstructions,
       runtimeWorkspaceRoots: launchOptions.writableRoots
     };
+    this.sessionThreads.delete(session.id);
     const connection = await this.connections.start({
       sessionId: session.id,
       runtime,
       settings,
       handlers: this.handlers(session.id)
+    }).catch((error) => {
+      this.sessionThreads.set(session.id, previousThreadId);
+      throw error;
     });
     const text = `${PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX}\n\n${request.plan.trim()}`;
     const protocol = new CodexAppServerProtocol(connection.rpc);
@@ -350,6 +358,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         await implementationTurnOptions(protocol, implementationSession)
       );
     } catch (error) {
+      this.sessionThreads.set(session.id, previousThreadId);
       const unresolved = await this.requestStore?.listUnresolvedAppServerRequests(session.id) ?? [];
       await this.connections.reconnect({
         sessionId: session.id,
@@ -361,6 +370,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
       }).catch(() => undefined);
       throw error;
     }
+    this.sessionThreads.set(session.id, connection.threadId);
     this.activeTurns.set(session.id, response.turn.id);
     return {
       provider: { kind: "codex", threadId: connection.threadId, rolloutPath: null },
@@ -403,6 +413,8 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     if (runtimeSpec.sessionId !== spec.sessionId) throw new Error("Runtime spec session id does not match launch spec");
     const runtime = await this.supervisor.start(runtimeSpec);
     try {
+      if (operation === "resume") this.sessionThreads.set(spec.sessionId, requireSourceThread(spec));
+      else this.sessionThreads.delete(spec.sessionId);
       const handlers = this.handlers(spec.sessionId);
       const settings = {
         cwd: spec.cwd,
@@ -431,6 +443,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               expectedPendingRequestIds: unresolved.map((request) => request.requestId),
               handlers
             });
+      this.sessionThreads.set(spec.sessionId, connection.threadId);
       if (operation === "resume") {
         const restoredTurnId = this.restoreActiveTurnAfterReconnect(
           spec.sessionId,
@@ -455,7 +468,12 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           if (request.response === null) throw new Error(`Responded app-server request has no durable response: ${request.requestId}`);
           await connection.rpc.respond(request.requestId, request.response);
         }
-        await this.eventSink?.restore(spec.sessionId, connection.threadId, this.now().toISOString());
+        await this.eventSink?.restore(
+          spec.sessionId,
+          connection.threadId,
+          recordValue(connection.reconciliation.current.thread, "status"),
+          this.now().toISOString()
+        );
       }
       return {
         sessionId: spec.sessionId,
@@ -475,6 +493,24 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return {
       notification: async ({ method, params }) => {
         const receivedAt = this.now().toISOString();
+        const threadId = directString(params, "threadId");
+        if (method === "serverRequest/resolved") {
+          const requestId = directId(params, "requestId");
+          if (requestId !== null) {
+            await this.requestStore?.resolveAppServerRequest(sessionId, requestId, receivedAt);
+            this.pendingRequests.delete(pendingKey(sessionId, requestId));
+          }
+        }
+        if (threadId && !this.isSessionThread(sessionId, threadId)) {
+          if (method === "turn/completed") {
+            const turnId = nestedId(params, "turn");
+            if (turnId) {
+              await this.requestStore?.resolveAppServerTurnRequests(sessionId, threadId, turnId, receivedAt);
+              this.clearPendingTurnRequests(sessionId, threadId, turnId);
+            }
+          }
+          return;
+        }
         if (method === "turn/started") {
           const turnId = nestedId(params, "turn");
           if (turnId) this.activeTurns.set(sessionId, turnId);
@@ -488,7 +524,6 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           const turnId = nestedId(params, "turn");
           const activeTurnId = this.activeTurns.get(sessionId);
           if (!turnId || !activeTurnId || activeTurnId === turnId) {
-            const threadId = directString(params, "threadId");
             if (this.requestStore) {
               if (!threadId || !turnId) {
                 throw new Error("App-server turn completion is missing thread/turn identity");
@@ -496,13 +531,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
               await this.requestStore.resolveAppServerTurnRequests(sessionId, threadId, turnId, receivedAt);
             }
             this.activeTurns.delete(sessionId);
-            this.clearPendingRequests(sessionId);
-          }
-        } else if (method === "serverRequest/resolved") {
-          const requestId = directId(params, "requestId");
-          if (requestId !== null) {
-            await this.requestStore?.resolveAppServerRequest(sessionId, requestId, receivedAt);
-            this.pendingRequests.delete(pendingKey(sessionId, requestId));
+            if (threadId && turnId) this.clearPendingTurnRequests(sessionId, threadId, turnId);
           }
         }
         const event = { method, params, receivedAt };
@@ -527,7 +556,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         const key = pendingKey(sessionId, id);
         const existing = this.pendingRequests.get(key);
         const responded = persisted ? persisted.state === "responded" : (existing?.responded ?? false);
-        this.pendingRequests.set(key, { sessionId, id, method, params, responded });
+        this.pendingRequests.set(key, { sessionId, id, method, params, threadId, turnId, responded });
         if (responded) return;
         const event = { method, params: { requestId: id, params }, receivedAt };
         await this.eventSink?.handle(sessionId, event);
@@ -593,6 +622,19 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     for (const [key, pending] of this.pendingRequests) {
       if (pending.sessionId === sessionId) this.pendingRequests.delete(key);
     }
+  }
+
+  private clearPendingTurnRequests(sessionId: string, threadId: string, turnId: string): void {
+    for (const [key, pending] of this.pendingRequests) {
+      if (pending.sessionId === sessionId && pending.threadId === threadId && pending.turnId === turnId) {
+        this.pendingRequests.delete(key);
+      }
+    }
+  }
+
+  private isSessionThread(sessionId: string, threadId: string): boolean {
+    const expected = this.connections.get(sessionId)?.threadId ?? this.sessionThreads.get(sessionId);
+    return expected === threadId;
   }
 
   private restoreActiveTurnAfterReconnect(
