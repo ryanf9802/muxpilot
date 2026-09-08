@@ -315,7 +315,9 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
     if ((await this.db.listQueuedInputs(sessionId)).length > 0) return { status: "not_ready" };
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return { status: "not_ready" };
-    const ready = await this.readyLiveSession(session);
+    const ready = session.driverKind === "codex_app_server"
+      ? readyAppServerInputSession(session)
+      : await this.readyLiveSession(session);
     if (!ready) return { status: "not_ready" };
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
 
@@ -327,7 +329,7 @@ export class SessionManager {
       if (result.status === "conflict") return result;
       this.publishDocumentsUpdated(sessionId, result.changes);
       try {
-        await this.sendRawInput(ready, btwDocumentNotice(exchangeId, result.changes));
+        await this.sendSessionNotice(ready, btwDocumentNotice(exchangeId, result.changes));
         const now = nowIso();
         const status = activeInputStatus(ready.inputMode);
         await this.db.setSessionStatus(sessionId, status, now);
@@ -348,14 +350,16 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
-    const ready = await this.readyLiveSession(session);
+    const ready = session.driverKind === "codex_app_server"
+      ? readyAppServerInputSession(session)
+      : await this.readyLiveSession(session);
     if (!ready) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     this.deliveringInputSessionIds.add(sessionId);
     try {
       if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
       if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
-      await this.sendRawInput(ready, btwDocumentNotice(exchangeId, changes));
+      await this.sendSessionNotice(ready, btwDocumentNotice(exchangeId, changes));
       const now = nowIso();
       const status = activeInputStatus(ready.inputMode);
       await this.db.setSessionStatus(sessionId, status, now);
@@ -1620,6 +1624,15 @@ export class SessionManager {
   private async sendRawInput(session: ManagedSession, text: string): Promise<InputTransportResult | void> {
     const pane = await this.livePane(session);
     return this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
+  }
+
+  private async sendSessionNotice(session: ManagedSession, text: string): Promise<void> {
+    const driver = this.appServerDriver(session);
+    if (driver) {
+      await driver.sendMessage(session, text, eventId());
+      return;
+    }
+    await this.sendRawInput(session, text);
   }
 
   private async recordSubmittedInput(

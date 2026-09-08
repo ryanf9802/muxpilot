@@ -7280,6 +7280,47 @@ describe("agent-managed session hierarchy", () => {
     await harness.db.close();
   });
 
+  it("applies staged BTW documents and delivers the private notice through app-server", async () => {
+    const sendMessage = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-documents-app",
+      turnId: "turn-documents-app",
+      acceptedAt: "2026-09-01T12:00:00.000Z"
+    }));
+    const driver = { kind: "codex_app_server", sendMessage } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const repo = join(harness.dir, "repo");
+    await mkdir(repo);
+    const session = {
+      ...appServerSession("app-documents", "thread-documents-app", "idle"),
+      cwd: repo,
+      tmux: testPane({ cwd: repo, paneId: "app-server:app-documents" })
+    };
+    await harness.db.upsertSession(session, "2026-09-01T12:00:00.000Z");
+    const staging = await harness.manager.prepareBtwDocumentStaging(session.id, "exchange-documents-app");
+    await writeFile(join(staging.documentsRoot, "plan.md"), "# App-server plan\n");
+
+    expect(await harness.manager.applyBtwDocumentStaging(session.id, "exchange-documents-app")).toMatchObject({
+      status: "applied",
+      noticeDelivered: true,
+      changes: { created: ["plan.md"], updated: [] }
+    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, driverKind: "codex_app_server" }),
+      expect.stringContaining("<muxpilot_document_notice>"),
+      expect.any(String)
+    );
+    expect((await harness.manager.readDocument(session.id, "plan.md")).document.content).toContain("App-server plan");
+    await harness.db.setSessionStatus(session.id, "idle", "2026-09-01T12:01:00.000Z");
+    await expect(harness.manager.deliverBtwDocumentNotice(
+      session.id,
+      "exchange-documents-app",
+      { created: ["plan.md"], updated: [] }
+    )).resolves.toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    await harness.db.close();
+  });
+
   it("refuses to claim a live session that was not relaunched into a dedicated scope", async () => {
     const harness = await createHarness();
     const root = agentHierarchySession("claim-root");
