@@ -48,6 +48,7 @@ import {
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
+  LiveTranscriptRefreshScheduler,
   loadingSessionFromLocationState,
   markdownLinkTarget,
   MarkdownBlock,
@@ -1347,13 +1348,16 @@ describe("LatestGenerationRefreshGate", () => {
 
     first.resolve();
     await obsoleteRun;
+    let reconciled = false;
     await gate.run(2, async () => {
-      throw new Error("Same-generation refreshes should use the active owner");
+      reconciled = true;
+      return true;
     });
     second.resolve();
     await currentRun;
 
-    expect(secondGenerationCalls).toBe(2);
+    expect(secondGenerationCalls).toBe(1);
+    expect(reconciled).toBe(true);
 
     let obsoleteRestarted = false;
     await gate.run(1, async () => {
@@ -1363,23 +1367,28 @@ describe("LatestGenerationRefreshGate", () => {
     expect(obsoleteRestarted).toBe(false);
   });
 
-  it("coalesces repeated requests and stops when refreshing cannot continue", async () => {
+  it("coalesces repeated requests to the newest follow-up", async () => {
     const gate = new LatestGenerationRefreshGate();
     const first = deferred<void>();
-    let calls = 0;
+    const calls: string[] = [];
 
     const activeRun = gate.run(7, async () => {
-      calls += 1;
+      calls.push("active");
       await first.promise;
-      return false;
+      return true;
     });
     await gate.run(7, async () => {
-      throw new Error("Queued refresh callback should not replace the active callback");
+      calls.push("obsolete follow-up");
+      return true;
+    });
+    await gate.run(7, async () => {
+      calls.push("latest follow-up");
+      return true;
     });
     first.resolve();
     await activeRun;
 
-    expect(calls).toBe(1);
+    expect(calls).toEqual(["active", "latest follow-up"]);
   });
 
   it("releases the generation after a failed refresh", async () => {
@@ -1397,6 +1406,40 @@ describe("LatestGenerationRefreshGate", () => {
       return true;
     });
     expect(recovered).toBe(true);
+  });
+});
+
+describe("LiveTranscriptRefreshScheduler", () => {
+  it("coalesces a continuous event burst with a bounded maximum wait", async () => {
+    vi.useFakeTimers();
+    let now = 1;
+    let calls = 0;
+    const scheduler = new LiveTranscriptRefreshScheduler(100, 500, () => now);
+
+    for (let index = 0; index < 100; index += 1) {
+      scheduler.schedule(() => { calls += 1; });
+      now += 10;
+      await vi.advanceTimersByTimeAsync(10);
+    }
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(calls).toBeLessThanOrEqual(3);
+    scheduler.cancel();
+    vi.useRealTimers();
+  });
+
+  it("cancels a pending refresh when the session changes", async () => {
+    vi.useFakeTimers();
+    const scheduler = new LiveTranscriptRefreshScheduler();
+    let called = false;
+    scheduler.schedule(() => { called = true; });
+
+    scheduler.cancel();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(called).toBe(false);
+    vi.useRealTimers();
   });
 });
 

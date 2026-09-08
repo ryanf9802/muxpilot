@@ -166,7 +166,7 @@ export interface PendingUserMessage {
 
 interface RefreshOwner {
   token: number;
-  queued: boolean;
+  queuedRefresh: (() => Promise<boolean>) | null;
 }
 
 export class LatestGenerationRefreshGate {
@@ -177,21 +177,58 @@ export class LatestGenerationRefreshGate {
     if (token < this.latestToken) return;
     if (token > this.latestToken) this.latestToken = token;
     if (this.owner?.token === token) {
-      this.owner.queued = true;
+      this.owner.queuedRefresh = refresh;
       return;
     }
 
-    const owner: RefreshOwner = { token, queued: false };
+    const owner: RefreshOwner = { token, queuedRefresh: null };
     this.owner = owner;
     try {
-      let canRepeat: boolean;
-      do {
-        owner.queued = false;
-        canRepeat = await refresh();
-      } while (owner.queued && canRepeat && this.latestToken === token);
+      let nextRefresh: (() => Promise<boolean>) | null = refresh;
+      while (nextRefresh && this.latestToken === token) {
+        owner.queuedRefresh = null;
+        const canRepeat = await nextRefresh();
+        nextRefresh = canRepeat ? owner.queuedRefresh : null;
+      }
     } finally {
       if (this.owner === owner) this.owner = null;
     }
+  }
+}
+
+export class LiveTranscriptRefreshScheduler {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private burstStartedAt = 0;
+  private pending: (() => void) | null = null;
+
+  constructor(
+    private readonly debounceMs = 100,
+    private readonly maxWaitMs = 500,
+    private readonly now: () => number = () => Date.now()
+  ) {}
+
+  schedule(refresh: () => void): void {
+    const now = this.now();
+    if (!this.burstStartedAt) this.burstStartedAt = now;
+    this.pending = refresh;
+    if (this.timer) clearTimeout(this.timer);
+    const remaining = Math.max(0, this.maxWaitMs - (now - this.burstStartedAt));
+    this.timer = setTimeout(() => this.flush(), Math.min(this.debounceMs, remaining));
+  }
+
+  cancel(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.pending = null;
+    this.burstStartedAt = 0;
+  }
+
+  private flush(): void {
+    const refresh = this.pending;
+    this.timer = null;
+    this.pending = null;
+    this.burstStartedAt = 0;
+    refresh?.();
   }
 }
 
@@ -1318,8 +1355,8 @@ export function SessionView() {
   const loadingOlderRef = useRef(false);
   const loadingNewerRef = useRef(false);
   const loadingSearchPageRef = useRef(false);
-  const liveTailRefreshGateRef = useRef(new LatestGenerationRefreshGate());
-  const snapshotRefreshGateRef = useRef(new LatestGenerationRefreshGate());
+  const transcriptRefreshGateRef = useRef(new LatestGenerationRefreshGate());
+  const liveTailRefreshSchedulerRef = useRef(new LiveTranscriptRefreshScheduler());
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
   const pendingFastModeRef = useRef<boolean | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
@@ -1856,6 +1893,10 @@ export function SessionView() {
   }, [connectionEpoch, id, sessionLoadRetryNonce]);
 
   useEffect(() => {
+    return () => liveTailRefreshSchedulerRef.current.cancel();
+  }, [id]);
+
+  useEffect(() => {
     let cancelled = false;
     let refreshing = false;
     const refreshDocuments = async () => {
@@ -1945,7 +1986,9 @@ export function SessionView() {
       const token = requestTokenRef.current;
       if (event.type === "message.appended") {
         const nextMessage = event.payload as ChatMessage;
-        if (!hasMoreAfterRef.current) void refreshLiveTailMessages(id, token);
+        if (!hasMoreAfterRef.current) {
+          liveTailRefreshSchedulerRef.current.schedule(() => void refreshLiveTailMessages(id, token));
+        }
         if (nextMessage.type === "approval_request") void loadApproval(id, token);
         if (nextMessage.type === "question_request") void loadQuestion(id, token);
         return;
@@ -2082,7 +2125,7 @@ export function SessionView() {
     signal?: AbortSignal
   ): Promise<boolean> {
     let applied = false;
-    await snapshotRefreshGateRef.current.run(token, async () => {
+    await transcriptRefreshGateRef.current.run(token, async () => {
       const refreshRequestId = sessionRefreshRequestRef.current + 1;
       sessionRefreshRequestRef.current = refreshRequestId;
       const response = await trackRefreshRequest(() => api.sessionSnapshot(targetId, MESSAGE_PAGE_SIZE, signal));
@@ -2144,7 +2187,7 @@ export function SessionView() {
 
   async function refreshLiveTailMessages(targetId = id, token = requestTokenRef.current) {
     if (hasMoreAfterRef.current) return;
-    await liveTailRefreshGateRef.current.run(token, async () => {
+    await transcriptRefreshGateRef.current.run(token, async () => {
       scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("live", isNearBottomRef.current);
       const response = await trackRefreshRequest(() => api.messages(targetId, { limit: MESSAGE_PAGE_SIZE }));
       if (!isCurrentTranscriptResponse(targetId, token, response)) return false;
