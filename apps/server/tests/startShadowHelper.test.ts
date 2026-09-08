@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  hostScopedHeavyEnvironment,
+  hostScopedShadowEnvironment,
   isMuxpilotSessionCgroup,
   isShadowExecutionCgroup,
   shadowSocketPathSafety,
@@ -14,9 +14,24 @@ import {
 } from "../../../.agents/skills/muxpilot-start-shadow/scripts/shadow-environment.mjs";
 
 describe("muxpilot shadow start helper", () => {
-  it("keeps heavyweight installation and startup in the host verifier", () => {
-    expect(hostScopedHeavyEnvironment({ MUXPILOT_HEAVY_QUEUE_ENABLED: "1", KEEP: "value" })).toEqual({
-      MUXPILOT_HEAVY_QUEUE_ENABLED: "0",
+  it("runs persistent shadow lifecycle without the heavyweight runner", () => {
+    const source = readFileSync(new URL("../../../.agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs", import.meta.url), "utf8");
+    expect(source).toContain('spawnSync("pnpm", pnpmArgs');
+    expect(source).not.toContain("muxpilot-git-run.mjs");
+    expect(source).not.toContain('"--heavy"');
+  });
+
+  it("removes heavyweight execution ownership from direct host-scoped commands", () => {
+    expect(hostScopedShadowEnvironment({
+      MUXPILOT_HEAVY_QUEUE_ENABLED: "1",
+      MUXPILOT_HEAVY_COMPLETION_ENABLED: "1",
+      MUXPILOT_HEAVY_RUN_ID: "stale-run",
+      MUXPILOT_HEAVY_BROKER_SOCKET: "/tmp/heavy.sock",
+      MUXPILOT_HEAVY_BROKER_TOKEN: "secret",
+      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "2",
+      KEEP: "value"
+    })).toEqual({
+      MUXPILOT_HEAVY_VALIDATION_CONCURRENCY: "2",
       KEEP: "value"
     });
   });

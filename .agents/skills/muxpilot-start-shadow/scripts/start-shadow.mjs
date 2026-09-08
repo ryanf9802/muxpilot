@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  hostScopedHeavyEnvironment,
+  hostScopedShadowEnvironment,
   isMuxpilotSessionCgroup,
   isShadowExecutionCgroup,
   shadowSocketPathSafety,
@@ -57,11 +57,6 @@ for (const port of [14177, 15177]) {
   if (!await portAvailable(port)) fail(`shadow port ${port} is already occupied; refusing to adopt or stop an existing process`);
 }
 
-const helperDir = process.env.MUXPILOT_GIT_HELPER_DIR
-  ?? join(process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex"), "skills", "muxpilot-git-workflow", "scripts");
-const heavyRunner = join(helperDir, "muxpilot-git-run.mjs");
-if (!existsSync(heavyRunner)) fail(`heavy command runner not found at ${heavyRunner}`);
-
 if (dependenciesInstalledAt) {
   try {
     verifyReusableDependencyInstall(shadowRoot, dependenciesInstalledAt, head);
@@ -70,11 +65,11 @@ if (dependenciesInstalledAt) {
   }
   console.log(`Skipping dependency installation; dependency inputs are unchanged since ${dependenciesInstalledAt}.`);
 } else {
-  runHeavy(heavyRunner, ["pnpm", "install", "--frozen-lockfile"]);
+  runDirectPnpm(["install", "--frozen-lockfile"], "dependency installation");
 }
 if (git(shadowRoot, ["status", "--porcelain"])) fail("frozen dependency installation changed the shadow checkout");
 shadowStartAttempted = true;
-runHeavy(heavyRunner, ["pnpm", "app", "start", "shadow"]);
+runDirectPnpm(["app", "start", "shadow"], "shadow startup");
 
 const shadowHealth = await health("http://127.0.0.1:14177/healthz");
 if (!shadowHealth?.ok || shadowHealth.shadowMode !== true) fail("shadow health endpoint did not identify an active shadow server");
@@ -102,14 +97,14 @@ console.log(
   `MUXPILOT_SHADOW_STARTED_OUTSIDE_SESSION_SCOPE commit=${expectedCommit} url=http://127.0.0.1:15177 supervisor=${shadowProcesses.supervisor.pid} server=${shadowProcesses.server.pid} web=${shadowProcesses.web.pid} cgroup=${ownCgroup} prodSupervisor=${after.processes.supervisor.pid} prodServer=${after.processes.server.pid} prodWeb=${after.processes.web.pid}`
 );
 
-function runHeavy(runner, command) {
-  const result = spawnSync(process.execPath, [runner, "--heavy", "--", ...command], {
+function runDirectPnpm(pnpmArgs, description) {
+  const result = spawnSync("pnpm", pnpmArgs, {
     cwd: shadowRoot,
-    env: hostScopedHeavyEnvironment(process.env),
+    env: hostScopedShadowEnvironment(process.env),
     stdio: "inherit"
   });
-  if (result.error) fail(`${command.join(" ")} failed: ${result.error.message}`);
-  if (result.status !== 0) fail(`${command.join(" ")} exited with status ${result.status ?? "unknown"}`);
+  if (result.error) fail(`${description} failed: ${result.error.message}`);
+  if (result.status !== 0) fail(`${description} exited with status ${result.status ?? "unknown"}`);
 }
 
 async function productionSnapshot(root) {

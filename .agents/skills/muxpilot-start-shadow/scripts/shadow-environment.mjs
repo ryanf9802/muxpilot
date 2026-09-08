@@ -1,8 +1,18 @@
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-export function hostScopedHeavyEnvironment(environment) {
-  return { ...environment, MUXPILOT_HEAVY_QUEUE_ENABLED: "0" };
+const HEAVY_EXECUTION_KEYS = [
+  "MUXPILOT_HEAVY_BROKER_SOCKET",
+  "MUXPILOT_HEAVY_BROKER_TOKEN",
+  "MUXPILOT_HEAVY_COMPLETION_ENABLED",
+  "MUXPILOT_HEAVY_QUEUE_ENABLED",
+  "MUXPILOT_HEAVY_RUN_ID"
+];
+
+export function hostScopedShadowEnvironment(environment) {
+  const direct = { ...environment };
+  for (const key of HEAVY_EXECUTION_KEYS) delete direct[key];
+  return direct;
 }
 
 const MAX_UNIX_SOCKET_PATH_BYTES = 107;
