@@ -3,13 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  formatStartupWaitProgress,
   isMissingSystemdUnitStopError,
   resourceGovernorSessionScopeLines,
   shadowDependencyIsolation,
   shadowIsolationEnvironment,
   shadowOwnedSystemdUnits,
+  startupTimeoutMs,
   syncBundledSkillForMode
 } from "../../../scripts/lifecycle.mjs";
+
+describe("application startup wait", () => {
+  it("allows production recovery five minutes while keeping local modes fast", () => {
+    expect(startupTimeoutMs("prod", {})).toBe(300_000);
+    expect(startupTimeoutMs("dev", {})).toBe(30_000);
+    expect(startupTimeoutMs("shadow", {})).toBe(30_000);
+  });
+
+  it("accepts a bounded explicit startup timeout override", () => {
+    expect(startupTimeoutMs("prod", { MUXPILOT_APP_START_TIMEOUT_MS: "420000" })).toBe(420_000);
+    expect(() => startupTimeoutMs("prod", { MUXPILOT_APP_START_TIMEOUT_MS: "999" }))
+      .toThrow("must be an integer of at least 1000 milliseconds");
+  });
+
+  it("reports elapsed time and endpoint readiness during a slow start", () => {
+    expect(formatStartupWaitProgress("production", 72_000, [
+      { name: "backend", active: false },
+      { name: "frontend", active: true }
+    ])).toBe("Still waiting for production startup after 1m 12s (backend pending, frontend ready).");
+  });
+});
 
 describe("production bundled skill startup", () => {
   it("does not synchronize the skill in development mode", async () => {

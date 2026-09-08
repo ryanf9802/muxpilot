@@ -26,7 +26,9 @@ import { fileURLToPath } from "node:url";
 import { syncMuxpilotGitWorkflowSkill } from "./bundled-skill.mjs";
 
 const HEALTH_CHECK_TIMEOUT_MS = 5000;
-const START_TIMEOUT_MS = 30000;
+const DEFAULT_START_TIMEOUT_MS = 30000;
+const PRODUCTION_START_TIMEOUT_MS = 5 * 60 * 1000;
+const START_PROGRESS_INTERVAL_MS = 10 * 1000;
 const START_POLL_MS = 500;
 const STOP_GRACE_MS = 1500;
 const DEFAULT_DEV_PORTS = ["4177", "5177"];
@@ -150,16 +152,19 @@ export async function startMode(mode) {
     if (config.build === "workspace") runPnpmSync(["build"]);
     if (config.build === "core") runPnpmSync(["--filter", "@muxpilot/core", "build"]);
 
+    const timeoutMs = startupTimeoutMs(mode);
     spawnSupervisor(mode, state);
     console.log(`Starting ${config.label} under the muxpilot supervisor...`);
 
     const ready = await waitForEndpoints([
       { name: "backend", url: `${urls.backendUrl}/healthz` },
       { name: "frontend", url: urls.webUrl }
-    ]);
+    ], timeoutMs, ({ elapsedMs, endpoints }) => {
+      console.log(formatStartupWaitProgress(config.label, elapsedMs, endpoints));
+    });
 
     if (!ready.ok) {
-      console.error(`Timed out waiting for ${ready.name} at ${ready.url}.`);
+      console.error(`Timed out after ${formatWaitDuration(ready.elapsedMs)} waiting for ${ready.name} at ${ready.url}.`);
       printState(state);
       process.exit(1);
     }
@@ -582,18 +587,53 @@ function runPnpmSync(args) {
   execFileSync("pnpm", args, { env: process.env, stdio: "inherit" });
 }
 
-async function waitForEndpoints(endpoints) {
-  const deadline = Date.now() + START_TIMEOUT_MS;
+async function waitForEndpoints(endpoints, timeoutMs, onProgress) {
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let nextProgressAt = startedAt + START_PROGRESS_INTERVAL_MS;
   while (Date.now() < deadline) {
     const active = await Promise.all(endpoints.map((endpoint) => endpointActive(endpoint.url)));
     if (active.every(Boolean)) return { ok: true };
+    const now = Date.now();
+    if (now >= nextProgressAt) {
+      onProgress?.({
+        elapsedMs: now - startedAt,
+        endpoints: endpoints.map((endpoint, index) => ({ ...endpoint, active: active[index] }))
+      });
+      nextProgressAt = now + START_PROGRESS_INTERVAL_MS;
+    }
     await sleep(START_POLL_MS);
   }
 
   for (const endpoint of endpoints) {
-    if (!(await endpointActive(endpoint.url))) return { ok: false, ...endpoint };
+    if (!(await endpointActive(endpoint.url))) return { ok: false, ...endpoint, elapsedMs: Date.now() - startedAt };
   }
   return { ok: true };
+}
+
+export function startupTimeoutMs(mode, environment = process.env) {
+  const configured = environment.MUXPILOT_APP_START_TIMEOUT_MS;
+  if (configured !== undefined && configured !== "") {
+    const value = Number(configured);
+    if (!Number.isInteger(value) || value < 1000) {
+      throw new Error("MUXPILOT_APP_START_TIMEOUT_MS must be an integer of at least 1000 milliseconds");
+    }
+    return value;
+  }
+  return mode === "prod" ? PRODUCTION_START_TIMEOUT_MS : DEFAULT_START_TIMEOUT_MS;
+}
+
+export function formatStartupWaitProgress(label, elapsedMs, endpoints) {
+  const states = endpoints.map((endpoint) => `${endpoint.name} ${endpoint.active ? "ready" : "pending"}`).join(", ");
+  return `Still waiting for ${label} startup after ${formatWaitDuration(elapsedMs)} (${states}).`;
+}
+
+function formatWaitDuration(milliseconds) {
+  const seconds = Math.max(1, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
 }
 
 function portOccupied(host, port) {

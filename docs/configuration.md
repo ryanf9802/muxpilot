@@ -60,6 +60,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
 - `MUXPILOT_DEFAULT_SESSION_DRIVER`: runtime for new sessions, `codex_app_server` (default) or `codex_tmux`. tmux is an optional dependency detected once at startup. Configuring `codex_tmux` while tmux is unavailable fails startup instead of silently changing the default; installing or removing tmux takes effect after restarting muxpilot. The UI never silently falls back between runtimes.
+- `MUXPILOT_APP_START_TIMEOUT_MS`: endpoint-health wait after the supervisor launches, default `300000` (five minutes) for production and `30000` for development and shadow. The lifecycle command reports endpoint progress every 10 seconds while it waits. Values must be integers of at least `1000`.
 - `MUXPILOT_APP_SERVER_HIBERNATE_MS`: idle time before an eligible app-server service hibernates, default `900000` (15 minutes). Pending input, gates, child waits, heavyweight work, active turns, and background terminals block hibernation.
 - `MUXPILOT_RESOURCE_GOVERNOR`: `auto` (default) applies best-effort systemd cgroup and Docker limits to muxpilot-launched sessions; `off` disables both controls.
 - `MUXPILOT_AGENT_MEMORY_SOFT_PERCENT`: shared `MemoryHigh` pool for busy agent sessions, default `50`.

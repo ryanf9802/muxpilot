@@ -16,7 +16,7 @@ cp .env.example .env
 pnpm app start
 ```
 
-`pnpm app start` runs the production path. It installs or updates all bundled muxpilot skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits until both endpoints are healthy. Skill synchronization also runs when production is already active.
+`pnpm app start` runs the production path. It installs or updates all bundled muxpilot skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits up to five minutes until both endpoints are healthy. Cold database and session recovery can take longer than ordinary startup, so the command reports endpoint readiness every 10 seconds while it waits. Skill synchronization also runs when production is already active.
 
 Production defaults:
 
