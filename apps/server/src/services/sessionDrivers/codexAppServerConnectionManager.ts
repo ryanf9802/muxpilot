@@ -98,6 +98,7 @@ export class CodexAppServerConnectionManager {
       spec.expectedPendingRequestIds ?? [],
       spec.settings,
       true,
+      true,
       async (protocol) => {
         const backgroundTerminals = await protocol.listBackgroundTerminals(spec.threadId).catch(() => null);
         if (hasBackgroundTerminals(backgroundTerminals)) {
@@ -120,6 +121,7 @@ export class CodexAppServerConnectionManager {
       [],
       spec.settings,
       false,
+      false,
       (protocol) => protocol.startThread(spec.settings)
     ));
   }
@@ -134,6 +136,7 @@ export class CodexAppServerConnectionManager {
         [],
         spec.settings,
         false,
+        true,
         (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings)
       );
     });
@@ -159,6 +162,7 @@ export class CodexAppServerConnectionManager {
     expectedPendingRequestIds: readonly (string | number)[],
     settings: Partial<ThreadLaunchSettings> | undefined,
     recoverProcessOwnership: boolean,
+    readCurrentTurns: boolean,
     establish: (protocol: CodexAppServerProtocol) => Promise<ThreadIdentityResponse>
   ): Promise<AppServerSessionConnection> {
     requireIdentity(sessionId, "sessionId");
@@ -202,7 +206,11 @@ export class CodexAppServerConnectionManager {
           sandboxPolicy: workspaceWriteSandboxPolicy(settings)
         });
       }
-      const current = await protocol.readThread(threadId, true);
+      // Codex does not materialize a brand-new thread's turn collection until
+      // its first user message. Keep the connection/input path available so
+      // callers can deliver that message; resumed and forked threads retain
+      // the full turn-list reconciliation barrier.
+      const current = await protocol.readThread(threadId, readCurrentTurns);
       requireMatchingThread(threadId, current, "read");
       const journalProcessOwnership = recoverProcessOwnership
         ? await journal.listActiveCommandProcesses(threadId)

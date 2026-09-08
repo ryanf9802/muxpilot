@@ -104,16 +104,24 @@ describe("CodexAppServerConnectionManager", () => {
     expect(started.reconciliation.journalProcessOwnership).toEqual([]);
   });
 
-  it("establishes new and forked threads through the same read barrier", async () => {
+  it("establishes a new thread before its turn collection is materialized", async () => {
     const started = new FakeProtocolProxy([], "new-thread");
-    const forked = new FakeProtocolProxy([], "forked-thread");
-    const manager = createManager([started, forked]);
+    const manager = createManager([started]);
 
     const newConnection = await manager.start({
       sessionId: "new-session",
       runtime,
       settings: { cwd: "/repo", model: "gpt-5.6" }
     });
+
+    expect(started.methods).toEqual(["initialize", "thread/start", "thread/settings/update", "thread/read"]);
+    expect(newConnection.reconciliation.current.thread).toMatchObject({ id: "new-thread" });
+    expect(started.methods).not.toContain("thread/turns/list");
+  });
+
+  it("keeps the full read barrier for forked threads", async () => {
+    const forked = new FakeProtocolProxy([], "forked-thread");
+    const manager = createManager([forked]);
     const forkConnection = await manager.fork({
       sessionId: "fork-session",
       runtime,
@@ -121,9 +129,7 @@ describe("CodexAppServerConnectionManager", () => {
       settings: { cwd: "/fork" }
     });
 
-    expect(started.methods).toEqual(["initialize", "thread/start", "thread/settings/update", "thread/read", "thread/turns/list"]);
     expect(forked.methods).toEqual(["initialize", "thread/fork", "thread/settings/update", "thread/read", "thread/turns/list"]);
-    expect(newConnection.threadId).toBe("new-thread");
     expect(forkConnection.threadId).toBe("forked-thread");
   });
 
