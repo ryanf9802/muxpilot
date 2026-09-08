@@ -301,7 +301,7 @@ export function AppShell() {
 
   const loadSessions = useCallback(async () => {
     const requestId = ++sessionRequestIdRef.current;
-    const sessionResponse = await api.sessions();
+    const sessionResponse = await api.sessionSummaries();
     if (isLatestSessionListRequest(requestId, sessionRequestIdRef.current)) {
       sessionsRef.current = sessionResponse.sessions;
       setSessions(sessionResponse.sessions);

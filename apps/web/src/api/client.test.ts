@@ -149,6 +149,17 @@ describe("api client request headers", () => {
     );
   });
 
+  it("loads lightweight session summaries with encoded server-side filters", async () => {
+    const fetchMock = mockJsonResponse({ sessions: [] });
+
+    await api.sessionSummaries("api refactor", "working");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/session-summaries?q=api%20refactor&status=working",
+      expect.objectContaining({ credentials: "include" })
+    );
+  });
+
   it("revokes remote access with a bodyless post", async () => {
     const fetchMock = mockJsonResponse({ urls: [], accessUrls: [], accessKey: "river-slate-42-orbit-copper-18" });
 

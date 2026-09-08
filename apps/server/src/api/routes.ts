@@ -7,6 +7,7 @@ import type {
   SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CreateSessionRequest,
+  DashboardSessionSummary,
   ForkSessionRequest,
   ForkSessionResponse,
   PushSubscriptionInput,
@@ -21,6 +22,7 @@ import type {
   SessionDirectoriesResponse,
   SessionEvidenceResponse,
   SessionHistoryResponse,
+  SessionSummaryListResponse,
   SessionSnapshotResponse,
   SessionTransferExportRequest,
   SessionTransferImportRequest,
@@ -30,6 +32,7 @@ import type {
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
+import type { ManagedSession } from "@muxpilot/core";
 import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
 import {
   ApprovalResolutionError,
@@ -107,6 +110,7 @@ const DEFAULT_SESSION_HISTORY_LIMIT = 40;
 const MAX_SESSION_HISTORY_LIMIT = 100;
 const DEFAULT_TRANSCRIPT_SEARCH_LIMIT = 100;
 const MAX_TRANSCRIPT_SEARCH_LIMIT = 500;
+const DASHBOARD_PREVIEW_MAX_LENGTH = 512;
 const approvalSchema = z.object({
   decision: z.enum(["approve_once", "approve_for_session", "approve_always", "approve_for_prefix", "deny"])
 });
@@ -325,28 +329,16 @@ export function registerRoutes(
     const query = request.query as { includeArchived?: string; includeAll?: string; status?: string; q?: string };
     let sessions = await manager.listSessions(query.includeArchived === "true", query.includeAll === "true");
     if (query.status) sessions = sessions.filter((session) => !session.initializing && session.status === query.status);
-    if (query.q) {
-      const q = query.q.toLowerCase();
-      sessions = sessions.filter((session) =>
-        [
-          session.repo.name,
-          session.repo.branch,
-          session.tmux.cwd,
-          session.tmux.sessionName,
-          session.tmux.windowId,
-          String(session.tmux.windowIndex),
-          session.tmux.windowName,
-          session.tmux.paneId,
-          String(session.tmux.paneIndex),
-          session.preview,
-          session.activitySummary,
-          ...session.recentUserPrompts
-        ]
-          .filter(Boolean)
-          .some((value) => String(value).toLowerCase().includes(q))
-      );
-    }
+    if (query.q) sessions = sessions.filter((session) => sessionMatchesQuery(session, query.q!));
     return { sessions };
+  });
+
+  app.get("/api/session-summaries", { preHandler: access.requireAccess }, async (request): Promise<SessionSummaryListResponse> => {
+    const query = request.query as { status?: string; q?: string };
+    let sessions = await manager.listSessions(false, false);
+    if (query.status) sessions = sessions.filter((session) => !session.initializing && session.status === query.status);
+    if (query.q) sessions = sessions.filter((session) => sessionMatchesQuery(session, query.q!));
+    return { sessions: sessions.map(dashboardSessionSummary) };
   });
 
   app.get("/api/session-directories", { preHandler: access.requireAccess }, async (): Promise<SessionDirectoriesResponse> => ({
@@ -835,6 +827,47 @@ function notificationSocketDeviceId(query: unknown): string | null {
 function shouldSendNotificationEventToDevice(payload: unknown, deviceId: string | null): boolean {
   if (!deviceId || !payload || typeof payload !== "object" || !("deviceId" in payload)) return false;
   return (payload as { deviceId?: unknown }).deviceId === deviceId;
+}
+
+export function dashboardSessionSummary(session: ManagedSession): DashboardSessionSummary {
+  const completedChild = Boolean(session.agentOwnership?.completedAt);
+  const recentUserPrompts = completedChild
+    ? []
+    : session.recentUserPrompts.slice(0, 2).map(boundedDashboardPreview);
+  return {
+    ...session,
+    preview: "",
+    recentUserPrompts,
+    activitySummary: completedChild || !session.activitySummary ? null : boundedDashboardPreview(session.activitySummary),
+    gitWorkspace: session.gitWorkspace
+      ? { ...session.gitWorkspace, dependencyLinks: [] }
+      : null
+  };
+}
+
+export function sessionMatchesQuery(session: ManagedSession, query: string): boolean {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return true;
+  return [
+    session.name,
+    session.cwd,
+    session.repo.name,
+    session.repo.branch,
+    session.tmux.cwd,
+    session.tmux.sessionName,
+    session.tmux.windowId,
+    String(session.tmux.windowIndex),
+    session.tmux.windowName,
+    session.tmux.paneId,
+    String(session.tmux.paneIndex),
+    session.preview,
+    session.activitySummary,
+    ...session.recentUserPrompts
+  ].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle));
+}
+
+function boundedDashboardPreview(value: string): string {
+  return [...value].slice(0, DASHBOARD_PREVIEW_MAX_LENGTH).join("");
 }
 
 function parsePositiveSequence(value: string | undefined): number | null {

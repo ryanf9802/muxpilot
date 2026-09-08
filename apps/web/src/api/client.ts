@@ -39,6 +39,7 @@ import type {
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionHistoryResponse,
+  SessionSummaryListResponse,
   SendInputResponse,
   SessionSnapshotResponse,
   SessionActionResponse,
@@ -125,6 +126,8 @@ export const api = {
   gitWorkflowSkillStatus: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/status"),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
+  sessionSummaries: (q = "", status = "") =>
+    json<SessionSummaryListResponse>(`/api/session-summaries?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   transferableSessions: () => json<{ sessions: ManagedSession[] }>("/api/sessions?includeArchived=true&includeAll=true"),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),

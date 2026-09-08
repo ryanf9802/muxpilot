@@ -46,6 +46,7 @@ const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
 export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
+export const DASHBOARD_SEARCH_DEBOUNCE_MS = 150;
 export const DASHBOARD_STATUSES = ["", "working", "running", "planning", "queued", "waiting", "question", "plan_ready", "approval", "blocked", "input_failed", "startup_failed", "unknown", "missing", "completed"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 
@@ -65,6 +66,7 @@ export function Dashboard() {
   const [usageSummaryInitialLoading, setUsageSummaryInitialLoading] = useState(true);
   const [codexUsageSummaryInitialLoading, setCodexUsageSummaryInitialLoading] = useState(true);
   const [q, setQ] = useState("");
+  const [serverSearch, setServerSearch] = useState<{ query: string; sessions: ManagedSession[] } | null>(null);
   const [menu, setMenu] = useState<{ session: ManagedSession; x: number; y: number } | null>(null);
   const [notifySubmenuOpen, setNotifySubmenuOpen] = useState(false);
   const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
@@ -92,13 +94,38 @@ export function Dashboard() {
     [queryStatusFilter, sessionStoplightSeverity]
   );
 
-  const sessions = useMemo(
-    () => includeAgentAncestors(
-      removeSessionsFromDashboard(filterSessionsByDashboardQuery(filterSessionsByDashboardStatus(shellSessions, statusFilter), q), optimisticallyRemovedSessionIds),
+  const normalizedQuery = q.trim();
+  const searchBase = useMemo(() => {
+    if (!normalizedQuery || serverSearch?.query !== normalizedQuery) return shellSessions;
+    const latestById = new Map(shellSessions.map((session) => [session.id, session]));
+    return serverSearch.sessions.map((session) => latestById.get(session.id) ?? session);
+  }, [normalizedQuery, serverSearch, shellSessions]);
+  const sessions = useMemo(() => {
+    const matched = normalizedQuery && serverSearch?.query !== normalizedQuery
+      ? filterSessionsByDashboardQuery(searchBase, normalizedQuery)
+      : searchBase;
+    return includeAgentAncestors(
+      removeSessionsFromDashboard(filterSessionsByDashboardStatus(matched, statusFilter), optimisticallyRemovedSessionIds),
       shellSessions
-    ),
-    [optimisticallyRemovedSessionIds, q, shellSessions, statusFilter]
-  );
+    );
+  }, [normalizedQuery, optimisticallyRemovedSessionIds, searchBase, serverSearch?.query, shellSessions, statusFilter]);
+
+  useEffect(() => {
+    if (!normalizedQuery) {
+      setServerSearch(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void api.sessionSummaries(normalizedQuery).then((response) => {
+        if (!cancelled) setServerSearch({ query: normalizedQuery, sessions: response.sessions });
+      }).catch(() => undefined);
+    }, DASHBOARD_SEARCH_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [normalizedQuery]);
 
   const loadUsageSummary = useCallback(async () => {
     const requestId = ++usageRequestIdRef.current;

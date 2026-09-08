@@ -965,6 +965,23 @@ export interface SessionListResponse {
   sessions: ManagedSession[];
 }
 
+/** Dashboard-safe Git shape. Dependency-link details remain available from full session APIs. */
+export type DashboardGitWorkspaceSummary = Omit<GitWorkspaceSummary, "dependencyLinks"> & {
+  dependencyLinks: [];
+};
+
+/**
+ * A structurally compatible session record with bounded preview content and a slim Git workspace.
+ * Full provider, transcript, document, and workspace state remains available from the session APIs.
+ */
+export type DashboardSessionSummary = Omit<ManagedSession, "gitWorkspace"> & {
+  gitWorkspace?: DashboardGitWorkspaceSummary | null;
+};
+
+export interface SessionSummaryListResponse {
+  sessions: DashboardSessionSummary[];
+}
+
 export interface PromptHistoryResult {
   id: string;
   sessionId: string;
