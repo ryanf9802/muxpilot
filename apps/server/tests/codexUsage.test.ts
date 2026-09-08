@@ -1,11 +1,63 @@
 import { describe, expect, it } from "vitest";
 import {
+  CodexUsageService,
   normalizeCodexModels,
   normalizeCodexUsage,
   selectCodexRateLimitSnapshot,
   type AccountReadResponse,
   type RateLimitsReadResponse
 } from "../src/services/codexUsage.js";
+
+describe("CodexUsageService", () => {
+  it("single-flights concurrent reads and caches successful summaries", async () => {
+    let now = 1_000;
+    let requests = 0;
+    const client = {
+      request: async <T>(method: string): Promise<T> => {
+        requests += 1;
+        if (method === "account/read") return account({ email: "engineer@example.com", planType: "plus" }) as T;
+        return rateLimits({ rateLimits: snapshot("codex", "codex usage", 10, 20), rateLimitsByLimitId: null }) as T;
+      },
+      stop: () => undefined
+    };
+    const service = new CodexUsageService({ codexHome: "/tmp/codex", client, now: () => now });
+
+    const [first, second] = await Promise.all([service.summary(), service.summary()]);
+    const cached = await service.summary();
+
+    expect(first).toBe(second);
+    expect(cached).toBe(first);
+    expect(requests).toBe(2);
+
+    now += 60_001;
+    await service.summary();
+    expect(requests).toBe(4);
+  });
+
+  it("briefly caches unavailable results before retrying", async () => {
+    let now = 1_000;
+    let requests = 0;
+    const service = new CodexUsageService({
+      codexHome: "/tmp/codex",
+      now: () => now,
+      client: {
+        request: async () => {
+          requests += 1;
+          throw new Error("offline");
+        },
+        stop: () => undefined
+      }
+    });
+
+    expect((await service.summary()).available).toBe(false);
+    expect((await service.summary()).available).toBe(false);
+    expect(requests).toBe(1);
+
+    now += 10_001;
+    await service.summary();
+    expect(requests).toBe(2);
+  });
+});
 
 describe("normalizeCodexUsage", () => {
   it("maps account identity and primary/secondary Codex limit windows", () => {

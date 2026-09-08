@@ -13,6 +13,8 @@ const FIVE_HOUR_WINDOW_MINS = 5 * 60;
 const WEEKLY_WINDOW_MINS = 7 * 24 * 60;
 const MODEL_CACHE_TTL_MS = 60_000;
 const MODEL_FAILURE_CACHE_TTL_MS = 10_000;
+const USAGE_CACHE_TTL_MS = 60_000;
+const USAGE_FAILURE_CACHE_TTL_MS = 10_000;
 
 interface JsonRpcSuccess {
   id: string | number;
@@ -46,6 +48,11 @@ export interface CodexAppServerClientOptions {
   logger?: Pick<Logger, "warn" | "debug">;
 }
 
+export interface CodexUsageServiceOptions extends CodexAppServerClientOptions {
+  client?: Pick<CodexAppServerClient, "request" | "stop">;
+  now?: () => number;
+}
+
 export interface AccountReadResponse {
   account: CodexAccount | null;
   requiresOpenaiAuth: boolean;
@@ -77,13 +84,34 @@ export interface RateLimitWindow {
 }
 
 export class CodexUsageService {
-  private readonly client: CodexAppServerClient;
+  private readonly client: Pick<CodexAppServerClient, "request" | "stop">;
+  private readonly now: () => number;
+  private cache: { summary: CodexUsageSummaryResponse; expiresAt: number } | null = null;
+  private inFlight: Promise<CodexUsageSummaryResponse> | null = null;
 
-  constructor(options: CodexAppServerClientOptions) {
-    this.client = new CodexAppServerClient(options);
+  constructor(options: CodexUsageServiceOptions) {
+    this.client = options.client ?? new CodexAppServerClient(options);
+    this.now = options.now ?? (() => Date.now());
   }
 
   async summary(): Promise<CodexUsageSummaryResponse> {
+    const now = this.now();
+    if (this.cache && this.cache.expiresAt > now) return this.cache.summary;
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.loadSummary();
+    try {
+      const summary = await this.inFlight;
+      this.cache = {
+        summary,
+        expiresAt: this.now() + (summary.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_CACHE_TTL_MS)
+      };
+      return summary;
+    } finally {
+      this.inFlight = null;
+    }
+  }
+
+  private async loadSummary(): Promise<CodexUsageSummaryResponse> {
     const refreshedAt = nowIso();
     try {
       const account = await this.client.request<AccountReadResponse>("account/read", { refreshToken: false });
