@@ -11,22 +11,30 @@ import {
 
 describe("app-server runtime composition", () => {
   it("registers no driver when compatibility is unavailable", () => {
-    const registry = createSessionDriverRegistry(options({
+    const { runtimeDir: _runtimeDir, ...unavailableOptions } = options({
       status: "user_systemd_unavailable",
       available: false,
       codexVersion: null,
       detail: "unavailable",
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: ["user-systemd"]
-    }));
+    });
+    const registry = createSessionDriverRegistry(unavailableOptions);
     expect(registry.has("codex_app_server")).toBe(false);
+  });
+
+  it("requires the user runtime directory when app-server is available", () => {
+    const { runtimeDir: _runtimeDir, ...availableOptions } = options(availableCompatibility());
+
+    expect(() => createSessionDriverRegistry(availableOptions)).toThrow("requires XDG_RUNTIME_DIR");
   });
 
   it("registers the compatible driver without starting a service or creating runtime files", () => {
     const dataDir = join(tmpdir(), `muxpilot-app-runtime-${randomUUID()}`);
     const registry = createSessionDriverRegistry({
       ...options(availableCompatibility()),
-      dataDir
+      dataDir,
+      runtimeDir: join(tmpdir(), "muxpilot-runtime")
     });
     expect(registry.has("codex_app_server")).toBe(true);
     expect(registry.require("codex_app_server").capabilities).toMatchObject({
@@ -51,6 +59,7 @@ function options(compatibility: AppServerCompatibility) {
   return {
     compatibility,
     dataDir: "/tmp/muxpilot-app-server-runtime-test",
+    runtimeDir: "/run/user/1000",
     codexHome: "/tmp/codex-home",
     environment: {},
     db: {} as never,

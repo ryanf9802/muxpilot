@@ -13,6 +13,7 @@ import { SystemdAppServerSupervisor } from "./systemdAppServerSupervisor.js";
 export interface AppServerRuntimeCompositionOptions {
   compatibility: AppServerCompatibility;
   dataDir: string;
+  runtimeDir?: string;
   codexHome: string;
   environment: Record<string, string>;
   db: AppDatabase;
@@ -24,13 +25,18 @@ export interface AppServerRuntimeCompositionOptions {
 export function createSessionDriverRegistry(options: AppServerRuntimeCompositionOptions): SessionDriverRegistry {
   const registry = new SessionDriverRegistry();
   if (!options.compatibility.available) return registry;
+  if (!options.runtimeDir?.trim()) throw new Error("App-server runtime requires XDG_RUNTIME_DIR");
   const capabilityNamespace = options.environment.MUXPILOT_SHADOW === "1" ? "shadow" : "default";
   const capabilityId = (sessionId: string) => appServerCapabilityId(sessionId, capabilityNamespace);
 
   const runtimeRoot = join(options.dataDir, "runtime", "app-server-sessions");
+  const socketRoot = join(options.runtimeDir, "muxpilot", "app-server-sessions");
   const journalRoot = join(options.dataDir, "protocol", "app-server-sessions");
   const journals = new Map<string, ProtocolJournal>();
-  const supervisor = new SystemdAppServerSupervisor(runtimeRoot);
+  const supervisor = new SystemdAppServerSupervisor(runtimeRoot, {}, {
+    socketRoot,
+    legacySocketRoots: [runtimeRoot]
+  });
   const connections = new CodexAppServerConnectionManager(
     supervisor,
     (sessionId) => {

@@ -165,6 +165,7 @@ const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const sessionDrivers = createSessionDriverRegistry({
   compatibility: appServerCompatibility,
   dataDir: config.dataDir,
+  runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
   codexHome: config.codexHome,
   environment: managedEnvironment,
   db,

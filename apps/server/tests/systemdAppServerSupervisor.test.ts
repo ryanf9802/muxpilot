@@ -13,9 +13,21 @@ import type { RuntimeProxyConnection, RuntimeStartSpec } from "../src/services/s
 const capabilityId = "0123456789abcdef01234567";
 
 describe("SystemdAppServerSupervisor", () => {
+  it("keeps sockets short when durable runtime data has a long path", () => {
+    const runtimeRoot = `/home/operator/${"long-checkout/".repeat(8)}data/runtime/app-server-sessions`;
+    const socketRoot = "/run/user/1000/muxpilot/app-server-sessions";
+
+    const paths = runtimePaths(runtimeRoot, capabilityId, socketRoot);
+
+    expect(paths.environmentPath).toBe(join(runtimeRoot, capabilityId, "environment"));
+    expect(paths.socketPath).toBe(join(socketRoot, capabilityId, "app-server.sock"));
+    expect(Buffer.byteLength(paths.socketPath)).toBeLessThanOrEqual(107);
+  });
+
   it("creates a private bounded-restart service and reconnects through the proxy", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-supervisor-"));
-    const paths = runtimePaths(root, capabilityId);
+    const socketRoot = await mkdtemp(join(tmpdir(), "muxpilot-app-server-sockets-"));
+    const paths = runtimePaths(root, capabilityId, socketRoot);
     let active = false;
     let socketReady = false;
     const calls: Array<{ command: string; args: string[] }> = [];
@@ -33,7 +45,7 @@ describe("SystemdAppServerSupervisor", () => {
       openProxy: vi.fn(() => proxy),
       delay: vi.fn(async () => undefined),
       now: vi.fn(() => 0)
-    }, { executablePath: "/node/bin:/usr/bin" });
+    }, { executablePath: "/node/bin:/usr/bin", socketRoot });
 
     const runtime = await supervisor.start(spec(root));
 
@@ -65,6 +77,8 @@ describe("SystemdAppServerSupervisor", () => {
     ]));
     expect((await stat(root)).mode & 0o777).toBe(0o700);
     expect((await stat(paths.directory)).mode & 0o777).toBe(0o700);
+    expect((await stat(socketRoot)).mode & 0o777).toBe(0o700);
+    expect((await stat(paths.socketDirectory)).mode & 0o777).toBe(0o700);
     expect((await stat(paths.environmentPath)).mode & 0o777).toBe(0o600);
     expect(await readFile(paths.environmentPath, "utf8")).toBe(`CODEX_HOME="${root}/codex"\nMUXPILOT_DOCUMENTS_DIR="/documents"\nPATH="/node/bin:/usr/bin"\n`);
     await expect(supervisor.reconnect(runtime)).resolves.toBe(proxy);
@@ -112,6 +126,40 @@ describe("SystemdAppServerSupervisor", () => {
     await expect(supervisor.reconnect(runtime)).rejects.toThrow("App-server runtime is not connectable");
     await expect(supervisor.stop({ ...runtime, unit: "ssh.service" })).rejects.toThrow("Refusing non-muxpilot app-server unit");
     await expect(supervisor.stop({ ...runtime, socketPath: "/tmp/other.sock" })).rejects.toThrow("outside its owned runtime path");
+  });
+
+  it("fails before launching when the configured socket path exceeds the platform limit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-long-socket-"));
+    const run = vi.fn(async () => ({ stdout: "" }));
+    const socketRoot = join(root, "nested-runtime-segment".repeat(8));
+    const supervisor = new SystemdAppServerSupervisor(root, { run }, { socketRoot });
+
+    await expect(supervisor.start(spec(root))).rejects.toThrow(
+      /socket path is \d+ bytes; the maximum supported length is 107.*shorter XDG_RUNTIME_DIR/
+    );
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("accepts legacy data-directory sockets for pre-migration session records", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-legacy-"));
+    const socketRoot = join(tmpdir(), "muxpilot-short-runtime");
+    const legacyRuntime = {
+      kind: "systemd_service" as const,
+      unit: appServerServiceUnit(capabilityId),
+      socketPath: runtimePaths(root, capabilityId).socketPath,
+      state: "stopped" as const,
+      codexVersion: null
+    };
+    const supervisor = new SystemdAppServerSupervisor(root, {
+      run: vi.fn(async () => ({ stdout: "ActiveState=inactive\nSubState=dead\nMainPID=0\n" })),
+      socketReady: vi.fn(async () => false)
+    }, { socketRoot, legacySocketRoots: [root] });
+
+    await expect(supervisor.inspect(legacyRuntime)).resolves.toMatchObject({
+      runtime: legacyRuntime,
+      activeState: "inactive",
+      socketPresent: false
+    });
   });
 
   it("rejects invalid or duplicate MCP configuration before starting a service", async () => {

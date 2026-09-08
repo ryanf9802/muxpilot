@@ -30,6 +30,8 @@ Production defaults:
 
 The app-server runtime requires an available systemd user manager. muxpilot probes Codex protocol compatibility before enabling it and reports missing systemd or incompatible Codex versions without silently creating tmux sessions. Enable user lingering when needed with `sudo loginctl enable-linger "$USER"`, then restart muxpilot. tmux is optional and detected once at startup. Existing tmux sessions remain intact when it is absent, are shown as unavailable, and can be restored through app-server; install tmux and restart muxpilot to use the legacy runtime again.
 
+App-server Unix sockets live below `XDG_RUNTIME_DIR` so their paths remain within the platform limit even when muxpilot is installed in a deeply nested checkout. Durable environment metadata and protocol journals remain below `MUXPILOT_DATA_DIR`.
+
 You can close the terminal after startup. The supervisor keeps running while the Linux/WSL instance stays running, and it restarts the backend or web process if one crashes. If the WSL distro, Linux session, or host machine stops, start muxpilot again with `pnpm app start`.
 
 ## Operations

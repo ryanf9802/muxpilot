@@ -17,6 +17,7 @@ const ENVIRONMENT_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MCP_SERVER_NAME = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_START_TIMEOUT_MS = 30_000;
 const DEFAULT_SOCKET_POLL_MS = 50;
+const MAX_UNIX_SOCKET_PATH_BYTES = 107;
 const execFileAsync = promisify(execFile);
 
 interface CommandResult {
@@ -35,10 +36,14 @@ interface SystemdAppServerSupervisorOptions {
   startTimeoutMs?: number;
   socketPollMs?: number;
   executablePath?: string;
+  socketRoot?: string;
+  legacySocketRoots?: string[];
 }
 
 export class SystemdAppServerSupervisor implements RuntimeSupervisor {
   private readonly runtimeRoot: string;
+  private readonly socketRoot: string;
+  private readonly legacySocketRoots: string[];
   private readonly dependencies: SupervisorDependencies;
   private readonly startTimeoutMs: number;
   private readonly socketPollMs: number;
@@ -50,6 +55,8 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     options: SystemdAppServerSupervisorOptions = {}
   ) {
     this.runtimeRoot = resolve(runtimeRoot);
+    this.socketRoot = resolve(options.socketRoot ?? runtimeRoot);
+    this.legacySocketRoots = (options.legacySocketRoots ?? []).map((root) => resolve(root));
     this.dependencies = { ...defaultDependencies(), ...dependencies };
     this.startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.socketPollMs = options.socketPollMs ?? DEFAULT_SOCKET_POLL_MS;
@@ -58,9 +65,12 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
 
   async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef> {
     validateMcpServers(spec.mcpServers);
-    const paths = runtimePaths(this.runtimeRoot, spec.capabilityId);
+    const paths = runtimePaths(this.runtimeRoot, spec.capabilityId, this.socketRoot);
+    validateSocketPath(paths.socketPath);
     await preparePrivateDirectory(this.runtimeRoot);
     await preparePrivateDirectory(paths.directory);
+    await preparePrivateDirectory(this.socketRoot);
+    await preparePrivateDirectory(paths.socketDirectory);
     await writeEnvironmentFile(paths.environmentPath, {
       ...spec.environment,
       ...(this.executablePath ? { PATH: this.executablePath } : {}),
@@ -142,8 +152,9 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
   private requireOwnedRuntime(runtime: SystemdSessionRuntimeRef): void {
     const capabilityId = runtime.unit.match(APP_SERVER_UNIT)?.[1];
     if (!capabilityId) throw new Error(`Refusing non-muxpilot app-server unit: ${runtime.unit}`);
-    const expected = runtimePaths(this.runtimeRoot, capabilityId);
-    if (runtime.socketPath !== expected.socketPath) {
+    const ownedSocketPaths = [this.socketRoot, ...this.legacySocketRoots]
+      .map((socketRoot) => runtimePaths(this.runtimeRoot, capabilityId, socketRoot).socketPath);
+    if (!ownedSocketPaths.includes(runtime.socketPath)) {
       throw new Error(`Refusing app-server socket outside its owned runtime path: ${runtime.socketPath}`);
     }
   }
@@ -162,20 +173,33 @@ export function appServerServiceUnit(capabilityId: string): string {
   return `muxpilot-session-${capabilityId}.service`;
 }
 
-export function runtimePaths(runtimeRoot: string, capabilityId: string): {
+export function runtimePaths(runtimeRoot: string, capabilityId: string, socketRoot = runtimeRoot): {
   directory: string;
+  socketDirectory: string;
   socketPath: string;
   environmentPath: string;
   unit: string;
 } {
   requireCapabilityId(capabilityId);
   const directory = join(runtimeRoot, capabilityId);
+  const socketDirectory = join(socketRoot, capabilityId);
   return {
     directory,
-    socketPath: join(directory, "app-server.sock"),
+    socketDirectory,
+    socketPath: join(socketDirectory, "app-server.sock"),
     environmentPath: join(directory, "environment"),
     unit: appServerServiceUnit(capabilityId)
   };
+}
+
+function validateSocketPath(socketPath: string): void {
+  const byteLength = Buffer.byteLength(socketPath);
+  if (byteLength > MAX_UNIX_SOCKET_PATH_BYTES) {
+    throw new Error(
+      `App-server socket path is ${byteLength} bytes; the maximum supported length is ${MAX_UNIX_SOCKET_PATH_BYTES}. ` +
+      `Use a shorter XDG_RUNTIME_DIR: ${socketPath}`
+    );
+  }
 }
 
 function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtimePaths>): string[] {
