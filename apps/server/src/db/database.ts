@@ -122,6 +122,15 @@ interface SessionHistoryMatchRow {
   rank: number;
 }
 
+interface SessionHistoryNameRow {
+  session_id: string;
+  session_data_json: string;
+  git_workspace_data_json: string | null;
+  status: SessionStatus;
+  last_activity_at: string | null;
+  archived: number;
+}
+
 export interface MessagePage {
   messages: ChatMessage[];
   hasMoreBefore: boolean;
@@ -2172,10 +2181,27 @@ export class SyncAppDatabase {
       bySession.set(row.session_id, { row, prompts: [prompt] });
     }
 
-    return collapseSessionHistory(
-      [...bySession.values()].map(({ row, prompts }) => sessionHistoryResultFromMatchRow(row, prompts)),
-      limit
-    );
+    const promptMatches = [...bySession.values()].map(({ row, prompts }) => sessionHistoryResultFromMatchRow(row, prompts));
+    const nameRows = this.db
+      .prepare(
+        `SELECT managed_sessions.id AS session_id,
+                managed_sessions.data_json AS session_data_json,
+                git_workspaces.data_json AS git_workspace_data_json,
+                managed_sessions.status,
+                managed_sessions.last_activity_at,
+                managed_sessions.archived
+         FROM managed_sessions
+         LEFT JOIN git_workspaces ON git_workspaces.session_id = managed_sessions.id`
+      )
+      .all() as unknown as SessionHistoryNameRow[];
+    const nameMatches = nameRows
+      .filter((row) => {
+        const session = JSON.parse(row.session_data_json) as ManagedSession;
+        return Boolean(session.codexSessionId) && sessionNameMatchesQuery(session.name, query);
+      })
+      .map(sessionHistoryResultFromNameRow);
+
+    return collapseSessionHistory([...promptMatches, ...nameMatches], limit);
   }
 
   listRecentMessages(sessionId: string, limit: number): TranscriptPageResponse {
@@ -4039,6 +4065,21 @@ function sessionHistoryResultFromMatchRow(
   );
 }
 
+function sessionHistoryResultFromNameRow(row: SessionHistoryNameRow): SessionHistoryResult {
+  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const workspace = row.git_workspace_data_json ? (JSON.parse(row.git_workspace_data_json) as StoredGitWorkspace).summary : null;
+  return sessionHistoryResultFromSession(
+    {
+      ...session,
+      status: row.status,
+      lastActivityAt: row.last_activity_at ?? session.lastActivityAt,
+      archived: row.archived === 1
+    },
+    [],
+    workspace
+  );
+}
+
 function sessionHistoryResultFromSession(
   session: ManagedSession,
   matchedPrompts: SessionHistoryResult["matchedPrompts"],
@@ -4105,6 +4146,14 @@ function ftsPromptQuery(query: string): string {
     .filter(Boolean)
     .slice(0, 12) ?? [];
   return tokens.map((token) => `"${token}"*`).join(" AND ");
+}
+
+function sessionNameMatchesQuery(name: string, query: string): boolean {
+  const nameTokens = name.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  const queryTokens = query.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+  return queryTokens.length > 0 && queryTokens.every((queryToken) =>
+    nameTokens.some((nameToken) => nameToken.startsWith(queryToken))
+  );
 }
 
 function parseStoredJson<T>(value: string | null): T | null {

@@ -783,6 +783,31 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("searches restorable session history by canonical session name", async () => {
+    const db = await tempDb();
+    const named = {
+      ...testSession("session-history-named"),
+      name: "codex-app-server-runtime",
+      codexSessionId: "codex-named"
+    };
+    const promptOnly = {
+      ...testSession("session-history-prompt-only"),
+      name: "unrelated-session",
+      codexSessionId: "codex-prompt-only"
+    };
+    db.upsertSession(named, "2026-07-07T00:00:00.000Z");
+    db.upsertSession(promptOnly, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(named.id, 1, "user", "Unrelated prompt", "2026-07-07T00:00:01.000Z"));
+    db.appendMessage(testMessage(promptOnly.id, 1, "user", "Investigate app server behavior", "2026-07-07T00:00:02.000Z"));
+
+    const history = await db.listSessionHistory("app server", 10);
+
+    expect(history.map((result) => result.sessionId)).toEqual(expect.arrayContaining([named.id, promptOnly.id]));
+    expect(history.find((result) => result.sessionId === named.id)?.matchedPrompts).toEqual([]);
+    expect(history.find((result) => result.sessionId === promptOnly.id)?.matchedPrompts[0]?.text).toBe("Investigate app server behavior");
+    db.close();
+  });
+
   it("keeps the same Codex session distinct across managed worktrees", async () => {
     const db = await tempDb();
     const first = { ...testSession("history-workspace-first"), codexSessionId: "shared-codex", lastActivityAt: "2026-07-07T00:00:01.000Z" };

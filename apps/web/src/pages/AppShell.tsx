@@ -1331,7 +1331,7 @@ export function AppShell() {
                     value={sessionHistoryQuery}
                     onChange={(event) => setSessionHistoryQuery(event.target.value)}
                     onKeyDown={handleSessionHistoryKeyDown}
-                    placeholder="Search user prompts"
+                    placeholder="Search prompts or session names"
                     aria-controls="session-history-results"
                   />
                 </label>
