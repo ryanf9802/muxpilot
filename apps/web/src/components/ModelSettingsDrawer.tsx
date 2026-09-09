@@ -1,13 +1,15 @@
-import { ClipboardList, MessageSquare, Star } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactElement } from "react";
+import { ClipboardList, MessageSquare } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type {
   CodexModel,
   CodexModelCatalogResponse,
   CollaborationMode,
   ManagedSession,
+  SessionModelSelections,
   SessionModelSettings
 } from "@muxpilot/core";
 import { Modal } from "./Modal.js";
+import { Button, DialogActions } from "./Button.js";
 
 export function effectiveModelSettings(
   session: Pick<ManagedSession, "models">,
@@ -23,7 +25,11 @@ export function effectiveModelSettings(
 
 export function ModelSettingsDrawer({
   open,
-  session,
+  title,
+  description,
+  selections,
+  activeMode,
+  fastMode,
   catalog,
   loading,
   error,
@@ -33,67 +39,69 @@ export function ModelSettingsDrawer({
   onApply
 }: {
   open: boolean;
-  session: ManagedSession;
+  title: string;
+  description: string;
+  selections: SessionModelSelections;
+  activeMode: CollaborationMode | null;
+  fastMode?: boolean | null;
   catalog: CodexModelCatalogResponse | null;
   loading: boolean;
   error: string;
-  applying: boolean;
+  applying: CollaborationMode | null;
   onClose: () => void;
   onRetry: () => void;
-  onApply: (mode: CollaborationMode, model: string, reasoningEffort: string | null) => Promise<boolean>;
+  onApply: (mode: CollaborationMode, model: string, reasoningEffort: string | null) => Promise<void>;
 }) {
-  const mode = session.inputMode;
   const [draftModel, setDraftModel] = useState("");
   const [draftEffort, setDraftEffort] = useState<string | null>(null);
   const initialFocusRef = useRef<HTMLInputElement>(null);
   const defaults = catalog?.defaults ?? emptyDefaults;
-  const normal = effectiveModelSettings(session, defaults, "default");
-  const plan = effectiveModelSettings(session, defaults, "plan");
-  const current = mode === "plan" ? plan : normal;
+  const normal = effectiveModelSettings({ models: selections }, defaults, "default");
+  const plan = effectiveModelSettings({ models: selections }, defaults, "plan");
+  const initialMode = activeMode ?? "default";
+  const initial = initialMode === "plan" ? plan : normal;
   const selectedModel = catalog?.models.find((model) => model.model === draftModel) ?? null;
 
   useEffect(() => {
     if (!open || !catalog) return;
     const fallback = catalog.models.find((model) => model.isDefault) ?? catalog.models[0] ?? null;
-    const model = catalog.models.find((candidate) => candidate.model === current.model) ?? fallback;
+    const model = catalog.models.find((candidate) => candidate.model === initial.model) ?? fallback;
     setDraftModel(model?.model ?? "");
-    setDraftEffort(validEffort(model, current.reasoningEffort));
-  }, [catalog, current.model, current.reasoningEffort, mode, open]);
+    setDraftEffort(validEffort(model, initial.reasoningEffort));
+  }, [catalog, initial.model, initial.reasoningEffort, initialMode, open]);
 
-  const changed = draftModel !== current.model || draftEffort !== current.reasoningEffort;
+  const changedNormal = draftModel !== normal.model || draftEffort !== normal.reasoningEffort;
+  const changedPlan = draftModel !== plan.model || draftEffort !== plan.reasoningEffort;
   const valid = Boolean(selectedModel) && (
     selectedModel!.supportedReasoningEfforts.length === 0
       ? draftEffort === null
       : selectedModel!.supportedReasoningEfforts.some((option) => option.reasoningEffort === draftEffort)
   );
-  const fastUnavailable = session.fastMode === true && selectedModel !== null && !supportsFast(selectedModel);
+  const fastUnavailable = fastMode === true && selectedModel !== null && !supportsFast(selectedModel);
+  const activeSelectionChanged = activeMode === "plan" ? changedPlan : activeMode === "default" ? changedNormal : false;
   const badgeSelections = useMemo(() => ({ normal, plan }), [normal.model, normal.reasoningEffort, plan.model, plan.reasoningEffort]);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!valid || !changed || applying) return;
-    if (await onApply(mode, draftModel, draftEffort)) onClose();
+  async function apply(mode: CollaborationMode) {
+    if (!valid || applying) return;
+    await onApply(mode, draftModel, draftEffort);
   }
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      title={`Model settings · ${mode === "plan" ? "Plan" : "Normal"}`}
+      title={title}
       panelClassName="model-settings-drawer"
       backdropClassName="model-settings-backdrop"
       closeLabel="Close model settings"
       placement="end"
-      as="form"
-      onSubmit={submit}
       dismissible={!applying}
-      loading={loading || applying}
+      loading={loading || Boolean(applying)}
       initialFocusRef={initialFocusRef}
     >
       <div className="model-settings-intro">
-        <p>Choose the model and reasoning effort used by the next {mode === "plan" ? "Plan" : "Normal"} turn.</p>
+        <p>{description}</p>
         <div className="model-settings-legend" aria-label="Option badge legend">
-          <Badge icon={<Star />} label="Codex default" legend />
           <Badge icon={<MessageSquare />} label="Current Normal selection" legend />
           <Badge icon={<ClipboardList />} label="Current Plan selection" legend />
         </div>
@@ -103,7 +111,7 @@ export function ModelSettingsDrawer({
         {error ? (
           <div className="model-settings-state" role="alert">
             <p>{error}</p>
-            {!catalog ? <button type="button" onClick={onRetry}>Retry</button> : null}
+            <Button size="small" onClick={onRetry} disabled={Boolean(applying)}>Retry</Button>
           </div>
         ) : null}
         {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No Codex models are currently available.</p> : null}
@@ -119,10 +127,11 @@ export function ModelSettingsDrawer({
                     name="codex-model"
                     value={model.model}
                     checked={draftModel === model.model}
-                    disabled={applying}
+                    disabled={Boolean(applying)}
                     onChange={() => {
                       setDraftModel(model.model);
-                      setDraftEffort(validEffort(model, model.model === current.model ? current.reasoningEffort : null));
+                      const preferred = model.model === initial.model ? initial.reasoningEffort : null;
+                      setDraftEffort(validEffort(model, preferred));
                     }}
                   />
                   <span className="model-settings-option-copy">
@@ -131,7 +140,6 @@ export function ModelSettingsDrawer({
                     {model.description ? <small>{model.description}</small> : null}
                   </span>
                   <span className="model-settings-badges">
-                    {model.isDefault ? <Badge icon={<Star />} label="Codex default model" /> : null}
                     {badgeSelections.normal.model === model.model ? <Badge icon={<MessageSquare />} label="Current Normal model" /> : null}
                     {badgeSelections.plan.model === model.model ? <Badge icon={<ClipboardList />} label="Current Plan model" /> : null}
                   </span>
@@ -148,7 +156,7 @@ export function ModelSettingsDrawer({
                       name="codex-reasoning-effort"
                       value={option.reasoningEffort}
                       checked={draftEffort === option.reasoningEffort}
-                      disabled={applying}
+                      disabled={Boolean(applying)}
                       onChange={() => setDraftEffort(option.reasoningEffort)}
                     />
                     <span className="model-settings-option-copy">
@@ -156,9 +164,6 @@ export function ModelSettingsDrawer({
                       {option.description ? <small>{option.description}</small> : null}
                     </span>
                     <span className="model-settings-badges">
-                      {selectedModel.defaultReasoningEffort === option.reasoningEffort
-                        ? <Badge icon={<Star />} label="Codex default reasoning effort" />
-                        : null}
                       {badgeSelections.normal.model === selectedModel.model && badgeSelections.normal.reasoningEffort === option.reasoningEffort
                         ? <Badge icon={<MessageSquare />} label="Current Normal reasoning effort" />
                         : null}
@@ -170,16 +175,33 @@ export function ModelSettingsDrawer({
                 ))}
               </fieldset>
             ) : null}
-            {fastUnavailable ? <p className="model-settings-warning" role="note">Applying this model will turn off Fast mode.</p> : null}
+            {fastUnavailable && activeMode && activeSelectionChanged ? <p className="model-settings-warning" role="note">Applying this model to the active {activeMode === "plan" ? "Plan" : "Normal"} mode will turn off Fast mode.</p> : null}
           </>
         ) : null}
       </div>
-      <div className="model-settings-actions">
-        <button type="button" onClick={onClose} disabled={applying}>Cancel</button>
-        <button className="primary" type="submit" disabled={!valid || !changed || applying} aria-busy={applying}>
-          {applying ? "Applying" : "Apply"}
-        </button>
-      </div>
+      <DialogActions className="model-settings-actions">
+        <Button variant="ghost" onClick={onClose} disabled={Boolean(applying)}>Cancel</Button>
+        <Button
+          variant="primary"
+          icon={<MessageSquare size={16} />}
+          disabled={!valid || !changedNormal || Boolean(applying)}
+          busy={applying === "default"}
+          busyLabel="Applying Normal"
+          onClick={() => void apply("default")}
+        >
+          Apply Normal
+        </Button>
+        <Button
+          variant="primary"
+          icon={<ClipboardList size={16} />}
+          disabled={!valid || !changedPlan || Boolean(applying)}
+          busy={applying === "plan"}
+          busyLabel="Applying Plan"
+          onClick={() => void apply("plan")}
+        >
+          Apply Plan
+        </Button>
+      </DialogActions>
     </Modal>
   );
 }

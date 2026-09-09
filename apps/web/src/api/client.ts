@@ -7,6 +7,7 @@ import type {
   SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CodexModelCatalogResponse,
+  GlobalModelSettingsResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
   AccessResponse,
@@ -50,6 +51,7 @@ import type {
   TranscriptPageResponse,
   TranscriptSearchResponse,
   UpdateNotificationSettingRequest,
+  UpdateGlobalModelSettingsRequest,
   UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
@@ -182,6 +184,12 @@ export const api = {
     }),
   codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
   codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
+  globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
+  updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>
+    json<GlobalModelSettingsResponse>("/api/model-settings/defaults", {
+      method: "PATCH",
+      body: JSON.stringify(request)
+    }),
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
   sessionSnapshot: (id: string, limit = 80, signal?: AbortSignal) =>
     json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`, { signal }),

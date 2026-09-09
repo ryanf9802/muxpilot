@@ -118,6 +118,80 @@ button[data-busy="true"] {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warning) 34%, transparent);
 }
 
+.app-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.app-button-small {
+  min-height: 34px;
+  padding-inline: 11px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.app-button-primary {
+  color: var(--color-text-inverse);
+  background: var(--color-action);
+  border-color: var(--color-action);
+}
+
+.app-button-primary:hover:not(:disabled) {
+  color: var(--color-text-inverse);
+  background: var(--color-action-hover);
+  border-color: var(--color-action-hover);
+}
+
+.app-button-primary:active:not(:disabled) {
+  background: var(--color-action-active);
+  border-color: var(--color-action-active);
+}
+
+.app-button-secondary {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.app-button-ghost {
+  color: var(--color-text-muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+.app-button-ghost:hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border-color: var(--color-border);
+}
+
+.app-button-danger {
+  color: var(--color-text-inverse);
+  background: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.app-button-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-error) 82%, black);
+  border-color: color-mix(in srgb, var(--color-error) 82%, black);
+}
+
+.app-button-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.app-button-icon:empty { display: none; }
+
 select {
   cursor: pointer;
   transition:
@@ -881,7 +955,6 @@ select:focus-visible {
 }
 
 .primary-button:hover:not(:disabled),
-.dialog-actions .primary:hover:not(:disabled),
 .question-actions button:hover:not(:disabled),
 .send-button:hover:not(:disabled) {
   background: var(--color-action-hover);
@@ -889,7 +962,6 @@ select:focus-visible {
 }
 
 .primary-button:active:not(:disabled),
-.dialog-actions .primary:active:not(:disabled),
 .question-actions button:active:not(:disabled),
 .send-button:active:not(:disabled) {
   background: var(--color-action-active);
@@ -1333,7 +1405,8 @@ select:focus-visible {
 }
 
 .dashboard-new-session-button,
-.dashboard-transfer-button {
+.dashboard-transfer-button,
+.dashboard-model-defaults-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1348,14 +1421,17 @@ select:focus-visible {
   white-space: nowrap;
 }
 
-.dashboard-transfer-button {
+.dashboard-transfer-button,
+.dashboard-model-defaults-button {
   color: var(--color-text);
   background: var(--color-surface);
   border-color: var(--color-border);
 }
 
 .dashboard-transfer-button:hover,
-.dashboard-transfer-button:focus-visible {
+.dashboard-transfer-button:focus-visible,
+.dashboard-model-defaults-button:hover,
+.dashboard-model-defaults-button:focus-visible {
   border-color: color-mix(in srgb, var(--color-secondary) 52%, var(--color-border));
   background: color-mix(in srgb, var(--color-secondary) 8%, var(--color-surface));
 }
@@ -1366,7 +1442,8 @@ select:focus-visible {
 }
 
 .dashboard-new-session-button-label,
-.dashboard-transfer-button-label {
+.dashboard-transfer-button-label,
+.dashboard-model-defaults-button-label {
   display: inline;
 }
 
@@ -2748,19 +2825,7 @@ select:focus-visible {
   flex-wrap: wrap;
 }
 
-.dialog-actions button {
-  min-height: 38px;
-  padding: 0 12px;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-}
-
-.dialog-actions .primary {
-  color: var(--color-text-inverse);
-  background: var(--color-action);
-  border-color: var(--color-action);
-}
+.dialog-actions .app-button { min-width: 96px; }
 
 .card-head,
 .card-foot,
@@ -3224,8 +3289,7 @@ select:focus-visible {
   background: var(--color-surface);
 }
 
-.model-settings-actions button { min-width: 84px; }
-.model-settings-actions .primary { color: var(--color-text-inverse); background: var(--color-action); border-color: var(--color-action); }
+.model-settings-actions .app-button-primary { min-width: 132px; }
 
 .runtime-attach-button { flex: 0 0 auto; }
 
@@ -5967,6 +6031,13 @@ select:focus-visible {
   .model-settings-drawer > .dialog-head,
   .model-settings-intro { padding-inline: 15px; }
   .model-settings-content { padding-inline: 13px; }
+  .model-settings-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .model-settings-actions .app-button { width: 100%; min-width: 0; }
+  .model-settings-actions .app-button-primary { order: 1; }
+  .model-settings-actions .app-button-ghost { grid-column: 1 / -1; order: 2; }
   .btw-exchange-list { gap: 10px; padding: 14px 13px 18px; }
   .btw-composer-shell { padding-inline: 13px; }
   .btw-composer-heading > span { display: none; }
@@ -6051,13 +6122,15 @@ select:focus-visible {
   }
 
   .dashboard-new-session-button,
-  .dashboard-transfer-button {
+  .dashboard-transfer-button,
+  .dashboard-model-defaults-button {
     width: 44px;
     padding: 0;
   }
 
   .dashboard-new-session-button-label,
-  .dashboard-transfer-button-label {
+  .dashboard-transfer-button-label,
+  .dashboard-model-defaults-button-label {
     display: none;
   }
 

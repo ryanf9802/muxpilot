@@ -66,6 +66,11 @@ import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
+const modelSettingsSchema = z.object({
+  mode: collaborationModeSchema,
+  model: z.string().trim().min(1).max(200),
+  reasoningEffort: z.string().trim().min(1).max(100).nullable()
+});
 const restoreSessionRecoverySchema = z.object({
   incidentId: z.string().trim().min(1).max(200),
   sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
@@ -161,12 +166,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
-  z.object({
-    type: z.literal("setModelSettings"),
-    mode: collaborationModeSchema,
-    model: z.string().trim().min(1).max(200),
-    reasoningEffort: z.string().trim().min(1).max(100).nullable()
-  }),
+  modelSettingsSchema.extend({ type: z.literal("setModelSettings") }),
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
@@ -215,6 +215,20 @@ export function registerRoutes(
   app.get("/api/codex-models", { preHandler: access.requireAccess }, async () =>
     manager.codexModelCatalog()
   );
+
+  app.get("/api/model-settings/defaults", { preHandler: access.requireAccess }, async () => ({
+    settings: await manager.globalModelSettings()
+  }));
+
+  app.patch("/api/model-settings/defaults", { preHandler: access.requireAccess }, async (request, reply) => {
+    const body = modelSettingsSchema.parse(request.body);
+    try {
+      return { settings: await manager.updateGlobalModelSettings(body.mode, body.model, body.reasoningEffort) };
+    } catch (error) {
+      if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  });
 
   if (sessionDriverCompatibility) {
     app.get("/api/session-drivers/compatibility", { preHandler: access.requireAccess }, async (): Promise<SessionDriverCompatibilityResponse> =>

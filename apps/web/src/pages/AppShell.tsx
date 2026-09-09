@@ -40,6 +40,7 @@ import {
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { AppBrand } from "../components/AppBrand.js";
 import { Modal } from "../components/Modal.js";
+import { Button, DialogActions } from "../components/Button.js";
 import {
   attemptConnectionAutoReload,
   clearConnectionAutoReload,
@@ -1329,20 +1330,18 @@ export function AppShell() {
                     {createSessionError}
                   </p>
                 ) : null}
-                <div className="dialog-actions">
-                  <button type="button" onClick={closeCreateSession} disabled={createSessionBusy}>
-                    Cancel
-                  </button>
-                  <button
-                    className="primary"
+                <DialogActions>
+                  <Button variant="ghost" onClick={closeCreateSession} disabled={createSessionBusy}>Cancel</Button>
+                  <Button
+                    variant="primary"
                     type="submit"
                     disabled={createSessionBusy || createSessionNameInvalid || !runtimeDriverAvailable(createSessionDriver, appServerCompatibility, tmuxCompatibility) || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
-                    aria-busy={createSessionBusy}
-                    data-busy={createSessionBusy || undefined}
+                    busy={createSessionBusy}
+                    busyLabel="Creating"
                   >
-                    {createSessionBusy ? "Creating" : "Create"}
-                  </button>
-                </div>
+                    Create
+                  </Button>
+                </DialogActions>
               </>
             ) : (
               <div className="session-history-panel">
@@ -1466,12 +1465,12 @@ export function SessionRecoveryContent({
           </label>
         ))}
       </div>
-      <div className="dialog-actions">
-        <button type="button" onClick={onDismiss} disabled={busy}>Not now</button>
-        <button type="button" className="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} aria-busy={busy}>
-          {busy ? <><LoaderCircle className="spin" size={15} aria-hidden="true" /> Restoring</> : `Restore selected (${selectedIds.size})`}
-        </button>
-      </div>
+      <DialogActions>
+        <Button variant="ghost" onClick={onDismiss} disabled={busy}>Not now</Button>
+        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Restoring">
+          Restore selected ({selectedIds.size})
+        </Button>
+      </DialogActions>
     </>
   );
 }
@@ -1574,13 +1573,12 @@ function ForkSessionDialog({
       <RuntimeDriverField value={driverKind} compatibility={compatibility} tmuxCompatibility={tmuxCompatibility} busy={busy} onChange={onDriverChange} />
       {warning ? <p className="dialog-error" role="alert">{warning}</p> : null}
       {error ? <p className="dialog-error" role="alert">{error}</p> : null}
-      <div className="dialog-actions">
-        <button type="button" onClick={onClose} disabled={busy}>Cancel</button>
-        <button className="primary" type="submit" disabled={busy || invalid || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} aria-busy={busy} data-busy={busy || undefined}>
-          <GitFork size={16} aria-hidden="true" />
-          {busy ? "Forking" : "Fork and open"}
-        </button>
-      </div>
+      <DialogActions>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
+        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Forking">
+          Fork and open
+        </Button>
+      </DialogActions>
     </Modal>
   );
 }
@@ -2171,7 +2169,12 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
             {selectedWithActiveWork.length ? <p className="session-git-probe-note dialog-error">
               Unfinished task-worktree changes are not included. Only the committed target branch will be exported for {selectedWithActiveWork.map(sessionBaseName).join(", ")}.
             </p> : null}
-            <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary" disabled={busy || selected.size === 0} aria-busy={busy} data-busy={busy || undefined} onClick={() => void exportSelected()}>{busy ? "Exporting" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
+            <DialogActions>
+              <Button variant="ghost" onClick={() => void close()} disabled={busy}>Cancel</Button>
+              <Button variant="primary" icon={<Download size={16} />} disabled={busy || selected.size === 0} busy={busy} busyLabel="Exporting" onClick={() => void exportSelected()}>
+                Export {selected.size || ""} session{selected.size === 1 ? "" : "s"}
+              </Button>
+            </DialogActions>
           </div>
         ) : (
           <div className="session-transfer-panel">
@@ -2210,7 +2213,7 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
                 <span>{busy ? importFileName : "or click to browse"}</span>
                 {!busy && importFileName ? <small>Selected: {importFileName}</small> : null}
               </label>
-              <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button></div>
+              <DialogActions><Button variant="ghost" onClick={() => void close()} disabled={busy}>Cancel</Button></DialogActions>
             </> : null}
             {preview && !result ? <>
               <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
@@ -2254,12 +2257,17 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
                   </> : null}
                 </div>)}
               </div>
-              <div className="dialog-actions"><button type="button" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</button><button type="button" className="primary" disabled={busy || !mappingComplete || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} aria-busy={busy} data-busy={busy || undefined} onClick={() => void importSessions()}>{busy ? "Importing" : "Import and resume all"}</button></div>
+              <DialogActions>
+                <Button variant="ghost" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</Button>
+                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
+                  Import and resume all
+                </Button>
+              </DialogActions>
             </> : null}
             {result ? <><div className="session-transfer-results">
               {result.branches.map((item) => <div className="session-transfer-result" key={`${item.destinationCwd}:${item.branchName}`}><strong>{item.branchName}</strong><span>{item.status.replaceAll("_", " ")} · upstream {item.upstreamStatus.replaceAll("_", " ")}{item.warning ? ` · ${item.warning}` : ""}</span></div>)}
               {result.results.map((item) => <div className="session-transfer-result" key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
-            </div><div className="dialog-actions"><button type="button" className="primary" onClick={onClose}>Done</button></div></> : null}
+            </div><DialogActions><Button variant="primary" onClick={onClose}>Done</Button></DialogActions></> : null}
           </div>
         )}
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}

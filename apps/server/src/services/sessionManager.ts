@@ -673,6 +673,31 @@ export class SessionManager {
     };
   }
 
+  async globalModelSettings(): Promise<SessionModelSelections> {
+    const [stored, catalog] = await Promise.all([
+      this.db.getGlobalModelSettings(),
+      this.codexModelCatalog()
+    ]);
+    return effectiveModelSelections(stored, catalog.defaults);
+  }
+
+  async updateGlobalModelSettings(
+    mode: CollaborationMode,
+    requestedModel: string,
+    reasoningEffort: string | null
+  ): Promise<SessionModelSelections> {
+    const catalog = await this.codexModelCatalog();
+    const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
+    const updatedAt = nowIso();
+    const settings = await this.db.setGlobalModelSettings(mode, model.model, reasoningEffort, updatedAt);
+    await this.db.addAudit("local", "set_global_model_settings", "global", JSON.stringify({
+      mode,
+      model: model.model,
+      reasoningEffort
+    }), updatedAt);
+    return effectiveModelSelections(settings, catalog.defaults);
+  }
+
   stop(): void {
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     if (this.parserTimer) clearInterval(this.parserTimer);
@@ -2490,10 +2515,17 @@ export class SessionManager {
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
     if (driverKind === "codex_app_server") this.requireAppServerDriver();
+    const preferences = driverKind === "codex_app_server" && launchSettings === undefined
+      ? await this.defaultAppServerPreferences()
+      : undefined;
+    const resolvedLaunchSettings = launchSettings ?? (preferences ? {
+      ...preferences.models.default,
+      fastMode: preferences.fastMode
+    } : undefined);
     const documentScopeId = this.requireDocuments().newScopeId();
     const documentOptions = await this.withDocumentLaunchOptions({
       environment: this.managedEnvironment,
-      ...launchSettings
+      ...resolvedLaunchSettings
     }, documentScopeId);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     if (driverKind === "codex_app_server") {
@@ -2504,6 +2536,7 @@ export class SessionManager {
         sessionName,
         options: prepared.options,
         orchestrationCapabilityId: prepared.capabilityId,
+        preferences,
         documentScopeId
       });
       await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
@@ -2543,11 +2576,18 @@ export class SessionManager {
       targetBranch: request.workspace.targetBranch
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
+    const preferences = driverKind === "codex_app_server" && launchSettings === undefined
+      ? await this.defaultAppServerPreferences()
+      : undefined;
+    const resolvedLaunchSettings = launchSettings ?? (preferences ? {
+      ...preferences.models.default,
+      fastMode: preferences.fastMode
+    } : undefined);
     const documentOptions = await this.withDocumentLaunchOptions({
       ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
-      model: launchSettings?.model,
-      reasoningEffort: launchSettings?.reasoningEffort,
-      fastMode: launchSettings?.fastMode
+      model: resolvedLaunchSettings?.model,
+      reasoningEffort: resolvedLaunchSettings?.reasoningEffort,
+      fastMode: resolvedLaunchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     if (driverKind === "codex_app_server") {
@@ -2560,6 +2600,7 @@ export class SessionManager {
         orchestrationCapabilityId: prepared.capabilityId,
         gitWorkspace: workspace.summary,
         gitWorkspaceId: workspace.id,
+        preferences,
         documentScopeId: workspace.id
       });
       await this.db.addAudit("local", "create_git_session", session.id, workspace.id, nowIso());
@@ -4010,25 +4051,21 @@ export class SessionManager {
     const driver = this.appServerDriver(session);
     if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
     const catalog = await this.codexModelCatalog();
-    if (catalog.models.length === 0) throw new ModelSettingsError("Codex model options are temporarily unavailable", 503);
-    const model = catalog.models.find((candidate) => candidate.model === requestedModel || candidate.id === requestedModel);
-    if (!model) throw new ModelSettingsError("The selected Codex model is unavailable");
-    const efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
-    if ((reasoningEffort === null && efforts.length > 0) || (reasoningEffort !== null && !efforts.includes(reasoningEffort))) {
-      throw new ModelSettingsError("The selected reasoning effort is unavailable for this model");
-    }
+    const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
     const current = requireSession(await this.db.getSession(session.id));
-    if (current.runtime?.kind === "systemd_service" && current.runtime.state === "hibernated") {
-      throw new ModelSettingsError("Wake this session before changing its model");
+    const active = current.inputMode === mode;
+    if (active && current.runtime?.kind === "systemd_service" && current.runtime.state === "hibernated") {
+      throw new ModelSettingsError("Wake this session before changing its active model");
     }
-    if (current.inputMode !== mode) throw new ModelSettingsError("The active session mode changed; reopen the model selector");
-    const fastModeAvailable = codexFastModeAvailable(catalog.models, model.model) ?? false;
-    const disableFastMode = current.fastMode === true && !fastModeAvailable;
-    await driver.setPreferences(current, {
-      mode,
-      model: { model: model.model, reasoningEffort },
-      ...(disableFastMode ? { fastMode: false } : {})
-    });
+    const fastModeAvailable = active ? codexFastModeAvailable(catalog.models, model.model) ?? false : undefined;
+    const disableFastMode = active && current.fastMode === true && fastModeAvailable === false;
+    if (active) {
+      await driver.setPreferences(current, {
+        mode,
+        model: { model: model.model, reasoningEffort },
+        ...(disableFastMode ? { fastMode: false } : {})
+      });
+    }
     const updatedAt = nowIso();
     const updated = await this.db.setSessionModelSettings(
       session.id,
@@ -4044,8 +4081,23 @@ export class SessionManager {
       mode,
       model: model.model,
       reasoningEffort,
+      appliedToActiveMode: active,
       fastModeDisabled: disableFastMode
     }), updatedAt);
+  }
+
+  private async defaultAppServerPreferences(): Promise<Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">> {
+    const [stored, catalog] = await Promise.all([
+      this.db.getGlobalModelSettings(),
+      this.codexModelCatalog()
+    ]);
+    const models = effectiveModelSelections(stored, catalog.defaults);
+    return {
+      inputMode: "default",
+      models,
+      fastMode: null,
+      fastModeAvailable: codexFastModeAvailable(catalog.models, models.default.model)
+    };
   }
 
   private async liveSession(session: ManagedSession): Promise<ManagedSession> {
@@ -5344,6 +5396,33 @@ function emptySessionModels(): SessionModelSelections {
 
 function emptySessionModelSettings(): SessionModelSettings {
   return { model: null, reasoningEffort: null };
+}
+
+function effectiveModelSelections(
+  stored: SessionModelSelections,
+  defaults: SessionModelSelections
+): SessionModelSelections {
+  const selection = (mode: CollaborationMode): SessionModelSettings => stored[mode].model
+    ? stored[mode]
+    : defaults[mode];
+  return { default: selection("default"), plan: selection("plan") };
+}
+
+function requireCatalogModel(
+  catalog: CodexModelCatalogResponse,
+  requestedModel: string,
+  reasoningEffort: string | null
+): CodexModel {
+  if (catalog.models.length === 0) {
+    throw new ModelSettingsError("Codex model options are temporarily unavailable", 503);
+  }
+  const model = catalog.models.find((candidate) => candidate.model === requestedModel || candidate.id === requestedModel);
+  if (!model) throw new ModelSettingsError("The selected Codex model is unavailable");
+  const efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
+  if ((reasoningEffort === null && efforts.length > 0) || (reasoningEffort !== null && !efforts.includes(reasoningEffort))) {
+    throw new ModelSettingsError("The selected reasoning effort is unavailable for this model");
+  }
+  return model;
 }
 
 function activeSessionModel(models: SessionModelSelections, mode: CollaborationMode): string | null {

@@ -23,23 +23,25 @@ describe("ModelSettingsDrawer", () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const apply = vi.fn(async () => true);
+    const apply = vi.fn(async () => undefined);
     const close = vi.fn();
 
     await act(async () => {
       root.render(
         <ModelSettingsDrawer
           open
-          session={session({
-            models: {
-              default: { model: "gpt-default", reasoningEffort: "medium" },
-              plan: { model: "gpt-other", reasoningEffort: "high" }
-            }
-          })}
+          title="Session model settings"
+          description="Choose settings"
+          selections={{
+            default: { model: "gpt-default", reasoningEffort: "medium" },
+            plan: { model: "gpt-other", reasoningEffort: "high" }
+          }}
+          activeMode="default"
+          fastMode={false}
           catalog={catalog}
           loading={false}
           error=""
-          applying={false}
+          applying={null}
           onClose={close}
           onRetry={() => undefined}
           onApply={apply}
@@ -48,41 +50,53 @@ describe("ModelSettingsDrawer", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[aria-label="Codex default model"]')).not.toBeNull();
+    expect(container.textContent).not.toContain("Codex default");
     expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="Current Plan model"]')).not.toBeNull();
+    expect(button(container, "Apply Normal").disabled).toBe(true);
+    expect(button(container, "Apply Plan").disabled).toBe(false);
 
     const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
     await act(async () => { otherModel.click(); });
     const lowEffort = container.querySelector<HTMLInputElement>('input[name="codex-reasoning-effort"][value="low"]')!;
     await act(async () => { lowEffort.click(); });
     expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
+    expect(button(container, "Apply Normal").disabled).toBe(false);
+    expect(button(container, "Apply Plan").disabled).toBe(false);
 
     await act(async () => {
-      container.querySelector<HTMLFormElement>("form")!.requestSubmit();
+      button(container, "Apply Normal").click();
       await Promise.resolve();
     });
     expect(apply).toHaveBeenCalledWith("default", "gpt-other", "low");
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    await act(async () => {
+      button(container, "Apply Plan").click();
+      await Promise.resolve();
+    });
+    expect(apply).toHaveBeenCalledWith("plan", "gpt-other", "low");
     act(() => root.unmount());
   });
 
-  it("retains the draft and stays open when Apply fails", async () => {
+  it("retains the draft and stays open after applying", async () => {
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
-    const apply = vi.fn(async () => false);
+    const apply = vi.fn(async () => undefined);
     const close = vi.fn();
 
     await act(async () => {
       root.render(
         <ModelSettingsDrawer
           open
-          session={session()}
+          title="Session model settings"
+          description="Choose settings"
+          selections={session().models}
+          activeMode="default"
           catalog={catalog}
           loading={false}
           error=""
-          applying={false}
+          applying={null}
           onClose={close}
           onRetry={() => undefined}
           onApply={apply}
@@ -94,7 +108,7 @@ describe("ModelSettingsDrawer", () => {
     const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
     await act(async () => { otherModel.click(); });
     await act(async () => {
-      container.querySelector<HTMLFormElement>("form")!.requestSubmit();
+      button(container, "Apply Normal").click();
       await Promise.resolve();
     });
 
@@ -104,6 +118,10 @@ describe("ModelSettingsDrawer", () => {
     act(() => root.unmount());
   });
 });
+
+function button(container: HTMLElement, label: string): HTMLButtonElement {
+  return Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.trim() === label)!;
+}
 
 const catalog: CodexModelCatalogResponse = {
   models: [

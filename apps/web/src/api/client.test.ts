@@ -347,6 +347,24 @@ describe("api client request headers", () => {
     }));
   });
 
+  it("reads and updates global model defaults", async () => {
+    const fetchMock = mockJsonResponse({ settings: {} });
+
+    await api.globalModelSettings();
+    await api.updateGlobalModelSettings({
+      mode: "default",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "medium"
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/model-settings/defaults");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/model-settings/defaults");
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      method: "PATCH",
+      body: JSON.stringify({ mode: "default", model: "gpt-5.6-sol", reasoningEffort: "medium" })
+    }));
+  });
+
   it("searches and restores session history", async () => {
     const fetchMock = mockJsonResponse({ results: [] });
 

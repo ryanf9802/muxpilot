@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Skull, Zap } from "lucide-react";
+import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Settings2, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -14,13 +14,16 @@ import { useLocation, useNavigate, useOutletContext, useSearchParams } from "rea
 import type {
   CodexUsageLimit,
   CodexUsageSummaryResponse,
+  CodexModelCatalogResponse,
+  CollaborationMode,
   ManagedSession,
   NotificationRuleType,
   NotificationTriggeredPayload,
   OpenAIUsageDailyPoint,
   OpenAIUsageSummaryResponse,
   SessionEvent,
-  SessionDisplayStatus
+  SessionDisplayStatus,
+  SessionModelSelections
 } from "@muxpilot/core";
 import { SESSION_NAME_MAX_LENGTH, SESSION_NAME_MIN_LENGTH, isOperatorActionableAgentStatus, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, normalizeSessionNameInput } from "@muxpilot/core";
 import { api, notificationDeviceId } from "../api/client.js";
@@ -30,6 +33,8 @@ import { ContextMenu, ContextMenuItem, clampContextMenuPosition, submenuPosition
 import { NotificationRuleMenu } from "../components/NotificationRuleMenu.js";
 import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
+import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
+import { Button, DialogActions } from "../components/Button.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -79,6 +84,12 @@ export function Dashboard() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [activitySummaryToggleBusy, setActivitySummaryToggleBusy] = useState(false);
   const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
+  const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
+  const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<CodexModelCatalogResponse | null>(null);
+  const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
+  const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false);
+  const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | null>(null);
+  const [modelDefaultsError, setModelDefaultsError] = useState("");
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -342,6 +353,38 @@ export function Dashboard() {
     }
   }
 
+  async function loadModelDefaults() {
+    setModelDefaultsLoading(true);
+    setModelDefaultsError("");
+    try {
+      const [catalog, response] = await Promise.all([api.codexModels(), api.globalModelSettings()]);
+      setModelDefaultsCatalog(catalog);
+      setModelDefaults(response.settings);
+    } catch (error) {
+      setModelDefaultsError(error instanceof Error ? error.message : "Could not load model defaults.");
+    } finally {
+      setModelDefaultsLoading(false);
+    }
+  }
+
+  function openModelDefaults() {
+    setModelDefaultsOpen(true);
+    void loadModelDefaults();
+  }
+
+  async function applyModelDefault(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
+    setModelDefaultsApplying(mode);
+    setModelDefaultsError("");
+    try {
+      const response = await api.updateGlobalModelSettings({ mode, model, reasoningEffort });
+      setModelDefaults(response.settings);
+    } catch (error) {
+      setModelDefaultsError(error instanceof Error ? error.message : "Could not update model defaults.");
+    } finally {
+      setModelDefaultsApplying(null);
+    }
+  }
+
   async function toggleSessionNotification(sessionId: string, type: NotificationRuleType, enabled: boolean) {
     if (notificationToggleBusy) return;
     setNotificationToggleBusy(true);
@@ -381,10 +424,26 @@ export function Dashboard() {
         </label>
         <DashboardPrimaryActions
           showTransfer={accessMode === "local"}
+          onOpenModelDefaults={openModelDefaults}
           onOpenSessionTransfer={openSessionTransfer}
           onNewSession={() => openCreateSession()}
         />
       </div>
+
+      <ModelSettingsDrawer
+        open={modelDefaultsOpen}
+        title="Default model settings"
+        description="Choose the model and reasoning effort inherited by new sessions, then apply it to the Normal or Plan default."
+        selections={modelDefaults ?? modelDefaultsCatalog?.defaults ?? emptyModelSelections}
+        activeMode={null}
+        catalog={modelDefaultsCatalog}
+        loading={modelDefaultsLoading}
+        error={modelDefaultsError}
+        applying={modelDefaultsApplying}
+        onClose={() => setModelDefaultsOpen(false)}
+        onRetry={() => void loadModelDefaults()}
+        onApply={applyModelDefault}
+      />
 
       {actionError && !renameSession && !agentParentSession ? (
         <p className="dashboard-action-error" role="alert">
@@ -540,20 +599,18 @@ export function Dashboard() {
                 {actionError}
               </p>
             ) : null}
-            <div className="dialog-actions">
-              <button type="button" onClick={closeRename} disabled={Boolean(busyAction)}>
-                Cancel
-              </button>
-              <button
-                className="primary"
+            <DialogActions>
+              <Button variant="ghost" onClick={closeRename} disabled={Boolean(busyAction)}>Cancel</Button>
+              <Button
+                variant="primary"
                 type="submit"
                 disabled={Boolean(busyAction) || renameNameInvalid}
-                aria-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename"}
-                data-busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? true : undefined}
+                busy={busyAction?.sessionId === renameSession.id && busyAction.type === "rename"}
+                busyLabel="Renaming"
               >
-                {busyAction?.sessionId === renameSession.id && busyAction.type === "rename" ? "Renaming" : "Rename"}
-              </button>
-            </div>
+                Rename
+              </Button>
+            </DialogActions>
         </Modal>
       ) : null}
 
@@ -586,17 +643,18 @@ export function Dashboard() {
           </label>
           <p className="dialog-help">Agent-managed sessions remain fully visible under their selected parent.</p>
           {actionError ? <p className="dialog-error" role="alert">{actionError}</p> : null}
-          <div className="dialog-actions">
-            <button type="button" onClick={closeAgentParent} disabled={Boolean(busyAction)}>Cancel</button>
-            <button
-              className="primary"
+          <DialogActions>
+            <Button variant="ghost" onClick={closeAgentParent} disabled={Boolean(busyAction)}>Cancel</Button>
+            <Button
+              variant="primary"
               type="submit"
               disabled={Boolean(busyAction)}
-              aria-busy={busyAction?.sessionId === agentParentSession.id && busyAction.type === "agentParent"}
+              busy={busyAction?.sessionId === agentParentSession.id && busyAction.type === "agentParent"}
+              busyLabel="Saving"
             >
-              {busyAction?.sessionId === agentParentSession.id && busyAction.type === "agentParent" ? "Saving" : "Save"}
-            </button>
-          </div>
+              Save
+            </Button>
+          </DialogActions>
         </Modal>
       ) : null}
 
@@ -626,15 +684,21 @@ export function Dashboard() {
 
 export function DashboardPrimaryActions({
   showTransfer,
+  onOpenModelDefaults,
   onOpenSessionTransfer,
   onNewSession
 }: {
   showTransfer: boolean;
+  onOpenModelDefaults: () => void;
   onOpenSessionTransfer: () => void;
   onNewSession: () => void;
 }) {
   return (
     <div className="dashboard-primary-actions">
+      <button className="dashboard-model-defaults-button" type="button" onClick={onOpenModelDefaults} aria-label="Default model settings" title="Default model settings">
+        <Settings2 size={17} />
+        <span className="dashboard-model-defaults-button-label">Model defaults</span>
+      </button>
       {showTransfer ? (
         <button className="dashboard-transfer-button" type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
           <ArrowLeftRight size={17} />
@@ -648,6 +712,11 @@ export function DashboardPrimaryActions({
     </div>
   );
 }
+
+const emptyModelSelections: SessionModelSelections = {
+  default: { model: null, reasoningEffort: null },
+  plan: { model: null, reasoningEffort: null }
+};
 
 function UsageUnavailablePanel({ title }: { title: string }) {
   return (

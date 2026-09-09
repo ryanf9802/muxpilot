@@ -55,6 +55,7 @@ const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const SESSION_RUNTIME_BACKUP_SETTING = "session_runtime_backup_v2";
+const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
 export const SESSION_RUNTIME_BACKUP_SUFFIX = ".pre-runtime-v2.sqlite3";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 
@@ -744,6 +745,19 @@ export class AppDatabase {
 
   setActivitySummariesEnabled(enabled: boolean): Promise<boolean> {
     return this.call("setActivitySummariesEnabled", enabled) as Promise<boolean>;
+  }
+
+  getGlobalModelSettings(): Promise<SessionModelSelections> {
+    return this.call("getGlobalModelSettings") as Promise<SessionModelSelections>;
+  }
+
+  setGlobalModelSettings(
+    mode: CollaborationMode,
+    model: string,
+    reasoningEffort: string | null,
+    updatedAt: string
+  ): Promise<SessionModelSelections> {
+    return this.call("setGlobalModelSettings", mode, model, reasoningEffort, updatedAt) as Promise<SessionModelSelections>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -2678,6 +2692,21 @@ export class SyncAppDatabase {
   setActivitySummariesEnabled(enabled: boolean): boolean {
     this.setBooleanSetting(ACTIVITY_SUMMARIES_ENABLED_SETTING, enabled);
     return enabled;
+  }
+
+  getGlobalModelSettings(): SessionModelSelections {
+    return sessionModels(parseStoredJson<unknown>(this.getSetting(GLOBAL_MODEL_SETTINGS)));
+  }
+
+  setGlobalModelSettings(
+    mode: CollaborationMode,
+    model: string,
+    reasoningEffort: string | null,
+    updatedAt: string
+  ): SessionModelSelections {
+    const settings = withSessionModelSettings(this.getGlobalModelSettings(), mode, model, reasoningEffort);
+    this.setSetting(GLOBAL_MODEL_SETTINGS, JSON.stringify(settings), updatedAt);
+    return settings;
   }
 
   getUnrestrictedRemoteAccessEnabled(): boolean {

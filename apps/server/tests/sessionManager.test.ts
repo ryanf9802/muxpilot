@@ -2866,6 +2866,7 @@ describe("SessionManager transcript isolation", () => {
         effectiveServiceTier: async () => null
       }
     });
+    expect(await harness.manager.globalModelSettings()).toEqual(catalog.defaults);
     appDb = harness.db;
     const session: ManagedSession = {
       ...agentHierarchySession("app-server-routing"),
@@ -2943,12 +2944,25 @@ describe("SessionManager transcript isolation", () => {
       reasoningEffort: "high"
     })).rejects.toThrow("reasoning effort is unavailable");
     await harness.db.setSessionInputMode(session.id, "plan", "2026-09-01T12:00:02.000Z");
-    await expect(harness.manager.act(session.id, {
+    await harness.db.setSessionFastMode(session.id, true, "2026-09-01T12:00:02.500Z");
+    const preferenceCallCount = setPreferences.mock.calls.length;
+    await harness.manager.act(session.id, {
       type: "setModelSettings",
       mode: "default",
       model: "gpt-standard",
       reasoningEffort: "medium"
-    })).rejects.toThrow("active session mode changed");
+    });
+    expect(setPreferences).toHaveBeenCalledTimes(preferenceCallCount);
+    expect(await harness.db.getSession(session.id)).toMatchObject({
+      inputMode: "plan",
+      models: { default: { model: "gpt-standard", reasoningEffort: "medium" } },
+      fastMode: true,
+      fastModeAvailable: false
+    });
+
+    expect(await harness.manager.updateGlobalModelSettings("plan", "gpt-standard", "medium")).toMatchObject({
+      plan: { model: "gpt-standard", reasoningEffort: "medium" }
+    });
 
     const legacySession = { ...session, id: "legacy-model-settings", driverKind: "tmux" as const };
     await harness.db.upsertSession(legacySession, "2026-09-01T12:00:03.000Z");
@@ -5966,6 +5980,16 @@ describe("SessionManager transcript isolation", () => {
       runtime: { kind: "systemd_service", state: "connected" },
       resourceUnit: "muxpilot-session-0123456789abcdef01234567.service",
       tmux: { pid: 0, currentCommand: "codex app-server" }
+    });
+    await harness.db.setGlobalModelSettings("default", "gpt-global-normal", "medium", "2026-09-01T12:00:00.000Z");
+    await harness.db.setGlobalModelSettings("plan", "gpt-global-plan", "high", "2026-09-01T12:00:01.000Z");
+    const inherited = await harness.manager.createSessionInDirectory(repo, "app-global-defaults");
+    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({
+      options: expect.objectContaining({ model: "gpt-global-normal", reasoningEffort: "medium" })
+    }));
+    expect(inherited.models).toEqual({
+      default: { model: "gpt-global-normal", reasoningEffort: "medium" },
+      plan: { model: "gpt-global-plan", reasoningEffort: "high" }
     });
     await expect.poll(async () => (await harness.manager.getSession(created.id))?.initializing).toBe(false);
     await harness.manager.discoverNow();

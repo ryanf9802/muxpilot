@@ -1293,7 +1293,7 @@ export function SessionView() {
   const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResponse | null>(null);
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelSettingsError, setModelSettingsError] = useState("");
-  const [modelSettingsApplying, setModelSettingsApplying] = useState(false);
+  const [modelSettingsApplying, setModelSettingsApplying] = useState<CollaborationMode | null>(null);
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
@@ -1758,7 +1758,7 @@ export function SessionView() {
       setModelCatalog(null);
       setModelCatalogLoading(false);
       setModelSettingsError("");
-      setModelSettingsApplying(false);
+      setModelSettingsApplying(null);
       modelCatalogRequestSessionRef.current = null;
       setCopiedTmuxCommand(false);
       setGitPanelOpen(false);
@@ -2073,19 +2073,17 @@ export function SessionView() {
     void loadModelCatalog();
   }, [id, loadModelCatalog, modelCatalog, modelCatalogLoading, session?.driverKind]);
 
-  async function applyModelSettings(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<boolean> {
-    setModelSettingsApplying(true);
+  async function applyModelSettings(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
+    setModelSettingsApplying(mode);
     setModelSettingsError("");
     try {
       const response = await api.action(id, { type: "setModelSettings", mode, model, reasoningEffort });
       if (!response.session) throw new Error("The session is no longer available.");
       setSession(response.session);
-      return true;
     } catch (error) {
       setModelSettingsError(error instanceof Error ? error.message : String(error));
-      return false;
     } finally {
-      setModelSettingsApplying(false);
+      setModelSettingsApplying(null);
     }
   }
 
@@ -2928,7 +2926,11 @@ export function SessionView() {
       />
       <ModelSettingsDrawer
         open={modelSettingsOpen}
-        session={readySession}
+        title="Session model settings"
+        description="Choose a model and reasoning effort, then apply it explicitly to this session's Normal or Plan mode."
+        selections={readySession.models}
+        activeMode={readySession.inputMode}
+        fastMode={readySession.fastMode}
         catalog={modelCatalog}
         loading={modelCatalogLoading}
         error={modelSettingsError}

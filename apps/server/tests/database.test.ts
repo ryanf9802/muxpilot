@@ -1003,6 +1003,23 @@ describe("AppDatabase activity summaries", () => {
     db.close();
   });
 
+  it("persists global Normal and Plan model defaults", async () => {
+    const db = await tempDb();
+
+    expect(db.getGlobalModelSettings()).toEqual({
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    });
+    db.setGlobalModelSettings("default", "gpt-normal", "medium", "2026-07-07T00:00:01.000Z");
+    db.setGlobalModelSettings("plan", "gpt-plan", "high", "2026-07-07T00:00:02.000Z");
+
+    expect(db.getGlobalModelSettings()).toEqual({
+      default: { model: "gpt-normal", reasoningEffort: "medium" },
+      plan: { model: "gpt-plan", reasoningEffort: "high" }
+    });
+    db.close();
+  });
+
   it("pages recent and older transcript messages without loading the full chat", async () => {
     const db = await tempDb();
     const session = testSession("session-pages");

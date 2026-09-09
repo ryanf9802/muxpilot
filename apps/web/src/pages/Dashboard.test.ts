@@ -60,11 +60,13 @@ describe("DashboardPrimaryActions", () => {
   it("keeps transfer and new session directly accessible for local operators", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: true,
+      onOpenModelDefaults: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
 
     expect(html).toContain('aria-label="Import or export sessions"');
+    expect(html).toContain('aria-label="Default model settings"');
     expect(html).toContain("Transfer");
     expect(html).toContain('aria-label="New session"');
   });
@@ -72,11 +74,13 @@ describe("DashboardPrimaryActions", () => {
   it("omits transfer when local filesystem access is unavailable", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: false,
+      onOpenModelDefaults: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
 
     expect(html).not.toContain("Import or export sessions");
+    expect(html).toContain("Model defaults");
     expect(html).toContain("New session");
   });
 });

@@ -86,6 +86,16 @@ export interface CodexModelCatalogResponse {
   defaults: SessionModelSelections;
 }
 
+export interface GlobalModelSettingsResponse {
+  settings: SessionModelSelections;
+}
+
+export interface UpdateGlobalModelSettingsRequest {
+  mode: CollaborationMode;
+  model: string;
+  reasoningEffort: string | null;
+}
+
 export type MessageType =
   | "user"
   | "assistant"
