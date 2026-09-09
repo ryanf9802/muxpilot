@@ -3823,18 +3823,20 @@ export class SyncAppDatabase {
 
   private removeDuplicateAppServerQuestionMessages(): void {
     const rows = this.db.prepare(
-      `SELECT rollout.message_id, rollout.session_id
+      `SELECT DISTINCT rollout.message_id, rollout.session_id
        FROM codex_item_messages AS rollout
        JOIN messages AS rollout_message ON rollout_message.id = rollout.message_id
-       JOIN codex_item_messages AS app_server
-         ON app_server.session_id = rollout.session_id
-        AND app_server.thread_id = rollout.thread_id
-        AND app_server.turn_id = rollout.turn_id
-        AND app_server.item_id = json_extract(rollout_message.payload_json, '$.question.id')
+       JOIN messages AS app_server_message
+         ON app_server_message.session_id = rollout.session_id
+        AND app_server_message.type = 'question_request'
+        AND json_extract(app_server_message.payload_json, '$.source') = 'codex_app_server'
+        AND json_extract(app_server_message.payload_json, '$.method') = 'item/tool/requestUserInput'
+        AND json_extract(app_server_message.payload_json, '$.appServerIdentity.threadId') = rollout.thread_id
+        AND json_extract(app_server_message.payload_json, '$.appServerIdentity.turnId') = rollout.turn_id
+        AND json_extract(app_server_message.payload_json, '$.appServerIdentity.itemId') = json_extract(rollout_message.payload_json, '$.question.id')
        WHERE rollout_message.type = 'question_request'
          AND rollout.app_server_message_id IS NULL
-         AND rollout.rollout_message_id IS NOT NULL
-         AND app_server.app_server_message_id IS NOT NULL`
+         AND rollout.rollout_message_id IS NOT NULL`
     ).all() as unknown as Array<{ message_id: string; session_id: string }>;
     if (rows.length === 0) return;
     const removedBySession = new Map<string, number>();

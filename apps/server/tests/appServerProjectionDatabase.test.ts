@@ -223,15 +223,9 @@ describe("app-server projection persistence", () => {
         source: "codex_app_server",
         method: "item/tool/requestUserInput",
         question: { id: "0", requestId: 0, questions: [] },
-        codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "call-question" },
         appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "call-question" }
       })
     );
-    raw.prepare(
-      `INSERT INTO codex_item_messages
-       (session_id, thread_id, turn_id, item_id, message_id, app_server_message_id, rollout_message_id, app_server_observed_at, rollout_observed_at)
-       VALUES (?, 'thread-1', 'turn-1', 'call-question', ?, ?, NULL, ?, NULL)`
-    ).run(sessionId, "legacy-app-server-question", "legacy-app-server-question", "2026-09-01T00:00:01.001Z");
     raw.close();
 
     const reopened = new AppDatabase(path);

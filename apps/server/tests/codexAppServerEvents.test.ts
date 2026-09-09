@@ -213,7 +213,10 @@ describe("projectAppServerEvent", () => {
       status: "question",
       message: {
         type: "question_request",
-        payload: { question: { id: "9", requestId: 9, autoResolutionMs: 30_000 } }
+        payload: {
+          codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "question-1" },
+          question: { id: "9", requestId: 9, autoResolutionMs: 30_000 }
+        }
       }
     });
     expect(replay?.message?.id).toBe(first?.message?.id);

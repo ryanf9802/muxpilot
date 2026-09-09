@@ -108,6 +108,7 @@ function serverRequestProjection(
       text: "Codex needs your input",
       payload: {
         ...basePayload,
+        codexItemIdentity: eventIdentity,
         question: {
           id: String(requestId),
           requestId,
