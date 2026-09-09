@@ -4,6 +4,33 @@ import type { StoredGitWorkspace } from "../src/db/database.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("rejects a stale plan action when a newer plan is pending", async () => {
+    const session = managedSession();
+    const plan = {
+      id: "current-plan",
+      sessionId: session.id,
+      sequence: 2,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T00:00:02.000Z",
+      text: "<proposed_plan>\nCurrent\n</proposed_plan>",
+      payload: {}
+    } as const;
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => session),
+        latestPlanReadyMessage: vi.fn(async () => plan)
+      },
+      requireAppServerDriver: () => ({})
+    }) as SessionManager;
+
+    await expect(manager.act(session.id, {
+      type: "choosePlanAction",
+      action: "implement",
+      messageId: "stale-plan"
+    } as Parameters<SessionManager["act"]>[1])).rejects.toThrow("proposed plan changed");
+  });
+
   it("resumes an agent wait only when ready without queueing the wake", async () => {
     const session = managedSession();
     const sendMessage = vi.fn(async () => undefined);

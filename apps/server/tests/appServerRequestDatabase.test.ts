@@ -122,6 +122,46 @@ describe("app-server request persistence", () => {
     });
     await db.close();
   });
+
+  it("marks a request that closes without a response in transcript history", async () => {
+    const { db, sessionId } = await requestDb("closed-question");
+    await db.appendMessage({
+      id: "question-message",
+      sessionId,
+      sequence: 1,
+      type: "question_request",
+      role: "system",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "Codex needs your input",
+      payload: {
+        appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "question-item" },
+        question: { requestId: 0, questions: [] },
+        codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "question-item" }
+      }
+    });
+    await db.upsertAppServerRequest({
+      sessionId,
+      requestId: 0,
+      method: "item/tool/requestUserInput",
+      params: {},
+      threadId: "thread-1",
+      turnId: "turn-1",
+      receivedAt: "2026-09-01T00:00:01.000Z",
+      lastSeenAt: "2026-09-01T00:00:01.000Z"
+    });
+
+    expect(await db.resolveAppServerRequest(sessionId, 0, "2026-09-01T00:00:02.000Z")).toBe(true);
+    expect(await db.getMessage(sessionId, "question-message")).toMatchObject({
+      payload: {
+        interactionOutcome: {
+          kind: "question",
+          status: "closed",
+          submittedAt: "2026-09-01T00:00:02.000Z"
+        }
+      }
+    });
+    await db.close();
+  });
 });
 
 async function requestDb(suffix: string): Promise<{ db: AppDatabase; path: string; sessionId: string }> {

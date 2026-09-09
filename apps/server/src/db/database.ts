@@ -672,6 +672,10 @@ export class AppDatabase {
     return this.call("listMessages", sessionId, afterSequence) as Promise<ChatMessage[]>;
   }
 
+  getMessage(sessionId: string, messageId: string): Promise<ChatMessage | null> {
+    return this.call("getMessage", sessionId, messageId) as Promise<ChatMessage | null>;
+  }
+
   listPromptHistory(query: string, limit: number): Promise<PromptHistoryResult[]> {
     return this.call("listPromptHistory", query, limit) as Promise<PromptHistoryResult[]>;
   }
@@ -2069,8 +2073,10 @@ export class SyncAppDatabase {
          ORDER BY sequence DESC`
       )
       .all(sessionId, sessionId) as unknown as MessageRow[];
-    const row = rows.find((candidate) => hasCompleteProposedPlan(candidate.text));
-    return row ? hydrateMessage(row) : null;
+    const message = rows
+      .map(hydrateMessage)
+      .find((candidate) => hasCompleteProposedPlan(candidate.text) && !candidate.payload.interactionOutcome);
+    return message ?? null;
   }
 
   updateMessageText(message: ChatMessage, text: string): ChatMessage | null {
@@ -2139,6 +2145,12 @@ export class SyncAppDatabase {
       .all(sessionId, afterSequence) as unknown as MessageRow[];
 
     return rows.map(hydrateMessage);
+  }
+
+  getMessage(sessionId: string, messageId: string): ChatMessage | null {
+    const row = this.db.prepare("SELECT * FROM messages WHERE session_id = ? AND id = ?")
+      .get(sessionId, messageId) as MessageRow | undefined;
+    return row ? hydrateMessage(row) : null;
   }
 
   listPromptHistory(query: string, limit: number): PromptHistoryResult[] {
@@ -3131,21 +3143,50 @@ export class SyncAppDatabase {
   }
 
   resolveAppServerRequest(sessionId: string, requestId: string | number, resolvedAt: string): boolean {
+    const pending = this.db.prepare(
+      "SELECT * FROM app_server_requests WHERE session_id = ? AND request_id_json = ? AND state = 'pending'"
+    ).get(sessionId, appServerRequestIdJson(requestId)) as AppServerRequestRow | undefined;
     const result = this.db.prepare(
       `UPDATE app_server_requests
        SET state = 'resolved', resolved_at = ?
        WHERE session_id = ? AND request_id_json = ? AND state != 'resolved'`
     ).run(resolvedAt, sessionId, appServerRequestIdJson(requestId));
+    if (result.changes === 1 && pending) this.recordClosedInteraction(hydrateAppServerRequest(pending), resolvedAt);
     return result.changes === 1;
   }
 
   resolveAppServerTurnRequests(sessionId: string, threadId: string, turnId: string, resolvedAt: string): number {
+    const pending = this.db.prepare(
+      `SELECT * FROM app_server_requests
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND state = 'pending'`
+    ).all(sessionId, threadId, turnId) as unknown as AppServerRequestRow[];
     const result = this.db.prepare(
       `UPDATE app_server_requests
        SET state = 'resolved', resolved_at = ?
        WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND state != 'resolved'`
     ).run(resolvedAt, sessionId, threadId, turnId);
+    for (const request of pending) this.recordClosedInteraction(hydrateAppServerRequest(request), resolvedAt);
     return Number(result.changes);
+  }
+
+  private recordClosedInteraction(request: PersistedAppServerRequest, resolvedAt: string): void {
+    const rows = this.db.prepare(
+      `SELECT * FROM messages
+       WHERE session_id = ? AND type IN ('approval_request', 'question_request')`
+    ).all(request.sessionId) as unknown as MessageRow[];
+    for (const row of rows) {
+      const message = hydrateMessage(row);
+      const identity = recordValue(message.payload.appServerIdentity);
+      const detail = recordValue(message.payload.approval) ?? recordValue(message.payload.question);
+      if (identity?.threadId !== request.threadId || identity?.turnId !== request.turnId || detail?.requestId !== request.requestId) continue;
+      if (message.payload.interactionOutcome) return;
+      const kind = message.type === "approval_request" ? "approval" : "question";
+      this.updateMessagePayload(message, {
+        ...message.payload,
+        interactionOutcome: { kind, status: "closed", submittedAt: resolvedAt }
+      });
+      return;
+    }
   }
 
   applyAppServerProjection(projection: AppServerProjectionInput): AppServerProjectionResult {
@@ -3818,6 +3859,7 @@ export class SyncAppDatabase {
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
     this.removeDuplicateAppServerPlanMessages();
+    this.backfillInteractionOutcomes();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
   }
@@ -4043,6 +4085,51 @@ export class SyncAppDatabase {
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  private backfillInteractionOutcomes(): void {
+    const plans = this.db.prepare(
+      `SELECT * FROM messages
+       WHERE role = 'assistant' AND type = 'assistant'
+       ORDER BY session_id, sequence`
+    ).all() as unknown as MessageRow[];
+    for (const row of plans) {
+      const message = hydrateMessage(row);
+      if (canonicalProposedPlan(message) === null || message.payload.interactionOutcome) continue;
+      const nextUser = this.db.prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND role = 'user' AND sequence > ?
+         ORDER BY sequence LIMIT 1`
+      ).get(row.session_id, row.sequence) as MessageRow | undefined;
+      if (!nextUser) continue;
+      const decision = historicalPlanDecision(nextUser.text);
+      if (!decision) continue;
+      this.updateMessagePayload(message, {
+        ...message.payload,
+        interactionOutcome: { kind: "plan", status: "answered", decision, submittedAt: nextUser.timestamp }
+      });
+    }
+
+    const requests = this.db.prepare(
+      "SELECT * FROM app_server_requests WHERE state IN ('responded', 'resolved') ORDER BY received_at"
+    ).all() as unknown as AppServerRequestRow[];
+    for (const row of requests) {
+      const request = hydrateAppServerRequest(row);
+      const messages = this.db.prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND type IN ('approval_request', 'question_request')`
+      ).all(request.sessionId) as unknown as MessageRow[];
+      for (const messageRow of messages) {
+        const message = hydrateMessage(messageRow);
+        if (message.payload.interactionOutcome) continue;
+        const identity = recordValue(message.payload.appServerIdentity);
+        const detail = recordValue(message.payload.approval) ?? recordValue(message.payload.question);
+        if (identity?.threadId !== request.threadId || identity?.turnId !== request.turnId || detail?.requestId !== request.requestId) continue;
+        const outcome = historicalRequestOutcome(message.type, request);
+        this.updateMessagePayload(message, { ...message.payload, interactionOutcome: outcome });
+        break;
+      }
     }
   }
 
@@ -4558,6 +4645,39 @@ function parseBtwDocumentOperation(value: string | null): BtwExchange["documentO
 
 function stringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function historicalPlanDecision(text: string): "implement" | "clear_context_implement" | null {
+  if (text.trim() === "Implement the plan.") return "implement";
+  if (text.startsWith("A previous agent produced the plan below to accomplish the user's task.")) {
+    return "clear_context_implement";
+  }
+  return null;
+}
+
+function historicalRequestOutcome(messageType: ChatMessage["type"], request: PersistedAppServerRequest): Record<string, unknown> {
+  const submittedAt = request.respondedAt ?? request.resolvedAt ?? request.lastSeenAt;
+  if (!request.response) {
+    return { kind: messageType === "approval_request" ? "approval" : "question", status: "closed", submittedAt };
+  }
+  const response = recordValue(request.response) ?? {};
+  if (messageType === "question_request") {
+    const answers = recordValue(response.answers);
+    return answers
+      ? { kind: "question", status: "answered", answers, submittedAt }
+      : { kind: "question", status: "closed", submittedAt };
+  }
+  const rawDecision = response.decision;
+  let decision: string | null = null;
+  if (rawDecision === "accept") decision = "approve_once";
+  else if (rawDecision === "acceptForSession") decision = "approve_for_session";
+  else if (rawDecision === "decline") decision = "deny";
+  else if (recordValue(rawDecision)?.acceptWithExecpolicyAmendment) decision = "approve_for_prefix";
+  else if (response.scope === "session") decision = "approve_for_session";
+  else if (response.scope === "turn") decision = Object.keys(recordValue(response.permissions) ?? {}).length > 0 ? "approve_once" : "deny";
+  return decision
+    ? { kind: "approval", status: "answered", decision, submittedAt }
+    : { kind: "approval", status: "closed", submittedAt };
 }
 
 function queuedInputStatus(value: unknown): QueuedInput["status"] {

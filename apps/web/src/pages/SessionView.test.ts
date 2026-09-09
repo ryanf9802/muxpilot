@@ -2931,12 +2931,32 @@ describe("pendingProposedPlanMessage", () => {
     expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), plan], null)).toBeNull();
   });
 
-  it("suppresses an answered plan until a newer plan appears", () => {
-    const oldPlan = message("session-a", 2, proposedPlanText("First"), "assistant", "assistant");
+  it("uses the durable outcome to suppress an answered plan until a newer plan appears", () => {
+    const oldPlan = message("session-a", 2, proposedPlanText("First"), "assistant", "assistant", {
+      interactionOutcome: {
+        kind: "plan",
+        status: "answered",
+        decision: "implement",
+        submittedAt: "2026-07-07T00:00:03.000Z"
+      }
+    });
     const newPlan = message("session-a", 3, proposedPlanText("Second"), "assistant", "assistant");
 
-    expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), oldPlan], oldPlan.id)).toBeNull();
-    expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), oldPlan, newPlan], oldPlan.id)).toBe(newPlan);
+    expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), oldPlan])).toBeNull();
+    expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), oldPlan, newPlan])).toBe(newPlan);
+  });
+
+  it("does not treat closed or failed plan history as pending", () => {
+    for (const status of ["closed", "failed"] as const) {
+      const plan = message("session-a", 2, proposedPlanText("First"), "assistant", "assistant", {
+        interactionOutcome: {
+          kind: "plan",
+          status,
+          submittedAt: "2026-07-07T00:00:03.000Z"
+        }
+      });
+      expect(pendingProposedPlanMessage([message("session-a", 1, "prompt"), plan])).toBeNull();
+    }
   });
 });
 
@@ -2948,10 +2968,58 @@ describe("planActionText", () => {
   });
 
   it("builds typed plan action requests instead of composer text", () => {
-    expect(planActionRequest("stay_in_plan")).toEqual({
+    expect(planActionRequest("stay_in_plan", "plan-message-1")).toEqual({
       type: "choosePlanAction",
-      action: "stay_in_plan"
+      action: "stay_in_plan",
+      messageId: "plan-message-1"
     });
+  });
+
+  it("renders an answered plan compactly with its decision", () => {
+    const plan = message("session-a", 2, proposedPlanText("Do it."), "assistant", "assistant", {
+      interactionOutcome: {
+        kind: "plan",
+        status: "answered",
+        decision: "clear_context_implement",
+        submittedAt: "2026-07-07T00:00:03.000Z"
+      }
+    });
+    const html = renderToStaticMarkup(createElement(MessageBubble, {
+      message: plan,
+      planOutcome: plan.payload.interactionOutcome as never
+    }));
+
+    expect(html).toContain("Proposed plan");
+    expect(html).toContain("Yes, clear context and implement");
+    expect(html).toContain("<details");
+  });
+
+  it("renders completed question answers as expandable transcript history", () => {
+    const question = message("session-a", 2, "Codex needs your input", "system", "question_request", {
+      question: {
+        id: "question-1",
+        requestId: 0,
+        sessionId: "session-a",
+        messageId: "session-a-2",
+        questions: [{ id: "scope", header: "Scope", question: "How broad?", options: [] }],
+        autoResolutionMs: null,
+        createdAt: "2026-07-07T00:00:02.000Z",
+        expiresAt: null,
+        countdownStartedAt: null,
+        countdownExpiresAt: null
+      },
+      interactionOutcome: {
+        kind: "question",
+        status: "answered",
+        answers: { scope: { answers: ["Focused"] } },
+        submittedAt: "2026-07-07T00:00:03.000Z"
+      }
+    });
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: question }));
+
+    expect(html).toContain("Question");
+    expect(html).toContain("Answered");
+    expect(html).toContain("Focused");
   });
 
   it("applies the returned plan-action session immediately when the request is current", () => {

@@ -6,6 +6,19 @@ import { serializeSessionWaitEvent } from "./sessionWaitEvent.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
+  it("keeps approvals and questions outside collapsed activity ranges", () => {
+    const items = buildTranscriptItems([
+      message(1, "prompt"),
+      message(2, "Approval required", "system", "approval_request"),
+      message(3, "Question requested", "system", "question_request"),
+      message(4, "tool_result", "tool", "tool_output")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "message", "message", "range"]);
+    expect(items[1]).toMatchObject({ message: { type: "approval_request" } });
+    expect(items[2]).toMatchObject({ message: { type: "question_request" } });
+  });
+
   it("keeps every assistant message visible while collapsing intervening activity", () => {
     const items = buildTranscriptItems([
       message(1, "first answer", "assistant", "assistant"),

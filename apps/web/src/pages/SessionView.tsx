@@ -151,6 +151,15 @@ const SKILL_REFRESH_STALE_MS = 10_000;
 export type ScrollBehavior = "bottom" | "top" | "preserve" | "none" | "idle";
 export type ScrollUpdateReason = "initial" | "explicit_bottom" | "send" | "live" | "older_page" | "manual_newer";
 export type PlanAction = PlanActionChoice;
+
+interface TranscriptInteractionOutcome {
+  kind: "plan" | "approval" | "question";
+  status: "answered" | "failed" | "closed";
+  submittedAt: string;
+  decision?: PlanActionChoice | ApprovalDecision;
+  answers?: QuestionAnswerRequest["answers"];
+  error?: string;
+}
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
 export interface SessionDocumentReference { scopeId: string; name: string; path: string }
@@ -1267,7 +1276,6 @@ export function SessionView() {
   const [questionBusy, setQuestionBusy] = useState(false);
   const [questionError, setQuestionError] = useState("");
   const [queuedInputs, setQueuedInputs] = useState<QueuedInput[]>([]);
-  const [suppressedPlanMessageId, setSuppressedPlanMessageId] = useState<string | null>(null);
   const [planActionBusy, setPlanActionBusy] = useState<PlanAction | null>(null);
   const [planActionError, setPlanActionError] = useState("");
   const [submitBusy, setSubmitBusy] = useState(false);
@@ -1385,7 +1393,7 @@ export function SessionView() {
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
   const firstSequence = useMemo(() => transcriptItems[0]?.firstSequence ?? 0, [transcriptItems]);
   lastSequenceRef.current = lastSequence;
-  const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages, suppressedPlanMessageId), [loadedMessages, suppressedPlanMessageId]);
+  const pendingPlan = useMemo(() => pendingProposedPlanMessage(loadedMessages), [loadedMessages]);
   const childAttention = useMemo(
     () => session ? childSessionAttentionItems(session, [session, ...shellSessions.filter((candidate) => candidate.id !== session.id)]) : [],
     [session, shellSessions]
@@ -1417,6 +1425,11 @@ export function SessionView() {
     question &&
       (transcriptItems.some((item) => transcriptItemContainsMessageId(item, question.messageId)) ||
         Object.values(expandedRangeItems).some((items) => items.some((item) => transcriptItemContainsMessageId(item, question.messageId))))
+  );
+  const approvalRenderedInline = Boolean(
+    approval &&
+      (transcriptItems.some((item) => transcriptItemContainsMessageId(item, approval.messageId)) ||
+        Object.values(expandedRangeItems).some((items) => items.some((item) => transcriptItemContainsMessageId(item, approval.messageId))))
   );
   const bottomContentKey = [
     id,
@@ -1705,6 +1718,18 @@ export function SessionView() {
               />
             ) : null
           }
+          planOutcome={interactionOutcome(item.message)}
+          approvalAction={
+            approval?.messageId === item.message.id ? (
+              <ApprovalBanner
+                approval={approval}
+                busy={approvalBusy}
+                disabled={session?.initializing === true}
+                error={approvalError}
+                onDecision={resolveApproval}
+              />
+            ) : null
+          }
           questionAction={
             question?.messageId === item.message.id ? (
               <QuestionBanner
@@ -1753,7 +1778,6 @@ export function SessionView() {
       setQuestionBusy(false);
       setQuestionError("");
       setQueuedInputs([]);
-      setSuppressedPlanMessageId(null);
       setPlanActionBusy(null);
       setPlanActionError("");
       setSubmitBusy(false);
@@ -2736,12 +2760,13 @@ export function SessionView() {
   }
 
   async function resolveApproval(decision: ApprovalDecision) {
+    if (!approval) return;
     const targetId = id;
     const token = requestTokenRef.current;
     setApprovalBusy(decision);
     setApprovalError("");
     try {
-      await api.resolveApproval(targetId, { decision });
+      await api.resolveApproval(targetId, { decision, messageId: approval.messageId } as Parameters<typeof api.resolveApproval>[1]);
       if (!isCurrentRequest(targetId, token)) return;
       setApproval(null);
       await Promise.all([loadSession(targetId, token), loadApproval(targetId, token)]);
@@ -2754,13 +2779,14 @@ export function SessionView() {
   }
 
   async function answerQuestion(request: QuestionAnswerRequest) {
+    if (!question) return;
     const targetId = id;
     const token = requestTokenRef.current;
     const answeredQuestion = question;
     setQuestionBusy(true);
     setQuestionError("");
     try {
-      await api.answerQuestion(targetId, request);
+      await api.answerQuestion(targetId, { ...request, messageId: question.messageId } as Parameters<typeof api.answerQuestion>[1]);
       if (answeredQuestion) clearQuestionAnswerDraft(answeredQuestion);
       if (!isCurrentRequest(targetId, token)) return;
       setQuestion(null);
@@ -2780,9 +2806,8 @@ export function SessionView() {
     setPlanActionBusy(action);
     setPlanActionError("");
     try {
-      const response = await api.action(targetId, planActionRequest(action));
+      const response = await api.action(targetId, planActionRequest(action, pendingPlan.id));
       if (!applyPlanActionResponse(response, targetId, token, isCurrentRequest, setSession, syncSessionStoplight)) return;
-      setSuppressedPlanMessageId(pendingPlan.id);
     } catch (error) {
       if (!isCurrentRequest(targetId, token)) return;
       setPlanActionError(error instanceof Error ? error.message : String(error));
@@ -3195,7 +3220,7 @@ export function SessionView() {
         {childAttention.length > 0 ? (
           <ChildSessionAttentionTray items={childAttention} onOpen={(sessionId) => navigate(`/sessions/${sessionId}`)} />
         ) : null}
-        {approval ? (
+        {approval && !approvalRenderedInline ? (
           <ApprovalBanner
             approval={approval}
             busy={approvalBusy}
@@ -5096,8 +5121,8 @@ export function planActionText(action: PlanAction): string {
   return PLAN_ACTION_LABELS[action];
 }
 
-export function planActionRequest(action: PlanAction): SessionAction {
-  return { type: "choosePlanAction", action };
+export function planActionRequest(action: PlanAction, messageId = "pending-plan"): SessionAction {
+  return { type: "choosePlanAction", action, messageId } as SessionAction;
 }
 
 export function applyPlanActionResponse(
@@ -5145,14 +5170,14 @@ export function buildQuestionAnswerRequest(
   return { answers };
 }
 
-export function pendingProposedPlanMessage(messages: ChatMessage[], suppressedMessageId: string | null): ChatMessage | null {
+export function pendingProposedPlanMessage(messages: ChatMessage[], _legacySuppressedMessageId: string | null = null): ChatMessage | null {
   const visibleMessages = displayMessages(messages);
   for (let index = visibleMessages.length - 1; index >= 0; index -= 1) {
     const message = visibleMessages[index];
     if (!message) continue;
     if (message.role === "user") return null;
     if (isRegularAssistantMessage(message) && hasCompleteProposedPlan(displayText(message) ?? "")) {
-      return message.id === suppressedMessageId ? null : message;
+      return interactionOutcome(message) ? null : message;
     }
   }
   return null;
@@ -5286,6 +5311,8 @@ export function MessageBubble({
   itemId,
   pending = false,
   planAction = null,
+  planOutcome = null,
+  approvalAction = null,
   questionAction = null,
   onOpenDocument,
   onOpenMenu
@@ -5294,6 +5321,8 @@ export function MessageBubble({
   itemId?: string;
   pending?: boolean;
   planAction?: ReactNode;
+  planOutcome?: TranscriptInteractionOutcome | null;
+  approvalAction?: ReactNode;
   questionAction?: ReactNode;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
@@ -5314,8 +5343,12 @@ export function MessageBubble({
         </span>
         <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
       </div>
-      <MessageContent message={message} planAction={planAction} onOpenDocument={onOpenDocument} />
+      <MessageContent message={message} planAction={planAction} planOutcome={planOutcome} onOpenDocument={onOpenDocument} />
+      {approvalAction}
       {questionAction}
+      {!approvalAction && !questionAction && message.type !== "assistant" ? (
+        <ResolvedInteractionCard message={message} outcome={interactionOutcome(message)} />
+      ) : null}
     </article>
   );
 }
@@ -5505,10 +5538,12 @@ function delegatedSessionId(message: ChatMessage): string | null {
 function MessageContent({
   message,
   planAction = null,
+  planOutcome = null,
   onOpenDocument
 }: {
   message: ChatMessage;
   planAction?: ReactNode;
+  planOutcome?: TranscriptInteractionOutcome | null;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
 }) {
   const components = fileAwareMarkdownComponentsValue;
@@ -5533,7 +5568,13 @@ function MessageContent({
         <div className="rendered assistant-content">
           {segments.map((segment, index) => {
             if (segment.type === "plan") {
-              return <ProposedPlanBlock key={index} text={segment.text} components={components} action={index === lastPlanSegmentIndex ? planAction : null} />;
+              return <ProposedPlanBlock
+                key={index}
+                text={segment.text}
+                components={components}
+                action={index === lastPlanSegmentIndex ? planAction : null}
+                outcome={index === lastPlanSegmentIndex ? planOutcome : null}
+              />;
             }
             return <MarkdownBlock key={index} text={segment.text} components={components} />;
           })}
@@ -5756,7 +5797,30 @@ export function MarkdownBlock({ text, components = markdownComponents }: { text:
   );
 }
 
-function ProposedPlanBlock({ text, components = markdownComponents, action = null }: { text: string; components?: Components; action?: ReactNode }) {
+function ProposedPlanBlock({
+  text,
+  components = markdownComponents,
+  action = null,
+  outcome = null
+}: {
+  text: string;
+  components?: Components;
+  action?: ReactNode;
+  outcome?: TranscriptInteractionOutcome | null;
+}) {
+  if (outcome) {
+    return (
+      <details className="proposed-plan interaction-history">
+        <summary>
+          <span>Proposed plan</span>
+          <strong>{interactionOutcomeLabel(outcome)}</strong>
+        </summary>
+        <div className="markdown proposed-plan-body">
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{text}</ReactMarkdown>
+        </div>
+      </details>
+    );
+  }
   return (
     <section className="proposed-plan">
       <div className="proposed-plan-head">Proposed plan</div>
@@ -5767,6 +5831,69 @@ function ProposedPlanBlock({ text, components = markdownComponents, action = nul
       </div>
       {action}
     </section>
+  );
+}
+
+export function interactionOutcome(message: ChatMessage): TranscriptInteractionOutcome | null {
+  const value = message.payload.interactionOutcome;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const outcome = value as Partial<TranscriptInteractionOutcome>;
+  if (
+    (outcome.kind !== "plan" && outcome.kind !== "approval" && outcome.kind !== "question") ||
+    (outcome.status !== "answered" && outcome.status !== "failed" && outcome.status !== "closed") ||
+    typeof outcome.submittedAt !== "string"
+  ) return null;
+  return outcome as TranscriptInteractionOutcome;
+}
+
+function interactionOutcomeLabel(outcome: TranscriptInteractionOutcome): string {
+  if (outcome.status === "failed") return "Submission failed";
+  if (outcome.status === "closed") return "Closed without a response";
+  if (outcome.kind === "plan") return PLAN_ACTION_LABELS[outcome.decision as PlanAction] ?? "Answered";
+  if (outcome.kind === "approval") {
+    const labels: Partial<Record<ApprovalDecision, string>> = {
+      approve_once: "Approved once",
+      approve_for_session: "Approved for session",
+      approve_always: "Always approved",
+      approve_for_prefix: "Approved for prefix",
+      deny: "Denied"
+    };
+    return labels[outcome.decision as ApprovalDecision] ?? "Answered";
+  }
+  return "Answered";
+}
+
+function ResolvedInteractionCard({ message, outcome }: { message: ChatMessage; outcome: TranscriptInteractionOutcome | null }) {
+  if (!outcome) return null;
+  const request = message.payload.question as QuestionRequest | undefined;
+  const approval = message.payload.approval as ApprovalRequest | undefined;
+  return (
+    <details className="interaction-history">
+      <summary>
+        <span>{outcome.kind === "question" ? "Question" : "Approval"}</span>
+        <strong>{interactionOutcomeLabel(outcome)}</strong>
+      </summary>
+      {outcome.kind === "question" && request && outcome.answers ? (
+        <dl className="interaction-history-answers">
+          {request.questions.map((prompt) => (
+            <div key={prompt.id}>
+              <dt>{prompt.header || "Question"}</dt>
+              <dd>
+                <span>{prompt.question}</span>
+                <strong>{outcome.answers?.[prompt.id]?.answers.join(", ") ?? "No recorded answer"}</strong>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : outcome.kind === "approval" && approval ? (
+        <dl className="interaction-history-answers">
+          <div><dt>Request</dt><dd>{approval.command ?? approval.toolName ?? approval.title}</dd></div>
+          {approval.reason ? <div><dt>Reason</dt><dd>{approval.reason}</dd></div> : null}
+          {approval.cwd ? <div><dt>Working directory</dt><dd>{approval.cwd}</dd></div> : null}
+          {approval.prefixRule?.length ? <div><dt>Approved prefix</dt><dd>{approval.prefixRule.join(" ")}</dd></div> : null}
+        </dl>
+      ) : <p>{message.text}</p>}
+    </details>
   );
 }
 
@@ -6189,7 +6316,7 @@ function isStackableMessage(message: ChatMessage): boolean {
 }
 
 function isStandaloneActionMessage(message: ChatMessage): boolean {
-  return message.type === "question_request";
+  return message.type === "question_request" || message.type === "approval_request";
 }
 
 function transcriptItemContainsMessageId(item: CoreTranscriptItem, messageId: string): boolean {

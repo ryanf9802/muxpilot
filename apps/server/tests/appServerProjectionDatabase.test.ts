@@ -209,6 +209,93 @@ describe("app-server projection persistence", () => {
     await db.close();
   });
 
+  it("reconciles native and rollout plan ids by turn and normalized content", async () => {
+    const { db, sessionId } = await projectionDb();
+    const planText = "<proposed_plan>\n# Build it\n\nProceed.\n</proposed_plan>";
+    await db.applyAppServerProjection({
+      ...projectionInput(sessionId),
+      itemId: "turn-1-plan",
+      message: {
+        ...projectionInput(sessionId).message,
+        id: "native-plan",
+        text: planText,
+        payload: {
+          source: "codex_app_server",
+          codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "turn-1-plan" },
+          appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "turn-1-plan" }
+        }
+      }
+    });
+
+    expect(await db.appendMessage({
+      id: "rollout-plan",
+      sessionId,
+      sequence: 2,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T00:00:02.004Z",
+      text: `${planText}\n\n<oai-mem-citation>ignored</oai-mem-citation>`,
+      payload: {
+        type: "response_item",
+        codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "rollout-message-id" }
+      }
+    })).toBe(false);
+    expect(await db.listMessages(sessionId)).toMatchObject([{ id: "native-plan", text: planText }]);
+    await db.close();
+  });
+
+  it("repairs persisted duplicate plans and backfills an unambiguous implementation decision", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    const planText = "<proposed_plan>\n# Existing plan\n</proposed_plan>";
+    await db.appendMessage({
+      id: "existing-native-plan",
+      sessionId,
+      sequence: 1,
+      type: "assistant",
+      role: "assistant",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: planText,
+      payload: {
+        source: "codex_app_server",
+        codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "turn-1-plan" }
+      }
+    });
+    await db.close();
+
+    const raw = new DatabaseSync(path);
+    raw.prepare(
+      `INSERT INTO messages (id, session_id, sequence, type, role, timestamp, text, payload_json)
+       VALUES (?, ?, 2, 'assistant', 'assistant', ?, ?, ?)`
+    ).run(
+      "existing-rollout-plan",
+      sessionId,
+      "2026-09-01T00:00:01.004Z",
+      planText,
+      JSON.stringify({ codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "rollout-plan-message" } })
+    );
+    raw.prepare(
+      `INSERT INTO codex_item_messages
+        (session_id, thread_id, turn_id, item_id, message_id, rollout_message_id, rollout_observed_at)
+       VALUES (?, 'thread-1', 'turn-1', 'rollout-plan-message', 'existing-rollout-plan', 'existing-rollout-plan', ?)`
+    ).run(sessionId, "2026-09-01T00:00:01.004Z");
+    raw.prepare(
+      `INSERT INTO messages (id, session_id, sequence, type, role, timestamp, text, payload_json)
+       VALUES ('implementation-input', ?, 3, 'user', 'user', ?, 'Implement the plan.', '{}')`
+    ).run(sessionId, "2026-09-01T00:00:02.000Z");
+    raw.close();
+
+    const reopened = new AppDatabase(path);
+    expect(await reopened.listMessages(sessionId)).toMatchObject([
+      {
+        id: "existing-native-plan",
+        payload: { interactionOutcome: { kind: "plan", status: "answered", decision: "implement" } }
+      },
+      { id: "implementation-input" }
+    ]);
+    expect(await reopened.latestPlanReadyMessage(sessionId)).toBeNull();
+    await reopened.close();
+  });
+
   it("upgrades a rollout question by its wire call id instead of creating a second prompt", async () => {
     const { db, path, sessionId } = await projectionDb();
     expect(await db.appendMessage({

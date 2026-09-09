@@ -397,7 +397,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   timestamp: string;
   text: string;
-  payload: Record<string, unknown>;
+  payload: Record<string, unknown> & { interactionOutcome?: TranscriptInteractionOutcome };
 }
 
 export type ApprovalKind = "command" | "tool" | "patch" | "permissions";
@@ -434,6 +434,7 @@ export interface ApprovalRequest {
 
 export interface ResolveApprovalRequest {
   decision: ApprovalDecision;
+  messageId?: string;
 }
 
 export interface ApprovalResponse {
@@ -472,6 +473,7 @@ export interface QuestionAnswer {
 
 export interface QuestionAnswerRequest {
   answers: Record<string, QuestionAnswer>;
+  messageId?: string;
 }
 
 export interface QuestionResponse {
@@ -894,6 +896,15 @@ export interface SessionDirectoriesResponse {
 
 export type PlanActionChoice = "implement" | "clear_context_implement" | "stay_in_plan";
 
+export interface TranscriptInteractionOutcome {
+  kind: "plan" | "approval" | "question";
+  status: "answered" | "failed" | "closed";
+  submittedAt: string;
+  decision?: PlanActionChoice | ApprovalDecision;
+  answers?: Record<string, QuestionAnswer>;
+  error?: string;
+}
+
 export type SessionAction =
   | { type: "interrupt" }
   | { type: "archiveTranscript" }
@@ -901,7 +912,7 @@ export type SessionAction =
   | { type: "setModelSettings"; mode: CollaborationMode; model: string; reasoningEffort: string | null }
   | { type: "setFastMode"; enabled: boolean }
   | { type: "setAgentParent"; parentSessionId: string | null }
-  | { type: "choosePlanAction"; action: PlanActionChoice }
+  | { type: "choosePlanAction"; action: PlanActionChoice; messageId: string }
   | { type: "extendAgentBudget"; additionalTokens: number; reason: string }
   | { type: "retryInputDelivery" }
   | { type: "dismissInputDeliveryFailure" }

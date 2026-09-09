@@ -66,6 +66,15 @@ interface ActivitySummaryScheduler {
   stop(): void;
 }
 
+interface TranscriptInteractionOutcome {
+  kind: "plan" | "approval" | "question";
+  status: "answered" | "failed" | "closed";
+  submittedAt: string;
+  decision?: PlanActionChoice | ApprovalDecision;
+  answers?: QuestionAnswerRequest["answers"];
+  error?: string;
+}
+
 interface CodexMetadataLookup {
   listModels(): Promise<CodexModel[]>;
   catalog(): Promise<CodexModelCatalogResponse>;
@@ -1895,6 +1904,8 @@ export class SessionManager {
     const session = requireSession(await this.db.getSession(sessionId));
     const approval = await this.getPendingApproval(sessionId);
     if (!approval) throw new ApprovalResolutionError("No pending approval for this session");
+    const expectedMessageId = (request as ResolveApprovalRequest & { messageId?: string }).messageId;
+    if (expectedMessageId && expectedMessageId !== approval.messageId) throw new ApprovalResolutionError("The approval request changed before this decision was submitted");
     if (!approval.options.some((option) => option.decision === request.decision)) throw new ApprovalResolutionError("This choice is not available for the pending approval");
     if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
     const workspace = await this.db.getGitWorkspaceBySession(sessionId);
@@ -1905,6 +1916,9 @@ export class SessionManager {
       throw new ApprovalResolutionError("Could not submit the approval to Codex app-server: " + (error instanceof Error ? error.message : String(error)));
     }
     const now = nowIso();
+    await this.recordInteractionOutcome(approval.messageId, sessionId, {
+      kind: "approval", status: "answered", decision: request.decision, submittedAt: now
+    });
     if (request.decision === "approve_for_prefix" && approval.prefixRule?.length && workspace) {
       await this.db.addRepositoryApprovalRule(workspace.commonGitDir, normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace), now);
     }
@@ -1918,6 +1932,8 @@ export class SessionManager {
     const session = requireSession(await this.db.getSession(sessionId));
     const question = await this.getPendingQuestion(sessionId);
     if (!question) throw new QuestionResolutionError("No pending question for this session");
+    const expectedMessageId = (request as QuestionAnswerRequest & { messageId?: string }).messageId;
+    if (expectedMessageId && expectedMessageId !== question.messageId) throw new QuestionResolutionError("The question changed before this answer was submitted");
     const normalized = normalizeQuestionAnswer(question, request);
     try {
       await this.requireAppServerDriver().answerQuestion(session, question.requestId ?? question.id, normalized);
@@ -1927,6 +1943,9 @@ export class SessionManager {
     }
     this.answeredQuestionMessageIds.add(question.messageId);
     const now = nowIso();
+    await this.recordInteractionOutcome(question.messageId, sessionId, {
+      kind: "question", status: "answered", answers: normalized.answers, submittedAt: now
+    });
     await this.db.setSessionStatus(sessionId, "waiting", now);
     await this.db.addAudit("local", "question:answer", sessionId, "ok", now);
     this.publish("status.changed", sessionId, { status: "waiting" });
@@ -2331,6 +2350,9 @@ export class SessionManager {
       await driver.choosePlanAction(session, action, { plan: null, clientMessageId: null });
       this.answeredPlanMessageIds.add(planMessage.id);
       const now = nowIso();
+      await this.recordInteractionOutcome(planMessage.id, session.id, {
+        kind: "plan", status: "answered", decision: action, submittedAt: now
+      });
       await this.db.setSessionInputMode(session.id, "plan", now);
       await this.db.setSessionStatus(session.id, "idle", now);
       this.pendingPlanActionStatuses.delete(session.id);
@@ -2383,6 +2405,9 @@ export class SessionManager {
         failureReason: null
       });
       this.answeredPlanMessageIds.add(planMessage.id);
+      await this.recordInteractionOutcome(planMessage.id, session.id, {
+        kind: "plan", status: "answered", decision: action, submittedAt: result.receipt.acceptedAt
+      });
       this.pendingPlanActionStatuses.set(session.id, { status: "working", expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
       await this.db.addAudit("local", `plan_action:${action}`, session.id, JSON.stringify({
         clientMessageId: result.receipt.clientMessageId,
@@ -2393,6 +2418,13 @@ export class SessionManager {
       this.publish("status.changed", session.id, { status: "working" });
       this.publish("session.updated", session.id, await this.db.getSession(session.id));
     } catch (error) {
+      await this.recordInteractionOutcome(planMessage.id, session.id, {
+        kind: "plan",
+        status: "failed",
+        decision: action,
+        submittedAt: nowIso(),
+        error: error instanceof Error ? error.message : String(error)
+      });
       message = await this.updateInputDelivery(message, {
         state: "failed",
         deliveryPhase: "failed",
@@ -2670,6 +2702,10 @@ export class SessionManager {
     if (action.type === "choosePlanAction") {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
+      const selectedPlanMessageId = (action as SessionAction & { messageId?: string }).messageId;
+      if (!selectedPlanMessageId || latestPlanMessage.id !== selectedPlanMessageId) {
+        throw new InputModeSwitchError("The proposed plan changed before this action was submitted");
+      }
       let plan: string | null = null;
       if (action.action !== "stay_in_plan") {
         plan = extractLastCompleteProposedPlan(latestPlanMessage.text);
@@ -2714,6 +2750,21 @@ export class SessionManager {
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
     return updatedSession;
+  }
+
+  async getPendingPlanMessage(sessionId: string): Promise<ChatMessage | null> {
+    return this.db.latestPlanReadyMessage(sessionId);
+  }
+
+  private async recordInteractionOutcome(
+    messageId: string,
+    sessionId: string,
+    outcome: TranscriptInteractionOutcome
+  ): Promise<void> {
+    const message = await this.db.getMessage(sessionId, messageId);
+    if (!message) return;
+    const updated = await this.db.updateMessagePayload(message, { ...message.payload, interactionOutcome: outcome });
+    if (updated) this.publish("message.appended", sessionId, updated);
   }
 
   private async failInputDelivery(message: ChatMessage, reason: InputDeliveryFailureCode): Promise<ChatMessage> {
@@ -2779,6 +2830,19 @@ export class SessionManager {
         failureReason: null
       });
       const updatedAt = nowIso();
+      const failedPlan = isPlanActionInput(message.text) ? (await this.db.listMessages(session.id)).reverse().find((candidate) => {
+        const outcome = candidate.payload.interactionOutcome as Partial<TranscriptInteractionOutcome> | undefined;
+        return outcome?.kind === "plan" && outcome.status === "failed";
+      }) : undefined;
+      const failedPlanOutcome = failedPlan?.payload.interactionOutcome as Partial<TranscriptInteractionOutcome> | undefined;
+      if (failedPlan && failedPlanOutcome?.decision) {
+        await this.recordInteractionOutcome(failedPlan.id, session.id, {
+          kind: "plan",
+          status: "answered",
+          decision: failedPlanOutcome.decision,
+          submittedAt: receipt.acceptedAt
+        });
+      }
       const status = activeInputStatus(mode);
       await this.db.setSessionStatus(session.id, status, updatedAt);
       await this.db.addAudit("local", "input_delivery_reconciled", session.id, JSON.stringify({
@@ -3479,6 +3543,7 @@ function activeQuestionMessage(
   answeredQuestionMessageIds: Set<string>
 ): ChatMessage | null {
   if (!latestQuestionMessage) return null;
+  if (latestQuestionMessage.payload.interactionOutcome) return null;
   if (answeredQuestionMessageIds.has(latestQuestionMessage.id)) return null;
   if (latestQuestionAnswerMessage && latestQuestionAnswerMessage.sequence > latestQuestionMessage.sequence) return null;
   if (latestUserMessage && latestUserMessage.sequence > latestQuestionMessage.sequence) return null;

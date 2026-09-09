@@ -112,9 +112,11 @@ const DEFAULT_TRANSCRIPT_SEARCH_LIMIT = 100;
 const MAX_TRANSCRIPT_SEARCH_LIMIT = 500;
 const DASHBOARD_PREVIEW_MAX_LENGTH = 512;
 const approvalSchema = z.object({
-  decision: z.enum(["approve_once", "approve_for_session", "approve_always", "approve_for_prefix", "deny"])
+  decision: z.enum(["approve_once", "approve_for_session", "approve_always", "approve_for_prefix", "deny"]),
+  messageId: z.string().min(1)
 });
 const questionAnswerSchema = z.object({
+  messageId: z.string().min(1),
   answers: z.record(
     z.object({
       answers: z.array(z.string().min(1).max(20_000)).min(1)
@@ -166,7 +168,11 @@ const actionSchema = z.discriminatedUnion("type", [
   modelSettingsSchema.extend({ type: z.literal("setModelSettings") }),
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
-  z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
+  z.object({
+    type: z.literal("choosePlanAction"),
+    action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]),
+    messageId: z.string().min(1)
+  }),
   z.object({
     type: z.literal("extendAgentBudget"),
     additionalTokens: z.number().int().min(1).max(2_000_000),

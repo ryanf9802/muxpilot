@@ -158,13 +158,22 @@ export class SessionOrchestrationBroker {
         const answers = recordValue(args.answers);
         if (!answers) throw new Error("answers is required");
         await this.manager.requireAgentControl(actorId, target);
-        await this.manager.answerQuestion(target, { answers: answers as QuestionAnswerRequest["answers"] });
+        const question = await this.manager.getPendingQuestion(target);
+        if (!question) throw new Error("No pending question for this session");
+        await this.manager.answerQuestion(target, {
+          answers: answers as QuestionAnswerRequest["answers"],
+          messageId: question.messageId
+        } as QuestionAnswerRequest);
         return { ok: true, sessionId: target };
       }
       case "choose_plan_action": {
         const target = requiredString(args.sessionId, "sessionId");
         await this.manager.requireAgentControl(actorId, target);
-        await this.manager.act(target, { type: "choosePlanAction", action: planAction(args.action) });
+        const plan = await this.manager.getPendingPlanMessage(target);
+        if (!plan) throw new Error("No pending proposed plan for this session");
+        await this.manager.act(target, {
+          type: "choosePlanAction", action: planAction(args.action), messageId: plan.id
+        } as Parameters<SessionManager["act"]>[1]);
         return { ok: true, sessionId: target };
       }
       case "interrupt_session": {

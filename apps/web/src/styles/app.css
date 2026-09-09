@@ -5189,6 +5189,61 @@ select:focus-visible {
   padding: 12px;
 }
 
+.interaction-history {
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-surface-raised) 82%, transparent);
+  overflow: hidden;
+}
+
+.interaction-history > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.interaction-history > summary::-webkit-details-marker {
+  display: none;
+}
+
+.interaction-history > summary strong {
+  color: var(--color-success);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.interaction-history > p,
+.interaction-history-answers {
+  margin: 0;
+  padding: 0 12px 12px;
+}
+
+.interaction-history-answers > div {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+}
+
+.interaction-history-answers dt {
+  color: var(--color-text-muted);
+  font-size: 0.76rem;
+}
+
+.interaction-history-answers dd {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.interaction-history-answers dd strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .message-stack {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

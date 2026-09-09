@@ -303,7 +303,7 @@ function isStackableMessage(message: ChatMessage): boolean {
 }
 
 function isStandaloneActionMessage(message: ChatMessage): boolean {
-  return message.type === "question_request";
+  return message.type === "question_request" || message.type === "approval_request";
 }
 
 function stackLabel(messages: ChatMessage[]): string {
