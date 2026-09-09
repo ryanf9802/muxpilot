@@ -51,16 +51,14 @@ describe("ModelSettingsDrawer", () => {
     });
 
     expect(container.textContent).not.toContain("Codex default");
-    expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="Current Plan model"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Normal combination"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Plan combination"]')).not.toBeNull();
     expect(button(container, "Apply Normal").disabled).toBe(true);
     expect(button(container, "Apply Plan").disabled).toBe(false);
 
-    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
-    await act(async () => { otherModel.click(); });
-    const lowEffort = container.querySelector<HTMLInputElement>('input[name="codex-reasoning-effort"][value="low"]')!;
+    const lowEffort = container.querySelector<HTMLInputElement>('input[name="codex-model-combination"][value="gpt-other:low"]')!;
     await act(async () => { lowEffort.click(); });
-    expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Normal combination"]')).not.toBeNull();
     expect(button(container, "Apply Normal").disabled).toBe(false);
     expect(button(container, "Apply Plan").disabled).toBe(false);
 
@@ -105,7 +103,7 @@ describe("ModelSettingsDrawer", () => {
       await Promise.resolve();
     });
 
-    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
+    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model-combination"][value="gpt-other:low"]')!;
     await act(async () => { otherModel.click(); });
     await act(async () => {
       button(container, "Apply Normal").click();
@@ -115,6 +113,79 @@ describe("ModelSettingsDrawer", () => {
     expect(apply).toHaveBeenCalledWith("default", "gpt-other", "low");
     expect(close).not.toHaveBeenCalled();
     expect(otherModel.checked).toBe(true);
+    act(() => root.unmount());
+  });
+
+  it("shows independent quality and usage estimates and preserves unknown combinations", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const comparisonCatalog: CodexModelCatalogResponse = {
+      ...catalog,
+      models: [
+        { ...catalog.models[0]!, id: "gpt-5.6-terra", model: "gpt-5.6-terra", displayName: "GPT-5.6 Terra" },
+        { ...catalog.models[1]!, id: "future-model", model: "future-model", displayName: "Future Model" }
+      ],
+      defaults: {
+        default: { model: "gpt-5.6-terra", reasoningEffort: "medium" },
+        plan: { model: "gpt-5.6-terra", reasoningEffort: "high" }
+      }
+    };
+
+    await act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open
+          title="Session model settings"
+          description="Choose settings"
+          selections={{ default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } }}
+          activeMode="default"
+          fastMode
+          catalog={comparisonCatalog}
+          loading={false}
+          error=""
+          applying={null}
+          onClose={() => undefined}
+          onRetry={() => undefined}
+          onApply={async () => undefined}
+        />
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[aria-label="Estimated quality: Very high, 4 of 5"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Estimated usage: Low, 2 of 5"]')).not.toBeNull();
+    expect(container.textContent).toContain("Quality and usage: Not yet rated");
+    const details = container.querySelector("details")!;
+    details.open = true;
+    expect(details.textContent).toContain("25–200 local messages per 5 hours on Plus");
+    expect(details.textContent).toContain("Fast mode is on");
+    expect(details.querySelector('a[href="https://learn.chatgpt.com/docs/pricing"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("keeps models without reasoning controls selectable", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const noEffortCatalog: CodexModelCatalogResponse = {
+      models: [{ ...catalog.models[0]!, supportedReasoningEfforts: [], defaultReasoningEffort: null }],
+      defaults: { default: { model: "gpt-default", reasoningEffort: null }, plan: { model: "gpt-default", reasoningEffort: null } }
+    };
+    await act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open title="Session model settings" description="Choose settings"
+          selections={{ default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } }}
+          activeMode="default" catalog={noEffortCatalog} loading={false} error="" applying={null}
+          onClose={() => undefined} onRetry={() => undefined} onApply={async () => undefined}
+        />
+      );
+      await Promise.resolve();
+    });
+    const standard = container.querySelector<HTMLInputElement>('input[value="gpt-default:none"]');
+    expect(standard?.checked).toBe(true);
+    expect(container.textContent).toContain("Standard");
     act(() => root.unmount());
   });
 });

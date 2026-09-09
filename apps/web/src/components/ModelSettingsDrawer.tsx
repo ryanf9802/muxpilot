@@ -10,6 +10,12 @@ import type {
 } from "@muxpilot/core";
 import { Modal } from "./Modal.js";
 import { Button, DialogActions } from "./Button.js";
+import {
+  comparisonGuidance,
+  comparisonGuidanceSource,
+  publishedModelGuidance,
+  type ComparisonLevel
+} from "./modelComparisonGuidance.js";
 
 export function effectiveModelSettings(
   session: Pick<ManagedSession, "models">,
@@ -117,64 +123,76 @@ export function ModelSettingsDrawer({
         {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No Codex models are currently available.</p> : null}
         {catalog && catalog.models.length > 0 ? (
           <>
-            <fieldset className="model-settings-options">
-              <legend>Model</legend>
-              {catalog.models.map((model, index) => (
-                <label className="model-settings-option" key={model.id}>
-                  <input
-                    ref={index === 0 ? initialFocusRef : undefined}
-                    type="radio"
-                    name="codex-model"
-                    value={model.model}
-                    checked={draftModel === model.model}
-                    disabled={Boolean(applying)}
-                    onChange={() => {
-                      setDraftModel(model.model);
-                      const preferred = model.model === initial.model ? initial.reasoningEffort : null;
-                      setDraftEffort(validEffort(model, preferred));
-                    }}
-                  />
-                  <span className="model-settings-option-copy">
-                    <strong>{model.displayName}</strong>
-                    <code>{model.model}</code>
-                    {model.description ? <small>{model.description}</small> : null}
-                  </span>
-                  <span className="model-settings-badges">
-                    {badgeSelections.normal.model === model.model ? <Badge icon={<MessageSquare />} label="Current Normal model" /> : null}
-                    {badgeSelections.plan.model === model.model ? <Badge icon={<ClipboardList />} label="Current Plan model" /> : null}
-                  </span>
-                </label>
-              ))}
+            <div className="model-settings-comparison-note" role="note">
+              <strong>Compare each combination</strong>
+              <span>Estimated quality is for coding and agent work. Estimated usage is relative subscription allowance consumption.</span>
+            </div>
+            <fieldset className="model-settings-options model-settings-combinations">
+              <legend>Model and reasoning</legend>
+              {catalog.models.map((model) => {
+                const efforts = model.supportedReasoningEfforts.length > 0
+                  ? model.supportedReasoningEfforts
+                  : [{ reasoningEffort: null, description: "This model does not expose a reasoning setting." }];
+                return (
+                  <section className="model-settings-model" key={model.id} aria-labelledby={`model-${model.id}`}>
+                    <div className="model-settings-model-head">
+                      <span className="model-settings-option-copy">
+                        <strong id={`model-${model.id}`}>{model.displayName}</strong>
+                        <code>{model.model}</code>
+                        {model.description ? <small>{model.description}</small> : null}
+                      </span>
+                    </div>
+                    <div className="model-settings-efforts">
+                      {efforts.map((option, optionIndex) => {
+                        const effort = option.reasoningEffort;
+                        const estimate = comparisonGuidance(model.model, effort);
+                        const selected = draftModel === model.model && draftEffort === effort;
+                        return (
+                          <label className="model-settings-option model-settings-combination" key={effort ?? "none"}>
+                            <input
+                              ref={model === catalog.models[0] && optionIndex === 0 ? initialFocusRef : undefined}
+                              type="radio"
+                              name="codex-model-combination"
+                              value={`${model.model}:${effort ?? "none"}`}
+                              checked={selected}
+                              disabled={Boolean(applying)}
+                              onChange={() => {
+                                setDraftModel(model.model);
+                                setDraftEffort(effort);
+                              }}
+                            />
+                            <span className="model-settings-combination-copy">
+                              <span className="model-settings-combination-title">
+                                <strong>{effort ? effortLabel(effort) : "Standard"}</strong>
+                                <span className="model-settings-badges">
+                                  {badgeSelections.normal.model === model.model && badgeSelections.normal.reasoningEffort === effort
+                                    ? <Badge icon={<MessageSquare />} label="Current Normal combination" />
+                                    : null}
+                                  {badgeSelections.plan.model === model.model && badgeSelections.plan.reasoningEffort === effort
+                                    ? <Badge icon={<ClipboardList />} label="Current Plan combination" />
+                                    : null}
+                                </span>
+                              </span>
+                              {option.description ? <small>{option.description}</small> : null}
+                              {estimate ? (
+                                <>
+                                  <ComparisonMeter kind="quality" label="Estimated quality" level={estimate.quality} levelLabel={estimate.qualityLabel} />
+                                  <ComparisonMeter kind="usage" label="Estimated usage" level={estimate.usage} levelLabel={estimate.usageLabel} />
+                                  <small className="model-settings-estimate-summary">{estimate.summary}</small>
+                                </>
+                              ) : (
+                                <span className="model-settings-unrated">Quality and usage: Not yet rated</span>
+                              )}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })}
             </fieldset>
-            {selectedModel && selectedModel.supportedReasoningEfforts.length > 0 ? (
-              <fieldset className="model-settings-options">
-                <legend>Reasoning effort</legend>
-                {selectedModel.supportedReasoningEfforts.map((option) => (
-                  <label className="model-settings-option" key={option.reasoningEffort}>
-                    <input
-                      type="radio"
-                      name="codex-reasoning-effort"
-                      value={option.reasoningEffort}
-                      checked={draftEffort === option.reasoningEffort}
-                      disabled={Boolean(applying)}
-                      onChange={() => setDraftEffort(option.reasoningEffort)}
-                    />
-                    <span className="model-settings-option-copy">
-                      <strong>{effortLabel(option.reasoningEffort)}</strong>
-                      {option.description ? <small>{option.description}</small> : null}
-                    </span>
-                    <span className="model-settings-badges">
-                      {badgeSelections.normal.model === selectedModel.model && badgeSelections.normal.reasoningEffort === option.reasoningEffort
-                        ? <Badge icon={<MessageSquare />} label="Current Normal reasoning effort" />
-                        : null}
-                      {badgeSelections.plan.model === selectedModel.model && badgeSelections.plan.reasoningEffort === option.reasoningEffort
-                        ? <Badge icon={<ClipboardList />} label="Current Plan reasoning effort" />
-                        : null}
-                    </span>
-                  </label>
-                ))}
-              </fieldset>
-            ) : null}
+            <PublishedGuidance models={catalog.models.map((model) => model.model)} fastMode={fastMode === true} />
             {fastUnavailable && activeMode && activeSelectionChanged ? <p className="model-settings-warning" role="note">Applying this model to the active {activeMode === "plan" ? "Plan" : "Normal"} mode will turn off Fast mode.</p> : null}
           </>
         ) : null}
@@ -204,6 +222,52 @@ export function ModelSettingsDrawer({
       </DialogActions>
     </Modal>
   );
+}
+
+function ComparisonMeter({ kind, label, level, levelLabel }: {
+  kind: "quality" | "usage";
+  label: string;
+  level: ComparisonLevel;
+  levelLabel: string;
+}) {
+  return (
+    <span className={`model-settings-meter model-settings-meter-${kind}`} aria-label={`${label}: ${levelLabel}, ${level} of 5`}>
+      <span className="model-settings-meter-label">{label}</span>
+      <span className="model-settings-meter-track" aria-hidden="true">
+        {([1, 2, 3, 4, 5] as const).map((band) => <i className={band <= level ? "is-filled" : ""} key={band} />)}
+      </span>
+      <span className="model-settings-meter-value">{levelLabel}</span>
+    </span>
+  );
+}
+
+function PublishedGuidance({ models, fastMode }: { models: string[]; fastMode: boolean }) {
+  const available = models.flatMap((model) => {
+    const published = publishedModelGuidance[model];
+    return published ? [{ model, ...published }] : [];
+  });
+  return (
+    <details className="model-settings-evidence">
+      <summary>About these estimates and published usage</summary>
+      <p>These combination ratings are curated guidance, reviewed {formatGuidanceDate(comparisonGuidanceSource.reviewedAt)}. Actual usage varies with context, task complexity, reasoning, tools, retrieval, and caching.</p>
+      {fastMode ? <p><strong>Fast mode is on:</strong> it increases usage for supported models; no unsupported multiplier is applied to the bars.</p> : null}
+      {available.length > 0 ? (
+        <dl>
+          {available.map((item) => (
+            <div key={item.model}>
+              <dt>{item.model}</dt>
+              <dd>{item.allowance}. Credit rates: {item.credits}.</dd>
+            </div>
+          ))}
+        </dl>
+      ) : <p>No published model-level usage information is available for the listed models.</p>}
+      <a href={comparisonGuidanceSource.url} target="_blank" rel="noreferrer">OpenAI pricing and allowance guidance</a>
+    </details>
+  );
+}
+
+function formatGuidanceDate(value: string): string {
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`));
 }
 
 function Badge({ icon, label, legend = false }: { icon: ReactElement; label: string; legend?: boolean }) {
