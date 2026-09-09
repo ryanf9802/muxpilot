@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import {
+  AppServerSteerUnavailableError,
   CodexAppServerDriver,
   type AppServerDriverEventSink,
   type AppServerProcessStore,
   type AppServerRequestStore
 } from "../src/services/sessionDrivers/codexAppServerDriver.js";
 import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
-import type { JsonRpcConnection } from "../src/services/sessionDrivers/jsonRpcConnection.js";
+import { JsonRpcResponseError, type JsonRpcConnection } from "../src/services/sessionDrivers/jsonRpcConnection.js";
 import type { RuntimeStartSpec, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
 
 const runtime: SystemdSessionRuntimeRef = {
@@ -57,7 +58,7 @@ describe("CodexAppServerDriver", () => {
       acceptedAt: "2026-09-01T12:00:00.000Z"
     });
     harness.rpc.request.mockResolvedValueOnce({ turnId: "turn-1" });
-    await expect(harness.driver.steer(session, "follow up", "turn-1", "client-2")).resolves.toMatchObject({
+    await expect(harness.driver.steer(session, "follow up", "client-2")).resolves.toMatchObject({
       clientMessageId: "client-2",
       turnId: "turn-1"
     });
@@ -93,6 +94,28 @@ describe("CodexAppServerDriver", () => {
     harness.rpc.request.mockResolvedValueOnce({ thread: { id: "thread-1", status: { type: "idle" } } })
       .mockResolvedValueOnce({ data: [], nextCursor: null });
     await expect(harness.driver.reconcileInput(managedSession(), "missing-client")).resolves.toBeNull();
+  });
+
+  it("fails definitively when there is no active turn to steer", async () => {
+    const harness = createHarness();
+
+    await expect(harness.driver.steer(managedSession(), "follow up", "client-2"))
+      .rejects.toBeInstanceOf(AppServerSteerUnavailableError);
+    expect(harness.rpc.request).not.toHaveBeenCalledWith("turn/steer", expect.anything());
+  });
+
+  it("classifies Codex non-steerable turn responses as definitive", async () => {
+    const harness = createHarness();
+    const session = managedSession();
+    await harness.driver.sendMessage(session, "hello", "client-1");
+    harness.rpc.request.mockRejectedValueOnce(new JsonRpcResponseError(
+      -32600,
+      "The active turn is not steerable",
+      { codexErrorInfo: { activeTurnNotSteerable: { turnKind: "review" } } }
+    ));
+
+    await expect(harness.driver.steer(session, "follow up", "client-2"))
+      .rejects.toBeInstanceOf(AppServerSteerUnavailableError);
   });
 
   it("resolves the Codex default model when switching collaboration modes", async () => {

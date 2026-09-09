@@ -47,6 +47,8 @@ Those steps describe the legacy tmux adapter. App-server delivery supplies a sta
 
 The acknowledgement deadline is 30 seconds. muxpilot never overwrites a composer containing different text. Failures distinguish missing paste observation, rejected submit, no acknowledgement, changed composer, unavailable session, legacy unverified state, and tmux transport failure.
 
+While an ordinary app-server turn is active, the composer can steer that exact turn with `turn/steer`. The driver supplies its tracked active turn as the `expectedTurnId` precondition. A definitive completed, changed, or non-steerable turn response converts the same durable submission into an ordinary queued input. Transport-uncertain steering is reconciled by stable client message ID and is never blindly queued or resent.
+
 An input failure blocks new composer messages. The session view preserves the exact submitted message and exposes **Retry input** and **Dismiss**. Retry first verifies Codex is ready and either submits an exact matching existing draft or restores the preserved prompt into an empty composer. Dismiss clears the blocking state without claiming that Codex received the message.
 
 Pending deliveries are reconciled after backend restart, pane rediscovery, transcript rollover, and queued-input processing. A matching Codex lifecycle event marks the persisted submission acknowledged; a completed restored delivery is not sent again.

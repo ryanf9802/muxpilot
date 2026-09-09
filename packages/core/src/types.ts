@@ -724,6 +724,7 @@ export interface PwaTrustInfo {
 export interface SendInputRequest {
   text: string;
   mode?: CollaborationMode;
+  delivery?: "auto" | "steer";
 }
 
 export type SendInputResponse =

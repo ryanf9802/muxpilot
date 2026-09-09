@@ -25,6 +25,7 @@ import {
   composerLockReason,
   composerDraftStorageKey,
   composerHasContent,
+  canSteerComposerInput,
   copyableMessageText,
   createPendingUserMessage,
   DESKTOP_VIM_MEDIA_QUERY,
@@ -1056,6 +1057,55 @@ describe("shouldQueueComposerInput", () => {
   it("sends directly when the session is ready and the queue is empty", () => {
     expect(shouldQueueComposerInput({ status: "waiting" }, [])).toBe(false);
     expect(shouldQueueComposerInput({ status: "idle" }, [])).toBe(false);
+  });
+});
+
+describe("canSteerComposerInput", () => {
+  const appServerSession = managedSession({
+    driverKind: "codex_app_server",
+    capabilities: {
+      start: true,
+      sendMessage: true,
+      steer: true,
+      resume: true,
+      fork: true,
+      verifiedInput: true,
+      interrupt: true,
+      kill: true,
+      approvals: true,
+      questions: true,
+      planActions: true,
+      fastMode: true,
+      rawTerminalCapture: false,
+      terminalAttach: true,
+      hibernate: true
+    },
+    runtime: {
+      kind: "systemd_service",
+      unit: "muxpilot-session-0123456789abcdef01234567.service",
+      socketPath: "/tmp/app.sock",
+      state: "connected",
+      codexVersion: "0.152.0"
+    }
+  });
+
+  it("offers steering only while a connected app-server turn is active", () => {
+    expect(canSteerComposerInput({ ...appServerSession, status: "working" }, false)).toBe(true);
+    expect(canSteerComposerInput({ ...appServerSession, status: "planning" }, false)).toBe(true);
+    expect(canSteerComposerInput({ ...appServerSession, status: "idle" }, false)).toBe(false);
+    expect(canSteerComposerInput({ ...appServerSession, status: "question" }, false)).toBe(false);
+    expect(canSteerComposerInput({ ...appServerSession, initializing: true, status: "working" }, false)).toBe(false);
+    expect(canSteerComposerInput({ ...appServerSession, status: "working" }, true)).toBe(false);
+    expect(canSteerComposerInput({ ...appServerSession, runtime: undefined, status: "working" }, false)).toBe(false);
+  });
+
+  it("does not offer app-server steering to legacy sessions or disconnected runtimes", () => {
+    expect(canSteerComposerInput(managedSession({ status: "working" }), false)).toBe(false);
+    expect(canSteerComposerInput({
+      ...appServerSession,
+      status: "working",
+      runtime: { ...appServerSession.runtime!, state: "hibernated" } as ManagedSession["runtime"]
+    }, false)).toBe(false);
   });
 });
 

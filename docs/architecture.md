@@ -95,11 +95,14 @@ Input:
 
 ```text
 React composer -> persist stable client ID -> driver.sendMessage -> turn/start
+Busy app-server turn + Steer now -> persist stable client ID -> driver.steer -> turn/steer
 Busy session -> queued input in SQLite -> wake if hibernated -> send when ready
 Mode/Fast toggle -> driver.setPreferences -> thread/settings/update
 Interactive gate -> persisted exact request ID -> structured JSON-RPC response
 Legacy tmux sessions retain verified paste/menu-key behavior behind the tmux adapter
 ```
+
+Active app-server turns expose separate **Steer now** and **Queue** actions. A definitive stale or non-steerable response moves the same persisted submission into the normal queue; an uncertain response is reconciled by client message ID before any retry or fallback.
 
 Verified delivery:
 

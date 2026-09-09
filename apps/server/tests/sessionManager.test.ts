@@ -25,6 +25,7 @@ import {
 import { InputTransportError, TmuxAdapter } from "../src/tmux/tmuxAdapter.js";
 import type { AgentSessionDriver, AgentSessionLaunchOptions } from "../src/services/sessionDrivers/types.js";
 import { SessionDriverRegistry } from "../src/services/sessionDrivers/registry.js";
+import { AppServerSteerUnavailableError } from "../src/services/sessionDrivers/codexAppServerDriver.js";
 
 describe("Codex pane model settings", () => {
   it("reads the persistent status line", () => {
@@ -2906,6 +2907,109 @@ describe("SessionManager transcript isolation", () => {
     expect(await harness.db.getSession(session.id)).toMatchObject({
       status: "missing",
       runtime: { kind: "systemd_service", state: "stopped" }
+    });
+    await harness.db.close();
+  });
+
+  it("steers an active app-server turn without changing its mode or status", async () => {
+    const steer = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-steer",
+      turnId: "turn-active",
+      acceptedAt: "2026-09-08T20:00:00.000Z"
+    }));
+    const driver = { kind: "codex_app_server", steer } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-steer", "thread-steer", "working");
+    await harness.db.upsertSession(session, "2026-09-08T19:59:00.000Z");
+
+    const result = await harness.manager.sendInput(session.id, "focus on the API", "plan", null, "steer");
+
+    expect(result).toMatchObject({ session: { status: "working", inputMode: "default" } });
+    expect(steer).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), "focus on the API", expect.any(String));
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      collaborationMode: "default",
+      muxpilotSubmission: {
+        deliveryKind: "steer",
+        state: "acknowledged",
+        acknowledgedBy: "app_server_steer_receipt",
+        turnId: "turn-active"
+      }
+    });
+    await harness.db.close();
+  });
+
+  it("falls a definitively rejected steer back to the existing queue", async () => {
+    const steer = vi.fn(async () => {
+      throw new AppServerSteerUnavailableError("active turn completed");
+    });
+    const sendMessage = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-steer-fallback",
+      turnId: "turn-next",
+      acceptedAt: "2026-09-08T20:01:00.000Z"
+    }));
+    const setPreferences = vi.fn(async () => undefined);
+    const driver = { kind: "codex_app_server", steer, sendMessage, setPreferences } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-steer-fallback", "thread-steer-fallback", "working");
+    await harness.db.upsertSession(session, "2026-09-08T19:59:00.000Z");
+
+    const result = await harness.manager.sendInput(session.id, "use the safer path", "plan", null, "steer");
+
+    expect(result).toMatchObject({ queuedInput: { text: "use the safer path", mode: "default", status: "queued" } });
+    const queued = (await harness.manager.listQueuedInputs(session.id))[0]!;
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: { deliveryKind: "steer", deliveryPhase: "queued", queuedInputId: queued.id }
+    });
+
+    await harness.db.setSessionStatus(session.id, "idle", "2026-09-08T20:00:30.000Z");
+    await (harness.manager as unknown as { processQueuedInputs(sessionId: string): Promise<void> })
+      .processQueuedInputs(session.id);
+
+    expect(await harness.manager.listQueuedInputs(session.id)).toMatchObject([{ id: queued.id, status: "sent" }]);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), "use the safer path", expect.any(String));
+    expect(await harness.db.listMessages(session.id, 0)).toHaveLength(1);
+    await harness.db.close();
+  });
+
+  it("queues an explicit steer when the app-server runtime is not connected", async () => {
+    const steer = vi.fn();
+    const driver = { kind: "codex_app_server", steer } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-steer-disconnected", "thread-steer-disconnected", "working");
+    session.runtime = { ...session.runtime!, state: "failed" } as ManagedSession["runtime"];
+    await harness.db.upsertSession(session, "2026-09-08T19:59:00.000Z");
+
+    const result = await harness.manager.sendInput(session.id, "save this for later", undefined, null, "steer");
+
+    expect(result).toMatchObject({ queuedInput: { text: "save this for later", status: "queued" } });
+    expect(steer).not.toHaveBeenCalled();
+    await harness.db.close();
+  });
+
+  it("reconciles an uncertain steer before deciding delivery failed", async () => {
+    const steer = vi.fn(async () => { throw new Error("connection closed"); });
+    const reconcileInput = vi.fn(async (_session: ManagedSession, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-steer-reconcile",
+      turnId: "turn-active",
+      acceptedAt: "2026-09-08T20:02:00.000Z"
+    }));
+    const driver = { kind: "codex_app_server", steer, reconcileInput } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-steer-reconcile", "thread-steer-reconcile", "generating");
+    await harness.db.upsertSession(session, "2026-09-08T19:59:00.000Z");
+
+    await expect(harness.manager.sendInput(session.id, "one more constraint", undefined, null, "steer"))
+      .resolves.toMatchObject({ session: { status: "generating" } });
+    expect(reconcileInput).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), expect.any(String));
+    expect((await harness.db.latestUserMessage(session.id))?.payload).toMatchObject({
+      muxpilotSubmission: {
+        state: "acknowledged",
+        acknowledgedBy: "app_server_steer_reconciliation",
+        turnId: "turn-active"
+      }
     });
     await harness.db.close();
   });

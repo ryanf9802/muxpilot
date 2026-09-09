@@ -369,6 +369,17 @@ describe("api client request headers", () => {
     expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/sessions/session-1/queued-inputs/queued-1");
     expect((fetchMock.mock.calls[3]?.[1] as RequestInit).method).toBe("DELETE");
   });
+
+  it("requests same-turn steering through the input endpoint", async () => {
+    const fetchMock = mockJsonResponse({ ok: true, session: {}, message: {}, queuedInput: null });
+
+    await api.send("session-1", "change direction", "default", "steer");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/input", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ text: "change direction", mode: "default", delivery: "steer" })
+    }));
+  });
 });
 
 function mockJsonResponse(body: unknown) {

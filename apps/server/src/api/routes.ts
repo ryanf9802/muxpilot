@@ -73,10 +73,12 @@ const restoreSessionRecoverySchema = z.object({
 const restoreSessionSchema = z.object({
   driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
 });
-const inputBodySchema = z
-  .object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() })
+const inputBodyFields = z.object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() });
+const inputBodySchema = inputBodyFields
   .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
-const sendInputSchema = inputBodySchema;
+const sendInputSchema = inputBodyFields
+  .extend({ delivery: z.enum(["auto", "steer"]).optional() })
+  .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
 const sessionNameSchema = z
   .string()
   .max(4096)
@@ -617,7 +619,7 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body: SendInputRequest = sendInputSchema.parse(request.body);
     try {
-      const result = await manager.sendInput(id, body.text, body.mode);
+      const result = await manager.sendInput(id, body.text, body.mode, null, body.delivery);
       return reply.code(202).send("queuedInput" in result
         ? { ok: true, session: null, message: null, queuedInput: result.queuedInput }
         : { ok: true, ...result, queuedInput: null });

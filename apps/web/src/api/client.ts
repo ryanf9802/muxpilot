@@ -223,8 +223,8 @@ export const api = {
     }),
   deleteQueuedInput: (id: string, queuedId: string) =>
     json<{ ok: true }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, { method: "DELETE" }),
-  send: (id: string, text: string, mode?: CollaborationMode) =>
-    json<SendInputResponse>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode }) }),
+  send: (id: string, text: string, mode?: CollaborationMode, delivery?: "auto" | "steer") =>
+    json<SendInputResponse>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode, delivery }) }),
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) }),
 };

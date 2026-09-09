@@ -85,7 +85,7 @@ export interface AgentSessionDriver {
   subscribe(session: ManagedSession, onEvent: (event: DriverEvent) => void): Promise<DriverSubscription>;
   sendMessage(session: ManagedSession, text: string, clientMessageId: string): Promise<DriverInputReceipt>;
   reconcileInput(session: ManagedSession, clientMessageId: string): Promise<DriverInputReceipt | null>;
-  steer(session: ManagedSession, text: string, expectedTurnId: string, clientMessageId: string): Promise<DriverInputReceipt>;
+  steer(session: ManagedSession, text: string, clientMessageId: string): Promise<DriverInputReceipt>;
   interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<void>;
   kill(session: ManagedSession): Promise<void>;
   answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;

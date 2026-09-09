@@ -55,9 +55,10 @@ import {
   isCodexStartupFailureCapture,
   TmuxAdapter
 } from "../tmux/tmuxAdapter.js";
-import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, McpServerLaunchConfig } from "./sessionDrivers/types.js";
+import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
 import {
+  AppServerSteerUnavailableError,
   PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX,
   PLAN_IMPLEMENTATION_MESSAGE
 } from "./sessionDrivers/codexAppServerDriver.js";
@@ -136,6 +137,14 @@ const HEAVY_COMMAND_STATUS_BLOCKERS = new Set<SessionStatus>([
   "missing",
   "unknown"
 ]);
+const STEERABLE_SESSION_STATUSES = new Set<SessionStatus>([
+  "working",
+  "generating",
+  "executing",
+  "running",
+  "planning"
+]);
+type InputDeliveryIntent = "auto" | "steer";
 type InputDeliveryFailureCode =
   | "paste_not_observed"
   | "submit_not_accepted"
@@ -1586,22 +1595,24 @@ export class SessionManager {
     sessionId: string,
     text: string,
     mode?: CollaborationMode,
-    actorSessionId: string | null = null
+    actorSessionId: string | null = null,
+    delivery: InputDeliveryIntent = "auto"
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const storedSession = await this.db.getSession(sessionId);
     if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
     const session = requireSession(storedSession);
     if (session.driverKind !== "codex_app_server") {
-      return this.sendInputExclusive(sessionId, text, mode, actorSessionId);
+      return this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery);
     }
-    return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId));
+    return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery));
   }
 
   private async sendInputExclusive(
     sessionId: string,
     text: string,
     mode?: CollaborationMode,
-    actorSessionId: string | null = null
+    actorSessionId: string | null = null,
+    delivery: InputDeliveryIntent = "auto"
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     let session = requireSession(await this.db.getSession(sessionId));
     if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated") {
@@ -1609,6 +1620,9 @@ export class SessionManager {
     }
     if (session.status === "input_failed") {
       throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
+    }
+    if (delivery === "steer" && session.driverKind === "codex_app_server") {
+      return this.sendSteeredInputExclusive(session, text, actorSessionId);
     }
     if (await this.shouldQueueInput(session, text)) {
       return { queuedInput: await this.enqueueInput(sessionId, text, mode, actorSessionId) };
@@ -1631,6 +1645,120 @@ export class SessionManager {
     this.publish("status.changed", sessionId, { status });
     this.publish("session.updated", sessionId, updatedSession);
     return { session: updatedSession, message };
+  }
+
+  private async sendSteeredInputExclusive(
+    session: ManagedSession,
+    text: string,
+    actorSessionId: string | null = null
+  ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
+    const targetMode = session.inputMode;
+    const driver = this.appServerDriver(session);
+    const heavyweightActive = session.gitWorkspace
+      ? await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id) ?? false
+      : false;
+    if (
+      !driver
+      || !session.capabilities?.steer
+      || session.initializing
+      || session.runtime?.kind !== "systemd_service"
+      || session.runtime.state !== "connected"
+      || heavyweightActive
+      || !STEERABLE_SESSION_STATUSES.has(session.status)
+    ) {
+      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId) };
+    }
+    if (this.deliveringInputSessionIds.has(session.id)) {
+      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId) };
+    }
+
+    const submittedAt = nowIso();
+    let message = await this.recordSubmittedInput(
+      session,
+      text,
+      targetMode,
+      submittedAt,
+      null,
+      actorSessionId,
+      "steer"
+    );
+    this.publish("message.appended", session.id, message);
+    this.deliveringInputSessionIds.add(session.id);
+    try {
+      message = await this.updateInputDelivery(message, { deliveryPhase: "delivering" });
+      let receipt: DriverInputReceipt;
+      let acknowledgedBy = "app_server_steer_receipt";
+      try {
+        receipt = await driver.steer(session, text, message.id);
+      } catch (error) {
+        if (error instanceof AppServerSteerUnavailableError) {
+          const queuedInput = await this.enqueueInput(session.id, text, targetMode, actorSessionId);
+          message = await this.updateInputDelivery(message, {
+            state: "pending",
+            deliveryPhase: "queued",
+            queuedInputId: queuedInput.id,
+            failureCode: null,
+            failureReason: null
+          });
+          await this.db.addAudit("local", "steer_input_queued", session.id, JSON.stringify({
+            promptHash: inputPromptHash(session.id, text),
+            promptLength: text.length,
+            reason: error.message
+          }), nowIso());
+          this.publish("message.appended", session.id, message);
+          return { queuedInput };
+        }
+
+        const reconciled = await driver.reconcileInput(session, message.id).catch(() => null);
+        if (!reconciled) {
+          const failureReason = inputDeliveryFailureMessage("app_server_rejected");
+          message = await this.updateInputDelivery(message, {
+            state: "failed",
+            deliveryPhase: "failed",
+            failureCode: "app_server_rejected",
+            failureReason
+          });
+          const failedAt = nowIso();
+          await this.db.setSessionStatus(session.id, "input_failed", failedAt);
+          await this.db.addAudit("local", "input_delivery_failed", session.id, JSON.stringify({
+            promptHash: inputPromptHash(session.id, text),
+            promptLength: text.length,
+            reason: "app_server_rejected",
+            deliveryKind: "steer"
+          }), failedAt);
+          this.publish("message.appended", session.id, message);
+          this.publish("status.changed", session.id, { status: "input_failed" });
+          this.publish("session.updated", session.id, await this.db.getSession(session.id));
+          throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
+        }
+        receipt = reconciled;
+        acknowledgedBy = "app_server_steer_reconciliation";
+      }
+
+      message = await this.updateInputDelivery(message, {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        acknowledgedBy,
+        clientMessageId: receipt.clientMessageId,
+        threadId: receipt.threadId,
+        turnId: receipt.turnId,
+        acceptedAt: receipt.acceptedAt,
+        failureReason: null
+      });
+      await this.db.addAudit("local", "input_delivery_app_server_steer", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, text),
+        promptLength: text.length,
+        clientMessageId: receipt.clientMessageId,
+        threadId: receipt.threadId,
+        turnId: receipt.turnId
+      }), receipt.acceptedAt);
+      const updatedSession = requireSession(await this.db.getSession(session.id));
+      this.publish("message.appended", session.id, message);
+      this.publish("session.updated", session.id, updatedSession);
+      return { session: updatedSession, message };
+    } finally {
+      this.deliveringInputSessionIds.delete(session.id);
+    }
   }
 
   private async shouldQueueInput(session: ManagedSession, text: string): Promise<boolean> {
@@ -1663,7 +1791,8 @@ export class SessionManager {
     mode: CollaborationMode,
     timestamp: string,
     queuedInputId: string | null = null,
-    actorSessionId: string | null = null
+    actorSessionId: string | null = null,
+    deliveryKind: "turn_start" | "steer" = "turn_start"
   ): Promise<ChatMessage> {
     const message: Omit<ChatMessage, "sequence"> = {
       id: eventId(),
@@ -1686,6 +1815,7 @@ export class SessionManager {
           promptHash: inputPromptHash(session.id, text),
           promptLength: text.length,
           queuedInputId,
+          deliveryKind,
           actor: actorSessionId ? { kind: "session", sessionId: actorSessionId } : { kind: "operator" },
           failureReason: null
         }
@@ -3665,14 +3795,25 @@ export class SessionManager {
 
       try {
         const now = nowIso();
-        let message = await this.recordSubmittedInput(
-          session,
-          sending.text,
-          sending.mode,
-          now,
-          sending.id,
-          sending.actorSessionId
-        );
+        const queuedSubmission = await this.db.queuedSubmissionMessage(session.id, sending.id);
+        const queuedSubmissionState = queuedSubmission ? muxpilotSubmission(queuedSubmission) : null;
+        const reusedSteerSubmission = queuedSubmissionState?.deliveryPhase === "queued" ? queuedSubmission : null;
+        let message = reusedSteerSubmission
+          ? await this.updateInputDelivery(reusedSteerSubmission, {
+              state: "pending",
+              deliveryPhase: "persisted",
+              lastAttemptAt: now,
+              failureCode: null,
+              failureReason: null
+            })
+          : await this.recordSubmittedInput(
+              session,
+              sending.text,
+              sending.mode,
+              now,
+              sending.id,
+              sending.actorSessionId
+            );
         this.publish("message.appended", sessionId, message);
         message = await this.deliverSubmittedInput(readySession, message, sending.mode);
         await this.db.updateQueuedInput({ ...sending, status: "sent", updatedAt: now, sentAt: now });

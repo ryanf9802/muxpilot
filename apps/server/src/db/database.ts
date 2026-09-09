@@ -626,6 +626,10 @@ export class AppDatabase {
     return this.call("latestUserMessage", sessionId) as Promise<ChatMessage | null>;
   }
 
+  queuedSubmissionMessage(sessionId: string, queuedInputId: string): Promise<ChatMessage | null> {
+    return this.call("queuedSubmissionMessage", sessionId, queuedInputId) as Promise<ChatMessage | null>;
+  }
+
   activeApprovalContext(sessionId: string): Promise<ApprovalContextState> {
     return this.call("activeApprovalContext", sessionId) as Promise<ApprovalContextState>;
   }
@@ -1897,6 +1901,22 @@ export class SyncAppDatabase {
       )
       .get(sessionId) as MessageRow | undefined;
     return row ? hydrateMessage(row) : null;
+  }
+
+  queuedSubmissionMessage(sessionId: string, queuedInputId: string): ChatMessage | null {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND role = 'user'
+         ORDER BY sequence DESC`
+      )
+      .all(sessionId) as unknown as MessageRow[];
+    for (const row of rows) {
+      const message = hydrateMessage(row);
+      const submission = recordValue(message.payload.muxpilotSubmission);
+      if (submission?.queuedInputId === queuedInputId) return message;
+    }
+    return null;
   }
 
   activeApprovalContext(sessionId: string): ApprovalContextState {

@@ -5198,6 +5198,27 @@ select:focus-visible {
   height: 52px;
 }
 
+.composer-action-stack {
+  display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  width: 48px;
+  min-height: 52px;
+}
+
+.composer-action-stack > .send-button {
+  width: 48px;
+  min-height: 0;
+  height: auto;
+  padding: 0;
+}
+
+.composer-queue-button {
+  color: var(--color-text);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+
 .composer {
   --composer-control-rail-height: 74px;
 

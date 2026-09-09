@@ -450,6 +450,20 @@ export function shouldQueueComposerInput(
   return !session || session.initializing === true || (session.status !== "waiting" && session.status !== "idle");
 }
 
+export function canSteerComposerInput(
+  session: Pick<ManagedSession, "driverKind" | "capabilities" | "status" | "initializing" | "runtime"> | null,
+  heavyCommandActive: boolean
+): boolean {
+  if (!session || session.driverKind !== "codex_app_server" || !session.capabilities?.steer) return false;
+  if (session.initializing || heavyCommandActive) return false;
+  if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") return false;
+  return session.status === "working"
+    || session.status === "generating"
+    || session.status === "executing"
+    || session.status === "running"
+    || session.status === "planning";
+}
+
 export function isNearMessageListBottom(
   metrics: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
   thresholdPx = MESSAGE_BOTTOM_LOAD_THRESHOLD_PX
@@ -2444,7 +2458,7 @@ export function SessionView() {
     }
   }
 
-  async function submit(event: FormEvent) {
+  async function submit(event: Pick<FormEvent, "preventDefault">, delivery: "auto" | "steer" | "queue" = "auto") {
     event.preventDefault();
     if (submitBusy || btwSubmitting || composerLocked) return;
     if (!composerHasContent(text)) return;
@@ -2466,13 +2480,13 @@ export function SessionView() {
     isNearBottomRef.current = true;
     scrollBehaviorRef.current = scrollBehaviorForTranscriptUpdate("send", true);
     try {
-      const queued = shouldQueueComposerInput(session, queuedInputs);
+      const queued = delivery === "queue" || (delivery === "auto" && shouldQueueComposerInput(session, queuedInputs));
       if (queued) {
         await api.enqueueInput(id, value, session?.inputMode ?? "default");
         await loadQueuedInputs(id, requestTokenRef.current);
         setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
       } else {
-        const response = await api.send(id, value, session?.inputMode ?? "default");
+        const response = await api.send(id, value, session?.inputMode ?? "default", delivery === "steer" ? "steer" : "auto");
         if (response.queuedInput) {
           await loadQueuedInputs(id, requestTokenRef.current);
           setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
@@ -2749,6 +2763,7 @@ export function SessionView() {
     );
   }
   const readySession = session;
+  const steerAvailable = canSteerComposerInput(readySession, hasActiveHeavyCommand(heavyCommands));
   if (!readySession) {
     return (
       <SessionLoadingView
@@ -3132,7 +3147,11 @@ export function SessionView() {
           ) : null}
           {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
           {fastModeError ? <p className="mode-toggle-error" role="alert">{fastModeError}</p> : null}
-          <form className={vimAvailable ? "composer composer-vim-available" : "composer"} ref={composerFormRef} onSubmit={submit}>
+          <form
+            className={vimAvailable ? "composer composer-vim-available" : "composer"}
+            ref={composerFormRef}
+            onSubmit={(event) => void submit(event, steerAvailable ? "steer" : "auto")}
+          >
             <div className="composer-settings" role="group" aria-label="Composer settings">
               <ModeToggle
                 mode={readySession.inputMode}
@@ -3174,16 +3193,42 @@ export function SessionView() {
               focusCommand={composerFocusRequest?.command ?? "focus"}
               disabled={submitBusy || btwSubmitting || composerLocked}
             />
-            <button
-              className="send-button"
-              type="submit"
-              aria-busy={submitBusy}
-              aria-label={submitBusy ? "Sending" : shouldQueueComposerInput(readySession, queuedInputs) ? "Queue" : "Send"}
-              data-busy={submitBusy || undefined}
-              disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
-            >
-              {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
-            </button>
+            {steerAvailable ? (
+              <div className="composer-action-stack">
+                <button
+                  className="send-button composer-steer-button"
+                  type="submit"
+                  aria-busy={submitBusy}
+                  aria-label={submitBusy ? "Steering" : "Steer now"}
+                  title="Steer now"
+                  data-busy={submitBusy || undefined}
+                  disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+                >
+                  {submitBusy ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
+                </button>
+                <button
+                  className="send-button composer-queue-button"
+                  type="button"
+                  aria-label="Queue"
+                  title="Queue"
+                  disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+                  onClick={(event) => void submit(event, "queue")}
+                >
+                  <Clock3 size={16} />
+                </button>
+              </div>
+            ) : (
+              <button
+                className="send-button"
+                type="submit"
+                aria-busy={submitBusy}
+                aria-label={submitBusy ? "Sending" : shouldQueueComposerInput(readySession, queuedInputs) ? "Queue" : "Send"}
+                data-busy={submitBusy || undefined}
+                disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+              >
+                {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
+              </button>
+            )}
           </form>
           </div>
         )}

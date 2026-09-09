@@ -6,7 +6,8 @@ import type {
   SessionCapabilities
 } from "@muxpilot/core";
 import { CodexAppServerConnectionManager, type AppServerSessionHandlers } from "./codexAppServerConnectionManager.js";
-import { CodexAppServerProtocol } from "./codexAppServerProtocol.js";
+import { CodexAppServerProtocol, type TurnSteerResponse } from "./codexAppServerProtocol.js";
+import { JsonRpcResponseError } from "./jsonRpcConnection.js";
 import type {
   AgentSessionDriver,
   AgentSessionLaunchResult,
@@ -97,6 +98,13 @@ export interface AppServerRequestStore {
   resolveAppServerTurnRequests(sessionId: string, threadId: string, turnId: string, resolvedAt: string): Promise<number>;
 }
 
+export class AppServerSteerUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AppServerSteerUnavailableError";
+  }
+}
+
 export class CodexAppServerDriver implements AgentSessionDriver {
   readonly kind = "codex_app_server" as const;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
@@ -176,11 +184,20 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   async steer(
     session: ManagedSession,
     text: string,
-    expectedTurnId: string,
     clientMessageId: string
   ): Promise<DriverInputReceipt> {
     const { threadId, protocol } = this.protocolFor(session);
-    const response = await protocol.steerTurn(threadId, expectedTurnId, text, clientMessageId);
+    const expectedTurnId = this.activeTurns.get(session.id);
+    if (!expectedTurnId) throw new AppServerSteerUnavailableError("Codex has no active turn to steer");
+    let response: TurnSteerResponse;
+    try {
+      response = await protocol.steerTurn(threadId, expectedTurnId, text, clientMessageId);
+    } catch (error) {
+      if (isDefinitiveSteerRejection(error)) {
+        throw new AppServerSteerUnavailableError(error instanceof Error ? error.message : String(error));
+      }
+      throw error;
+    }
     this.activeTurns.set(session.id, response.turnId);
     return receipt(threadId, response.turnId, clientMessageId, this.now());
   }
@@ -980,4 +997,17 @@ function activeTurnIdFromThread(threadId: string, thread: Record<string, unknown
 
 function isTerminalTurnStatus(value: unknown): boolean {
   return value === "completed" || value === "interrupted" || value === "failed";
+}
+
+function isDefinitiveSteerRejection(error: unknown): boolean {
+  if (!(error instanceof JsonRpcResponseError)) return false;
+  if (containsObjectKey(error.data, "activeTurnNotSteerable")) return true;
+  return /(?:no|without an?) active turn|active turn .*not steerable|expected turn .*?(?:match|active)|expectedTurnId/i.test(error.message);
+}
+
+function containsObjectKey(value: unknown, key: string): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some((entry) => containsObjectKey(entry, key));
+  const record = value as Record<string, unknown>;
+  return Object.hasOwn(record, key) || Object.values(record).some((entry) => containsObjectKey(entry, key));
 }
