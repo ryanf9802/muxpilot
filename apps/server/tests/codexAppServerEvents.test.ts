@@ -22,6 +22,20 @@ describe("projectAppServerEvent", () => {
       method: "item/commandExecution/outputDelta",
       params: { threadId: "thread-1", turnId: "turn-1", itemId: "command-1", delta: "output" }
     }, receivedAt)?.status).toBe("executing");
+    expect(projectAppServerEvent({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "command-1",
+          type: "commandExecution",
+          processId: "process-1",
+          status: "inProgress",
+          command: "git status"
+        }
+      }
+    }, receivedAt)?.status).toBe("executing");
   });
 
   it("projects completed items with stable identity and authoritative content", () => {

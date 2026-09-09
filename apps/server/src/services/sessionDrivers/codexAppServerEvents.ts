@@ -307,10 +307,8 @@ function itemStatus(item: Record<string, unknown> | null, started: boolean): Ses
   const type = string(item?.type);
   if (type === "agentMessage") return "generating";
   if (type === "plan") return started ? "planning" : "plan_ready";
-  if (type === "commandExecution") {
-    const processId = string(item?.processId);
-    return started ? (processId ? "running" : "executing") : null;
-  }
+  // "running" is reserved for commands owned by the heavyweight queue.
+  if (type === "commandExecution") return started ? "executing" : null;
   if (type === "fileChange" || type === "mcpToolCall" || type === "dynamicToolCall" || type === "collabAgentToolCall") {
     return "working";
   }
