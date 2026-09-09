@@ -24,6 +24,7 @@ export function canToggleFastMode(status: SessionStatus): boolean {
     || status === "generating"
     || status === "executing"
     || status === "working"
+    || status === "running"
     || status === "planning";
 }
 

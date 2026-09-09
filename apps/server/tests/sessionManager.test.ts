@@ -2892,6 +2892,7 @@ describe("SessionManager transcript isolation", () => {
 
     await harness.manager.act(session.id, { type: "setInputMode", mode: "default" });
     expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), { mode: "default" });
+    await harness.db.setSessionStatus(session.id, "running", "2026-09-01T12:00:01.000Z");
     await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
     expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), { fastMode: true });
 
