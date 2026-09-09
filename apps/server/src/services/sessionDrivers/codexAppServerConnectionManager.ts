@@ -7,6 +7,7 @@ import {
 } from "./codexAppServerProtocol.js";
 import {
   JsonRpcConnection,
+  JsonRpcResponseError,
   type JsonRpcConnectionHandlers,
   type JsonRpcNotification,
   type JsonRpcServerRequest
@@ -67,6 +68,11 @@ interface ConnectionManagerDependencies {
   connectionId(): string;
 }
 
+interface ThreadEstablishment {
+  response: ThreadIdentityResponse;
+  readCurrentTurns: boolean;
+}
+
 export class CodexAppServerConnectionManager {
   private readonly active = new Map<string, AppServerSessionConnection>();
   private readonly operationTails = new Map<string, Promise<void>>();
@@ -98,17 +104,23 @@ export class CodexAppServerConnectionManager {
       spec.expectedPendingRequestIds ?? [],
       spec.settings,
       true,
-      true,
       async (protocol) => {
         const backgroundTerminals = await protocol.listBackgroundTerminals(spec.threadId).catch(() => null);
         if (hasBackgroundTerminals(backgroundTerminals)) {
           const attached = await protocol.readThread(spec.threadId, true);
           requireMatchingThread(spec.threadId, attached, "attach");
-          return attached;
+          return { response: attached, readCurrentTurns: true };
         }
-        const established = await protocol.resumeThread(spec.threadId, spec.settings);
-        requireMatchingThread(spec.threadId, established, "resume");
-        return established;
+        try {
+          const resumed = await protocol.resumeThread(spec.threadId, spec.settings);
+          requireMatchingThread(spec.threadId, resumed, "resume");
+          return { response: resumed, readCurrentTurns: true };
+        } catch (error) {
+          if (!isMissingRolloutError(error, spec.threadId)) throw error;
+          const attached = await protocol.readThread(spec.threadId, false);
+          requireIdleMatchingThread(spec.threadId, attached);
+          return { response: attached, readCurrentTurns: false };
+        }
       }
     ));
   }
@@ -121,8 +133,7 @@ export class CodexAppServerConnectionManager {
       [],
       spec.settings,
       false,
-      false,
-      (protocol) => protocol.startThread(spec.settings)
+      (protocol) => protocol.startThread(spec.settings).then((response) => ({ response, readCurrentTurns: false }))
     ));
   }
 
@@ -136,8 +147,10 @@ export class CodexAppServerConnectionManager {
         [],
         spec.settings,
         false,
-        true,
-        (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings)
+        (protocol) => protocol.forkThread(spec.sourceThreadId, spec.settings).then((response) => ({
+          response,
+          readCurrentTurns: true
+        }))
       );
     });
   }
@@ -162,8 +175,7 @@ export class CodexAppServerConnectionManager {
     expectedPendingRequestIds: readonly (string | number)[],
     settings: Partial<ThreadLaunchSettings> | undefined,
     recoverProcessOwnership: boolean,
-    readCurrentTurns: boolean,
-    establish: (protocol: CodexAppServerProtocol) => Promise<ThreadIdentityResponse>
+    establish: (protocol: CodexAppServerProtocol) => Promise<ThreadEstablishment>
   ): Promise<AppServerSessionConnection> {
     requireIdentity(sessionId, "sessionId");
     const previous = this.active.get(sessionId);
@@ -199,7 +211,8 @@ export class CodexAppServerConnectionManager {
       );
       const protocol = new CodexAppServerProtocol(connection);
       const initialize = await protocol.initialize(this.clientVersion);
-      const established = await establish(protocol);
+      const establishment = await establish(protocol);
+      const established = establishment.response;
       const threadId = established.thread.id;
       if (settings) {
         await protocol.updateThreadSettings(threadId, {
@@ -208,9 +221,9 @@ export class CodexAppServerConnectionManager {
       }
       // Codex does not materialize a brand-new thread's turn collection until
       // its first user message. Keep the connection/input path available so
-      // callers can deliver that message; resumed and forked threads retain
-      // the full turn-list reconciliation barrier.
-      const current = await protocol.readThread(threadId, readCurrentTurns);
+      // callers can deliver that message. Persisted resumed and forked threads
+      // retain the full turn-list reconciliation barrier.
+      const current = await protocol.readThread(threadId, establishment.readCurrentTurns);
       requireMatchingThread(threadId, current, "read");
       const journalProcessOwnership = recoverProcessOwnership
         ? await journal.listActiveCommandProcesses(threadId)
@@ -267,6 +280,20 @@ function requireMatchingThread(expectedThreadId: string, response: ThreadIdentit
   if (response.thread.id !== expectedThreadId) {
     throw new Error(`Codex ${operation} returned unexpected thread ${response.thread.id}`);
   }
+}
+
+function requireIdleMatchingThread(expectedThreadId: string, response: ThreadIdentityResponse): void {
+  requireMatchingThread(expectedThreadId, response, "empty-thread attach");
+  const status = response.thread.status;
+  if (!status || typeof status !== "object" || !("type" in status) || status.type !== "idle") {
+    throw new Error(`Codex empty-thread attach returned non-idle thread ${expectedThreadId}`);
+  }
+}
+
+function isMissingRolloutError(error: unknown, threadId: string): boolean {
+  return error instanceof JsonRpcResponseError
+    && error.code === -32600
+    && error.message === `no rollout found for thread id ${threadId}`;
 }
 
 function requireIdentity(value: string, name: string): void {

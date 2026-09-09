@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { CodexAppServerConnectionManager } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
+import { CodexAppServerProtocol } from "../src/services/sessionDrivers/codexAppServerProtocol.js";
 import type { ProtocolJournal, ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
 import type { RuntimeProxyConnection, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
 
@@ -86,6 +87,72 @@ describe("CodexAppServerConnectionManager", () => {
     ]);
     expect(proxy.methods).not.toContain("thread/resume");
     expect(connected.threadId).toBe("thread-1");
+  });
+
+  it("attaches to a live idle thread when its unused rollout was never materialized", async () => {
+    const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      resumeError: { code: -32600, message: "no rollout found for thread id thread-1" }
+    });
+    const manager = createManager([proxy]);
+
+    const connected = await manager.reconnect({
+      sessionId: "session-1",
+      runtime,
+      threadId: "thread-1",
+      settings: { cwd: "/repo" }
+    });
+    const started = await new CodexAppServerProtocol(connected.rpc).startTurn("thread-1", "First message", "message-1");
+
+    expect(proxy.methods).toEqual([
+      "initialize",
+      "thread/backgroundTerminals/list",
+      "thread/resume",
+      "thread/read",
+      "thread/settings/update",
+      "thread/read",
+      "turn/start"
+    ]);
+    expect(connected.threadId).toBe("thread-1");
+    expect(started.turn.id).toBe("turn-1");
+  });
+
+  it("rejects missing-rollout attachment unless the live thread matches and is idle", async () => {
+    const mismatched = new FakeProtocolProxy([], "other-thread", false, {
+      resumeError: { code: -32600, message: "no rollout found for thread id thread-1" }
+    });
+    const active = new FakeProtocolProxy([], "thread-1", false, {
+      resumeError: { code: -32600, message: "no rollout found for thread id thread-1" },
+      threadStatus: "active"
+    });
+    const manager = createManager([mismatched, active]);
+
+    await expect(manager.reconnect({ sessionId: "mismatched", runtime, threadId: "thread-1" }))
+      .rejects.toThrow("unexpected thread");
+    await expect(manager.reconnect({ sessionId: "active", runtime, threadId: "thread-1" }))
+      .rejects.toThrow("non-idle thread");
+  });
+
+  it("rejects missing-rollout attachment when the live thread cannot be read", async () => {
+    const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      resumeError: { code: -32600, message: "no rollout found for thread id thread-1" },
+      readError: { code: -32600, message: "thread not loaded" }
+    });
+    const manager = createManager([proxy]);
+
+    await expect(manager.reconnect({ sessionId: "session-1", runtime, threadId: "thread-1" }))
+      .rejects.toThrow("thread not loaded");
+    expect(manager.get("session-1")).toBeNull();
+  });
+
+  it("does not attach after a different resume failure", async () => {
+    const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      resumeError: { code: -32600, message: "thread storage unavailable" }
+    });
+    const manager = createManager([proxy]);
+
+    await expect(manager.reconnect({ sessionId: "session-1", runtime, threadId: "thread-1" }))
+      .rejects.toThrow("thread storage unavailable");
+    expect(proxy.methods).not.toContain("thread/read");
   });
 
   it("returns journal-derived command ownership only during reconnect reconciliation", async () => {
@@ -231,7 +298,12 @@ class FakeProtocolProxy {
   constructor(
     private readonly replayRequests: Array<{ id: string; method: string; params: unknown }> = [],
     private readonly responseThreadId = "thread-1",
-    private readonly backgroundTerminal = false
+    private readonly backgroundTerminal = false,
+    private readonly options: {
+      resumeError?: { code: number; message: string };
+      readError?: { code: number; message: string };
+      threadStatus?: string;
+    } = {}
   ) {
     this.input.on("data", (chunk) => {
       this.buffer += chunk.toString("utf8");
@@ -250,7 +322,8 @@ class FakeProtocolProxy {
           } });
         } else if (frame.method === "thread/resume") {
           for (const request of this.replayRequests) this.emit(request);
-          this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
+          if (this.options.resumeError) this.emit({ id: frame.id, error: this.options.resumeError });
+          else this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/start" || frame.method === "thread/fork") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/backgroundTerminals/list") {
@@ -258,9 +331,14 @@ class FakeProtocolProxy {
         } else if (frame.method === "thread/settings/update") {
           this.emit({ id: frame.id, result: {} });
         } else if (frame.method === "thread/read") {
-          this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId, turns: [] } } });
+          if (this.options.readError) this.emit({ id: frame.id, error: this.options.readError });
+          else this.emit({ id: frame.id, result: {
+            thread: { id: this.responseThreadId, status: { type: this.options.threadStatus ?? "idle" }, turns: [] }
+          } });
         } else if (frame.method === "thread/turns/list") {
           this.emit({ id: frame.id, result: { data: [], nextCursor: null } });
+        } else if (frame.method === "turn/start") {
+          this.emit({ id: frame.id, result: { turn: { id: "turn-1" } } });
         }
         newline = this.buffer.indexOf("\n");
       }
