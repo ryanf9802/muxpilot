@@ -51,14 +51,16 @@ describe("ModelSettingsDrawer", () => {
     });
 
     expect(container.textContent).not.toContain("Codex default");
-    expect(container.querySelector('[aria-label="Current Normal combination"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="Current Plan combination"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Plan model"]')).not.toBeNull();
     expect(button(container, "Apply Normal").disabled).toBe(true);
     expect(button(container, "Apply Plan").disabled).toBe(false);
 
-    const lowEffort = container.querySelector<HTMLInputElement>('input[name="codex-model-combination"][value="gpt-other:low"]')!;
+    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
+    await act(async () => { otherModel.click(); });
+    const lowEffort = container.querySelector<HTMLInputElement>('input[name="codex-reasoning-effort"][value="low"]')!;
     await act(async () => { lowEffort.click(); });
-    expect(container.querySelector('[aria-label="Current Normal combination"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Current Normal model"]')).not.toBeNull();
     expect(button(container, "Apply Normal").disabled).toBe(false);
     expect(button(container, "Apply Plan").disabled).toBe(false);
 
@@ -103,7 +105,7 @@ describe("ModelSettingsDrawer", () => {
       await Promise.resolve();
     });
 
-    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model-combination"][value="gpt-other:low"]')!;
+    const otherModel = container.querySelector<HTMLInputElement>('input[name="codex-model"][value="gpt-other"]')!;
     await act(async () => { otherModel.click(); });
     await act(async () => {
       button(container, "Apply Normal").click();
@@ -153,9 +155,11 @@ describe("ModelSettingsDrawer", () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('[aria-label="Estimated quality: Very high, 4 of 5"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="Estimated usage: Low, 2 of 5"]')).not.toBeNull();
-    expect(container.textContent).toContain("Quality and usage: Not yet rated");
+    expect(container.querySelector('[aria-label="Quality: Very high, 4 of 5"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Usage: Low, 2 of 5"]')).not.toBeNull();
+    expect(container.querySelectorAll(".model-settings-model-option")).toHaveLength(2);
+    expect(container.querySelector(".model-settings-drawer .model-settings-model")).toBeNull();
+    expect(container.textContent).toContain("Comparison not yet rated");
     const details = container.querySelector("details")!;
     details.open = true;
     expect(details.textContent).toContain("25–200 local messages per 5 hours on Plus");
@@ -183,7 +187,7 @@ describe("ModelSettingsDrawer", () => {
       );
       await Promise.resolve();
     });
-    const standard = container.querySelector<HTMLInputElement>('input[value="gpt-default:none"]');
+    const standard = container.querySelector<HTMLInputElement>('input[name="codex-reasoning-effort"][value="none"]');
     expect(standard?.checked).toBe(true);
     expect(container.textContent).toContain("Standard");
     act(() => root.unmount());

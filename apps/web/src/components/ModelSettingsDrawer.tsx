@@ -128,71 +128,87 @@ export function ModelSettingsDrawer({
               <span>Estimated quality is for coding and agent work. Estimated usage is relative subscription allowance consumption.</span>
               {fastMode === true ? <span className="model-settings-fast-usage">Fast mode is on and increases usage for supported models; the bars do not apply an unsupported multiplier.</span> : null}
             </div>
-            <fieldset className="model-settings-options model-settings-combinations">
-              <legend>Model and reasoning</legend>
-              {catalog.models.map((model) => {
-                const efforts = model.supportedReasoningEfforts.length > 0
-                  ? model.supportedReasoningEfforts
-                  : [{ reasoningEffort: null, description: "This model does not expose a reasoning setting." }];
+            <fieldset className="model-settings-options model-settings-model-options">
+              <legend>Model</legend>
+              {catalog.models.map((model, index) => {
+                const summary = modelGuidanceSummary(model);
                 return (
-                  <section className="model-settings-model" key={model.id} aria-labelledby={`model-${model.id}`}>
-                    <div className="model-settings-model-head">
-                      <span className="model-settings-option-copy">
-                        <strong id={`model-${model.id}`}>{model.displayName}</strong>
-                        <code>{model.model}</code>
-                        {model.description ? <small>{model.description}</small> : null}
+                  <label className="model-settings-option model-settings-model-option" key={model.id}>
+                    <input
+                      ref={index === 0 ? initialFocusRef : undefined}
+                      type="radio"
+                      name="codex-model"
+                      value={model.model}
+                      checked={draftModel === model.model}
+                      disabled={Boolean(applying)}
+                      onChange={() => {
+                        setDraftModel(model.model);
+                        const preferred = model.model === initial.model ? initial.reasoningEffort : null;
+                        setDraftEffort(validEffort(model, preferred));
+                      }}
+                    />
+                    <span className="model-settings-option-copy">
+                      <span className="model-settings-model-heading">
+                        <strong>{model.displayName}</strong>
+                        <span className="model-settings-badges">
+                          {badgeSelections.normal.model === model.model ? <Badge icon={<MessageSquare />} label="Current Normal model" /> : null}
+                          {badgeSelections.plan.model === model.model ? <Badge icon={<ClipboardList />} label="Current Plan model" /> : null}
+                        </span>
                       </span>
-                    </div>
-                    <div className="model-settings-efforts">
-                      {efforts.map((option, optionIndex) => {
-                        const effort = option.reasoningEffort;
-                        const estimate = comparisonGuidance(model.model, effort);
-                        const selected = draftModel === model.model && draftEffort === effort;
-                        return (
-                          <label className="model-settings-option model-settings-combination" key={effort ?? "none"}>
-                            <input
-                              ref={model === catalog.models[0] && optionIndex === 0 ? initialFocusRef : undefined}
-                              type="radio"
-                              name="codex-model-combination"
-                              value={`${model.model}:${effort ?? "none"}`}
-                              checked={selected}
-                              disabled={Boolean(applying)}
-                              onChange={() => {
-                                setDraftModel(model.model);
-                                setDraftEffort(effort);
-                              }}
-                            />
-                            <span className="model-settings-combination-copy">
-                              <span className="model-settings-combination-title">
-                                <strong>{effort ? effortLabel(effort) : "Standard"}</strong>
-                                <span className="model-settings-badges">
-                                  {badgeSelections.normal.model === model.model && badgeSelections.normal.reasoningEffort === effort
-                                    ? <Badge icon={<MessageSquare />} label="Current Normal combination" />
-                                    : null}
-                                  {badgeSelections.plan.model === model.model && badgeSelections.plan.reasoningEffort === effort
-                                    ? <Badge icon={<ClipboardList />} label="Current Plan combination" />
-                                    : null}
-                                </span>
-                              </span>
-                              {option.description ? <small>{option.description}</small> : null}
-                              {estimate ? (
-                                <>
-                                  <ComparisonMeter kind="quality" label="Estimated quality" level={estimate.quality} levelLabel={estimate.qualityLabel} />
-                                  <ComparisonMeter kind="usage" label="Estimated usage" level={estimate.usage} levelLabel={estimate.usageLabel} />
-                                  <small className="model-settings-estimate-summary">{estimate.summary}</small>
-                                </>
-                              ) : (
-                                <span className="model-settings-unrated">Quality and usage: Not yet rated</span>
-                              )}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </section>
+                      <code>{model.model}</code>
+                      {model.description ? <small>{model.description}</small> : null}
+                      <small className="model-settings-model-summary">{summary}</small>
+                    </span>
+                  </label>
                 );
               })}
             </fieldset>
+            {selectedModel ? (
+              <fieldset className="model-settings-options model-settings-reasoning-options">
+                <legend>Reasoning for {selectedModel.displayName}</legend>
+                {(selectedModel.supportedReasoningEfforts.length > 0
+                  ? selectedModel.supportedReasoningEfforts
+                  : [{ reasoningEffort: null, description: "This model does not expose a reasoning setting." }]
+                ).map((option) => {
+                  const effort = option.reasoningEffort;
+                  const estimate = comparisonGuidance(selectedModel.model, effort);
+                  return (
+                    <label className="model-settings-option model-settings-combination" key={effort ?? "none"}>
+                      <input
+                        type="radio"
+                        name="codex-reasoning-effort"
+                        value={effort ?? "none"}
+                        checked={draftEffort === effort}
+                        disabled={Boolean(applying)}
+                        onChange={() => setDraftEffort(effort)}
+                      />
+                      <span className="model-settings-combination-copy">
+                        <span className="model-settings-combination-title">
+                          <strong>{effort ? effortLabel(effort) : "Standard"}</strong>
+                          <span className="model-settings-badges">
+                            {badgeSelections.normal.model === selectedModel.model && badgeSelections.normal.reasoningEffort === effort
+                              ? <Badge icon={<MessageSquare />} label="Current Normal combination" />
+                              : null}
+                            {badgeSelections.plan.model === selectedModel.model && badgeSelections.plan.reasoningEffort === effort
+                              ? <Badge icon={<ClipboardList />} label="Current Plan combination" />
+                              : null}
+                          </span>
+                        </span>
+                        {estimate ? (
+                          <span className="model-settings-meters">
+                            <ComparisonMeter kind="quality" label="Quality" level={estimate.quality} levelLabel={estimate.qualityLabel} />
+                            <ComparisonMeter kind="usage" label="Usage" level={estimate.usage} levelLabel={estimate.usageLabel} />
+                          </span>
+                        ) : (
+                          <span className="model-settings-unrated">Quality and usage: Not yet rated</span>
+                        )}
+                        <small>{estimate?.summary ?? option.description}</small>
+                      </span>
+                    </label>
+                  );
+                })}
+              </fieldset>
+            ) : null}
             <PublishedGuidance models={catalog.models.map((model) => model.model)} fastMode={fastMode === true} />
             {fastUnavailable && activeMode && activeSelectionChanged ? <p className="model-settings-warning" role="note">Applying this model to the active {activeMode === "plan" ? "Plan" : "Normal"} mode will turn off Fast mode.</p> : null}
           </>
@@ -240,6 +256,24 @@ function ComparisonMeter({ kind, label, level, levelLabel }: {
       <span className="model-settings-meter-value">{levelLabel}</span>
     </span>
   );
+}
+
+function modelGuidanceSummary(model: CodexModel): string {
+  const efforts = model.supportedReasoningEfforts.length > 0
+    ? model.supportedReasoningEfforts.map((option) => option.reasoningEffort)
+    : [null];
+  const estimates = efforts.flatMap((effort) => {
+    const estimate = comparisonGuidance(model.model, effort);
+    return estimate ? [estimate] : [];
+  });
+  if (estimates.length === 0) return "Comparison not yet rated";
+  return `Quality ${ratingRange(estimates.map((estimate) => ({ level: estimate.quality, label: estimate.qualityLabel })))} · Usage ${ratingRange(estimates.map((estimate) => ({ level: estimate.usage, label: estimate.usageLabel })))}`;
+}
+
+function ratingRange(values: Array<{ level: ComparisonLevel; label: string }>): string {
+  const minimum = values.reduce((best, value) => value.level < best.level ? value : best);
+  const maximum = values.reduce((best, value) => value.level > best.level ? value : best);
+  return minimum.level === maximum.level ? minimum.label : `${minimum.label}–${maximum.label}`;
 }
 
 function PublishedGuidance({ models, fastMode }: { models: string[]; fastMode: boolean }) {

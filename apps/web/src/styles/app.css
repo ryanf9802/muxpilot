@@ -3212,22 +3212,9 @@ select:focus-visible {
   font-weight: 650;
 }
 
-.model-settings-combinations { gap: 14px; }
-
-.model-settings-model {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.model-settings-model-head {
-  padding: 0 2px;
-}
-
-.model-settings-efforts {
-  display: grid;
-  gap: 7px;
-}
+.model-settings-model-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.model-settings-model-options > legend { grid-column: 1 / -1; }
+.model-settings-reasoning-options { gap: 6px; }
 
 .model-settings-option {
   display: grid;
@@ -3273,6 +3260,26 @@ select:focus-visible {
 .model-settings-option-copy code { color: var(--color-text-muted); font-size: 11px; }
 .model-settings-option-copy small { color: var(--color-text-muted); font-size: 11px; line-height: 1.35; }
 
+.model-settings-model-option {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  padding: 9px;
+}
+
+.model-settings-model-option > input { margin-top: 3px; }
+
+.model-settings-model-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+  min-width: 0;
+}
+
+.model-settings-model-heading strong { overflow-wrap: anywhere; }
+.model-settings-model-option .model-settings-option-copy > code { color: var(--color-text-muted); font-size: 9px; }
+.model-settings-model-summary { color: var(--color-secondary) !important; }
+
 .model-settings-combination {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
@@ -3286,8 +3293,7 @@ select:focus-visible {
   min-width: 0;
 }
 
-.model-settings-combination-copy > small,
-.model-settings-estimate-summary {
+.model-settings-combination-copy > small {
   color: var(--color-text-muted);
   font-size: 11px;
   line-height: 1.35;
@@ -3302,11 +3308,18 @@ select:focus-visible {
   font-size: 13px;
 }
 
+.model-settings-meters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  min-width: 0;
+}
+
 .model-settings-meter {
   display: grid;
-  grid-template-columns: 94px minmax(80px, 1fr) 64px;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 3px 6px;
   min-width: 0;
   font-size: 10px;
 }
@@ -3318,6 +3331,7 @@ select:focus-visible {
 
 .model-settings-meter-track {
   display: grid;
+  grid-column: 1 / -1;
   grid-template-columns: repeat(5, minmax(8px, 1fr));
   gap: 3px;
 }
@@ -3409,16 +3423,7 @@ select:focus-visible {
 .runtime-attach-button { flex: 0 0 auto; }
 
 @media (max-width: 520px) {
-  .model-settings-meter {
-    grid-template-columns: 1fr auto;
-  }
-
-  .model-settings-meter-track {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .model-settings-meter-value { grid-column: 2; grid-row: 1; }
+  .model-settings-model-options { grid-template-columns: minmax(0, 1fr); }
 }
 
 .btw-drawer {
