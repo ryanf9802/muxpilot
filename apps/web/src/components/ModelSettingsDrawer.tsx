@@ -126,6 +126,7 @@ export function ModelSettingsDrawer({
             <div className="model-settings-comparison-note" role="note">
               <strong>Compare each combination</strong>
               <span>Estimated quality is for coding and agent work. Estimated usage is relative subscription allowance consumption.</span>
+              {fastMode === true ? <span className="model-settings-fast-usage">Fast mode is on and increases usage for supported models; the bars do not apply an unsupported multiplier.</span> : null}
             </div>
             <fieldset className="model-settings-options model-settings-combinations">
               <legend>Model and reasoning</legend>
@@ -250,7 +251,7 @@ function PublishedGuidance({ models, fastMode }: { models: string[]; fastMode: b
     <details className="model-settings-evidence">
       <summary>About these estimates and published usage</summary>
       <p>These combination ratings are curated guidance, reviewed {formatGuidanceDate(comparisonGuidanceSource.reviewedAt)}. Actual usage varies with context, task complexity, reasoning, tools, retrieval, and caching.</p>
-      {fastMode ? <p><strong>Fast mode is on:</strong> it increases usage for supported models; no unsupported multiplier is applied to the bars.</p> : null}
+      {fastMode ? <p>Fast mode is reflected by the visible usage notice above.</p> : null}
       {available.length > 0 ? (
         <dl>
           {available.map((item) => (

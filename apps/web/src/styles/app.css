@@ -3194,6 +3194,7 @@ select:focus-visible {
 }
 
 .model-settings-comparison-note strong { color: var(--color-text); font-size: 12px; }
+.model-settings-fast-usage { color: var(--color-warning); }
 
 .model-settings-options {
   display: grid;
