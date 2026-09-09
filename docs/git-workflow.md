@@ -45,7 +45,7 @@ The bundled `$muxpilot-git-workflow` skill drives this sequence:
 2. **Begin.** `muxpilot-git-begin.mjs` creates or adopts a private implementation branch and worktree based on the target.
 3. **Implement in isolation.** Every repository content write occurs in that worktree.
 4. **Localize dependencies when changing them.** `muxpilot-git-deps.mjs localize` replaces a shared dependency link with task-local state before a manifest, lockfile, or installed package is changed.
-5. **Validate narrowly.** Run checks that cover the changed files or modules. Repository-wide work requires explicit operator scope.
+5. **Validate.** Run checks that cover the changed files or modules and any full build required by repository guidance. Other repository-wide work requires explicit operator scope.
 6. **Commit atomically.** All tracked and untracked task changes must belong to clean logical commits.
 7. **Self-review.** Review the complete target-to-task diff, fix every finding, rerun affected checks, and repeat until clean.
 8. **Finish.** `muxpilot-git-finish.mjs` verifies the task, serializes integration, and fast-forwards the local target.
@@ -74,7 +74,7 @@ When capacity is unavailable, the helper prints `QUEUED_NOT_RUN`; the command ha
 
 After a managed command starts, the helper asks muxpilot's private host-side broker to place its worker in a transient user-systemd service, prints `RUNNING_DEFERRED`, and emits a structured `run_released` event. The agent ends its turn instead of polling. Muxpilot resumes it with one `run_completed` event containing a compact success result or a bounded failure tail plus the retained-log path. Standalone helpers and managed installations without user-systemd session scopes continue to return the child result synchronously.
 
-The scheduler controls resources only. It does not authorize a broader test or scan than the operator requested.
+The scheduler controls resources only. Repository guidance may authorize a required full build, but the scheduler does not authorize a broader test or scan than the operator requested.
 
 ## Workflow Events and UI State
 
@@ -123,7 +123,7 @@ approvals are separate and cannot be bypassed through workflow guards.
 
 Integration stops rather than modifying a dirty target checkout. It also stops for unresolved conflicts, an invalidated review, missing commits, uncommitted task files, or a target that cannot be fast-forwarded safely.
 
-Do not use an implementation worktree to report whether another checkout is clean. Inspect the actual target checkout. A retained worktree is the recovery surface: resolve conflicts or incomplete work there, repeat focused checks and the complete review, then retry finish.
+Do not use an implementation worktree to report whether another checkout is clean. Inspect the actual target checkout. A retained worktree is the recovery surface: resolve conflicts or incomplete work there, repeat focused checks, any repository-required build, and the complete review, then retry finish.
 
 Successful local integration is distinct from a remote push, pull request, merge, deployment, or production restart. Each requires its own operator request and evidence.
 

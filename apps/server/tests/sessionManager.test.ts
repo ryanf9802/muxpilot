@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { StoredGitWorkspace } from "../src/db/database.js";
-import { latestCodexFastModeFromText, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
+import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
   it("resumes an agent wait only when ready without queueing the wake", async () => {
@@ -49,6 +49,21 @@ describe("SessionManager app-server helpers", () => {
     const workspace = { summary: { worktreePath: "/worktrees/task" }, implementationRoot: "/worktrees" } as StoredGitWorkspace;
     expect(normalizeRepositoryApprovalPrefix(["git", "-C", "/worktrees/task", "status"], workspace))
       .toEqual(["git", "-C", "$MUXPILOT_WORKTREE", "status"]);
+  });
+
+  it("instructs managed Git sessions to honor repository build gates", () => {
+    const workspace = {
+      summary: gitWorkspace("feature/current-target", "workspace-1"),
+      implementationRoot: "/worktrees",
+      controlPath: "/sessions/workspace-1",
+      commonGitDir: "/repo/.git"
+    } as StoredGitWorkspace;
+    const instructions = managedCodexLaunchOptions(workspace, "/codex", "/worktrees").developerInstructions;
+
+    expect(instructions).toContain("run any full build required by repository guidance");
+    expect(instructions).toContain("Repository-required builds are authorized validation");
+    expect(instructions).toContain("Run other repository-wide scans or test suites only when the user explicitly requests them");
+    expect(instructions).toContain("Report the integrated commit and the focused checks and repository-required build that succeeded");
   });
 
   it("reconciles managed Git targets without live runtime or rollout activity", async () => {

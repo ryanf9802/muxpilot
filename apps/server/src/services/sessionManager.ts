@@ -3325,7 +3325,7 @@ export function managedCodexLaunchOptions(
       "Workflow status is authoritative for the current target after a retarget.",
       "For answers, plans, reviews, and diagnosis, inspect the repository directly without creating a worktree.",
       "Before repository work, inspect applicable repository instructions from the entry path because the control directory is not the project root.",
-      "Before integration, repeatedly self-review the complete diff, fix every finding, and run focused file/module checks until the review is clean. Do not treat this same-agent self-review as a PR-style review. Run repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref.",
+      "Before integration, repeatedly self-review the complete diff, fix every finding, run focused file/module checks, and run any full build required by repository guidance until the final committed candidate is clean and builds successfully. Repository-required builds are authorized validation for that repository. Do not treat this same-agent self-review as a PR-style review. Run other repository-wide scans or test suites only when the user explicitly requests them, or when the user explicitly requests a PR-style review of a branch or ref.",
       "Treat a command as heavyweight if it covers an entire repository, workspace, application, package, or multi-project configuration; performs static-analysis, security, dependency, or container-image scanning such as Semgrep, CodeQL, or Trivy; starts Docker or Docker Compose; launches multiple workers, shards, or projects; produces a production bundle; or is reasonably expected to run longer than one minute, use more than about 1 GiB of memory, or sustain multiple CPU cores. Selected-file lint, syntax-only checks, and one explicitly selected test file or test case without parallel workers are normally not heavyweight. When uncertain, treat the command as heavyweight. Run every heavyweight command through muxpilot-git-run.mjs --heavy -- <command>. The wrapper schedules an already-authorized command; it does not authorize repository-wide validation, and its availability is not a reason to broaden a focused check.",
       "If the heavyweight wrapper reports QUEUED_NOT_RUN, use $muxpilot-heavy-command-queue. The command did not run; do not poll or retry it.",
       "If the heavyweight wrapper reports RUNNING_DEFERRED, use $muxpilot-heavy-command-queue, preserve its run_released event, end the turn immediately, and wait for muxpilot's run_completed continuation. Do not poll or overlap repository work.",
@@ -3334,7 +3334,7 @@ export function managedCodexLaunchOptions(
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "Shared dependency links are writable for test caches. Before installing or changing dependencies, localize the relevant link with the dependency helper.",
-      "Create clean atomic commits and run the finish helper before reporting completion."
+      "Create clean atomic commits and run the finish helper before reporting completion. Report the integrated commit and the focused checks and repository-required build that succeeded."
     ].join(" "),
     environment: {
       ...managedEnvironment,
