@@ -14,6 +14,7 @@ import { Modal } from "./Modal.js";
 
 const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
 const CODEX_USAGE_RECONCILE_INTERVAL_MS = 60_000;
+const CODEX_USAGE_HISTORY_DAYS = 30;
 
 interface PendingResetAttempt {
   idempotencyKey: string;
@@ -29,7 +30,6 @@ export function CodexUsagePanel({
   onSummaryChange?: (summary: CodexUsageSummaryResponse) => void;
   onRefreshSummary?: () => Promise<void>;
 }) {
-  const [historyDays, setHistoryDays] = useState<7 | 30>(30);
   const [history, setHistory] = useState<CodexTokenUsageResponse | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -44,11 +44,11 @@ export function CodexUsagePanel({
   const accountLabel = summary ? formatCodexAccount(summary) : "loading";
   const planLabel = summary?.account?.planType ? summary.account.planType : null;
 
-  const loadHistory = useCallback(async (days: 7 | 30, refresh = false) => {
+  const loadHistory = useCallback(async (refresh = false) => {
     const requestId = ++historyRequestIdRef.current;
     setHistoryLoading(true);
     try {
-      const nextHistory = await api.codexUsageHistory(days, refresh);
+      const nextHistory = await api.codexUsageHistory(CODEX_USAGE_HISTORY_DAYS, refresh);
       if (requestId === historyRequestIdRef.current) setHistory(nextHistory);
     } catch (error) {
       if (requestId === historyRequestIdRef.current) {
@@ -56,7 +56,7 @@ export function CodexUsagePanel({
           available: false,
           error: error instanceof Error ? error.message : "Codex token usage is unavailable.",
           refreshedAt: new Date().toISOString(),
-          days,
+          days: CODEX_USAGE_HISTORY_DAYS,
           summary: null,
           points: null
         });
@@ -67,10 +67,10 @@ export function CodexUsagePanel({
   }, []);
 
   useEffect(() => {
-    void loadHistory(historyDays);
-    const timer = window.setInterval(() => void loadHistory(historyDays), CODEX_USAGE_RECONCILE_INTERVAL_MS);
+    void loadHistory();
+    const timer = window.setInterval(() => void loadHistory(), CODEX_USAGE_RECONCILE_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [historyDays, loadHistory]);
+  }, [loadHistory]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -85,7 +85,7 @@ export function CodexUsagePanel({
     setRefreshing(true);
     setRefreshError(null);
     try {
-      await Promise.all([onRefreshSummary?.(), loadHistory(historyDays, true)]);
+      await Promise.all([onRefreshSummary?.(), loadHistory(true)]);
     } catch (error) {
       setRefreshError(error instanceof Error ? error.message : "Codex usage could not be refreshed.");
     } finally {
@@ -109,7 +109,7 @@ export function CodexUsagePanel({
       setSelectedCredit(undefined);
       setResetOutcome(response.outcome);
       onSummaryChange?.(response.summary);
-      await loadHistory(historyDays, true);
+      await loadHistory(true);
     } catch (error) {
       setSelectedCredit(undefined);
       setResetError(error instanceof Error ? error.message : "The reset attempt could not be confirmed.");
@@ -195,11 +195,6 @@ export function CodexUsagePanel({
           <div>
             <h3>Token activity</h3>
             <p>Daily account token usage</p>
-          </div>
-          <div className="codex-history-range" aria-label="Usage history range">
-            {([7, 30] as const).map((days) => (
-              <button type="button" key={days} className={historyDays === days ? "active" : undefined} aria-pressed={historyDays === days} onClick={() => setHistoryDays(days)}>{days}d</button>
-            ))}
           </div>
         </div>
         <CodexTokenUsageChart history={history} loading={historyLoading} />

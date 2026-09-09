@@ -90,6 +90,13 @@ describe("CodexUsagePanel interactions", () => {
     expect(container.textContent).toContain("Usage limit reset");
   });
 
+  it("always loads 30 days without a range selector", () => {
+    expect(apiMocks.codexUsageHistory).toHaveBeenCalledWith(30, false);
+    expect(container.querySelector('[aria-label="Usage history range"]')).toBeNull();
+    expect([...container.querySelectorAll("button")].map((button) => button.textContent?.trim())).not.toContain("7d");
+    expect([...container.querySelectorAll("button")].map((button) => button.textContent?.trim())).not.toContain("30d");
+  });
+
   it("reuses an uncertain attempt after the panel remounts", async () => {
     apiMocks.consumeCodexResetCredit.mockRejectedValueOnce(new Error("Connection closed"));
 
