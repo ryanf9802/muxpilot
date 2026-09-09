@@ -109,9 +109,6 @@ export function loadConfig(): AppConfig {
 }
 
 export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: boolean } = {}): AppConfig {
-  if (env.MUXPILOT_DEFAULT_SESSION_DRIVER !== undefined) {
-    throw new Error("MUXPILOT_DEFAULT_SESSION_DRIVER is no longer supported; Codex app-server is the only session runtime");
-  }
   const parsed = schema.parse({
     lanEnabled: env.MUXPILOT_LAN_ENABLED,
     host: env.MUXPILOT_HOST ?? defaultHost(env.MUXPILOT_LAN_ENABLED),

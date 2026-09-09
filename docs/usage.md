@@ -124,7 +124,7 @@ Created children use their own app-server service and inherit the source reposit
 
 ## Moving sessions between hosts
 
-The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, provider identity, and preferences, then resumes through app-server. Older supported archives are normalized during import and their obsolete runtime metadata is not retained.
+The transfer dialog exports one or more sessions to a format-v6 `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, provider identity, and preferences, then resumes through app-server. Earlier archive formats are not supported.
 
 For managed Git sessions, current exports can include the committed local target branch and objects not available from its upstream. Import may create, reuse, or safely fast-forward the same branch name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting upstream.
 

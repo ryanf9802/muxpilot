@@ -1,4 +1,4 @@
-import { managedSessionName, type ManagedSession } from "@muxpilot/core";
+import type { ManagedSession } from "@muxpilot/core";
 
 export function sessionDisplayName(session: ManagedSession, sessions: ManagedSession[] = [session]): string {
   const baseName = sessionBaseName(session);
@@ -7,7 +7,7 @@ export function sessionDisplayName(session: ManagedSession, sessions: ManagedSes
 }
 
 export function sessionBaseName(session: ManagedSession): string {
-  return managedSessionName(session).trim() || "session";
+  return session.name.trim() || "session";
 }
 
 function isAmbiguousSessionName(session: ManagedSession, sessions: ManagedSession[], baseName: string): boolean {

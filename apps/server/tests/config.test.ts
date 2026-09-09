@@ -18,11 +18,6 @@ describe("config LAN access validation", () => {
     expect(config.skillHome).toBe("/tmp/muxpilot-checkout");
   });
 
-  it("rejects the retired runtime selector", () => {
-    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_app_server" })).toThrow(/no longer supported/);
-    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_tmux" })).toThrow(/no longer supported/);
-  });
-
   it("enables LAN binding when MUXPILOT_LAN_ENABLED is set", () => {
     const config = parseConfig({
       MUXPILOT_LAN_ENABLED: "1"

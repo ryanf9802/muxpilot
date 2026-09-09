@@ -1,69 +1,29 @@
-import { existsSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type QueuedInput, type SessionHistoryResult, type TranscriptPageResponse } from "@muxpilot/core";
-import { AppDatabase, SESSION_RUNTIME_BACKUP_SUFFIX, type StoredGitWorkspace } from "../src/db/database.js";
+import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
-  it("backs up and normalizes a legacy session database before runtime-model writes", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-legacy-"));
+  it("reopens canonical session data without changing runtime fields", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-reopen-"));
     const path = join(dir, "test.db");
-    const legacy = testSession("legacy-runtime");
+    const original = testSession("canonical-runtime");
     const initial = new AppDatabase(path);
-    await initial.upsertSession(legacy, "2026-08-31T00:00:00.000Z");
+    await initial.upsertSession(original, "2026-08-31T00:00:00.000Z");
     await initial.close();
-
-    const raw = new DatabaseSync(path);
-    const stored = raw.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(legacy.id) as { data_json: string };
-    const legacyData = JSON.parse(stored.data_json) as Record<string, unknown>;
-    for (const key of ["name", "cwd", "provider", "driverKind", "runtime", "capabilities", "resourceUnit"]) delete legacyData[key];
-    legacyData.tmux = {
-      sessionId: "legacy-session",
-      sessionName: "work",
-      windowName: "codex",
-      cwd: "/repo"
-    };
-    raw.prepare("UPDATE managed_sessions SET data_json = ? WHERE id = ?").run(JSON.stringify(legacyData), legacy.id);
-    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v3'").run();
-    raw.close();
 
     const reopened = new AppDatabase(path);
-    const session = await reopened.getSession(legacy.id);
+    const session = await reopened.getSession(original.id);
     expect(session).toMatchObject({
-      name: "codex",
-      cwd: "/repo",
+      name: original.name,
+      cwd: original.cwd,
       provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
-      status: "missing"
+      runtime: original.runtime,
+      resourceUnit: null
     });
-    expect(session).not.toHaveProperty("driverKind");
-    expect(session).not.toHaveProperty("tmux");
-    expect(session?.runtime).toBeUndefined();
-    expect(existsSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`)).toBe(true);
-    const backup = new DatabaseSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`, { readOnly: true });
-    expect(backup.prepare("PRAGMA integrity_check").get()).toMatchObject({ integrity_check: "ok" });
-    const backupRow = backup.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(legacy.id) as { data_json: string };
-    const backupSession = JSON.parse(backupRow.data_json) as Record<string, unknown>;
-    expect(backupSession).not.toHaveProperty("runtime");
-    expect(backupSession).not.toHaveProperty("provider");
-    backup.close();
     await reopened.close();
-  });
-
-  it("aborts startup when an existing pre-runtime backup cannot be verified", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-corrupt-backup-"));
-    const path = join(dir, "test.db");
-    const initial = new AppDatabase(path);
-    await initial.upsertSession(testSession("backup-failure"), "2026-08-31T00:00:00.000Z");
-    await initial.close();
-    const raw = new DatabaseSync(path);
-    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v3'").run();
-    raw.close();
-    writeFileSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`, "not sqlite");
-
-    expect(() => new AppDatabase(path)).toThrow(/Unable to verify pre-runtime database backup/);
   });
 
   it("removes persisted context guards without clearing an exhausted work-token budget", async () => {
