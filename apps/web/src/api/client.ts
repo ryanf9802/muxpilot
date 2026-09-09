@@ -35,7 +35,6 @@ import type {
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
-  SessionEvidenceResponse,
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionHistoryResponse,
@@ -182,7 +181,6 @@ export const api = {
     }),
   codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
-  sessionEvidence: (id: string) => json<SessionEvidenceResponse>(`/api/sessions/${encodeURIComponent(id)}/evidence`),
   sessionSnapshot: (id: string, limit = 80, signal?: AbortSignal) =>
     json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`, { signal }),
   sessionDocuments: (id: string) =>

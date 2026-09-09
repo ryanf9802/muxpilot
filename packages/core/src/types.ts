@@ -514,18 +514,6 @@ export interface SessionSnapshotResponse {
   sampledAt: string;
 }
 
-export interface SessionEvidenceSection {
-  value: unknown | null;
-  error: string | null;
-}
-
-export interface SessionEvidenceResponse {
-  runtime: SessionEvidenceSection;
-  processTree: SessionEvidenceSection;
-  protocolJournal: SessionEvidenceSection | null;
-  sampledAt: string;
-}
-
 export type QueuedInputStatus = "queued" | "sending" | "sent" | "failed";
 
 export interface QueuedInput {

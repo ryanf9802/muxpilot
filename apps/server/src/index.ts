@@ -297,7 +297,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, rawSessionEvidence, sessionDriverCompatibility);
+registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionDriverCompatibility);
 
 app.get("/healthz", async () => ({
   ok: true,

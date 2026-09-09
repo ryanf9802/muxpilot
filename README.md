@@ -118,7 +118,7 @@ Read [Architecture](docs/architecture.md) and [Deployment](docs/deployment.md) b
 
 ## Using muxpilot
 
-The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, ask a BTW side question, inspect documents and runtime evidence, monitor heavyweight work, and manage the session. Agent-created sessions remain visible in a nested tree with context, budget, and rolled-up status.
+The dashboard is organized around attention: red sessions need input, yellow sessions are active or uncertain, and green sessions are ready. Open a card to view the structured transcript, send or queue input, handle interactive gates, ask a BTW side question, inspect documents, monitor heavyweight work, and manage the session. Agent-created sessions remain visible in a nested tree with context, budget, and rolled-up status.
 
 The [usage guide](docs/usage.md) covers:
 

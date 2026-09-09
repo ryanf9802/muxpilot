@@ -36,7 +36,7 @@ Managed Git sessions store the repository entry point, current existing local ta
 
 ## Components
 
-- React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, raw terminal panel, transfer/recovery dialogs, and LAN connection details.
+- React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, transfer/recovery dialogs, and LAN connection details.
 - Fastify Backend/API server: operator access gate, REST API, WebSocket event stream.
 - Session manager: provider-neutral dispatch, legacy discovery, structured reconciliation, verified input, queues, hibernation/recovery, create/fork/restore, agent ownership, and event publishing.
 - Session driver registry and Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
@@ -49,7 +49,7 @@ Managed Git sessions store the repository entry point, current existing local ta
 - Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
 - BTW service: forks a bounded app-server turn from a conversation snapshot, streams independent answers, coordinates isolated document staging, and hands safe changes back to the main session.
 - Session orchestration broker: binds a capability-scoped MCP server to each managed Codex launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
-- Raw evidence reader: exposes bounded, read-only runtime/service, process-tree, protocol-journal, tmux, and Codex JSONL evidence for independent diagnosis.
+- Raw evidence reader: exposes bounded, read-only runtime/service, process-tree, protocol-journal, tmux, and Codex JSONL evidence through the session orchestration MCP for independent diagnosis.
 - Heavy command service: observes shared queue metadata, resumes reserved sessions, serves bounded live output, and terminates exact process groups on operator request.
 - Resource governor and Docker proxy: allocate muxpilot-owned systemd scopes and label/constrain containers created through managed sessions.
 - Session transfer service: packages portable transcript prefixes, preferences, documents, and eligible committed Git objects with optional authenticated encryption.

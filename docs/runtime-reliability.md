@@ -125,9 +125,7 @@ Use the narrowest evidence that answers the problem:
 
 1. `pnpm app status` for supervisor, endpoint, PID, and port ownership.
 2. `pnpm app logs <mode> --process all --lines 80` for recent server/web/supervisor errors.
-3. The session status, failed-input banner, heavy-command modal, Git workspace panel, and runtime evidence available for the selected driver.
-4. For agent orchestration mismatches, compare persisted state with neutral runtime/service, process-tree, protocol-journal, rollout, and legacy tmux evidence as described in [Agent Orchestration](agent-orchestration.md#raw-evidence-tools).
-
-From a local browser, the session-header evidence button displays the same bounded runtime/service and process-tree evidence plus the app-server protocol-journal tail. The endpoint is intentionally unavailable to LAN clients because process commands and protocol frames can contain sensitive local context.
+3. The session status, failed-input banner, heavy-command modal, and Git workspace panel.
+4. For agent orchestration mismatches, use the muxpilot MCP tools to compare persisted state with neutral runtime/service, process-tree, protocol-journal, rollout, and legacy tmux evidence as described in [Agent Orchestration](agent-orchestration.md#raw-evidence-tools).
 
 A ready pane with no queued input can simply be idle. Do not resend or overwrite a draft unless the persisted submission, transcript source, terminal composer, and queue state all support that exact action.

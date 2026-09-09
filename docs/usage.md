@@ -33,7 +33,7 @@ The session view also provides:
 - Normal/Plan collaboration controls and model-dependent Fast mode
 - Transcript search, paging, and jump controls
 - Context-window use, managed Git state, documents, BTW side questions, and active heavyweight-command details
-- Raw terminal capture and a copyable local tmux attach command
+- A copyable local runtime attachment command
 - Interrupt, fork, new-session, and kill actions
 
 User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.

@@ -83,7 +83,6 @@ import type {
   QueuedInput,
   SessionEvent,
   SessionDocumentSummary,
-  SessionEvidenceResponse,
   SessionModelSettings,
   SessionAction,
   SessionActionResponse,
@@ -872,43 +871,6 @@ export function HeavyCommandsModal({
   );
 }
 
-export function SessionEvidenceModal({
-  open,
-  evidence,
-  loading,
-  error,
-  onClose
-}: {
-  open: boolean;
-  evidence: SessionEvidenceResponse | null;
-  loading: boolean;
-  error: string;
-  onClose: () => void;
-}) {
-  const sections: Array<[string, SessionEvidenceResponse["runtime"]]> = [];
-  if (evidence) {
-    sections.push(["Runtime and service", evidence.runtime], ["Process tree", evidence.processTree]);
-    if (evidence.protocolJournal) sections.push(["Protocol journal tail", evidence.protocolJournal]);
-  }
-  return (
-    <Modal open={open} onClose={onClose} title="Raw runtime evidence" panelClassName="session-evidence-modal">
-      <p className="muted">Bounded, read-only evidence sampled directly from the selected runtime. Available only to the local browser.</p>
-      {loading ? <p>Reading runtime evidence…</p> : null}
-      {error ? <p className="error-text" role="alert">{error}</p> : null}
-      {evidence ? <p className="muted">Sampled {evidence.sampledAt}</p> : null}
-      <div className="session-evidence-sections">
-        {sections.map(([title, section]) => (
-          <section key={title}>
-            <h3>{title}</h3>
-            {section.error ? <p className="error-text" role="alert">{section.error}</p> : null}
-            {section.value !== null ? <pre>{JSON.stringify(section.value, null, 2)}</pre> : null}
-          </section>
-        ))}
-      </div>
-    </Modal>
-  );
-}
-
 export function DocumentsModal({
   open,
   sessionId,
@@ -1305,10 +1267,6 @@ export function SessionView() {
   const [btwCompletedWhileClosed, setBtwCompletedWhileClosed] = useState(false);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
-  const [evidenceOpen, setEvidenceOpen] = useState(false);
-  const [sessionEvidence, setSessionEvidence] = useState<SessionEvidenceResponse | null>(null);
-  const [sessionEvidenceLoading, setSessionEvidenceLoading] = useState(false);
-  const [sessionEvidenceError, setSessionEvidenceError] = useState("");
   const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
   const [heavyCommandError, setHeavyCommandError] = useState("");
   const [terminatingHeavyRun, setTerminatingHeavyRun] = useState<string | null>(null);
@@ -2696,22 +2654,6 @@ export function SessionView() {
     }
   }
 
-  async function openRuntimeEvidence() {
-    if (!session || accessMode !== "local") return;
-    const targetId = session.id;
-    setEvidenceOpen(true);
-    setSessionEvidence(null);
-    setSessionEvidenceError("");
-    setSessionEvidenceLoading(true);
-    try {
-      setSessionEvidence(await api.sessionEvidence(targetId));
-    } catch (error) {
-      setSessionEvidenceError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSessionEvidenceLoading(false);
-    }
-  }
-
   async function copyMessageFromMenu() {
     if (!messageMenu) return;
     const text = copyableMessageText(messageMenu.message);
@@ -2852,16 +2794,6 @@ export function SessionView() {
             copyEnabled={!completed && accessMode === "local" && readySession.capabilities?.terminalAttach !== false}
             onCopy={() => void copyTmuxCommand()}
           />
-          <button
-            className="icon-button"
-            type="button"
-            disabled={accessMode !== "local" || readySession.capabilities?.rawTerminalCapture === false}
-            onClick={() => void openRuntimeEvidence()}
-            aria-label="Open raw runtime evidence"
-            title={accessMode === "local" ? "Raw runtime evidence" : "Raw runtime evidence is available only from the local browser"}
-          >
-            <ListChecks size={16} aria-hidden="true" />
-          </button>
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
           <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
             {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
@@ -2896,13 +2828,6 @@ export function SessionView() {
         terminatingRun={terminatingHeavyRun}
         onClose={() => setHeavyCommandsOpen(false)}
         onTerminate={(runId) => void terminateHeavyCommand(runId)}
-      />
-      <SessionEvidenceModal
-        open={evidenceOpen}
-        evidence={sessionEvidence}
-        loading={sessionEvidenceLoading}
-        error={sessionEvidenceError}
-        onClose={() => setEvidenceOpen(false)}
       />
       <DocumentsModal
         open={documentsOpen}
