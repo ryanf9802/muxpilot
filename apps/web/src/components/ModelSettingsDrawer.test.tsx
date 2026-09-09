@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodexModelCatalogResponse, ManagedSession } from "@muxpilot/core";
 import { effectiveModelSettings, ModelSettingsDrawer } from "./ModelSettingsDrawer.js";
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("ModelSettingsDrawer", () => {
   afterEach(() => {
