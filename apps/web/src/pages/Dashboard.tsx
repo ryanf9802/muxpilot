@@ -12,7 +12,6 @@ import {
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
-  CodexUsageLimit,
   CodexUsageSummaryResponse,
   CodexModelCatalogResponse,
   CollaborationMode,
@@ -35,6 +34,7 @@ import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/Loa
 import { Modal } from "../components/Modal.js";
 import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
+import { CodexUsagePanel } from "../components/CodexUsagePanel.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -43,6 +43,8 @@ import {
   sessionStatusSeverity,
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
+
+export { CodexUsagePanel };
 
 const ACTION_MENU_WIDTH = 220;
 const ACTION_MENU_HEIGHT = 312;
@@ -148,14 +150,20 @@ export function Dashboard() {
     }
   }, []);
 
-  const loadCodexUsageSummary = useCallback(async () => {
+  const loadCodexUsageSummary = useCallback(async (refresh = false) => {
     const requestId = ++codexUsageRequestIdRef.current;
     try {
-      const summary = await api.codexUsageSummary();
+      const summary = await api.codexUsageSummary(refresh);
       if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummary(summary);
     } finally {
       if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummaryInitialLoading(false);
     }
+  }, []);
+
+  const acceptCodexUsageSummary = useCallback((summary: CodexUsageSummaryResponse) => {
+    codexUsageRequestIdRef.current += 1;
+    setCodexUsageSummary(summary);
+    setCodexUsageSummaryInitialLoading(false);
   }, []);
 
   useEffect(() => {
@@ -662,7 +670,11 @@ export function Dashboard() {
       {codexUsageSummaryInitialLoading && !codexUsageSummary ? (
         <UsagePanelSkeleton />
       ) : codexUsageSummary ? (
-        <CodexUsagePanel summary={codexUsageSummary} />
+        <CodexUsagePanel
+          summary={codexUsageSummary}
+          onSummaryChange={acceptCodexUsageSummary}
+          onRefreshSummary={() => loadCodexUsageSummary(true)}
+        />
       ) : (
         <UsageUnavailablePanel title="Codex usage" />
       )}
@@ -1304,59 +1316,6 @@ export function OpenAIUsagePanel({
   );
 }
 
-export function CodexUsagePanel({ summary }: { summary: CodexUsageSummaryResponse | null }) {
-  const accountLabel = summary ? formatCodexAccount(summary) : "loading";
-  const planLabel = summary?.account?.planType ? summary.account.planType : null;
-
-  return (
-    <section className="usage-panel codex-usage-panel">
-      <div className="usage-panel-head">
-        <div>
-          <h2>Codex usage</h2>
-          <p>{summary?.available ? "Account limits" : summary?.error ?? "Account limits"}</p>
-        </div>
-        <div className="usage-total">
-          <strong>{accountLabel}</strong>
-          <span>{planLabel ?? (summary ? formatCodexRefresh(summary.refreshedAt) : "loading")}</span>
-        </div>
-      </div>
-
-      <div className="codex-limit-list">
-        <CodexLimitRow label="5h limit" limit={summary?.limits.fiveHour ?? null} loading={!summary} />
-        <CodexLimitRow label="Weekly limit" limit={summary?.limits.weekly ?? null} loading={!summary} />
-      </div>
-
-      {summary ? (
-        <div className="usage-stats">
-          <span>{formatCodexRefresh(summary.refreshedAt)}</span>
-          {summary.available ? null : <span>Unavailable</span>}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-function CodexLimitRow({ label, limit, loading }: { label: string; limit: CodexUsageLimit | null; loading: boolean }) {
-  const remainingPercent = limit?.remainingPercent ?? 0;
-  return (
-    <div className="codex-limit-row">
-      <div className="codex-limit-meta">
-        <span>{label}</span>
-        <span>
-          {loading ? "loading" : limit?.remainingPercent === null || !limit ? "unavailable" : `${Math.round(limit.remainingPercent)}% remaining`}
-        </span>
-      </div>
-      <div className="codex-limit-track" aria-label={`${label} usage`}>
-        <div className="codex-limit-fill" style={{ width: `${Math.max(0, Math.min(100, remainingPercent))}%` }} />
-      </div>
-      <div className="codex-limit-foot">
-        <span>{limit?.remainingPercent === null || !limit ? "" : `${Math.round(limit.remainingPercent)}% remaining`}</span>
-        <span>{limit?.resetsAt ? `Resets ${formatCodexReset(limit.resetsAt)}` : ""}</span>
-      </div>
-    </div>
-  );
-}
-
 function UsageChart({ points }: { points: OpenAIUsageDailyPoint[] }) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const width = 600;
@@ -1483,23 +1442,6 @@ function formatUsd(value: number | null): string {
   if (value === 0) return "$0.00";
   if (value < 0.01) return "<$0.01";
   return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(value);
-}
-
-function formatCodexAccount(summary: CodexUsageSummaryResponse): string {
-  if (!summary.account) return "Not signed in";
-  if (summary.account.kind === "chatgpt") return summary.account.email ?? "ChatGPT";
-  if (summary.account.kind === "apiKey") return "API key";
-  if (summary.account.kind === "amazonBedrock") return "Amazon Bedrock";
-  return "Unknown account";
-}
-
-function formatCodexRefresh(value: string): string {
-  return `Updated ${new Date(value).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
-}
-
-function formatCodexReset(value: number): string {
-  const millis = value < 10_000_000_000 ? value * 1000 : value;
-  return new Date(millis).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function formatNumber(value: number): string {

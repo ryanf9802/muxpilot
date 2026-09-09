@@ -122,6 +122,10 @@ const questionAnswerSchema = z.object({
   )
 });
 const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
+const codexResetCreditSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  creditId: z.string().trim().min(1).max(500).nullable().optional()
+}).strict();
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
 const sessionDirectorySchema = z.object({ path: z.string().trim().min(1).max(4096) });
 const sessionTransferExportSchema = z.object({ sessionIds: z.array(z.string().min(1)).min(1).max(500) });
@@ -788,17 +792,36 @@ export function registerRoutes(
     return { enabled };
   });
 
-  app.get("/api/codex-usage/summary", { preHandler: access.requireAccess }, async () => {
+  app.get("/api/codex-usage/summary", { preHandler: access.requireAccess }, async (request) => {
+    const { refresh } = z.object({ refresh: z.enum(["0", "1"]).optional() }).parse(request.query);
     if (!codexUsage) {
       return {
         available: false,
         error: "Codex usage service is not configured.",
         refreshedAt: new Date().toISOString(),
         account: null,
-        limits: { fiveHour: null, weekly: null }
+        limits: { fiveHour: null, weekly: null },
+        resetCredits: null
       };
     }
-    return codexUsage.summary();
+    return codexUsage.summary(refresh === "1");
+  });
+
+  app.get("/api/codex-usage/history", { preHandler: access.requireAccess }, async (request) => {
+    const parsed = z.object({
+      days: z.coerce.number().pipe(z.union([z.literal(7), z.literal(30)])).default(30),
+      refresh: z.enum(["0", "1"]).optional()
+    }).parse(request.query);
+    if (!codexUsage) {
+      return { available: false, error: "Codex usage service is not configured.", refreshedAt: new Date().toISOString(), days: parsed.days, summary: null, points: null };
+    }
+    return codexUsage.tokenUsage(parsed.days, parsed.refresh === "1");
+  });
+
+  app.post("/api/codex-usage/reset", { preHandler: access.requireAccess }, async (request, reply) => {
+    if (!codexUsage) return reply.code(503).send({ error: "Codex usage service is not configured." });
+    const body = codexResetCreditSchema.parse(request.body);
+    return codexUsage.consumeResetCredit(body.idempotencyKey, body.creditId);
   });
 
   app.get("/api/events", { websocket: true, preHandler: access.requireAccess }, (socket, request) => {

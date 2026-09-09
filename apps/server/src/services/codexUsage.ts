@@ -3,6 +3,8 @@ import type { Logger } from "pino";
 import type {
   CodexModel,
   CodexModelCatalogResponse,
+  CodexRateLimitResetCredits,
+  CodexTokenUsageResponse,
   CodexUsageAccount,
   CodexUsageLimit,
   CodexUsageSummaryResponse
@@ -16,6 +18,7 @@ const MODEL_CACHE_TTL_MS = 60_000;
 const MODEL_FAILURE_CACHE_TTL_MS = 10_000;
 const USAGE_CACHE_TTL_MS = 60_000;
 const USAGE_FAILURE_CACHE_TTL_MS = 10_000;
+const TOKEN_USAGE_CACHE_TTL_MS = 60_000;
 
 interface JsonRpcSuccess {
   id: string | number;
@@ -68,6 +71,31 @@ type CodexAccount =
 export interface RateLimitsReadResponse {
   rateLimits: RateLimitSnapshot;
   rateLimitsByLimitId: Record<string, RateLimitSnapshot | undefined> | null;
+  rateLimitResetCredits?: RawRateLimitResetCredits | null;
+}
+
+interface RawRateLimitResetCredits {
+  availableCount: number;
+  credits: Array<{
+    id: string;
+    resetType: string;
+    status: string;
+    grantedAt: number;
+    expiresAt: number | null;
+    title: string | null;
+    description: string | null;
+  }> | null;
+}
+
+interface AccountTokenUsageResponse {
+  summary: {
+    lifetimeTokens: number | null;
+    peakDailyTokens: number | null;
+    longestRunningTurnSec: number | null;
+    currentStreakDays: number | null;
+    longestStreakDays: number | null;
+  };
+  dailyUsageBuckets: Array<{ startDate: string; tokens: number }> | null;
 }
 
 export interface RateLimitSnapshot {
@@ -89,26 +117,120 @@ export class CodexUsageService {
   private readonly now: () => number;
   private cache: { summary: CodexUsageSummaryResponse; expiresAt: number } | null = null;
   private inFlight: Promise<CodexUsageSummaryResponse> | null = null;
+  private tokenUsageCache: { response: AccountTokenUsageResponse; expiresAt: number } | null = null;
+  private tokenUsageInFlight: Promise<AccountTokenUsageResponse> | null = null;
+  private summaryGeneration = 0;
+  private tokenUsageGeneration = 0;
 
   constructor(options: CodexUsageServiceOptions) {
     this.client = options.client ?? new CodexAppServerClient(options);
     this.now = options.now ?? (() => Date.now());
   }
 
-  async summary(): Promise<CodexUsageSummaryResponse> {
+  async summary(force = false): Promise<CodexUsageSummaryResponse> {
+    if (force) {
+      this.summaryGeneration += 1;
+      this.cache = null;
+      const generation = this.summaryGeneration;
+      const request = this.loadSummary();
+      this.inFlight = request;
+      try {
+        const summary = await request;
+        if (generation === this.summaryGeneration) {
+          this.cache = { summary, expiresAt: this.now() + (summary.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_CACHE_TTL_MS) };
+        }
+        return summary;
+      } finally {
+        if (this.inFlight === request) this.inFlight = null;
+      }
+    }
     const now = this.now();
     if (this.cache && this.cache.expiresAt > now) return this.cache.summary;
     if (this.inFlight) return this.inFlight;
-    this.inFlight = this.loadSummary();
+    const generation = this.summaryGeneration;
+    const request = this.loadSummary();
+    this.inFlight = request;
     try {
-      const summary = await this.inFlight;
-      this.cache = {
-        summary,
-        expiresAt: this.now() + (summary.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_CACHE_TTL_MS)
-      };
+      const summary = await request;
+      if (generation === this.summaryGeneration) {
+        this.cache = {
+          summary,
+          expiresAt: this.now() + (summary.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_CACHE_TTL_MS)
+        };
+      }
       return summary;
     } finally {
-      this.inFlight = null;
+      if (this.inFlight === request) this.inFlight = null;
+    }
+  }
+
+  async tokenUsage(days: 7 | 30, force = false): Promise<CodexTokenUsageResponse> {
+    const refreshedAt = nowIso();
+    try {
+      const response = await this.loadTokenUsage(force);
+      return {
+        available: true,
+        error: null,
+        refreshedAt,
+        days,
+        summary: response.summary,
+        points: response.dailyUsageBuckets === null ? null : response.dailyUsageBuckets.slice(-days).map((point) => ({
+          date: point.startDate,
+          tokens: finiteNumber(point.tokens) ?? 0
+        }))
+      };
+    } catch (error) {
+      return {
+        available: false,
+        error: error instanceof Error ? error.message : "Codex token usage is unavailable.",
+        refreshedAt,
+        days,
+        summary: null,
+        points: null
+      };
+    }
+  }
+
+  async consumeResetCredit(idempotencyKey: string, creditId?: string | null) {
+    const response = await this.client.request<{ outcome: "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit" }>(
+      "account/rateLimitResetCredit/consume",
+      { idempotencyKey, ...(creditId ? { creditId } : {}) }
+    );
+    this.cache = null;
+    this.summaryGeneration += 1;
+    const generation = this.summaryGeneration;
+    const request = this.loadSummary();
+    this.inFlight = request;
+    try {
+      const summary = await request;
+      if (generation === this.summaryGeneration) {
+        this.cache = { summary, expiresAt: this.now() + (summary.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_CACHE_TTL_MS) };
+      }
+      return { outcome: response.outcome, summary };
+    } finally {
+      if (this.inFlight === request) this.inFlight = null;
+    }
+  }
+
+  private async loadTokenUsage(force = false): Promise<AccountTokenUsageResponse> {
+    const now = this.now();
+    if (!force && this.tokenUsageCache && this.tokenUsageCache.expiresAt > now) return this.tokenUsageCache.response;
+    if (!force && this.tokenUsageInFlight) return this.tokenUsageInFlight;
+    if (force) {
+      this.tokenUsageCache = null;
+      this.tokenUsageGeneration += 1;
+    }
+    const generation = this.tokenUsageGeneration;
+    const request = this.client.request<AccountTokenUsageResponse>("account/usage/read");
+    this.tokenUsageInFlight = request;
+    try {
+      const response = await request;
+      if (generation === this.tokenUsageGeneration) {
+        this.tokenUsageCache = { response, expiresAt: this.now() + TOKEN_USAGE_CACHE_TTL_MS };
+      }
+      return response;
+    } finally {
+      if (this.tokenUsageInFlight === request) this.tokenUsageInFlight = null;
     }
   }
 
@@ -444,7 +566,16 @@ export function normalizeCodexUsage(
     limits: {
       fiveHour: snapshot ? selectLimit(snapshot, "5h limit", "fiveHour") : null,
       weekly: snapshot ? selectLimit(snapshot, "Weekly limit", "weekly") : null
-    }
+    },
+    resetCredits: normalizeResetCredits(rateLimitsResponse.rateLimitResetCredits)
+  };
+}
+
+function normalizeResetCredits(value: RawRateLimitResetCredits | null | undefined): CodexRateLimitResetCredits | null {
+  if (!value) return null;
+  return {
+    availableCount: Math.max(0, Math.trunc(finiteNumber(value.availableCount) ?? 0)),
+    credits: value.credits?.map((credit) => ({ ...credit })) ?? null
   };
 }
 
@@ -496,8 +627,13 @@ function unavailable(error: string, refreshedAt: string, account: CodexUsageAcco
     error,
     refreshedAt,
     account,
-    limits: { fiveHour: null, weekly: null }
+    limits: { fiveHour: null, weekly: null },
+    resetCredits: null
   };
+}
+
+function finiteNumber(value: number): number | null {
+  return Number.isFinite(value) ? value : null;
 }
 
 function clampPercent(value: number): number | null {

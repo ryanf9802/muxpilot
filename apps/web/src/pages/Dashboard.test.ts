@@ -689,6 +689,18 @@ describe("CodexUsagePanel", () => {
               windowDurationMins: 10_080,
               resetsAt: 1_784_300_000
             }
+          },
+          resetCredits: {
+            availableCount: 1,
+            credits: [{
+              id: "reset-1",
+              resetType: "codexRateLimits",
+              status: "available",
+              grantedAt: 1_783_000_000,
+              expiresAt: 1_794_000_000,
+              title: "Rate-limit reset",
+              description: "Reset an eligible Codex rate-limit window."
+            }]
           }
         }
       })
@@ -701,6 +713,10 @@ describe("CodexUsagePanel", () => {
     expect(html).toContain("60% remaining");
     expect(html).toContain("width:60%");
     expect(html).toContain("30% remaining");
+    expect(html).toContain("Usage reset tokens");
+    expect(html).toContain("Rate-limit reset");
+    expect(html).toContain("Use token");
+    expect(html).toContain("Token activity");
   });
 
   it("keeps the panel visible when Codex usage is unavailable", () => {
@@ -711,7 +727,8 @@ describe("CodexUsagePanel", () => {
           error: "Codex account authentication required.",
           refreshedAt: "2026-07-07T12:00:00.000Z",
           account: null,
-          limits: { fiveHour: null, weekly: null }
+          limits: { fiveHour: null, weekly: null },
+          resetCredits: null
         }
       })
     );

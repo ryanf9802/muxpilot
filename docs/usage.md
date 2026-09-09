@@ -16,6 +16,8 @@ Search matches session names, repository names, branches, working directories, p
 
 Repository groups can be collapsed and remember that choice in the browser. Pinned sessions sort ahead of other sessions in their repository. The three-color stoplight in the top bar shows the current attention totals; selecting a color filters the dashboard to that severity while preserving any parent rows needed to explain matching agent children.
 
+For authenticated ChatGPT accounts, the Codex usage panel shows the current limit windows, earned usage-reset tokens and their expiration details, and daily token activity over 7 or 30 days. Using a reset token requires confirmation. If the result is interrupted, the panel preserves the attempt so **Retry** checks the same idempotent redemption rather than consuming another token. Refresh reloads account limits, reset tokens, and token activity directly from Codex.
+
 When systemd resource metrics are available, a card shows current memory and CPU pressure. Fast-mode, notification, fork, managed-Git, transcript-size, and pin indicators expose other session state without opening the card. Agent-managed descendants render as a tree beneath the owning session with their own status, context percentage, and remaining work-token budget. Completed branches collapse into a separate disclosure.
 
 ## Session view

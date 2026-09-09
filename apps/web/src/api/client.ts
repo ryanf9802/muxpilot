@@ -8,6 +8,9 @@ import type {
   CodexModelCatalogResponse,
   GlobalModelSettingsResponse,
   CodexUsageSummaryResponse,
+  CodexTokenUsageResponse,
+  ConsumeCodexResetCreditRequest,
+  ConsumeCodexResetCreditResponse,
   CollaborationMode,
   AccessResponse,
   ConnectivityResponse,
@@ -180,7 +183,10 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(request)
     }),
-  codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
+  codexUsageSummary: (refresh = false) => json<CodexUsageSummaryResponse>(`/api/codex-usage/summary${refresh ? "?refresh=1" : ""}`),
+  codexUsageHistory: (days: 7 | 30, refresh = false) => json<CodexTokenUsageResponse>(`/api/codex-usage/history?days=${days}${refresh ? "&refresh=1" : ""}`),
+  consumeCodexResetCredit: (request: ConsumeCodexResetCreditRequest) =>
+    json<ConsumeCodexResetCreditResponse>("/api/codex-usage/reset", { method: "POST", body: JSON.stringify(request) }),
   codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
   globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
   updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>

@@ -1065,6 +1065,21 @@ export interface CodexUsageLimit {
   resetsAt: number | null;
 }
 
+export interface CodexRateLimitResetCredit {
+  id: string;
+  resetType: string;
+  status: string;
+  grantedAt: number;
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+}
+
+export interface CodexRateLimitResetCredits {
+  availableCount: number;
+  credits: CodexRateLimitResetCredit[] | null;
+}
+
 export interface CodexUsageSummaryResponse {
   available: boolean;
   error: string | null;
@@ -1074,4 +1089,37 @@ export interface CodexUsageSummaryResponse {
     fiveHour: CodexUsageLimit | null;
     weekly: CodexUsageLimit | null;
   };
+  resetCredits: CodexRateLimitResetCredits | null;
+}
+
+export interface CodexTokenUsageDailyPoint {
+  date: string;
+  tokens: number;
+}
+
+export interface CodexTokenUsageResponse {
+  available: boolean;
+  error: string | null;
+  refreshedAt: string;
+  days: 7 | 30;
+  summary: {
+    lifetimeTokens: number | null;
+    peakDailyTokens: number | null;
+    longestRunningTurnSec: number | null;
+    currentStreakDays: number | null;
+    longestStreakDays: number | null;
+  } | null;
+  points: CodexTokenUsageDailyPoint[] | null;
+}
+
+export interface ConsumeCodexResetCreditRequest {
+  idempotencyKey: string;
+  creditId?: string | null;
+}
+
+export type ConsumeCodexResetCreditOutcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
+
+export interface ConsumeCodexResetCreditResponse {
+  outcome: ConsumeCodexResetCreditOutcome;
+  summary: CodexUsageSummaryResponse;
 }
