@@ -24,6 +24,7 @@ import {
   Send,
   ShieldCheck,
   Skull,
+  SquareTerminal,
   Trash2,
   Zap,
   X
@@ -73,6 +74,7 @@ import type {
   BtwExchange,
   ChatMessage,
   CodexSkill,
+  CodexModelCatalogResponse,
   CollaborationMode,
   GitWorkspaceSummary,
   HeavyCommand,
@@ -124,6 +126,7 @@ import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTex
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
+import { effectiveModelSettings, ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
@@ -1286,6 +1289,11 @@ export function SessionView() {
   const [terminatingHeavyRun, setTerminatingHeavyRun] = useState<string | null>(null);
   const [inputModeError, setInputModeError] = useState("");
   const [fastModeError, setFastModeError] = useState("");
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResponse | null>(null);
+  const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
+  const [modelSettingsError, setModelSettingsError] = useState("");
+  const [modelSettingsApplying, setModelSettingsApplying] = useState(false);
   const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
@@ -1331,6 +1339,7 @@ export function SessionView() {
   const liveTailRefreshSchedulerRef = useRef(new LiveTranscriptRefreshScheduler());
   const pendingInputModeRef = useRef<CollaborationMode | null>(null);
   const pendingFastModeRef = useRef<boolean | null>(null);
+  const modelCatalogRequestSessionRef = useRef<string | null>(null);
   const transcriptSourceKeyRef = useRef<string | null>(null);
   const initialTranscriptSessionIdRef = useRef<string | null>(null);
   const hasMoreAfterRef = useRef(false);
@@ -1745,6 +1754,12 @@ export function SessionView() {
       pendingFastModeRef.current = null;
       setInputModeError("");
       setFastModeError("");
+      setModelSettingsOpen(false);
+      setModelCatalog(null);
+      setModelCatalogLoading(false);
+      setModelSettingsError("");
+      setModelSettingsApplying(false);
+      modelCatalogRequestSessionRef.current = null;
       setCopiedTmuxCommand(false);
       setGitPanelOpen(false);
       setDocumentsOpen(false);
@@ -2036,6 +2051,41 @@ export function SessionView() {
     } catch (error) {
       setHeavyCommandError(error instanceof Error ? error.message : "Unable to terminate heavyweight command");
       setTerminatingHeavyRun(null);
+    }
+  }
+
+  const loadModelCatalog = useCallback(async () => {
+    modelCatalogRequestSessionRef.current = id;
+    setModelCatalogLoading(true);
+    setModelSettingsError("");
+    try {
+      const catalog = await api.codexModels();
+      setModelCatalog(catalog);
+    } catch (error) {
+      setModelSettingsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setModelCatalogLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    if (session?.driverKind !== "codex_app_server" || modelCatalog || modelCatalogLoading || modelCatalogRequestSessionRef.current === id) return;
+    void loadModelCatalog();
+  }, [id, loadModelCatalog, modelCatalog, modelCatalogLoading, session?.driverKind]);
+
+  async function applyModelSettings(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<boolean> {
+    setModelSettingsApplying(true);
+    setModelSettingsError("");
+    try {
+      const response = await api.action(id, { type: "setModelSettings", mode, model, reasoningEffort });
+      if (!response.session) throw new Error("The session is no longer available.");
+      setSession(response.session);
+      return true;
+    } catch (error) {
+      setModelSettingsError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      setModelSettingsApplying(false);
     }
   }
 
@@ -2802,11 +2852,16 @@ export function SessionView() {
           </div>
         </div>
         <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
-          <TmuxCommandButton
+          <ModelSettingsButton
             compact
             session={readySession}
+            catalog={modelCatalog}
+            onOpen={() => setModelSettingsOpen(true)}
+          />
+          <RuntimeAttachButton
+            session={readySession}
             copied={copiedTmuxCommand}
-            copyEnabled={!completed && accessMode === "local" && readySession.capabilities?.terminalAttach !== false}
+            enabled={!completed && accessMode === "local" && readySession.capabilities?.terminalAttach !== false}
             onCopy={() => void copyTmuxCommand()}
           />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
@@ -2870,6 +2925,17 @@ export function SessionView() {
           setBtwOpen(false);
           showCurrentDocuments(name);
         }}
+      />
+      <ModelSettingsDrawer
+        open={modelSettingsOpen}
+        session={readySession}
+        catalog={modelCatalog}
+        loading={modelCatalogLoading}
+        error={modelSettingsError}
+        applying={modelSettingsApplying}
+        onClose={() => setModelSettingsOpen(false)}
+        onRetry={() => void loadModelCatalog()}
+        onApply={applyModelSettings}
       />
 
       <div className="session-actions">
@@ -3429,7 +3495,7 @@ export function SessionLoadingView({
             ) : <p className="session-header-meta">Starting session</p>}
           </div>
           <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
-            {session ? <TmuxCommandButton compact session={session} copied={false} copyEnabled={false} onCopy={() => undefined} /> : null}
+            {session ? <ModelSettingsButton compact session={session} catalog={null} /> : null}
             <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
               <LoadingStatusPill />
             </span>
@@ -4483,33 +4549,29 @@ function VimLogoMark() {
   );
 }
 
-export function TmuxCommandButton({
+export function ModelSettingsButton({
   session,
-  copied,
+  catalog,
   compact = false,
-  copyEnabled = true,
-  onCopy
+  onOpen
 }: {
   session: ManagedSession;
-  copied: boolean;
+  catalog: CodexModelCatalogResponse | null;
   compact?: boolean;
-  copyEnabled?: boolean;
-  onCopy: () => void;
+  onOpen?: () => void;
 }) {
-  const command = runtimeAttachCommand(session);
-  const model = sessionModelDisplay(session);
+  const model = sessionModelDisplay(session, catalog);
   const content = (
     <>
-      {copyEnabled ? copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" /> : null}
       <span className="tmux-command-label">
         <span className="tmux-command-model">{model.model}</span>
         <span className="tmux-command-effort">{model.reasoningEffort}</span>
       </span>
-      {copyEnabled && copied ? <span className="tmux-command-copied">Copied</span> : null}
     </>
   );
   const className = `tmux-command-button${compact ? " tmux-command-metadata" : ""}`;
-  if (!copyEnabled) {
+  const selectable = session.driverKind === "codex_app_server" && Boolean(onOpen);
+  if (!selectable) {
     return (
       <div className={`${className} tmux-command-display`} title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
         {content}
@@ -4520,17 +4582,48 @@ export function TmuxCommandButton({
     <button
       type="button"
       className={className}
-      onClick={onCopy}
-      title={`${model.model} / ${model.reasoningEffort}\n${command}`}
-      aria-label={`Copy runtime attach command for ${model.model} ${model.reasoningEffort}`}
+      onClick={onOpen}
+      title={`Change model settings · ${model.model} / ${model.reasoningEffort}`}
+      aria-label={`Change model settings, current ${model.model} ${model.reasoningEffort}`}
+      aria-haspopup="dialog"
     >
       {content}
     </button>
   );
 }
 
-export function sessionModelDisplay(session: Pick<ManagedSession, "inputMode" | "models">): { model: string; reasoningEffort: string } {
-  const settings = session.models[session.inputMode];
+export function RuntimeAttachButton({
+  session,
+  copied,
+  enabled,
+  onCopy
+}: {
+  session: Pick<ManagedSession, "tmux" | "runtime" | "driverKind">;
+  copied: boolean;
+  enabled: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <button
+      className="icon-button runtime-attach-button"
+      type="button"
+      disabled={!enabled}
+      onClick={onCopy}
+      title={enabled ? copied ? "Runtime attach command copied" : "Copy runtime attach command" : "Runtime attach is available only from the local browser"}
+      aria-label={copied ? "Runtime attach command copied" : "Copy runtime attach command"}
+    >
+      {copied ? <Check size={16} aria-hidden="true" /> : <SquareTerminal size={16} aria-hidden="true" />}
+    </button>
+  );
+}
+
+export function sessionModelDisplay(
+  session: Pick<ManagedSession, "inputMode" | "models">,
+  catalog: CodexModelCatalogResponse | null = null
+): { model: string; reasoningEffort: string } {
+  const settings = catalog
+    ? effectiveModelSettings(session, catalog.defaults, session.inputMode)
+    : session.models[session.inputMode];
   const fallback = fallbackModelSettings(session.models.default, session.models.plan);
   return {
     model: settings.model ?? fallback.model ?? "Model unknown",

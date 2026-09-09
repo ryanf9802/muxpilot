@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CodexUsageService,
+  normalizeCodexModelDefaults,
   normalizeCodexModels,
   normalizeCodexUsage,
   selectCodexRateLimitSnapshot,
@@ -164,6 +165,26 @@ describe("normalizeCodexModels", () => {
         serviceTiers: [{ id: "fast", name: "Fast", description: "Priority processing" }]
       }
     ]);
+  });
+
+  it("resolves Codex Normal and Plan presets against the default model", () => {
+    const models = normalizeCodexModels({
+      data: [{
+        model: "gpt-default",
+        isDefault: true,
+        defaultReasoningEffort: "medium"
+      }]
+    });
+
+    expect(normalizeCodexModelDefaults(models, {
+      data: [
+        { mode: "default", reasoning_effort: "high" },
+        { mode: "plan", reasoning_effort: "xhigh" }
+      ]
+    })).toEqual({
+      default: { model: "gpt-default", reasoningEffort: "high" },
+      plan: { model: "gpt-default", reasoningEffort: "xhigh" }
+    });
   });
 });
 

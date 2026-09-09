@@ -81,6 +81,11 @@ export interface CodexReasoningEffortOption {
   description: string;
 }
 
+export interface CodexModelCatalogResponse {
+  models: CodexModel[];
+  defaults: SessionModelSelections;
+}
+
 export type MessageType =
   | "user"
   | "assistant"
@@ -932,6 +937,7 @@ export type SessionAction =
   | { type: "interrupt" }
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
+  | { type: "setModelSettings"; mode: CollaborationMode; model: string; reasoningEffort: string | null }
   | { type: "setFastMode"; enabled: boolean }
   | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice }

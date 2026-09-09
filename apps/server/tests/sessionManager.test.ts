@@ -2841,7 +2841,31 @@ describe("SessionManager transcript isolation", () => {
       kill,
       setPreferences
     } as unknown as AgentSessionDriver;
-    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const catalog = {
+      models: [{
+        id: "gpt-standard",
+        model: "gpt-standard",
+        displayName: "GPT Standard",
+        description: "",
+        hidden: false,
+        isDefault: true,
+        supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Balanced" }],
+        defaultReasoningEffort: "medium",
+        serviceTiers: []
+      }],
+      defaults: {
+        default: { model: "gpt-standard", reasoningEffort: "medium" },
+        plan: { model: "gpt-standard", reasoningEffort: "medium" }
+      }
+    };
+    const harness = await createHarness({
+      sessionDrivers: new SessionDriverRegistry([driver]),
+      codexMetadata: {
+        listModels: async () => catalog.models,
+        catalog: async () => catalog,
+        effectiveServiceTier: async () => null
+      }
+    });
     appDb = harness.db;
     const session: ManagedSession = {
       ...agentHierarchySession("app-server-routing"),
@@ -2896,6 +2920,44 @@ describe("SessionManager transcript isolation", () => {
     await harness.db.setSessionStatus(session.id, "running", "2026-09-01T12:00:01.000Z");
     await harness.manager.act(session.id, { type: "setFastMode", enabled: true });
     expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), { fastMode: true });
+    await harness.manager.act(session.id, {
+      type: "setModelSettings",
+      mode: "default",
+      model: "gpt-standard",
+      reasoningEffort: "medium"
+    });
+    expect(setPreferences).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), {
+      mode: "default",
+      model: { model: "gpt-standard", reasoningEffort: "medium" },
+      fastMode: false
+    });
+    expect(await harness.db.getSession(session.id)).toMatchObject({
+      models: { default: { model: "gpt-standard", reasoningEffort: "medium" } },
+      fastMode: false,
+      fastModeAvailable: false
+    });
+    await expect(harness.manager.act(session.id, {
+      type: "setModelSettings",
+      mode: "default",
+      model: "gpt-standard",
+      reasoningEffort: "high"
+    })).rejects.toThrow("reasoning effort is unavailable");
+    await harness.db.setSessionInputMode(session.id, "plan", "2026-09-01T12:00:02.000Z");
+    await expect(harness.manager.act(session.id, {
+      type: "setModelSettings",
+      mode: "default",
+      model: "gpt-standard",
+      reasoningEffort: "medium"
+    })).rejects.toThrow("active session mode changed");
+
+    const legacySession = { ...session, id: "legacy-model-settings", driverKind: "tmux" as const };
+    await harness.db.upsertSession(legacySession, "2026-09-01T12:00:03.000Z");
+    await expect(harness.manager.act(legacySession.id, {
+      type: "setModelSettings",
+      mode: "default",
+      model: "gpt-standard",
+      reasoningEffort: "medium"
+    })).rejects.toThrow("only for app-server sessions");
 
     await harness.manager.act(session.id, { type: "interrupt" });
     expect(interrupt).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), null);
@@ -7679,6 +7741,11 @@ async function createHarness(options: {
   appServerHibernateMs?: number;
   defaultSessionDriver?: ManagedSession["driverKind"];
   tmuxAvailable?: boolean;
+  codexMetadata?: {
+    listModels(): Promise<import("@muxpilot/core").CodexModel[]>;
+    catalog(): Promise<import("@muxpilot/core").CodexModelCatalogResponse>;
+    effectiveServiceTier(cwd: string): Promise<string | null>;
+  };
 } = {}): Promise<{
   dir: string;
   codexHome: string;
@@ -7717,7 +7784,7 @@ async function createHarness(options: {
     codexHome,
     null,
     { MUXPILOT_SESSION_SCOPES_AVAILABLE: options.sessionScopesAvailable === false ? "0" : "1" },
-    null,
+    options.codexMetadata ?? null,
     options.sessionDrivers ?? null,
     options.appServerHibernateMs,
     options.defaultSessionDriver

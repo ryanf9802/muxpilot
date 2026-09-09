@@ -121,10 +121,11 @@ import {
   visibleTranscriptFindEntries,
   replaceSkillToken,
   resizeComposerTextarea,
+  RuntimeAttachButton,
   sessionTranscriptSource,
   shellQuote,
   tmuxAttachCommand,
-  TmuxCommandButton,
+  ModelSettingsButton,
   TranscriptSyncIndicator,
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
@@ -1594,53 +1595,71 @@ describe("tmux command helpers", () => {
     ).toEqual({ model: "gpt-5.1", reasoningEffort: "medium" });
   });
 
-  it("renders model state while copying the tmux command", () => {
+  it("renders app-server model state as a settings button", () => {
     const session = managedSession({
+      driverKind: "codex_app_server",
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
         plan: { model: null, reasoningEffort: null }
       }
     });
-    const copyHtml = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, onCopy: () => undefined }));
-    const copiedHtml = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: true, onCopy: () => undefined }));
+    const html = renderToStaticMarkup(createElement(ModelSettingsButton, { session, catalog: null, onOpen: () => undefined }));
 
-    expect(copyHtml).toContain("gpt-5.5");
-    expect(copyHtml).toContain("medium");
-    expect(copyHtml).toContain('class="tmux-command-effort"');
-    expect(copyHtml).toContain("tmux select-window -t &#x27;work:1&#x27;");
-    expect(copiedHtml).toContain("Copied");
-    expect(copiedHtml).toContain("gpt-5.5");
+    expect(html).toContain("gpt-5.5");
+    expect(html).toContain("medium");
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain("Change model settings");
+    expect(html).not.toContain("tmux select-window");
   });
 
-  it("renders read-only model state without tmux command affordances for remote access", () => {
+  it("renders legacy tmux model state without model settings affordances", () => {
     const session = managedSession({
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
         plan: { model: null, reasoningEffort: null }
       }
     });
-    const html = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, copyEnabled: false, onCopy: () => undefined }));
+    const html = renderToStaticMarkup(createElement(ModelSettingsButton, { session, catalog: null }));
 
     expect(html).toContain('class="tmux-command-button tmux-command-display"');
     expect(html).toContain("gpt-5.5");
     expect(html).toContain("medium");
     expect(html).not.toContain("<button");
-    expect(html).not.toContain("Copy tmux attach command");
-    expect(html).not.toContain("tmux select-window");
+    expect(html).not.toContain("Change model settings");
   });
 
-  it("renders model state as compact title metadata without changing copy behavior", () => {
+  it("renders model state as compact selectable title metadata", () => {
     const session = managedSession({
+      driverKind: "codex_app_server",
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
         plan: { model: "gpt-5.5", reasoningEffort: "high" }
       }
     });
-    const html = renderToStaticMarkup(createElement(TmuxCommandButton, { session, copied: false, compact: true, onCopy: () => undefined }));
+    const html = renderToStaticMarkup(createElement(ModelSettingsButton, { session, catalog: null, compact: true, onOpen: () => undefined }));
 
     expect(html).toContain('class="tmux-command-button tmux-command-metadata"');
-    expect(html).toContain("Copy runtime attach command");
+    expect(html).toContain("Change model settings");
     expect(html).toContain("gpt-5.5");
+  });
+
+  it("renders runtime attach copying as a separate icon button", () => {
+    const html = renderToStaticMarkup(createElement(RuntimeAttachButton, {
+      session: managedSession(),
+      copied: false,
+      enabled: true,
+      onCopy: () => undefined
+    }));
+    const copiedHtml = renderToStaticMarkup(createElement(RuntimeAttachButton, {
+      session: managedSession(),
+      copied: true,
+      enabled: true,
+      onCopy: () => undefined
+    }));
+
+    expect(html).toContain('aria-label="Copy runtime attach command"');
+    expect(copiedHtml).toContain('aria-label="Runtime attach command copied"');
+    expect(html).not.toContain("gpt-");
   });
 });
 

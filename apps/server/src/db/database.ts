@@ -493,9 +493,11 @@ export class AppDatabase {
     mode: CollaborationMode,
     model: string,
     reasoningEffort: string | null,
-    updatedAt: string
+    updatedAt: string,
+    fastModeAvailable?: boolean | null,
+    fastMode?: boolean | null
   ): Promise<ManagedSession | null> {
-    return this.call("setSessionModelSettings", sessionId, mode, model, reasoningEffort, updatedAt) as Promise<ManagedSession | null>;
+    return this.call("setSessionModelSettings", sessionId, mode, model, reasoningEffort, updatedAt, fastModeAvailable, fastMode) as Promise<ManagedSession | null>;
   }
 
   setSessionContextUsage(sessionId: string, contextUsage: SessionContextUsage, updatedAt: string): Promise<ManagedSession | null> {
@@ -1231,11 +1233,18 @@ export class SyncAppDatabase {
     mode: CollaborationMode,
     model: string,
     reasoningEffort: string | null,
-    updatedAt: string
+    updatedAt: string,
+    fastModeAvailable?: boolean | null,
+    fastMode?: boolean | null
   ): ManagedSession | null {
     const existing = this.getSession(sessionId);
     if (!existing) return null;
-    const next = { ...existing, models: withSessionModelSettings(existing.models, mode, model, reasoningEffort) };
+    const next = {
+      ...existing,
+      models: withSessionModelSettings(existing.models, mode, model, reasoningEffort),
+      ...(fastModeAvailable === undefined ? {} : { fastModeAvailable }),
+      ...(fastMode === undefined ? {} : { fastMode })
+    };
     this.db
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);

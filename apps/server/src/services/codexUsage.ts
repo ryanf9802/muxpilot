@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Logger } from "pino";
 import type {
   CodexModel,
+  CodexModelCatalogResponse,
   CodexUsageAccount,
   CodexUsageLimit,
   CodexUsageSummaryResponse
@@ -134,15 +135,19 @@ export class CodexUsageService {
 
 export class CodexModelsService {
   private readonly client: CodexAppServerClient;
-  private cache: { models: CodexModel[]; expiresAt: number } | null = null;
+  private cache: { catalog: CodexModelCatalogResponse; expiresAt: number } | null = null;
 
   constructor(options: CodexAppServerClientOptions) {
     this.client = new CodexAppServerClient(options);
   }
 
   async listModels(): Promise<CodexModel[]> {
+    return (await this.catalog()).models;
+  }
+
+  async catalog(): Promise<CodexModelCatalogResponse> {
     const now = Date.now();
-    if (this.cache && this.cache.expiresAt > now) return this.cache.models;
+    if (this.cache && this.cache.expiresAt > now) return this.cache.catalog;
 
     try {
       const models: CodexModel[] = [];
@@ -153,11 +158,15 @@ export class CodexModelsService {
         cursor = typeof response.nextCursor === "string" && response.nextCursor ? response.nextCursor : null;
       } while (cursor);
 
-      this.cache = { models, expiresAt: now + MODEL_CACHE_TTL_MS };
-      return models;
+      const modes = await this.client.request<RawCollaborationModeListResponse>("collaborationMode/list", {})
+        .catch(() => ({ data: [] }));
+      const catalog = { models, defaults: normalizeCodexModelDefaults(models, modes) };
+      this.cache = { catalog, expiresAt: now + MODEL_CACHE_TTL_MS };
+      return catalog;
     } catch {
-      this.cache = { models: [], expiresAt: now + MODEL_FAILURE_CACHE_TTL_MS };
-      return [];
+      const catalog = emptyCodexModelCatalog();
+      this.cache = { catalog, expiresAt: now + MODEL_FAILURE_CACHE_TTL_MS };
+      return catalog;
     }
   }
 
@@ -366,6 +375,36 @@ function isAppServerMessage(value: unknown): value is CodexAppServerMessage {
 interface RawModelListResponse {
   data?: unknown;
   nextCursor?: unknown;
+}
+
+interface RawCollaborationModeListResponse {
+  data?: unknown;
+}
+
+export function normalizeCodexModelDefaults(
+  models: CodexModel[],
+  response: RawCollaborationModeListResponse
+): CodexModelCatalogResponse["defaults"] {
+  const defaultModel = models.find((model) => model.isDefault) ?? null;
+  const presets = Array.isArray(response.data) ? response.data : [];
+  const settings = (mode: "default" | "plan") => {
+    const preset = presets.map(recordValue).find((candidate) => candidate?.mode === mode);
+    return {
+      model: defaultModel?.model ?? null,
+      reasoningEffort: stringValue(preset?.reasoning_effort) ?? defaultModel?.defaultReasoningEffort ?? null
+    };
+  };
+  return { default: settings("default"), plan: settings("plan") };
+}
+
+function emptyCodexModelCatalog(): CodexModelCatalogResponse {
+  return {
+    models: [],
+    defaults: {
+      default: { model: null, reasoningEffort: null },
+      plan: { model: null, reasoningEffort: null }
+    }
+  };
 }
 
 export function normalizeCodexModels(response: RawModelListResponse): CodexModel[] {

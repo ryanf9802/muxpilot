@@ -6,6 +6,7 @@ import type {
   AppServerCompatibility,
   SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
+  CodexModelCatalogResponse,
   CodexUsageSummaryResponse,
   CollaborationMode,
   AccessResponse,
@@ -180,6 +181,7 @@ export const api = {
       body: JSON.stringify(request)
     }),
   codexUsageSummary: () => json<CodexUsageSummaryResponse>("/api/codex-usage/summary"),
+  codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
   session: (id: string) => json<{ session: ManagedSession }>(`/api/sessions/${id}`),
   sessionSnapshot: (id: string, limit = 80, signal?: AbortSignal) =>
     json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`, { signal }),

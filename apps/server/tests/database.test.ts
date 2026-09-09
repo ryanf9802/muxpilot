@@ -974,7 +974,15 @@ describe("AppDatabase activity summaries", () => {
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
 
     const normal = db.setSessionModelSettings(session.id, "default", "gpt-5.4", "medium", "2026-07-07T00:00:01.000Z");
-    const plan = db.setSessionModelSettings(session.id, "plan", "gpt-5.5", "high", "2026-07-07T00:00:02.000Z");
+    const plan = db.setSessionModelSettings(
+      session.id,
+      "plan",
+      "gpt-5.5",
+      "high",
+      "2026-07-07T00:00:02.000Z",
+      false,
+      false
+    );
 
     expect(normal?.models).toEqual({
       default: { model: "gpt-5.4", reasoningEffort: "medium" },
@@ -984,6 +992,7 @@ describe("AppDatabase activity summaries", () => {
       default: { model: "gpt-5.4", reasoningEffort: "medium" },
       plan: { model: "gpt-5.5", reasoningEffort: "high" }
     });
+    expect(plan).toMatchObject({ fastMode: false, fastModeAvailable: false });
     expect(db.getSession(session.id)?.models).toEqual({
       default: { model: "gpt-5.4", reasoningEffort: "medium" },
       plan: { model: "gpt-5.5", reasoningEffort: "high" }

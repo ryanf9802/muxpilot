@@ -326,6 +326,27 @@ describe("api client request headers", () => {
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 
+  it("loads Codex model options and applies a model selection action", async () => {
+    const fetchMock = mockJsonResponse({ models: [], defaults: {} });
+
+    await api.codexModels();
+    await api.action("session-1", {
+      type: "setModelSettings",
+      mode: "plan",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high"
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/codex-models");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/sessions/session-1/actions");
+    expect((fetchMock.mock.calls[1]?.[1] as RequestInit).body).toBe(JSON.stringify({
+      type: "setModelSettings",
+      mode: "plan",
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high"
+    }));
+  });
+
   it("searches and restores session history", async () => {
     const fetchMock = mockJsonResponse({ results: [] });
 

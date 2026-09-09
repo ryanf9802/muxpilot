@@ -6,6 +6,7 @@ import type {
   ApprovalRequest,
   ChatMessage,
   CodexModel,
+  CodexModelCatalogResponse,
   CollaborationMode,
   CreateSessionRequest,
   GitWorkspaceSummary,
@@ -88,6 +89,7 @@ interface CodexProcessLookup {
 
 interface CodexMetadataLookup {
   listModels(): Promise<CodexModel[]>;
+  catalog(): Promise<CodexModelCatalogResponse>;
   effectiveServiceTier(cwd: string): Promise<string | null>;
 }
 
@@ -662,6 +664,13 @@ export class SessionManager {
     } finally {
       this.ingestRunning = false;
     }
+  }
+
+  async codexModelCatalog(): Promise<CodexModelCatalogResponse> {
+    return await this.codexMetadata?.catalog() ?? {
+      models: [],
+      defaults: emptySessionModels()
+    };
   }
 
   stop(): void {
@@ -3373,6 +3382,9 @@ export class SessionManager {
         updatedAt
       );
     }
+    if (action.type === "setModelSettings") {
+      await this.setModelSettings(session, action.mode, action.model, action.reasoningEffort);
+    }
     if (action.type === "setFastMode") {
       await this.setFastMode(session, action.enabled);
     }
@@ -3989,6 +4001,53 @@ export class SessionManager {
     throw new FastModeSwitchError("Codex did not confirm the Fast mode change");
   }
 
+  private async setModelSettings(
+    session: ManagedSession,
+    mode: CollaborationMode,
+    requestedModel: string,
+    reasoningEffort: string | null
+  ): Promise<void> {
+    const driver = this.appServerDriver(session);
+    if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
+    const catalog = await this.codexModelCatalog();
+    if (catalog.models.length === 0) throw new ModelSettingsError("Codex model options are temporarily unavailable", 503);
+    const model = catalog.models.find((candidate) => candidate.model === requestedModel || candidate.id === requestedModel);
+    if (!model) throw new ModelSettingsError("The selected Codex model is unavailable");
+    const efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
+    if ((reasoningEffort === null && efforts.length > 0) || (reasoningEffort !== null && !efforts.includes(reasoningEffort))) {
+      throw new ModelSettingsError("The selected reasoning effort is unavailable for this model");
+    }
+    const current = requireSession(await this.db.getSession(session.id));
+    if (current.runtime?.kind === "systemd_service" && current.runtime.state === "hibernated") {
+      throw new ModelSettingsError("Wake this session before changing its model");
+    }
+    if (current.inputMode !== mode) throw new ModelSettingsError("The active session mode changed; reopen the model selector");
+    const fastModeAvailable = codexFastModeAvailable(catalog.models, model.model) ?? false;
+    const disableFastMode = current.fastMode === true && !fastModeAvailable;
+    await driver.setPreferences(current, {
+      mode,
+      model: { model: model.model, reasoningEffort },
+      ...(disableFastMode ? { fastMode: false } : {})
+    });
+    const updatedAt = nowIso();
+    const updated = await this.db.setSessionModelSettings(
+      session.id,
+      mode,
+      model.model,
+      reasoningEffort,
+      updatedAt,
+      fastModeAvailable,
+      disableFastMode ? false : undefined
+    );
+    if (!updated) throw new ModelSettingsError("The session disappeared after Codex accepted the model change");
+    await this.db.addAudit("local", "set_model_settings", session.id, JSON.stringify({
+      mode,
+      model: model.model,
+      reasoningEffort,
+      fastModeDisabled: disableFastMode
+    }), updatedAt);
+  }
+
   private async liveSession(session: ManagedSession): Promise<ManagedSession> {
     const pane = await this.livePane(session);
     return { ...session, tmux: pane };
@@ -4202,6 +4261,12 @@ export class InputModeSwitchError extends Error {
 
 export class FastModeSwitchError extends Error {
   readonly statusCode = 409;
+}
+
+export class ModelSettingsError extends Error {
+  constructor(message: string, readonly statusCode = 409) {
+    super(message);
+  }
 }
 
 export class InputDeliveryError extends Error {

@@ -38,6 +38,7 @@ import {
   AgentSessionError,
   CreateSessionError,
   FastModeSwitchError,
+  ModelSettingsError,
   InputDeliveryError,
   InputModeSwitchError,
   QuestionResolutionError,
@@ -160,6 +161,12 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("interrupt") }),
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
+  z.object({
+    type: z.literal("setModelSettings"),
+    mode: collaborationModeSchema,
+    model: z.string().trim().min(1).max(200),
+    reasoningEffort: z.string().trim().min(1).max(100).nullable()
+  }),
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
   z.object({ type: z.literal("choosePlanAction"), action: z.enum(["implement", "clear_context_implement", "stay_in_plan"]) }),
@@ -204,6 +211,10 @@ export function registerRoutes(
       appServerCompatibility
     );
   }
+
+  app.get("/api/codex-models", { preHandler: access.requireAccess }, async () =>
+    manager.codexModelCatalog()
+  );
 
   if (sessionDriverCompatibility) {
     app.get("/api/session-drivers/compatibility", { preHandler: access.requireAccess }, async (): Promise<SessionDriverCompatibilityResponse> =>
@@ -749,6 +760,9 @@ export function registerRoutes(
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (error instanceof FastModeSwitchError) {
+        return reply.code(error.statusCode).send({ error: error.message });
+      }
+      if (error instanceof ModelSettingsError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
       if (error instanceof AgentSessionError) {
