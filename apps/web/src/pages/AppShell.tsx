@@ -2163,13 +2163,13 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
                     if (event.target.checked) next.add(session.id); else next.delete(session.id);
                     return next;
                   })} />
-                  <span><strong>{session.tmux.windowName || session.repo.name}</strong><small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small></span>
+                  <span><strong>{sessionBaseName(session)}</strong><small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small></span>
                 </label>
               ))}
               {!portableSessions.length ? <p className="prompt-history-muted">No portable sessions found.</p> : null}
             </div>
             {selectedWithActiveWork.length ? <p className="session-git-probe-note dialog-error">
-              Unfinished task-worktree changes are not included. Only the committed target branch will be exported for {selectedWithActiveWork.map((session) => session.tmux.windowName || session.repo.name).join(", ")}.
+              Unfinished task-worktree changes are not included. Only the committed target branch will be exported for {selectedWithActiveWork.map(sessionBaseName).join(", ")}.
             </p> : null}
             <div className="dialog-actions"><button type="button" onClick={() => void close()} disabled={busy}>Cancel</button><button type="button" className="primary" disabled={busy || selected.size === 0} aria-busy={busy} data-busy={busy || undefined} onClick={() => void exportSelected()}>{busy ? "Exporting" : `Export ${selected.size || ""} session${selected.size === 1 ? "" : "s"}`}</button></div>
           </div>

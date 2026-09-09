@@ -686,6 +686,7 @@ export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query
   const needle = query.trim().toLowerCase();
   if (!needle) return sessions;
   return sessions.filter((session) => [
+    sessionBaseName(session),
     session.repo.name,
     session.repo.branch,
     session.tmux.cwd,

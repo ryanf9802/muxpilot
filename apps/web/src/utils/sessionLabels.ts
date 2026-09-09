@@ -1,4 +1,4 @@
-import type { ManagedSession } from "@muxpilot/core";
+import { managedSessionName, type ManagedSession } from "@muxpilot/core";
 
 const GENERIC_TMUX_WINDOW_NAMES = new Set(["node"]);
 
@@ -9,7 +9,7 @@ export function sessionDisplayName(session: ManagedSession, sessions: ManagedSes
 }
 
 export function sessionBaseName(session: ManagedSession): string {
-  return session.tmux.windowName.trim() || session.tmux.sessionName.trim() || "session";
+  return managedSessionName(session).trim() || "session";
 }
 
 function isAmbiguousSessionName(session: ManagedSession, sessions: ManagedSession[], baseName: string): boolean {

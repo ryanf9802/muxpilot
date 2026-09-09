@@ -157,7 +157,8 @@ describe("shell connection state", () => {
 
   it("builds a valid editable name for a fork", () => {
     const session = testSession({ id: "fork-name" });
-    session.tmux.windowName = "a-very-long-session-name-that-needs-truncation";
+    session.name = "a-very-long-session-name-that-needs-truncation";
+    session.tmux.windowName = "stale-runtime-name";
 
     expect(defaultForkSessionName(session)).toBe("a-very-long-session-name-th-fork");
     expect(defaultForkSessionName(session)).toHaveLength(32);

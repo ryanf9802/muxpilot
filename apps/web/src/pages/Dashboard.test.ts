@@ -47,6 +47,13 @@ describe("dashboard data ownership", () => {
     const other = testSession({ id: "other", paneId: "%112", windowName: "ui" });
     expect(filterSessionsByDashboardQuery([matching, other], "CACHE")).toEqual([matching]);
   });
+
+  it("filters by the stable name after an app-server rename", () => {
+    const renamed = testSession({ id: "renamed", paneId: "%111", windowName: "changes" });
+    renamed.name = "runtime-evidence";
+
+    expect(filterSessionsByDashboardQuery([renamed], "runtime")).toEqual([renamed]);
+  });
 });
 
 describe("DashboardPrimaryActions", () => {
@@ -92,6 +99,13 @@ describe("sessionDisplayName", () => {
     const session = testSession({ id: "a", paneId: "%111", windowName: "plan-actions" });
 
     expect(sessionDisplayName(session, [session])).toBe("plan-actions");
+  });
+
+  it("prefers the stable session name after an app-server rename", () => {
+    const session = testSession({ id: "a", paneId: "%111", windowName: "changes" });
+    session.name = "runtime-evidence";
+
+    expect(sessionDisplayName(session, [session])).toBe("runtime-evidence");
   });
 });
 
