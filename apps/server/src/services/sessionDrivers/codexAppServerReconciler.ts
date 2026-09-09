@@ -31,7 +31,8 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     const rootThreadId = existingSession.provider?.kind === "codex" ? existingSession.provider.threadId : null;
     if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return;
     const current = await this.store.getAppServerReconciliationState(sessionId);
-    const applied = await this.store.applyAppServerProjection(input(sessionId, preservePlanReady(projection, current), event.receivedAt));
+    const normalizedProjection = normalizePlanModeStatus(projection, existingSession.inputMode);
+    const applied = await this.store.applyAppServerProjection(input(sessionId, preservePlanReady(normalizedProjection, current), event.receivedAt));
     const session = applied.messageChanged || applied.statusChanged
       ? await this.requireSession(sessionId)
       : null;
@@ -97,4 +98,16 @@ function preservePlanReady(
 ): AppServerEventProjection {
   if (current?.status !== "plan_ready" || projection.status !== "idle") return projection;
   return { ...projection, status: null };
+}
+
+function normalizePlanModeStatus(
+  projection: AppServerEventProjection,
+  inputMode: ManagedSession["inputMode"]
+): AppServerEventProjection {
+  if (
+    inputMode !== "plan"
+    || !projection.status
+    || !["working", "generating", "executing"].includes(projection.status)
+  ) return projection;
+  return { ...projection, status: "planning" };
 }

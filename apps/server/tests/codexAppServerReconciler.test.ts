@@ -46,6 +46,67 @@ describe("CodexAppServerReconciler", () => {
     expect(published.map((event) => event.type)).toEqual(["message.appended", "status.changed", "session.updated"]);
   });
 
+  it.each([
+    ["turn start", "turn/started", { threadId: "thread-1", turn: { id: "turn-1" } }],
+    ["active thread", "thread/status/changed", { threadId: "thread-1", status: { type: "active", activeFlags: [] } }],
+    ["command", "item/started", { threadId: "thread-1", turnId: "turn-1", item: { id: "command-1", type: "commandExecution" } }],
+    ["tool call", "item/started", { threadId: "thread-1", turnId: "turn-1", item: { id: "tool-1", type: "mcpToolCall" } }],
+    ["assistant message", "item/completed", { threadId: "thread-1", turnId: "turn-1", item: { id: "agent-1", type: "agentMessage", text: "Planning" } }]
+  ])("keeps Plan-mode %s activity in planning status", async (_label, method, params) => {
+    const store = projectionStore([], "plan");
+    const publish = vi.fn();
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish });
+
+    await reconciler.handle("session-1", {
+      method,
+      params,
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "planning" }));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: "status.changed",
+      payload: { status: "planning" }
+    }));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session.updated",
+      payload: expect.objectContaining({ status: "planning" })
+    }));
+  });
+
+  it("preserves attention and completion states in Plan mode", async () => {
+    const store = projectionStore([], "plan");
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "item/tool/requestUserInput",
+      params: {
+        requestId: "question-1",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "tool-1",
+          questions: [{ id: "choice", header: "Choice", question: "Choose", options: [] }]
+        }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "question" }));
+
+    await reconciler.handle("session-1", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "plan-1", type: "plan", text: "Final plan" }
+      },
+      receivedAt: "2026-09-01T12:00:01.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenLastCalledWith(expect.objectContaining({ status: "plan_ready" }));
+  });
+
   it("keeps deltas transient and preserves plan-ready across the following idle notification", async () => {
     const store = projectionStore([]);
     const publish = vi.fn();
@@ -133,12 +194,28 @@ describe("CodexAppServerReconciler", () => {
       "2026-09-01T12:05:00.000Z"
     ]);
   });
+
+  it("restores an active Plan-mode thread as planning", async () => {
+    const store = projectionStore([], "plan");
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "active", activeFlags: [] },
+      "2026-09-01T12:05:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "planning" }));
+  });
 });
 
-function projectionStore(order: string[]) {
+function projectionStore(order: string[], inputMode: "default" | "plan" = "default") {
+  let status: SessionStatus = "generating";
   return {
     applyAppServerProjection: vi.fn(async (projection) => {
       order.push("apply");
+      if (projection.status) status = projection.status;
       return {
         message: projection.message ? { ...projection.message, sessionId: projection.sessionId, sequence: 1 } : null,
         messageInserted: Boolean(projection.message),
@@ -152,7 +229,8 @@ function projectionStore(order: string[]) {
       order.push("session");
       return {
         id: "session-1",
-        status: "generating",
+        status,
+        inputMode,
         provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
       };
     }),
