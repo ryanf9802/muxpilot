@@ -74,6 +74,8 @@ describe("mobile session viewport layout", () => {
     const compactButtonRule = cssBlock(compactStyles, ".session-actions button");
     const narrowStyles = cssBlock(styles, "@media (max-width: 819px)");
     const narrowModelRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata");
+    const narrowModelIconRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata .tmux-command-icon");
+    const narrowModelLabelRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata .tmux-command-label");
     const narrowMetaRule = cssBlock(narrowStyles, ".session-header-meta");
     const narrowMetadataRule = cssBlock(narrowStyles, ".session-header-runtime-detail,\n  .session-header-memory-usage");
     const compactStatusRule = cssBlock(narrowStyles, ".session-header-status-compact .session-header-runtime > .status");
@@ -82,7 +84,10 @@ describe("mobile session viewport layout", () => {
     expect(runtimeRule).toContain("display: flex;");
     expect(runtimeRule).toContain("justify-content: flex-end;");
     expect(runtimeModelRule).toContain("max-width: none;");
-    expect(narrowModelRule).toContain("display: none;");
+    expect(narrowModelRule).toContain("width: 28px;");
+    expect(narrowModelRule).not.toContain("display: none;");
+    expect(narrowModelIconRule).toContain("display: block;");
+    expect(narrowModelLabelRule).toContain("display: none;");
     expect(narrowMetaRule).toContain("gap: 6px;");
     expect(narrowMetadataRule).toContain("display: none;");
     expect(compactStatusRule).toContain("width: 12px;");

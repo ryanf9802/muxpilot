@@ -1670,6 +1670,7 @@ describe("tmux command helpers", () => {
 
     expect(html).toContain('class="tmux-command-button tmux-command-metadata"');
     expect(html).toContain("Change model settings");
+    expect(html).toContain("tmux-command-icon");
     expect(html).toContain("gpt-5.5");
   });
 

@@ -4107,6 +4107,11 @@ select:focus-visible {
   font-size: 9px;
 }
 
+.tmux-command-icon {
+  display: none;
+  flex: 0 0 auto;
+}
+
 .tmux-command-label {
   min-width: 0;
   display: inline-flex;
@@ -6191,6 +6196,16 @@ select:focus-visible {
   }
 
   .session-header-runtime .tmux-command-metadata {
+    width: 28px;
+    min-width: 28px;
+    padding: 0;
+  }
+
+  .session-header-runtime .tmux-command-metadata .tmux-command-icon {
+    display: block;
+  }
+
+  .session-header-runtime .tmux-command-metadata .tmux-command-label {
     display: none;
   }
 

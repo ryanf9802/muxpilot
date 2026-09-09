@@ -23,6 +23,7 @@ import {
   Save,
   Send,
   ShieldCheck,
+  SlidersHorizontal,
   Skull,
   SquareTerminal,
   Trash2,
@@ -2851,12 +2852,6 @@ export function SessionView() {
           </div>
         </div>
         <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
-          <ModelSettingsButton
-            compact
-            session={readySession}
-            catalog={modelCatalog}
-            onOpen={() => setModelSettingsOpen(true)}
-          />
           <RuntimeAttachButton
             session={readySession}
             copied={copiedTmuxCommand}
@@ -2865,6 +2860,12 @@ export function SessionView() {
             onCopy={() => void copyTmuxCommand()}
           />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
+          <ModelSettingsButton
+            compact
+            session={readySession}
+            catalog={modelCatalog}
+            onOpen={() => setModelSettingsOpen(true)}
+          />
           <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
             {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
           </span>
@@ -4567,6 +4568,7 @@ export function ModelSettingsButton({
   const model = sessionModelDisplay(session, catalog);
   const content = (
     <>
+      <SlidersHorizontal className="tmux-command-icon" size={15} aria-hidden="true" />
       <span className="tmux-command-label">
         <span className="tmux-command-model">{model.model}</span>
         <span className="tmux-command-effort">{model.reasoningEffort}</span>
