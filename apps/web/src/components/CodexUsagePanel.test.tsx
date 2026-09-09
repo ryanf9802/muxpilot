@@ -120,7 +120,9 @@ describe("CodexUsagePanel interactions", () => {
   }
 
   async function clickButton(label: string) {
-    const button = [...container.querySelectorAll("button")].find((candidate) => candidate.textContent?.trim() === label);
+    const button = Array.from(container.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent?.trim() === label,
+    );
     expect(button, `button ${label}`).toBeDefined();
     await act(async () => {
       button!.click();
