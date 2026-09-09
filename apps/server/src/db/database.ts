@@ -1639,10 +1639,11 @@ export class SyncAppDatabase {
     if (source === "app_server" && incoming.type === "question_request") {
       this.rekeyLegacyRolloutQuestion(incoming.sessionId, identity);
     }
-    const existing = this.db.prepare(
+    let existing = this.db.prepare(
       `SELECT * FROM codex_item_messages
        WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
     ).get(incoming.sessionId, identity.threadId, identity.turnId, identity.itemId) as CodexItemMessageRow | undefined;
+    existing ??= this.equivalentPlanItemMessage(incoming, identity, source);
 
     if (!existing) {
       const inserted = this.insertMessage(incoming);
@@ -1678,7 +1679,7 @@ export class SyncAppDatabase {
       source, incoming.id,
       source, incoming.timestamp,
       source, incoming.timestamp,
-      incoming.sessionId, identity.threadId, identity.turnId, identity.itemId
+      existing.session_id, existing.thread_id, existing.turn_id, existing.item_id
     );
 
     if (source === "rollout" || existing.app_server_message_id !== null) {
@@ -1732,6 +1733,41 @@ export class SyncAppDatabase {
       authoritative.sessionId
     );
     return { message: authoritative, inserted: false, changed: true };
+  }
+
+  private equivalentPlanItemMessage(
+    incoming: ChatMessage,
+    identity: CodexItemMessageIdentity,
+    source: "app_server" | "rollout"
+  ): CodexItemMessageRow | undefined {
+    const incomingPlan = canonicalProposedPlan(incoming);
+    if (incomingPlan === null) return undefined;
+    const candidates = this.db.prepare(
+      `SELECT codex_item_messages.*
+       FROM codex_item_messages
+       JOIN messages ON messages.id = codex_item_messages.message_id
+       WHERE codex_item_messages.session_id = ?
+         AND codex_item_messages.thread_id = ?
+         AND codex_item_messages.turn_id = ?
+         AND codex_item_messages.item_id <> ?
+         AND messages.type = 'assistant'
+         AND messages.role = 'assistant'
+         AND CASE WHEN ? = 'app_server'
+           THEN codex_item_messages.app_server_message_id IS NULL
+           ELSE codex_item_messages.rollout_message_id IS NULL
+         END`
+    ).all(
+      incoming.sessionId,
+      identity.threadId,
+      identity.turnId,
+      identity.itemId,
+      source
+    ) as unknown as CodexItemMessageRow[];
+    return candidates.find((candidate) => {
+      const row = this.db.prepare("SELECT * FROM messages WHERE id = ? AND session_id = ?")
+        .get(candidate.message_id, incoming.sessionId) as MessageRow | undefined;
+      return row !== undefined && canonicalProposedPlan(hydrateMessage(row)) === incomingPlan;
+    });
   }
 
   private rekeyLegacyRolloutQuestion(sessionId: string, identity: CodexItemMessageIdentity): void {
@@ -3781,6 +3817,7 @@ export class SyncAppDatabase {
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
+    this.removeDuplicateAppServerPlanMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
   }
@@ -3907,6 +3944,96 @@ export class SyncAppDatabase {
         if (result.changes === 1) {
           removedBySession.set(row.session_id, (removedBySession.get(row.session_id) ?? 0) + 1);
         }
+      }
+      for (const [sessionId, removed] of removedBySession) {
+        this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?")
+          .run(removed, sessionId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private removeDuplicateAppServerPlanMessages(): void {
+    const rows = this.db.prepare(
+      `SELECT codex_item_messages.*, messages.id, messages.sequence, messages.type, messages.role,
+              messages.timestamp, messages.text, messages.payload_json
+       FROM codex_item_messages
+       JOIN messages ON messages.id = codex_item_messages.message_id
+       WHERE messages.type = 'assistant' AND messages.role = 'assistant'
+       ORDER BY codex_item_messages.session_id, codex_item_messages.thread_id,
+                codex_item_messages.turn_id, messages.sequence`
+    ).all() as unknown as Array<CodexItemMessageRow & MessageRow>;
+    const removedBySession = new Map<string, number>();
+    const consumed = new Set<string>();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const appServerRow of rows) {
+        if (!appServerRow.app_server_message_id || appServerRow.rollout_message_id || consumed.has(appServerRow.message_id)) continue;
+        const appServerMessage = hydrateMessage(appServerRow);
+        const plan = canonicalProposedPlan(appServerMessage);
+        if (plan === null) continue;
+        const rolloutRow = rows.find((candidate) =>
+          candidate.session_id === appServerRow.session_id
+          && candidate.thread_id === appServerRow.thread_id
+          && candidate.turn_id === appServerRow.turn_id
+          && candidate.rollout_message_id !== null
+          && candidate.app_server_message_id === null
+          && !consumed.has(candidate.message_id)
+          && canonicalProposedPlan(hydrateMessage(candidate)) === plan
+        );
+        if (!rolloutRow) continue;
+
+        const retained = appServerRow.sequence <= rolloutRow.sequence ? appServerRow : rolloutRow;
+        const discarded = retained.message_id === appServerRow.message_id ? rolloutRow : appServerRow;
+        const previous = hydrateMessage(retained);
+        const authoritative: ChatMessage = {
+          ...appServerMessage,
+          id: retained.message_id,
+          sessionId: retained.session_id,
+          sequence: retained.sequence,
+          payload: { ...hydrateMessage(rolloutRow).payload, ...appServerMessage.payload }
+        };
+        this.db.prepare(
+          `UPDATE messages SET type = ?, role = ?, timestamp = ?, text = ?, payload_json = ?
+           WHERE id = ? AND session_id = ?`
+        ).run(
+          authoritative.type,
+          authoritative.role,
+          authoritative.timestamp,
+          authoritative.text,
+          JSON.stringify(authoritative.payload),
+          retained.message_id,
+          retained.session_id
+        );
+        this.db.prepare(
+          `UPDATE codex_item_messages
+           SET app_server_message_id = ?, rollout_message_id = ?,
+               app_server_observed_at = ?, rollout_observed_at = ?
+           WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+        ).run(
+          appServerRow.app_server_message_id,
+          rolloutRow.rollout_message_id,
+          appServerRow.app_server_observed_at,
+          rolloutRow.rollout_observed_at,
+          retained.session_id,
+          retained.thread_id,
+          retained.turn_id,
+          retained.item_id
+        );
+        this.db.prepare(
+          "DELETE FROM codex_item_messages WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?"
+        ).run(discarded.session_id, discarded.thread_id, discarded.turn_id, discarded.item_id);
+        this.db.prepare("DELETE FROM messages WHERE id = ? AND session_id = ?")
+          .run(discarded.message_id, discarded.session_id);
+        this.deletePromptIndexMessage(previous.id);
+        this.upsertPromptIndexMessage(authoritative);
+        consumed.add(retained.message_id);
+        consumed.add(discarded.message_id);
+        removedBySession.set(retained.session_id, (removedBySession.get(retained.session_id) ?? 0) + 1);
       }
       for (const [sessionId, removed] of removedBySession) {
         this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?")
@@ -4196,6 +4323,24 @@ function stripAssistantSideChannelBlocks(text: string): string {
     .replace(/<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>/g, "")
     .replace(/<\/?codex-proposed-plan[^>]*>/g, "")
     .trim();
+}
+
+function canonicalProposedPlan(message: Pick<ChatMessage, "type" | "role" | "text">): string | null {
+  if (message.type !== "assistant" || message.role !== "assistant") return null;
+  const text = stripAssistantSideChannelBlocks(message.text).replace(/\r\n/g, "\n");
+  const openTag = "<proposed_plan>";
+  const closeTag = "</proposed_plan>";
+  let cursor = 0;
+  let plan: string | null = null;
+  while (cursor < text.length) {
+    const open = text.indexOf(openTag, cursor);
+    if (open === -1) break;
+    const close = text.indexOf(closeTag, open + openTag.length);
+    if (close === -1) break;
+    plan = text.slice(open + openTag.length, close).trim();
+    cursor = close + closeTag.length;
+  }
+  return plan;
 }
 
 function compareSessionsByActivity(first: ManagedSession, second: ManagedSession): number {

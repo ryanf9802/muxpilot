@@ -150,6 +150,65 @@ describe("app-server projection persistence", () => {
     raw.close();
   });
 
+  it("reconciles a late rollout plan whose item id differs from the live plan", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    expect(await db.applyAppServerProjection(planProjectionInput(sessionId))).toMatchObject({
+      messageInserted: true,
+      messageChanged: true
+    });
+    expect(await db.appendMessage(rolloutPlanMessage(sessionId, 2))).toBe(false);
+    expect(await db.listMessages(sessionId)).toMatchObject([
+      { id: "app-server-plan", sequence: 1, text: "<proposed_plan>\nBuild it\n</proposed_plan>" }
+    ]);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare(
+      `SELECT item_id, app_server_message_id, rollout_message_id
+       FROM codex_item_messages WHERE session_id = ?`
+    ).get(sessionId)).toEqual({
+      item_id: "turn-1-plan",
+      app_server_message_id: "app-server-plan",
+      rollout_message_id: "rollout-plan"
+    });
+    raw.close();
+  });
+
+  it("upgrades an earlier rollout plan when the differently identified live plan arrives", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    expect(await db.appendMessage(rolloutPlanMessage(sessionId, 1))).toBe(true);
+    expect(await db.applyAppServerProjection(planProjectionInput(sessionId))).toMatchObject({
+      messageInserted: false,
+      messageChanged: true,
+      message: { id: "rollout-plan", sequence: 1 }
+    });
+    expect(await db.listMessages(sessionId)).toMatchObject([
+      { id: "rollout-plan", sequence: 1, text: "<proposed_plan>\nBuild it\n</proposed_plan>" }
+    ]);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare(
+      `SELECT item_id, app_server_message_id, rollout_message_id
+       FROM codex_item_messages WHERE session_id = ?`
+    ).get(sessionId)).toEqual({
+      item_id: "rollout-plan-item",
+      app_server_message_id: "app-server-plan",
+      rollout_message_id: "rollout-plan"
+    });
+    raw.close();
+  });
+
+  it("keeps a revised plan from the same turn as a distinct message", async () => {
+    const { db, sessionId } = await projectionDb();
+    expect(await db.applyAppServerProjection(planProjectionInput(sessionId))).toMatchObject({ messageInserted: true });
+    const revised = rolloutPlanMessage(sessionId, 2);
+    revised.text = "<proposed_plan>\nBuild it differently\n</proposed_plan>";
+    expect(await db.appendMessage(revised)).toBe(true);
+    expect(await db.listMessages(sessionId)).toHaveLength(2);
+    await db.close();
+  });
+
   it("upgrades a rollout question by its wire call id instead of creating a second prompt", async () => {
     const { db, path, sessionId } = await projectionDb();
     expect(await db.appendMessage({
@@ -233,6 +292,56 @@ describe("app-server projection persistence", () => {
       { id: "legacy-app-server-question", text: "Codex needs your input" }
     ]);
     await reopened.close();
+  });
+
+  it("removes already-persisted duplicate plan copies when reopening", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    await db.applyAppServerProjection(planProjectionInput(sessionId));
+    await db.appendMessage({
+      id: "accepted-plan",
+      sessionId,
+      sequence: 2,
+      type: "user",
+      role: "user",
+      timestamp: "2026-09-01T00:00:02.000Z",
+      text: "Implement the plan.",
+      payload: {}
+    });
+    await db.close();
+    const raw = new DatabaseSync(path);
+    const delayed = rolloutPlanMessage(sessionId, 3);
+    raw.prepare(
+      `INSERT INTO messages (id, session_id, sequence, type, role, timestamp, text, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      delayed.id, delayed.sessionId, delayed.sequence, delayed.type, delayed.role,
+      delayed.timestamp, delayed.text, JSON.stringify(delayed.payload)
+    );
+    raw.prepare(
+      `INSERT INTO codex_item_messages
+        (session_id, thread_id, turn_id, item_id, message_id, rollout_message_id, rollout_observed_at)
+       VALUES (?, 'thread-1', 'turn-1', 'rollout-plan-item', ?, ?, ?)`
+    ).run(sessionId, delayed.id, delayed.id, delayed.timestamp);
+    raw.close();
+
+    const reopened = new AppDatabase(path);
+    expect(await reopened.listMessages(sessionId)).toMatchObject([
+      { id: "app-server-plan", sequence: 1, text: "<proposed_plan>\nBuild it\n</proposed_plan>" },
+      { id: "accepted-plan", sequence: 2, text: "Implement the plan." }
+    ]);
+    expect(await reopened.latestPlanReadyMessage(sessionId)).toBeNull();
+    await reopened.close();
+
+    const verified = new DatabaseSync(path, { readOnly: true });
+    expect(verified.prepare(
+      `SELECT item_id, app_server_message_id, rollout_message_id
+       FROM codex_item_messages WHERE session_id = ?`
+    ).get(sessionId)).toEqual({
+      item_id: "turn-1-plan",
+      app_server_message_id: "app-server-plan",
+      rollout_message_id: "rollout-plan"
+    });
+    verified.close();
   });
 
   it("keeps item ownership through a session rekey and removes it with transcript history", async () => {
@@ -444,6 +553,59 @@ function questionProjectionInput(sessionId: string) {
     },
     evidence: { requestId: 0 },
     observedAt: "2026-09-01T00:00:01.001Z"
+  };
+}
+
+function planProjectionInput(sessionId: string) {
+  return {
+    ...projectionInput(sessionId),
+    itemId: "turn-1-plan",
+    status: "plan_ready" as const,
+    message: {
+      id: "app-server-plan",
+      type: "assistant" as const,
+      role: "assistant" as const,
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "<proposed_plan>\nBuild it\n</proposed_plan>",
+      payload: {
+        source: "codex_app_server",
+        method: "item/completed",
+        codexItemIdentity: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "turn-1-plan",
+          clientMessageId: null
+        },
+        appServerIdentity: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "turn-1-plan",
+          clientMessageId: null
+        }
+      }
+    },
+    evidence: { item: { id: "turn-1-plan", type: "plan" } }
+  };
+}
+
+function rolloutPlanMessage(sessionId: string, sequence: number) {
+  return {
+    id: "rollout-plan",
+    sessionId,
+    sequence,
+    type: "assistant" as const,
+    role: "assistant" as const,
+    timestamp: "2026-09-01T00:00:01.001Z",
+    text: "Plan ready.\n\n<proposed_plan>\nBuild it\n</proposed_plan>\n\n<oai-mem-citation>ignored</oai-mem-citation>",
+    payload: {
+      type: "response_item",
+      codexItemIdentity: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "rollout-plan-item",
+        clientMessageId: null
+      }
+    }
   };
 }
 
