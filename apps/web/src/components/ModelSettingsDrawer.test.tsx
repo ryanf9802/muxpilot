@@ -159,7 +159,7 @@ describe("ModelSettingsDrawer", () => {
     const details = container.querySelector("details")!;
     details.open = true;
     expect(details.textContent).toContain("25–200 local messages per 5 hours on Plus");
-    expect(details.textContent).toContain("Fast mode is on");
+    expect(container.querySelector(".model-settings-fast-usage")?.textContent).toContain("Fast mode is on");
     expect(details.querySelector('a[href="https://learn.chatgpt.com/docs/pricing"]')).not.toBeNull();
     act(() => root.unmount());
   });
