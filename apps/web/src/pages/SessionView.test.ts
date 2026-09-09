@@ -356,7 +356,8 @@ describe("SessionHeaderMeta", () => {
           memoryCurrentBytes: 128 * 1024 ** 2,
           memoryHighBytes: 256 * 1024 ** 2,
           memoryMaxBytes: 512 * 1024 ** 2,
-          cpuUsageUsec: 0,
+          cpuPercent: 0,
+          cpuLimitPercent: 100,
           sampledAt: "2026-09-08T00:00:00.000Z"
         }
       }
