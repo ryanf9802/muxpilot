@@ -163,7 +163,9 @@ function withCodexItemIdentity(
   let event: RawEvent;
   try { event = JSON.parse(line) as RawEvent; } catch { return message; }
   if (event.type !== "response_item") return message;
-  const itemId = stringValue(event.payload?.id);
+  const itemId = event.payload?.type === "function_call"
+    ? stringValue(event.payload.call_id) ?? stringValue(event.payload.id)
+    : stringValue(event.payload?.id);
   const metadata = recordValue(event.payload?.internal_chat_message_metadata_passthrough);
   const turnId = stringValue(metadata?.turn_id);
   if (!itemId || !turnId) return message;

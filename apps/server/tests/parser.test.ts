@@ -486,8 +486,10 @@ describe("parseCodexJsonl", () => {
           type: "response_item",
           payload: {
             type: "function_call",
+            id: "fc-question",
             name: "request_user_input",
             call_id: "call-question",
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-question" },
             arguments: JSON.stringify({
               autoResolutionMs: 60000,
               questions: [
@@ -534,6 +536,11 @@ describe("parseCodexJsonl", () => {
           ]
         }
       ]
+    });
+    expect(result.messages[0]?.payload.codexItemIdentity).toEqual({
+      turnId: "turn-question",
+      itemId: "call-question",
+      clientMessageId: null
     });
   });
 

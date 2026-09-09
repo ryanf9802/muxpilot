@@ -1598,6 +1598,9 @@ export class SyncAppDatabase {
     identity: CodexItemMessageIdentity
   ): MessageWriteResult {
     const source = incoming.payload.source === "codex_app_server" ? "app_server" : "rollout";
+    if (source === "app_server" && incoming.type === "question_request") {
+      this.rekeyLegacyRolloutQuestion(incoming.sessionId, identity);
+    }
     const existing = this.db.prepare(
       `SELECT * FROM codex_item_messages
        WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
@@ -1691,6 +1694,31 @@ export class SyncAppDatabase {
       authoritative.sessionId
     );
     return { message: authoritative, inserted: false, changed: true };
+  }
+
+  private rekeyLegacyRolloutQuestion(sessionId: string, identity: CodexItemMessageIdentity): void {
+    const legacy = this.db.prepare(
+      `SELECT codex_item_messages.item_id
+       FROM codex_item_messages
+       JOIN messages ON messages.id = codex_item_messages.message_id
+       WHERE codex_item_messages.session_id = ?
+         AND codex_item_messages.thread_id = ?
+         AND codex_item_messages.turn_id = ?
+         AND codex_item_messages.app_server_message_id IS NULL
+         AND messages.type = 'question_request'
+         AND json_extract(messages.payload_json, '$.question.id') = ?
+       LIMIT 1`
+    ).get(sessionId, identity.threadId, identity.turnId, identity.itemId) as { item_id: string } | undefined;
+    if (!legacy || legacy.item_id === identity.itemId) return;
+    const target = this.db.prepare(
+      `SELECT 1 FROM codex_item_messages
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+    ).get(sessionId, identity.threadId, identity.turnId, identity.itemId);
+    if (target) return;
+    this.db.prepare(
+      `UPDATE codex_item_messages SET item_id = ?
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+    ).run(identity.itemId, sessionId, identity.threadId, identity.turnId, legacy.item_id);
   }
 
   private codexItemMessageIdentity(message: ChatMessage): CodexItemMessageIdentity | null {
@@ -3665,6 +3693,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
+    this.removeDuplicateAppServerQuestionMessages();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
   }
@@ -3784,6 +3813,43 @@ export class SyncAppDatabase {
       }
       for (const [sessionId, deleted] of deletedBySession) {
         this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?").run(deleted, sessionId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private removeDuplicateAppServerQuestionMessages(): void {
+    const rows = this.db.prepare(
+      `SELECT rollout.message_id, rollout.session_id
+       FROM codex_item_messages AS rollout
+       JOIN messages AS rollout_message ON rollout_message.id = rollout.message_id
+       JOIN codex_item_messages AS app_server
+         ON app_server.session_id = rollout.session_id
+        AND app_server.thread_id = rollout.thread_id
+        AND app_server.turn_id = rollout.turn_id
+        AND app_server.item_id = json_extract(rollout_message.payload_json, '$.question.id')
+       WHERE rollout_message.type = 'question_request'
+         AND rollout.app_server_message_id IS NULL
+         AND rollout.rollout_message_id IS NOT NULL
+         AND app_server.app_server_message_id IS NOT NULL`
+    ).all() as unknown as Array<{ message_id: string; session_id: string }>;
+    if (rows.length === 0) return;
+    const removedBySession = new Map<string, number>();
+    const remove = this.db.prepare("DELETE FROM messages WHERE id = ? AND session_id = ?");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        const result = remove.run(row.message_id, row.session_id);
+        if (result.changes === 1) {
+          removedBySession.set(row.session_id, (removedBySession.get(row.session_id) ?? 0) + 1);
+        }
+      }
+      for (const [sessionId, removed] of removedBySession) {
+        this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?")
+          .run(removed, sessionId);
       }
       this.db.exec("COMMIT");
     } catch (error) {

@@ -45,6 +45,7 @@ export interface CodexAppServerDriverOptions {
   processStore?: AppServerProcessStore;
   eventSink?: AppServerDriverEventSink;
   now?(): Date;
+  interactiveRequestReplayDelayMs?: number;
 }
 
 export interface AppServerProcessStore {
@@ -112,7 +113,9 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     turnId: string;
     responded: boolean;
   }>();
+  private readonly interactiveRequestReplayTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly now: () => Date;
+  private readonly interactiveRequestReplayDelayMs: number;
   private readonly requestStore: AppServerRequestStore | null;
   private readonly processStore: AppServerProcessStore | null;
   private readonly eventSink: AppServerDriverEventSink | null;
@@ -123,6 +126,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     private readonly options: CodexAppServerDriverOptions
   ) {
     this.now = options.now ?? (() => new Date());
+    this.interactiveRequestReplayDelayMs = options.interactiveRequestReplayDelayMs ?? 100;
     this.requestStore = options.requestStore ?? null;
     this.processStore = options.processStore ?? null;
     this.eventSink = options.eventSink ?? null;
@@ -213,6 +217,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.sessionThreads.delete(session.id);
     this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
+    this.cancelInteractiveRequestReplay(session.id);
     await this.supervisor.stop(runtime);
     await this.processStore?.clearAppServerCommandProcesses(session.id).catch(() => undefined);
   }
@@ -294,6 +299,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.activeTurns.delete(session.id);
     this.turnProcesses.delete(session.id);
     this.clearPendingRequests(session.id);
+    this.cancelInteractiveRequestReplay(session.id);
     await this.processStore?.clearAppServerCommandProcesses(session.id).catch(() => undefined);
     return { ...stopped, state: "hibernated" };
   }
@@ -537,12 +543,20 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         const event = { method, params, receivedAt };
         await this.eventSink?.handle(sessionId, event);
         this.emit(sessionId, event);
+        if (method === "thread/status/changed") {
+          if (threadId && threadStatusNeedsInteractiveRequest(params)) {
+            this.scheduleInteractiveRequestReplay(sessionId, threadId);
+          } else {
+            this.cancelInteractiveRequestReplay(sessionId);
+          }
+        }
       },
       serverRequest: async ({ id, method, params }) => {
         const threadId = directString(params, "threadId");
         const turnId = directString(params, "turnId");
         if (!threadId || !turnId) throw new Error(`App-server request is missing thread/turn identity: ${method}`);
         const receivedAt = this.now().toISOString();
+        if (this.isSessionThread(sessionId, threadId)) this.cancelInteractiveRequestReplay(sessionId);
         const persisted = await this.requestStore?.upsertAppServerRequest({
           sessionId,
           requestId: id,
@@ -621,6 +635,46 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   private clearPendingRequests(sessionId: string): void {
     for (const [key, pending] of this.pendingRequests) {
       if (pending.sessionId === sessionId) this.pendingRequests.delete(key);
+    }
+  }
+
+  private scheduleInteractiveRequestReplay(sessionId: string, threadId: string): void {
+    this.cancelInteractiveRequestReplay(sessionId);
+    const timer = setTimeout(() => {
+      this.interactiveRequestReplayTimers.delete(sessionId);
+      void this.replayMissingInteractiveRequest(sessionId, threadId);
+    }, this.interactiveRequestReplayDelayMs);
+    timer.unref?.();
+    this.interactiveRequestReplayTimers.set(sessionId, timer);
+  }
+
+  private cancelInteractiveRequestReplay(sessionId: string): void {
+    const timer = this.interactiveRequestReplayTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.interactiveRequestReplayTimers.delete(sessionId);
+  }
+
+  private async replayMissingInteractiveRequest(sessionId: string, threadId: string): Promise<void> {
+    if ([...this.pendingRequests.values()].some((request) => (
+      request.sessionId === sessionId && request.threadId === threadId && !request.responded
+    ))) return;
+    const connection = this.connections.get(sessionId);
+    if (!connection || connection.threadId !== threadId) return;
+    const protocol = new CodexAppServerProtocol(connection.rpc);
+    try {
+      const current = await protocol.readThread(threadId, false);
+      if (!threadStatusNeedsInteractiveRequest(current.thread)) return;
+      if ([...this.pendingRequests.values()].some((request) => (
+        request.sessionId === sessionId && request.threadId === threadId && !request.responded
+      ))) return;
+      await protocol.resumeThread(threadId);
+    } catch (error) {
+      this.emit(sessionId, {
+        method: "connection/error",
+        params: { message: `Could not replay pending app-server request: ${error instanceof Error ? error.message : String(error)}` },
+        receivedAt: this.now().toISOString()
+      });
     }
   }
 
@@ -722,6 +776,16 @@ const APPROVAL_METHODS = new Set([
   "item/fileChange/requestApproval",
   "item/permissions/requestApproval"
 ]);
+
+function threadStatusNeedsInteractiveRequest(value: unknown): boolean {
+  const envelope = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const status = recordValue(envelope, "status") ?? envelope;
+  if (status?.type !== "active") return false;
+  const flags = Array.isArray(status.activeFlags) ? status.activeFlags : [];
+  return flags.includes("waitingOnApproval") || flags.includes("waitingOnUserInput");
+}
 
 export const PLAN_IMPLEMENTATION_MESSAGE = "Implement the plan.";
 export const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = [

@@ -150,6 +150,97 @@ describe("app-server projection persistence", () => {
     raw.close();
   });
 
+  it("upgrades a rollout question by its wire call id instead of creating a second prompt", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    expect(await db.appendMessage({
+      id: "rollout-question",
+      sessionId,
+      sequence: 1,
+      type: "question_request",
+      role: "system",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "Question requested\nChoice: Continue?",
+      payload: {
+        question: {
+          id: "call-question",
+          questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }]
+        },
+        codexItemIdentity: { turnId: "turn-1", itemId: "fc-question", clientMessageId: null }
+      }
+    })).toBe(true);
+
+    expect(await db.applyAppServerProjection(questionProjectionInput(sessionId))).toMatchObject({
+      messageInserted: false,
+      messageChanged: true,
+      message: {
+        id: "rollout-question",
+        sequence: 1,
+        text: "Codex needs your input",
+        payload: { source: "codex_app_server", question: { requestId: 0 } }
+      }
+    });
+    expect(await db.listMessages(sessionId)).toHaveLength(1);
+    await db.close();
+
+    const raw = new DatabaseSync(path, { readOnly: true });
+    expect(raw.prepare(
+      `SELECT item_id, message_id, app_server_message_id, rollout_message_id
+       FROM codex_item_messages WHERE session_id = ?`
+    ).get(sessionId)).toEqual({
+      item_id: "call-question",
+      message_id: "rollout-question",
+      app_server_message_id: "app-server-question",
+      rollout_message_id: "rollout-question"
+    });
+    raw.close();
+  });
+
+  it("removes already-persisted duplicate rollout questions when reopening", async () => {
+    const { db, path, sessionId } = await projectionDb();
+    await db.appendMessage({
+      id: "legacy-rollout-question",
+      sessionId,
+      sequence: 1,
+      type: "question_request",
+      role: "system",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "Question requested",
+      payload: {
+        question: { id: "call-question", questions: [] },
+        codexItemIdentity: { turnId: "turn-1", itemId: "fc-question", clientMessageId: null }
+      }
+    });
+    await db.close();
+    const raw = new DatabaseSync(path);
+    raw.prepare(
+      `INSERT INTO messages (id, session_id, sequence, type, role, timestamp, text, payload_json)
+       VALUES (?, ?, 2, 'question_request', 'system', ?, 'Codex needs your input', ?)`
+    ).run(
+      "legacy-app-server-question",
+      sessionId,
+      "2026-09-01T00:00:01.001Z",
+      JSON.stringify({
+        source: "codex_app_server",
+        method: "item/tool/requestUserInput",
+        question: { id: "0", requestId: 0, questions: [] },
+        codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "call-question" },
+        appServerIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "call-question" }
+      })
+    );
+    raw.prepare(
+      `INSERT INTO codex_item_messages
+       (session_id, thread_id, turn_id, item_id, message_id, app_server_message_id, rollout_message_id, app_server_observed_at, rollout_observed_at)
+       VALUES (?, 'thread-1', 'turn-1', 'call-question', ?, ?, NULL, ?, NULL)`
+    ).run(sessionId, "legacy-app-server-question", "legacy-app-server-question", "2026-09-01T00:00:01.001Z");
+    raw.close();
+
+    const reopened = new AppDatabase(path);
+    expect(await reopened.listMessages(sessionId)).toMatchObject([
+      { id: "legacy-app-server-question", text: "Codex needs your input" }
+    ]);
+    await reopened.close();
+  });
+
   it("keeps item ownership through a session rekey and removes it with transcript history", async () => {
     const { db, path, sessionId } = await projectionDb();
     await db.applyAppServerProjection(projectionInput(sessionId));
@@ -317,6 +408,48 @@ function projectionInput(sessionId: string) {
     },
     evidence: { item: { id: "agent-1", type: "agentMessage" } },
     observedAt: "2026-09-01T00:00:02.000Z"
+  };
+}
+
+function questionProjectionInput(sessionId: string) {
+  return {
+    sessionId,
+    threadId: "thread-1",
+    turnId: "turn-1",
+    itemId: "call-question",
+    clientMessageId: null,
+    method: "item/tool/requestUserInput",
+    status: "question" as const,
+    message: {
+      id: "app-server-question",
+      type: "question_request" as const,
+      role: "system" as const,
+      timestamp: "2026-09-01T00:00:01.001Z",
+      text: "Codex needs your input",
+      payload: {
+        source: "codex_app_server",
+        method: "item/tool/requestUserInput",
+        question: {
+          id: "0",
+          requestId: 0,
+          questions: [{ id: "choice", header: "Choice", question: "Continue?", options: [] }]
+        },
+        codexItemIdentity: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "call-question",
+          clientMessageId: null
+        },
+        appServerIdentity: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "call-question",
+          clientMessageId: null
+        }
+      }
+    },
+    evidence: { requestId: 0 },
+    observedAt: "2026-09-01T00:00:01.001Z"
   };
 }
 

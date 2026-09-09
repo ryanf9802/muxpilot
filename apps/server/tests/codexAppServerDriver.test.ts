@@ -279,6 +279,60 @@ describe("CodexAppServerDriver", () => {
     await expect(harness.driver.answerApproval(session, "approval-1", "approve_once")).rejects.toThrow("Unknown");
   });
 
+  it("replays an interactive request when Codex reports the gate without delivering it", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness(undefined, undefined, undefined, 100);
+      await harness.driver.start(launchSpec());
+      harness.rpc.request.mockImplementation(async (method: string) => {
+        if (method === "thread/read") {
+          return { thread: { id: "thread-1", status: { type: "active", activeFlags: ["waitingOnUserInput"] } } };
+        }
+        if (method === "thread/resume") return { thread: { id: "thread-1" } };
+        return {};
+      });
+
+      await harness.handlers.notification?.({
+        method: "thread/status/changed",
+        params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnUserInput"] } }
+      });
+      await harness.handlers.serverRequest?.({
+        id: "child-question",
+        method: "item/tool/requestUserInput",
+        params: { threadId: "thread-child", turnId: "turn-child", itemId: "call-child-question" }
+      });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(harness.rpc.request).toHaveBeenCalledWith("thread/read", { threadId: "thread-1", includeTurns: false });
+      expect(harness.rpc.request).toHaveBeenCalledWith("thread/resume", { threadId: "thread-1", excludeTurns: true });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not replay when the native interactive request follows its status", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness(undefined, undefined, undefined, 100);
+      await harness.driver.start(launchSpec());
+      await harness.handlers.notification?.({
+        method: "thread/status/changed",
+        params: { threadId: "thread-1", status: { type: "active", activeFlags: ["waitingOnUserInput"] } }
+      });
+      await harness.handlers.serverRequest?.({
+        id: 0,
+        method: "item/tool/requestUserInput",
+        params: { threadId: "thread-1", turnId: "turn-1", itemId: "call-question" }
+      });
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(harness.rpc.request).not.toHaveBeenCalledWith("thread/read", expect.anything());
+      expect(harness.rpc.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("maps permission-profile grant scopes and denial without inventing permissions", async () => {
     const harness = createHarness();
     const session = managedSession();
@@ -882,7 +936,8 @@ describe("CodexAppServerDriver", () => {
 function createHarness(
   requestStore?: AppServerRequestStore,
   eventSink?: AppServerDriverEventSink,
-  processStore?: AppServerProcessStore
+  processStore?: AppServerProcessStore,
+  interactiveRequestReplayDelayMs?: number
 ): {
   driver: CodexAppServerDriver;
   supervisor: { start: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
@@ -941,6 +996,7 @@ function createHarness(
       requestStore,
       processStore,
       eventSink,
+      interactiveRequestReplayDelayMs,
       now: () => new Date("2026-09-01T12:00:00.000Z")
     }
   );
