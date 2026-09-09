@@ -287,6 +287,7 @@ describe("AppDatabase activity summaries", () => {
       sequence: 1,
       payload: {
         ...echoed.payload,
+        collaborationMode: "plan",
         muxpilotSubmission: {
           ...submitted.payload.muxpilotSubmission,
           state: "acknowledged",
@@ -397,6 +398,7 @@ describe("AppDatabase activity summaries", () => {
     const submitted = {
       ...testMessage(session.id, 1, "user", "Reply exactly CHILD_OK", "2026-07-07T00:00:01.000Z"),
       payload: {
+        collaborationMode: "plan",
         muxpilotSubmission: {
           state: "pending",
           deliveryPhase: "delivering",
@@ -460,6 +462,7 @@ describe("AppDatabase activity summaries", () => {
       id: submitted.id,
       sequence: submitted.sequence,
       payload: {
+        collaborationMode: "plan",
         source: "codex_app_server",
         codexItemIdentity: appServerIdentity,
         muxpilotSubmission: {

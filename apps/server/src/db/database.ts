@@ -1817,6 +1817,7 @@ export class SyncAppDatabase {
     const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
     const reconciledPayload = muxpilotSubmission
       ? {
+          ...submitted.payload,
           ...message.payload,
           muxpilotSubmission: muxpilotSubmission.state === "acknowledged"
             ? muxpilotSubmission
