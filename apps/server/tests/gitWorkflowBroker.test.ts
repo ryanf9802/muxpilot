@@ -15,7 +15,7 @@ const scripts = resolve(import.meta.dirname, "../../../skills/muxpilot-git-workf
 afterEach(async () => Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true }))));
 
 describe("GitWorkflowBroker", () => {
-  it("authenticates and performs the final fast-forward plus cleanup", async () => {
+  it("authenticates and performs the final fast-forward plus cleanup from blocked state", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-git-broker-"));
     roots.push(root);
     await git(root, ["init", "-b", "main"]);
@@ -52,6 +52,9 @@ describe("GitWorkflowBroker", () => {
     const capability = JSON.parse(await readFile(capabilityPath, "utf8"));
     await writeFile(capabilityPath, JSON.stringify({ ...capability, token: "invalid" }));
     await expect(node("muxpilot-git-finish.mjs", environment)).rejects.toThrow("unauthorized broker request");
+    const statusPath = environment.MUXPILOT_GIT_STATUS_FILE;
+    const status = JSON.parse(await readFile(statusPath, "utf8"));
+    await writeFile(statusPath, JSON.stringify({ ...status, state: "blocked", lastError: "resolved rebase conflict" }));
     await broker.publishCapability(workspace);
     expect(await node("muxpilot-git-finish.mjs", environment)).toContain("broker=authenticated");
     expect(await readFile(join(root, "broker.txt"), "utf8")).toBe("integrated\n");

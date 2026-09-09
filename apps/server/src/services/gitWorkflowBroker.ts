@@ -103,7 +103,7 @@ export class GitWorkflowBroker {
     const worktree = typeof status.worktreePath === "string" ? resolve(status.worktreePath) : "";
     const branch = typeof status.sessionBranch === "string" ? status.sessionBranch : "";
     const targetBranch = typeof status.targetBranch === "string" ? status.targetBranch : "";
-    if (!["worktree", "integrating", "failed"].includes(String(status.state))) throw new Error("No active task worktree to integrate");
+    if (!["worktree", "integrating", "blocked", "failed"].includes(String(status.state))) throw new Error("No active task worktree to integrate");
     if (!workspace.implementationRoot || !inside(resolve(workspace.implementationRoot), worktree)) throw new Error("Task worktree is outside the managed implementation root");
     if (!branch.startsWith(`muxpilot/${workspace.id}/`)) throw new Error("Task branch is not owned by this workspace");
     const targetRef = `refs/heads/${targetBranch}`;
