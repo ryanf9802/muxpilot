@@ -2858,19 +2858,19 @@ export function SessionView() {
           </div>
         </div>
         <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
-          <RuntimeAttachButton
-            session={readySession}
-            copied={copiedAttachCommand}
-            accessMode={accessMode}
-            enabled={!completed && readySession.capabilities?.terminalAttach !== false}
-            onCopy={() => void copyAttachCommand()}
-          />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
           <ModelSettingsButton
             compact
             session={readySession}
             catalog={modelCatalog}
             onOpen={() => setModelSettingsOpen(true)}
+          />
+          <RuntimeAttachButton
+            session={readySession}
+            copied={copiedAttachCommand}
+            accessMode={accessMode}
+            enabled={!completed && readySession.capabilities?.terminalAttach !== false}
+            onCopy={() => void copyAttachCommand()}
           />
           <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
             {readySession.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} detail={statusDetail} />}
