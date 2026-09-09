@@ -50,7 +50,85 @@ describe("SessionManager app-server helpers", () => {
     expect(normalizeRepositoryApprovalPrefix(["git", "-C", "/worktrees/task", "status"], workspace))
       .toEqual(["git", "-C", "$MUXPILOT_WORKTREE", "status"]);
   });
+
+  it("reconciles managed Git targets without live runtime or rollout activity", async () => {
+    const hibernated = managedSession();
+    hibernated.codexSessionId = null;
+    hibernated.codexJsonlPath = null;
+    hibernated.runtime = { ...hibernated.runtime!, state: "hibernated" };
+    hibernated.gitWorkspace = gitWorkspace("dev", "workspace-1");
+    const unchangedRollout = {
+      ...managedSession(),
+      id: "session-2",
+      gitWorkspace: gitWorkspace("dev", "workspace-2")
+    };
+    const sessions = new Map([hibernated, unchangedRollout].map((session) => [session.id, session]));
+    const setSessionGitWorkspace = vi.fn(async (sessionId: string, workspace: NonNullable<ManagedSession["gitWorkspace"]>) => {
+      const current = sessions.get(sessionId)!;
+      const updated = { ...current, gitWorkspace: workspace, repo: { ...current.repo, branch: workspace.targetBranch } };
+      sessions.set(sessionId, updated);
+      return updated;
+    });
+    const publish = vi.fn();
+    const listSessions = vi.fn(async () => [...sessions.values()]);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { listSessions, setSessionGitWorkspace },
+      codexStore: {
+        listRecent: vi.fn(async () => [{
+          sessionId: "thread-1",
+          path: "/codex/rollout.jsonl",
+          cwd: "/repo",
+          startedAtMs: 1,
+          updatedAtMs: 2,
+          sizeBytes: 3,
+          cliVersion: "0.152.0"
+        }])
+      },
+      gitWorkspaces: {
+        getBySession: vi.fn(async (sessionId: string) => ({ summary: sessions.get(sessionId)!.gitWorkspace })),
+        refresh: vi.fn(async (stored: { summary: NonNullable<ManagedSession["gitWorkspace"]> }) => ({
+          summary: gitWorkspace("feature/current-target", stored.summary.id)
+        }))
+      },
+      publish,
+      recoveryRunId: null
+    }) as SessionManager;
+
+    await manager.discover();
+    await manager.discover();
+
+    expect(setSessionGitWorkspace).toHaveBeenCalledTimes(2);
+    expect(listSessions).toHaveBeenCalledWith(false, false);
+    expect([...sessions.values()].map((session) => ({
+      id: session.id,
+      runtime: session.runtime?.state,
+      target: session.gitWorkspace?.targetBranch,
+      branch: session.repo.branch
+    }))).toEqual([
+      { id: "session-1", runtime: "hibernated", target: "feature/current-target", branch: "feature/current-target" },
+      { id: "session-2", runtime: "connected", target: "feature/current-target", branch: "feature/current-target" }
+    ]);
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(publish).toHaveBeenCalledWith("session.updated", "session-1", sessions.get("session-1"));
+  });
 });
+
+function gitWorkspace(targetBranch: string, id: string): NonNullable<ManagedSession["gitWorkspace"]> {
+  return {
+    workflowVersion: 1,
+    id,
+    state: "idle",
+    entryPath: "/repo",
+    repoRoot: "/repo",
+    targetBranch,
+    targetSha: "abcdef1234567890",
+    sessionBranch: null,
+    worktreePath: null,
+    lastError: null,
+    updatedAt: "2026-09-09T11:00:00.000Z",
+    dependencyLinks: []
+  };
+}
 
 function managedSession(): ManagedSession {
   return {

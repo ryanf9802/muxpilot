@@ -639,6 +639,7 @@ export class SessionManager {
       codexFiles.map((file) => [file.path, { sizeBytes: file.sizeBytes, updatedAtMs: file.updatedAtMs }])
     );
     const now = nowIso();
+    await this.refreshManagedGitWorkspaces();
     for (const session of await this.db.listSessions(true)) {
       if (!session.codexSessionId) continue;
       const rollout = codexFiles.find((file) => file.sessionId === session.codexSessionId);
@@ -653,6 +654,20 @@ export class SessionManager {
       this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? updated);
     }
     await this.recordRecoveryRoster();
+  }
+
+  private async refreshManagedGitWorkspaces(): Promise<void> {
+    if (!this.gitWorkspaces) return;
+    for (const session of await this.db.listSessions(false, false)) {
+      if (!session.gitWorkspace) continue;
+      const stored = await this.gitWorkspaces.getBySession(session.id);
+      if (!stored) continue;
+      const workspace = (await this.gitWorkspaces.refresh(stored)).summary;
+      if (session.repo.branch === workspace.targetBranch
+        && JSON.stringify(session.gitWorkspace) === JSON.stringify(workspace)) continue;
+      const updated = await this.db.setSessionGitWorkspace(session.id, workspace, nowIso());
+      if (updated) this.publish("session.updated", session.id, updated);
+    }
   }
 
   private async recordRecoveryRoster(): Promise<void> {

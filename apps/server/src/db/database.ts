@@ -525,6 +525,10 @@ export class AppDatabase {
     return this.call("setSessionDocumentScope", sessionId, documentScopeId, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  setSessionGitWorkspace(sessionId: string, workspace: GitWorkspaceSummary, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionGitWorkspace", sessionId, workspace, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   listAgentWaits(): Promise<PersistedAgentWait[]> {
     return this.call("listAgentWaits") as Promise<PersistedAgentWait[]>;
   }
@@ -1297,6 +1301,15 @@ export class SyncAppDatabase {
 
   setSessionDocumentScope(sessionId: string, documentScopeId: string, updatedAt: string): ManagedSession | null {
     return this.updateSessionData(sessionId, { documentScopeId }, updatedAt);
+  }
+
+  setSessionGitWorkspace(sessionId: string, workspace: GitWorkspaceSummary, updatedAt: string): ManagedSession | null {
+    const existing = this.getSession(sessionId);
+    if (!existing) return null;
+    return this.updateSessionData(sessionId, {
+      gitWorkspace: workspace,
+      repo: { ...existing.repo, branch: workspace.targetBranch }
+    }, updatedAt);
   }
 
   listAgentWaits(): PersistedAgentWait[] {
