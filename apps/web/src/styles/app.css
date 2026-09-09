@@ -6156,6 +6156,11 @@ select:focus-visible {
     display: none;
   }
 
+  .session-header-runtime-detail,
+  .session-header-memory-usage {
+    display: none;
+  }
+
   .session-header-status-compact .session-header-runtime > .status {
     width: 12px;
     height: 12px;

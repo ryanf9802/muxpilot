@@ -75,6 +75,7 @@ describe("mobile session viewport layout", () => {
     const narrowStyles = cssBlock(styles, "@media (max-width: 819px)");
     const narrowModelRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata");
     const narrowMetaRule = cssBlock(narrowStyles, ".session-header-meta");
+    const narrowMetadataRule = cssBlock(narrowStyles, ".session-header-runtime-detail,\n  .session-header-memory-usage");
     const compactStatusRule = cssBlock(narrowStyles, ".session-header-status-compact .session-header-runtime > .status");
     const compactStatusTextRule = cssBlock(narrowStyles, ".session-header-status-compact .session-header-runtime > .status .status-text");
     expect(headerRule).toContain("grid-template-columns: 40px minmax(0, 1fr) auto;");
@@ -83,6 +84,7 @@ describe("mobile session viewport layout", () => {
     expect(runtimeModelRule).toContain("max-width: none;");
     expect(narrowModelRule).toContain("display: none;");
     expect(narrowMetaRule).toContain("gap: 6px;");
+    expect(narrowMetadataRule).toContain("display: none;");
     expect(compactStatusRule).toContain("width: 12px;");
     expect(compactStatusTextRule).toContain("display: none;");
     expect(actionsRule).toContain("flex-wrap: wrap;");

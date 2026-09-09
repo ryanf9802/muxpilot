@@ -338,6 +338,35 @@ describe("SessionHeaderMeta", () => {
 
     expect(html).toContain('<span class="session-header-repo">project</span><span class="session-context-usage"');
   });
+
+  it("marks runtime and memory details for compact-width hiding", () => {
+    const html = renderToStaticMarkup(createElement(SessionHeaderMeta, {
+      session: {
+        repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
+        gitWorkspace: null,
+        driverKind: "codex_app_server",
+        runtime: {
+          kind: "systemd_service",
+          state: "connected",
+          unit: "muxpilot-session.service",
+          socketPath: "/run/muxpilot-session.sock",
+          codexVersion: null
+        },
+        resourceUsage: {
+          memoryCurrentBytes: 128 * 1024 ** 2,
+          memoryHighBytes: 256 * 1024 ** 2,
+          memoryMaxBytes: 512 * 1024 ** 2,
+          cpuUsageUsec: 0,
+          sampledAt: "2026-09-08T00:00:00.000Z"
+        }
+      }
+    }));
+
+    expect(html).toContain('class="session-header-runtime-detail"');
+    expect(html).toContain("App server · connected");
+    expect(html).toContain('class="session-header-memory-usage"');
+    expect(html).toContain("128 MiB memory");
+  });
 });
 
 describe("SessionContextUsage", () => {
@@ -1647,12 +1676,14 @@ describe("tmux command helpers", () => {
     const html = renderToStaticMarkup(createElement(RuntimeAttachButton, {
       session: managedSession(),
       copied: false,
+      accessMode: "local",
       enabled: true,
       onCopy: () => undefined
     }));
     const copiedHtml = renderToStaticMarkup(createElement(RuntimeAttachButton, {
       session: managedSession(),
       copied: true,
+      accessMode: "local",
       enabled: true,
       onCopy: () => undefined
     }));
@@ -1660,6 +1691,18 @@ describe("tmux command helpers", () => {
     expect(html).toContain('aria-label="Copy runtime attach command"');
     expect(copiedHtml).toContain('aria-label="Runtime attach command copied"');
     expect(html).not.toContain("gpt-");
+  });
+
+  it("omits runtime attach on remote access", () => {
+    const html = renderToStaticMarkup(createElement(RuntimeAttachButton, {
+      session: managedSession(),
+      copied: false,
+      accessMode: "token",
+      enabled: true,
+      onCopy: () => undefined
+    }));
+
+    expect(html).toBe("");
   });
 });
 

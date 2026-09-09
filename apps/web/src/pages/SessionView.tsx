@@ -68,6 +68,7 @@ import { Link, useLocation, useNavigate, useOutletContext, useParams } from "rea
 import remarkGfm from "remark-gfm";
 import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
+  AccessMode,
   ApprovalDecision,
   ApprovalRequest,
   BtwDeltaPayload,
@@ -2859,7 +2860,8 @@ export function SessionView() {
           <RuntimeAttachButton
             session={readySession}
             copied={copiedTmuxCommand}
-            enabled={!completed && accessMode === "local" && readySession.capabilities?.terminalAttach !== false}
+            accessMode={accessMode}
+            enabled={!completed && readySession.capabilities?.terminalAttach !== false}
             onCopy={() => void copyTmuxCommand()}
           />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
@@ -4358,12 +4360,12 @@ export function SessionHeaderMeta({ session }: {
           <span className="session-header-dirty dirty">dirty</span>
         </>
       ) : null}
-      <span className="session-header-meta-separator" aria-hidden="true">·</span>
-      <span title={runtimeDetail(session)}>{runtimeLabel(session)}</span>
+      <span className="session-header-meta-separator session-header-runtime-detail-separator" aria-hidden="true">·</span>
+      <span className="session-header-runtime-detail" title={runtimeDetail(session)}>{runtimeLabel(session)}</span>
       {session.resourceUsage ? (
         <>
-          <span className="session-header-meta-separator" aria-hidden="true">·</span>
-          <span title={`Memory limit ${formatRuntimeBytes(session.resourceUsage.memoryMaxBytes)}`}>
+          <span className="session-header-meta-separator session-header-memory-usage-separator" aria-hidden="true">·</span>
+          <span className="session-header-memory-usage" title={`Memory limit ${formatRuntimeBytes(session.resourceUsage.memoryMaxBytes)}`}>
             {formatRuntimeBytes(session.resourceUsage.memoryCurrentBytes)} memory
           </span>
         </>
@@ -4597,21 +4599,25 @@ export function ModelSettingsButton({
 export function RuntimeAttachButton({
   session,
   copied,
+  accessMode,
   enabled,
   onCopy
 }: {
   session: Pick<ManagedSession, "tmux" | "runtime" | "driverKind">;
   copied: boolean;
+  accessMode: AccessMode | null;
   enabled: boolean;
   onCopy: () => void;
 }) {
+  if (accessMode !== "local") return null;
+
   return (
     <button
       className="icon-button runtime-attach-button"
       type="button"
       disabled={!enabled}
       onClick={onCopy}
-      title={enabled ? copied ? "Runtime attach command copied" : "Copy runtime attach command" : "Runtime attach is available only from the local browser"}
+      title={enabled ? copied ? "Runtime attach command copied" : "Copy runtime attach command" : "Runtime attach is unavailable for this session"}
       aria-label={copied ? "Runtime attach command copied" : "Copy runtime attach command"}
     >
       {copied ? <Check size={16} aria-hidden="true" /> : <SquareTerminal size={16} aria-hidden="true" />}
