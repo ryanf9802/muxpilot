@@ -35,8 +35,7 @@ describe("CodexAppServerDriver", () => {
       sendMessage: true,
       approvals: true,
       questions: true,
-      planActions: true,
-      rawTerminalCapture: false
+      planActions: true
     });
   });
 
@@ -1065,10 +1064,8 @@ function managedSession(): ManagedSession {
     name: "Session",
     cwd: "/repo",
     provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
-    driverKind: "codex_app_server",
     runtime,
     capabilities: {} as ManagedSession["capabilities"],
-    tmux: {} as ManagedSession["tmux"],
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "thread-1",
     codexJsonlPath: null,

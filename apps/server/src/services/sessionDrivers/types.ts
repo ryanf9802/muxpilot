@@ -7,7 +7,6 @@ import type {
   PlanActionChoice,
   QuestionAnswerRequest,
   SessionCapabilities,
-  SessionDriverKind,
   SessionModelSettings,
   SessionRuntimeRef
 } from "@muxpilot/core";
@@ -77,7 +76,7 @@ export interface DriverSubscription {
 }
 
 export interface AgentSessionDriver {
-  readonly kind: SessionDriverKind;
+  readonly kind: "codex_app_server";
   readonly capabilities: SessionCapabilities;
   start(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult>;
   resume(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult>;

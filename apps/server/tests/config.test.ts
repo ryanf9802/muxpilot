@@ -8,7 +8,6 @@ describe("config LAN access validation", () => {
     expect(config.lanEnabled).toBe(false);
     expect(config.host).toBe("127.0.0.1");
     expect(config.skillHome).toBe(config.codexHome);
-    expect(config.defaultSessionDriver).toBe("codex_app_server");
     expect(config.operatorToken).toMatch(/^[a-z]+-[a-z]+-\d{2}-[a-z]+-[a-z]+-\d{2}$/);
     expect(requiresOperatorToken(config)).toBe(false);
   });
@@ -19,9 +18,9 @@ describe("config LAN access validation", () => {
     expect(config.skillHome).toBe("/tmp/muxpilot-checkout");
   });
 
-  it("allows an explicit legacy tmux creation default", () => {
-    expect(parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_tmux" }).defaultSessionDriver).toBe("codex_tmux");
-    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "automatic" })).toThrow();
+  it("rejects the retired runtime selector", () => {
+    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_app_server" })).toThrow(/no longer supported/);
+    expect(() => parseConfig({ MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_tmux" })).toThrow(/no longer supported/);
   });
 
   it("enables LAN binding when MUXPILOT_LAN_ENABLED is set", () => {

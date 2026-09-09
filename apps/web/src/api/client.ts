@@ -4,7 +4,6 @@ import type {
   BtwExchangesResponse,
   ActivitySummarySettingsResponse,
   AppServerCompatibility,
-  SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CodexModelCatalogResponse,
   GlobalModelSettingsResponse,
@@ -111,7 +110,6 @@ export const api = {
   logout: () => json<{ ok: true }>("/api/logout", { method: "POST" }),
   connectivity: () => json<ConnectivityResponse>("/api/connectivity"),
   appServerCompatibility: () => json<AppServerCompatibility>("/api/app-server/compatibility"),
-  sessionDriverCompatibility: () => json<SessionDriverCompatibilityResponse>("/api/session-drivers/compatibility"),
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
@@ -133,10 +131,10 @@ export const api = {
   transferableSessions: () => json<{ sessions: ManagedSession[] }>("/api/sessions?includeArchived=true&includeAll=true"),
   promptHistory: (q = "", limit = 30) => json<PromptHistoryResponse>(`/api/prompt-history?q=${encodeURIComponent(q)}&limit=${limit}`),
   sessionHistory: (q = "", limit = 40) => json<SessionHistoryResponse>(`/api/session-history?q=${encodeURIComponent(q)}&limit=${limit}`),
-  restoreSession: (id: string, driverKind?: ManagedSession["driverKind"]) =>
+  restoreSession: (id: string) =>
     json<RestoreSessionResponse>(`/api/session-history/${encodeURIComponent(id)}/restore`, {
       method: "POST",
-      body: JSON.stringify(driverKind ? { driverKind } : {})
+      body: JSON.stringify({})
     }),
   sessionRecovery: () => json<SessionRecoveryResponse>("/api/session-recovery"),
   restoreSessionRecovery: (request: RestoreSessionRecoveryRequest) =>

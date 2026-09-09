@@ -120,7 +120,6 @@ describe("ResourceGovernor", () => {
     const unit = "muxpilot-session-abcdef0123456789abcdef01.service";
     const governor = new ResourceGovernor(config, async () => [{
       ...session("app", "idle"),
-      driverKind: "codex_app_server",
       resourceUnit: unit,
       resourceScope: null,
       runtime: {
@@ -151,7 +150,6 @@ describe("ResourceGovernor", () => {
     const governor = new ResourceGovernor(config, async () => [{
       ...session("app", "unknown"),
       initializing,
-      driverKind: "codex_app_server",
       resourceUnit: unit,
       resourceScope: null,
       runtime: {
@@ -187,7 +185,6 @@ describe("ResourceGovernor", () => {
     const logger = { info: vi.fn(), warn: vi.fn() };
     const governor = new ResourceGovernor(config, async () => [{
       ...session("app", "idle"),
-      driverKind: "codex_app_server",
       resourceUnit: unit,
       resourceScope: null,
       runtime: {
@@ -284,9 +281,18 @@ describe("ResourceGovernor", () => {
 function session(id: string, status: SessionStatus): ManagedSession {
   return {
     id,
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: id, rolloutPath: null },
+    runtime: {
+      kind: "systemd_service",
+      unit: `muxpilot-session-${id}.service`,
+      socketPath: `/tmp/${id}.sock`,
+      state: "connected",
+      codexVersion: "0.152.0"
+    },
     status,
     initializing: false,
-    archived: false,
-    tmux: { pid: Number(id.length + 100) }
+    archived: false
   } as ManagedSession;
 }

@@ -3,46 +3,11 @@ import { open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { ManagedSession } from "@muxpilot/core";
-import { TmuxUnavailableError } from "../tmux/tmuxAdapter.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FILE_READ_BYTES = 64 * 1024;
 const MAX_PROCESS_COUNT = 64;
 const MAX_PROC_FILE_BYTES = 64 * 1024;
-const PANE_FIELDS = [
-  "session_id",
-  "session_name",
-  "window_id",
-  "window_index",
-  "window_name",
-  "pane_id",
-  "pane_index",
-  "pane_active",
-  "pane_current_path",
-  "pane_current_command",
-  "pane_title",
-  "pane_pid",
-  "pane_width_x_height",
-  "tmux_server_pid",
-  "session_created"
-] as const;
-const PANE_FORMAT = [
-  "#{session_id}",
-  "#{session_name}",
-  "#{window_id}",
-  "#{window_index}",
-  "#{window_name}",
-  "#{pane_id}",
-  "#{pane_index}",
-  "#{pane_active}",
-  "#{pane_current_path}",
-  "#{pane_current_command}",
-  "#{pane_title}",
-  "#{pane_pid}",
-  "#{pane_width}x#{pane_height}",
-  "#{pid}",
-  "#{session_created}"
-].join("\t");
 const APP_SERVER_UNIT = /^muxpilot-session-([a-f0-9]{24})\.service$/;
 
 type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string }>;
@@ -65,9 +30,6 @@ export interface RawProcessRecord {
 }
 
 export interface RawSessionEvidence {
-  listTmuxPanes(): Promise<{ fields: readonly string[]; output: string }>;
-  captureTmuxPane(paneId: string, lines: number, includeAnsi: boolean, joinWrappedLines: boolean): Promise<{ paneId: string; output: string }>;
-  readTmuxProcessTree(paneId: string): Promise<{ paneId: string; rootPid: number; processes: RawProcessRecord[]; truncated: boolean }>;
   readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>>;
   readSessionProcessTree(session: ManagedSession): Promise<{ sessionId: string; rootPid: number | null; processes: RawProcessRecord[]; truncated: boolean }>;
   readSessionProtocolJournal(session: ManagedSession, offset: number | null, length: number): Promise<{
@@ -94,57 +56,13 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     codexHome: string,
     private readonly runCommand: CommandRunner = async (command, args) => execFileAsync(command, args, { maxBuffer: 4 * 1024 * 1024 }),
     private readonly procRoot = "/proc",
-    private readonly dataDir: string | null = null,
-    private readonly tmuxAvailable = true,
-    private readonly tmuxUnavailableMessage = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime."
+    private readonly dataDir: string | null = null
   ) {
     this.codexSessionsRoot = resolve(codexHome, "sessions");
   }
 
-  async listTmuxPanes(): Promise<{ fields: readonly string[]; output: string }> {
-    this.requireTmux();
-    const { stdout } = await this.runCommand("tmux", ["list-panes", "-a", "-F", PANE_FORMAT]);
-    return { fields: PANE_FIELDS, output: stdout };
-  }
-
-  async captureTmuxPane(
-    paneId: string,
-    lines: number,
-    includeAnsi: boolean,
-    joinWrappedLines: boolean
-  ): Promise<{ paneId: string; output: string }> {
-    this.requireTmux();
-    await this.panePid(paneId);
-    const args = ["capture-pane", "-p", "-N", "-S", `-${lines}`, "-t", paneId];
-    if (includeAnsi) args.splice(2, 0, "-e");
-    if (joinWrappedLines) args.splice(2, 0, "-J");
-    const { stdout } = await this.runCommand("tmux", args);
-    return { paneId, output: stdout };
-  }
-
-  async readTmuxProcessTree(paneId: string): Promise<{
-    paneId: string;
-    rootPid: number;
-    processes: RawProcessRecord[];
-    truncated: boolean;
-  }> {
-    this.requireTmux();
-    const rootPid = await this.panePid(paneId);
-    const tree = await this.readProcessTree(rootPid);
-    return { paneId, rootPid, ...tree };
-  }
-
   async readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>> {
-    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
-      this.requireTmux();
-      return {
-        sessionId: session.id,
-        driverKind: session.driverKind,
-        runtime: session.runtime,
-        resourceUnit: session.resourceUnit ?? session.resourceScope ?? null,
-        attachmentCommand: `tmux select-window -t ${shellQuote(`${session.tmux.sessionName}:${session.tmux.windowIndex}`)} && tmux attach-session -t ${shellQuote(session.tmux.sessionName)}`
-      };
-    }
+    if (session.runtime?.kind !== "systemd_service") throw new Error("Session has no app-server runtime");
     const runtime = session.runtime;
     if (!APP_SERVER_UNIT.test(runtime.unit)) throw new Error("Refusing non-muxpilot app-server unit");
     const { stdout } = await this.runCommand("systemctl", [
@@ -156,7 +74,6 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     const socket = await stat(runtime.socketPath).catch(() => null);
     return {
       sessionId: session.id,
-      driverKind: session.driverKind,
       runtime,
       resourceUnit: session.resourceUnit ?? runtime.unit,
       systemd: properties,
@@ -171,11 +88,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     processes: RawProcessRecord[];
     truncated: boolean;
   }> {
-    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
-      this.requireTmux();
-      const tree = await this.readTmuxProcessTree(session.tmux.paneId);
-      return { sessionId: session.id, rootPid: tree.rootPid, processes: tree.processes, truncated: tree.truncated };
-    }
+    if (session.runtime?.kind !== "systemd_service") throw new Error("Session has no app-server runtime");
     if (!APP_SERVER_UNIT.test(session.runtime.unit)) throw new Error("Refusing non-muxpilot app-server unit");
     const { stdout } = await this.runCommand("systemctl", ["--user", "show", session.runtime.unit, "--property=MainPID", "--value"]);
     const rootPid = Number(stdout.trim());
@@ -185,10 +98,6 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     return { sessionId: session.id, rootPid, ...await this.readProcessTree(rootPid) };
   }
 
-  private requireTmux(): void {
-    if (!this.tmuxAvailable) throw new TmuxUnavailableError(this.tmuxUnavailableMessage);
-  }
-
   async readSessionProtocolJournal(session: ManagedSession, offset: number | null, length: number): Promise<{
     sessionId: string;
     fileSize: number;
@@ -196,7 +105,6 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     endOffset: number;
     text: string;
   }> {
-    if (session.driverKind !== "codex_app_server") throw new Error("Protocol journals are available only for app-server sessions");
     if (!this.dataDir) throw new Error("App-server protocol journal storage is unavailable");
     const capabilityId = session.runtime?.kind === "systemd_service"
       ? session.runtime.unit.match(APP_SERVER_UNIT)?.[1]
@@ -266,15 +174,6 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     } finally {
       await file.close();
     }
-  }
-
-  private async panePid(paneId: string): Promise<number> {
-    if (!/^%\d+$/.test(paneId)) throw new Error("paneId must be an exact tmux pane id");
-    const { stdout } = await this.runCommand("tmux", ["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}"]);
-    const line = stdout.split(/\r?\n/).find((candidate) => candidate.startsWith(`${paneId}\t`));
-    const pid = Number(line?.split("\t")[1]);
-    if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`Tmux pane not found: ${paneId}`);
-    return pid;
   }
 
   private async readProcess(pid: number, parentPid: number | null): Promise<RawProcessRecord> {

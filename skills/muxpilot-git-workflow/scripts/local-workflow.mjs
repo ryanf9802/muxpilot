@@ -58,11 +58,11 @@ export async function initializeStandalone(entryPath, targetBranch) {
 
   if (existing) {
     if (existing.workspaceId !== `standalone-${paths.identity}` || existing.statusFile !== paths.statusFile || existing.worktreeRoot !== paths.worktreeRoot) {
-      throw new Error("Standalone Git workflow configuration does not belong to the current tmux pane");
+      throw new Error("Standalone Git workflow configuration does not belong to the current Codex session");
     }
     const currentTarget = await currentTargetBranch(existing.statusFile, existing.targetBranch);
     if (existing.repoRoot !== repoRoot || existing.entryPath !== requestedEntry) {
-      throw new Error(`This tmux pane is already initialized for ${existing.entryPath}; use a new Codex session for another repository`);
+      throw new Error(`This Codex session is already initialized for ${existing.entryPath}; use a new Codex session for another repository`);
     }
     if (currentTarget !== targetBranch) {
       throw new Error(`This standalone workflow already targets '${currentTarget}'; use muxpilot-git-target after fixed-target confirmation`);
@@ -98,10 +98,10 @@ export async function standaloneConfiguration() {
   const paths = await standalonePaths();
   const stored = await readStandaloneConfig(paths.configFile);
   if (!stored) {
-    throw new Error("Standalone Git workflow is not initialized for this tmux pane. Obtain user approval for an explicit local target, then run muxpilot-git-init.mjs <entry-path> <target-branch> --confirm-target");
+    throw new Error("Standalone Git workflow is not initialized for this Codex session. Obtain user approval for an explicit local target, then run muxpilot-git-init.mjs <entry-path> <target-branch> --confirm-target");
   }
   if (stored.workspaceId !== `standalone-${paths.identity}` || stored.statusFile !== paths.statusFile || stored.worktreeRoot !== paths.worktreeRoot) {
-    throw new Error("Standalone Git workflow configuration does not belong to the current tmux pane");
+    throw new Error("Standalone Git workflow configuration does not belong to the current Codex session");
   }
   const targetBranch = await currentTargetBranch(stored.statusFile, stored.targetBranch);
   return { ...stored, targetBranch, executionMode: "standalone" };
@@ -235,7 +235,12 @@ export async function acquireWorkspaceLock(statusFile = process.env.MUXPILOT_GIT
 }
 
 async function standalonePaths() {
-  const identitySource = process.env.MUXPILOT_GIT_STANDALONE_ID ?? await tmuxIdentity();
+  const identitySource = process.env.MUXPILOT_GIT_STANDALONE_ID
+    ?? process.env.CODEX_SESSION_ID
+    ?? process.env.CODEX_THREAD_ID;
+  if (!identitySource) {
+    throw new Error("Standalone Git workflow requires MUXPILOT_GIT_STANDALONE_ID, CODEX_SESSION_ID, or CODEX_THREAD_ID");
+  }
   const identity = createHash("sha256").update(identitySource).digest("hex").slice(0, 16);
   const root = process.env.MUXPILOT_GIT_STANDALONE_ROOT ?? join(tmpdir(), `muxpilot-git-standalone-${process.getuid?.() ?? "user"}`);
   const controlRoot = join(root, identity);
@@ -247,14 +252,6 @@ async function standalonePaths() {
     statusFile: join(controlRoot, "git-workflow-status.json"),
     worktreeRoot: join(controlRoot, "worktrees")
   };
-}
-
-async function tmuxIdentity() {
-  const paneId = process.env.TMUX_PANE;
-  if (!paneId) throw new Error("Standalone Git workflow requires a tmux pane (TMUX_PANE is not set)");
-  const value = await gitLikeExec("tmux", ["display-message", "-p", "-t", paneId, "#{pid}\t#{session_created}\t#{pane_id}"]);
-  if (!value.trim()) throw new Error("Unable to identify the current tmux pane for standalone Git workflow state");
-  return value.trim();
 }
 
 async function readStandaloneConfig(path) {

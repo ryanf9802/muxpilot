@@ -5,7 +5,7 @@ description: Run isolated local Git tasks in short-lived worktrees, self-review 
 
 # Muxpilot Local Git Workflow
 
-Managed muxpilot sessions supply a repository entry path and an initial existing local target branch. Direct Codex sessions running in tmux can initialize the standalone mode below. The application observes workflow events but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific authorization process below.
+Managed muxpilot sessions supply a repository entry path and an initial existing local target branch. Direct Codex sessions can initialize the standalone mode below. The application observes workflow events but never creates worktrees, reviews changes, integrates commits, pulls, or pushes. User intent takes priority over these workflow rules through the guard-specific authorization process below.
 
 ## Read-only work
 
@@ -32,14 +32,14 @@ Integration is entirely local. Normal helpers never create a target branch, pull
 
 ## Standalone initialization
 
-Use standalone mode only when the status helper reports that this tmux pane has no managed muxpilot Git configuration. A partial `MUXPILOT_GIT_*` environment is an error and must not fall back to standalone mode.
+Use standalone mode only when the status helper reports that this Codex session has no managed muxpilot Git configuration. A partial `MUXPILOT_GIT_*` environment is an error and must not fall back to standalone mode.
 
 1. Resolve the repository entry path and intended existing local target branch from the request and repository state.
 2. Name the target branch, explain that current and future task commits in this session will integrate there, and obtain explicit user approval. Initial standalone target approval is required even when the target is the currently checked-out branch.
 3. Run `node <helper-dir>/muxpilot-git-init.mjs <entry-path> <target-branch> --confirm-target`, resolving `<helper-dir>` from this installed skill when `MUXPILOT_GIT_HELPER_DIR` is absent.
 4. Rerun the status helper and continue the normal change-task workflow.
 
-Standalone state is private to the current tmux pane and stored under `/tmp`. It reuses dependency directories, the shared heavyweight resource lease, and the same repository target lock as managed sessions. It does not add muxpilot workspace controls, a neutral Codex sandbox, injected developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Normal sandbox approvals may therefore still be required for Git metadata writes. A standalone finish result is reported as `INTEGRATED ... mode=standalone broker=none`.
+Standalone state is private to the current Codex session and stored under `/tmp`. It reuses dependency directories, the shared heavyweight resource lease, and the same repository target lock as managed sessions. It does not add muxpilot workspace controls, a neutral Codex sandbox, injected developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Normal sandbox approvals may therefore still be required for Git metadata writes. A standalone finish result is reported as `INTEGRATED ... mode=standalone broker=none`.
 
 ## Heavyweight commands
 

@@ -1,6 +1,6 @@
 # Usage Guide
 
-muxpilot is an operator console for durable Codex sessions. New sessions use Codex app-server by default; tmux is an optional legacy runtime. This guide covers the workflows and controls available after [setup](setup.md).
+muxpilot is an operator console for durable Codex app-server sessions. This guide covers the workflows and controls available after [setup](setup.md).
 
 ## Dashboard
 
@@ -9,11 +9,10 @@ The dashboard groups sessions by repository and makes their attention state visi
 - Current status and attention color
 - Repository, branch, working directory, and dirty-worktree state
 - Recent user prompts and optional activity summaries
-- Transcript size and tmux metadata
+- Transcript size and runtime availability
 - OpenAI usage estimates when configured
 - Codex account and rate-limit information when available
-
-Search matches repository names, branches, working directories, tmux metadata, session previews, summaries, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or terminate its pane.
+Search matches session names, repository names, branches, working directories, previews, summaries, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or end it.
 
 Repository groups can be collapsed and remember that choice in the browser. Pinned sessions sort ahead of other sessions in their repository. The three-color stoplight in the top bar shows the current attention totals; selecting a color filters the dashboard to that severity while preserving any parent rows needed to explain matching agent children.
 
@@ -45,12 +44,12 @@ Open the new-session dialog or press `Ctrl+N`.
 The Create tab asks for:
 
 - **Directory:** the repository or working directory in which Codex should start
-- **Name:** the muxpilot display name (also used as the window name for a legacy tmux session)
+- **Name:** the muxpilot display name
 - **Target branch:** an existing local branch used as the integration destination for managed Git work
 
 Directory suggestions come from active sessions and recently touched repositories. Names are normalized to 2–32 lowercase letters, numbers, or hyphens.
 
-New sessions use Codex app-server by default. When the optional legacy runtime is selected, muxpilot creates a window in the shared tmux session named `muxpilot`; existing Codex panes can also be discovered when muxpilot can match them to local Codex session logs.
+New sessions always use Codex app-server. Muxpilot creates and owns a user service and Unix socket for each live session.
 
 ### Managed Git sessions
 
@@ -70,7 +69,6 @@ The target branch must already exist locally. Selecting or creating a different 
 
 Heavy validation—such as repository-wide checks, production builds, scanners, Docker workloads, or multi-worker tests—uses a shared resource lease. That scheduler controls concurrency but does not authorize broader validation than the user requested.
 
-Externally discovered Codex panes remain unmanaged because a running process cannot safely be moved into a managed workspace. For change tasks, a direct Codex session running in tmux can initialize the bundled Git workflow's standalone mode after the user explicitly approves an existing local target branch. Standalone mode provides short-lived worktrees, dependency reuse, target locking, rebase/re-review gates, local integration, and cleanup, but it does not retrofit muxpilot workspace controls, sandbox roots, developer instructions, authenticated broker integration, or deferred heavyweight-command continuation. Non-Git directories keep the direct-directory session flow.
 
 See [Local Git Workflow](git-workflow.md) for the helper lifecycle, target guard, dependency localization, event schema, heavyweight classification, and recovery boundaries.
 
@@ -100,7 +98,7 @@ A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 
 
 The History tab in the new-session dialog searches sessions previously managed by muxpilot. Search covers submitted user prompts, not assistant messages or tool output.
 
-Selecting a live result opens its existing runtime. Selecting a missing or archived result resumes the exact Codex thread through app-server by default and keeps the same muxpilot session identity. Choose **Legacy tmux** in the Runtime field for an explicit compatibility fallback; muxpilot never silently changes runtimes.
+Selecting a live result opens its existing runtime. Selecting a missing or archived result resumes the exact Codex thread through app-server and keeps the same muxpilot session identity.
 
 If muxpilot stops without a clean shutdown, it records which non-archived Codex runtimes were open. On the next startup, any that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
 
@@ -122,11 +120,11 @@ Nested muxpilot sessions are reserved for work the operator explicitly requests 
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
-Created children inherit the source runtime, repository/target, model settings, and Fast setting but start with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
+Created children use their own app-server service and inherit the source repository/target, model settings, and Fast setting, while starting with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
 
 ## Moving sessions between hosts
 
-The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, portable driver identity, and preferences, then resumes through app-server by default. Legacy v2-v4 archives remain supported, and Legacy tmux can be selected explicitly during import.
+The transfer dialog exports one or more sessions to a `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, provider identity, and preferences, then resumes through app-server. Older supported archives are normalized during import and their obsolete runtime metadata is not retained.
 
 For managed Git sessions, current exports can include the committed local target branch and objects not available from its upstream. Import may create, reuse, or safely fast-forward the same branch name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting upstream.
 
@@ -136,20 +134,20 @@ Set the same `MUXPILOT_SESSION_FILE_KEY` value on both hosts to encrypt exports 
 
 ## Sending and queuing input
 
-muxpilot persists every input before delivery. App-server sessions send a structured turn with a stable client message ID; legacy sessions use a verified tmux paste buffer and configured submit key sequence.
+muxpilot persists every input before delivery. It sends a structured app-server turn with a stable client message ID and reconciles uncertain delivery before retrying.
 
 - `Ctrl+Enter` submits the composer.
 - Input is sent immediately when Codex is ready.
 - Input is queued while Codex is busy or another item is already queued.
 - Queued messages can be edited or deleted until sending begins.
-- Queued input is bound to the current Codex transcript source so it cannot leak into a different run after a pane or source change.
-- The next queued item is sent automatically when the pane becomes ready.
+- Queued input is bound to the current Codex thread so it cannot leak into a different run after a source change.
+- The next queued item is sent automatically when the session becomes ready.
 
-Every submitted message is persisted before delivery and bound to the current Codex transcript source. muxpilot verifies the pasted text, submit transition, and Codex acknowledgement. It can retry the submit key and perform one safe replay only when the composer is empty. It never overwrites different composer text.
+Every submitted message is persisted before delivery and bound to the current Codex thread. Muxpilot records the app-server receipt and reconciles the stable client ID against authoritative thread state before any retry.
 
-If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** first reads authoritative state: app-server retries reconcile the stable client ID before any send, while tmux retries recheck the live composer. **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
+If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** first reconciles authoritative app-server state; **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
 
-The Normal/Plan and Fast controls use structured thread settings for app-server sessions and retain the verified terminal path for legacy tmux sessions. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
+The Normal/Plan and Fast controls use structured thread settings. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
 
 When supported by the active model, **Fast** sends Codex's Fast-mode command and also updates the default for future Codex sessions. Fast mode uses more credits. The control is disabled while the session is in a state where Codex cannot accept the change, and dashboard cards show when it is active.
 
@@ -160,11 +158,10 @@ muxpilot exposes common Codex interactions in the browser:
 - Approval prompts can be approved once, approved for an offered prefix, or denied.
 - Connector permission prompts expose the choices supplied by Codex.
 - Structured questions render as form controls.
-- Multiple-choice answers follow the Codex terminal menu path.
-- Free-form answers are pasted into the pane.
+- Multiple-choice and free-form answers are returned through the exact app-server request.
 - Proposed plans can remain in plan mode or move into implementation, with or without clearing context.
 
-App-server sessions answer these requests with their exact JSON-RPC request identity; legacy sessions automate the corresponding verified terminal path. muxpilot does not bypass Codex approval behavior.
+Muxpilot answers these requests with their exact app-server JSON-RPC request identity. It does not bypass Codex approval behavior.
 
 ## Prompt history and skills
 
@@ -232,16 +229,16 @@ An installed PWA checks for a newer web build at startup and when it returns to 
 
 ## Session discovery
 
-muxpilot periodically reconciles managed app-server services, optional legacy tmux panes, and recent Codex session files. Depending on the runtime, it tracks:
+Muxpilot periodically reconciles managed app-server services, persisted thread identities, and recent Codex session files. It tracks:
 
-- App-server service/socket identity or tmux session, window, and pane identifiers
-- Working directory and current command
+- App-server service, socket, and thread identity
+- Working directory
 - Repository root, branch, worktree, and dirty state
 - Matched Codex session and JSONL file
 - Transcript size and recent prompt activity
 - Inferred working or attention status
 
-When a pane begins using a different Codex JSONL source, muxpilot resets the stored transcript for that app session so events from the previous run do not appear under the new one.
+When a session begins using a different Codex JSONL source, muxpilot resets the stored transcript for that app session so events from the previous run do not appear under the new one.
 
 ## Statuses
 

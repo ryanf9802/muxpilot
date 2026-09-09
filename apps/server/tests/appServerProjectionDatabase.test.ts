@@ -461,7 +461,7 @@ async function projectionDb(): Promise<{ db: AppDatabase; path: string; sessionI
     id: sessionId,
     name: "projection",
     cwd: "/repo",
-    tmux: { windowName: "projection", sessionName: "projection", cwd: "/repo" },
+    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "thread-1",
     codexJsonlPath: null,

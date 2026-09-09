@@ -6,67 +6,7 @@ import type { ManagedSession } from "@muxpilot/core";
 import { RawSessionEvidenceReader } from "../src/services/rawSessionEvidence.js";
 
 describe("RawSessionEvidenceReader", () => {
-  it("rejects tmux evidence without executing tmux when the runtime is unavailable", async () => {
-    const runCommand = vi.fn(async () => ({ stdout: "must not run" }));
-    const reader = new RawSessionEvidenceReader("/tmp/codex", runCommand, "/proc", null, false);
-
-    await expect(reader.listTmuxPanes()).rejects.toMatchObject({
-      code: "session_driver_unavailable",
-      driverKind: "codex_tmux",
-      statusCode: 503
-    });
-    expect(runCommand).not.toHaveBeenCalled();
-  });
-
-  it("returns verbatim pane listings and captures with explicit tmux options", async () => {
-    const runCommand = vi.fn(async (_command: string, args: string[]) => {
-      if (args[0] === "list-panes" && args.at(-1) === "#{pane_id}\t#{pane_pid}") return { stdout: "%7\t700\n" };
-      if (args[0] === "list-panes") return { stdout: "$1\tmuxpilot\t@2\t0\twork\t%7\n" };
-      if (args[0] === "capture-pane") return { stdout: "physical wrap\ncontinues here\n\u001b[31mred\u001b[0m\n" };
-      throw new Error(`unexpected command: ${args.join(" ")}`);
-    });
-    const reader = new RawSessionEvidenceReader("/tmp/codex", runCommand);
-
-    await expect(reader.listTmuxPanes()).resolves.toMatchObject({
-      fields: expect.arrayContaining(["session_name", "pane_id", "pane_pid"]),
-      output: "$1\tmuxpilot\t@2\t0\twork\t%7\n"
-    });
-    await expect(reader.captureTmuxPane("%7", 321, true, true)).resolves.toEqual({
-      paneId: "%7",
-      output: "physical wrap\ncontinues here\n\u001b[31mred\u001b[0m\n"
-    });
-    expect(runCommand).toHaveBeenLastCalledWith("tmux", [
-      "capture-pane", "-p", "-J", "-e", "-N", "-S", "-321", "-t", "%7"
-    ]);
-  });
-
-  it("rejects pane ids that are not present in the live tmux listing", async () => {
-    const reader = new RawSessionEvidenceReader("/tmp/codex", async () => ({ stdout: "%1\t100\n" }));
-    await expect(reader.captureTmuxPane("%2", 20, false, false)).rejects.toThrow("Tmux pane not found: %2");
-    await expect(reader.captureTmuxPane("all", 20, false, false)).rejects.toThrow("exact tmux pane id");
-  });
-
-  it("returns direct proc evidence for the current pane-rooted process tree", async () => {
-    const root = await mkdtemp(join(tmpdir(), "muxpilot-raw-proc-"));
-    await writeProcess(root, 700, "701 702 703 ", "bash\0launcher\0", "Name:\tbash\n", "0::/scope\n");
-    await writeProcess(root, 701, "", "codex\0resume\0abc\0", "Name:\tcodex\n", "0::/scope\n");
-    await writeProcess(root, 703, "", "x".repeat(70 * 1024), "Name:\tlarge\n", "0::/scope\n");
-    const reader = new RawSessionEvidenceReader("/tmp/codex", async () => ({ stdout: "%7\t700\n" }), root);
-
-    await expect(reader.readTmuxProcessTree("%7")).resolves.toEqual({
-      paneId: "%7",
-      rootPid: 700,
-      truncated: false,
-      processes: [
-        expect.objectContaining({ pid: 700, parentPid: null, cmdline: "bash\0launcher\0", children: "701 702 703 ", truncatedFields: [], error: null }),
-        expect.objectContaining({ pid: 701, parentPid: 700, cmdline: "codex\0resume\0abc\0", children: "", truncatedFields: [], error: null }),
-        expect.objectContaining({ pid: 702, parentPid: 700, cmdline: null, truncatedFields: [], error: "process exited while being sampled" }),
-        expect.objectContaining({ pid: 703, parentPid: 700, truncatedFields: ["cmdline"], error: null })
-      ]
-    });
-  });
-
-  it("lists Codex JSONL files by filesystem recency and reads exact bounded bytes", async () => {
+   it("lists Codex JSONL files by filesystem recency and reads exact bounded bytes", async () => {
     const codexHome = await mkdtemp(join(tmpdir(), "muxpilot-raw-codex-"));
     const sessions = join(codexHome, "sessions", "2026", "08");
     await mkdir(sessions, { recursive: true });
@@ -129,7 +69,6 @@ describe("RawSessionEvidenceReader", () => {
 
     await expect(reader.readSessionRuntime(session)).resolves.toMatchObject({
       sessionId: session.id,
-      driverKind: "codex_app_server",
       socketPresent: false,
       attachmentCommand: "codex --remote 'unix:///tmp/app-evidence.sock'",
       systemd: { ActiveState: "active", MainPID: "700" }
@@ -153,7 +92,7 @@ function appServerSession(id: string): ManagedSession {
     id,
     name: id,
     cwd: "/repo",
-    driverKind: "codex_app_server",
+    provider: { kind: "codex", threadId: id, rolloutPath: null },
     runtime: {
       kind: "systemd_service",
       unit: "muxpilot-session-0123456789abcdef01234567.service",
@@ -161,8 +100,7 @@ function appServerSession(id: string): ManagedSession {
       state: "connected",
       codexVersion: "0.152.0"
     },
-    resourceUnit: "muxpilot-session-0123456789abcdef01234567.service",
-    tmux: { sessionName: "muxpilot", windowIndex: 1, paneId: "%1" }
+    resourceUnit: "muxpilot-session-0123456789abcdef01234567.service"
   } as ManagedSession;
 }
 

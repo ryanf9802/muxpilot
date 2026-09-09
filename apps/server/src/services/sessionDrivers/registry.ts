@@ -1,29 +1,28 @@
-import type { ManagedSession, SessionDriverKind } from "@muxpilot/core";
+import type { ManagedSession } from "@muxpilot/core";
 import type { AgentSessionDriver } from "./types.js";
 
 export class SessionDriverRegistry {
-  private readonly drivers = new Map<SessionDriverKind, AgentSessionDriver>();
+  private driver: AgentSessionDriver | null = null;
 
   constructor(drivers: AgentSessionDriver[] = []) {
     for (const driver of drivers) this.register(driver);
   }
 
   register(driver: AgentSessionDriver): void {
-    if (this.drivers.has(driver.kind)) throw new Error(`Session driver is already registered: ${driver.kind}`);
-    this.drivers.set(driver.kind, driver);
+    if (this.driver) throw new Error("Codex app-server driver is already registered");
+    this.driver = driver;
   }
 
-  has(kind: SessionDriverKind): boolean {
-    return this.drivers.has(kind);
+  has(_kind: "codex_app_server" = "codex_app_server"): boolean {
+    return this.driver !== null;
   }
 
-  require(kind: SessionDriverKind): AgentSessionDriver {
-    const driver = this.drivers.get(kind);
-    if (!driver) throw new Error(`Session driver is unavailable: ${kind}`);
-    return driver;
+  require(_kind: "codex_app_server" = "codex_app_server"): AgentSessionDriver {
+    if (!this.driver) throw new Error("Codex app-server driver is unavailable");
+    return this.driver;
   }
 
-  forSession(session: ManagedSession): AgentSessionDriver {
-    return this.require(session.driverKind ?? "codex_tmux");
+  forSession(_session: ManagedSession): AgentSessionDriver {
+    return this.require();
   }
 }

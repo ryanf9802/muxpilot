@@ -284,7 +284,7 @@ function notificationPayload(
 }
 
 function notificationSessionName(session: ManagedSession): string {
-  return session.tmux.windowName || session.repo.name || "Session";
+  return session.name || session.repo.name || "Session";
 }
 
 function notificationSeverity(rules: NotificationRuleType[], status: SessionStatus): NotificationSeverity {

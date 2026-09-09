@@ -13,7 +13,7 @@ Use the tools exposed by `muxpilot_sessions` only when the operator explicitly r
 
 - Use `list_sessions` to inspect session IDs, hierarchy, status, context use, delegated work budgets, and Codex thread-goal objective, state, elapsed time, and token use when available.
 - Use `read_session` for the same goal telemetry plus a bounded recent transcript. Read only what the current decision needs.
-- When muxpilot's normalized state may be wrong, inspect independent evidence with `list_tmux_panes`, `capture_tmux_pane`, `read_tmux_process_tree`, `list_codex_session_files`, and `read_codex_session_file`. Compare the raw sources yourself; the tools do not classify mismatches.
+- When muxpilot's normalized state may be wrong, inspect independent evidence with `read_session_runtime`, `read_session_process_tree`, `read_session_protocol_journal`, `list_codex_session_files`, and `read_codex_session_file`. Compare the raw sources yourself; the tools do not classify mismatches.
 - Raw evidence tools are diagnostic and read-only. Report factual inconsistencies and wait for separate operator direction before attempting remediation.
 - You may send a work message to any live managed session by exact ID. The transcript records you as the delegating session.
 - Claim only an unowned session. Release, interrupt, finish, or otherwise control lifecycle only for sessions in your descendant tree.

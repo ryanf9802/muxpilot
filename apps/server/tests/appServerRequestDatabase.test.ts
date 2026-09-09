@@ -133,7 +133,7 @@ async function requestDb(suffix: string): Promise<{ db: AppDatabase; path: strin
     id: sessionId,
     name: suffix,
     cwd: "/repo",
-    tmux: { windowName: suffix, sessionName: suffix, cwd: "/repo" },
+    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "thread-1",
     codexJsonlPath: null,

@@ -7,7 +7,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import type {
   AccessMode,
   AppServerCompatibility,
-  TmuxCompatibility,
   CreateSessionRequest,
   GitRepositoryProbe,
   ManagedSession,
@@ -22,7 +21,6 @@ import type {
   SessionEvent,
   SessionHistoryResult,
   SessionRecoveryIncident,
-  SessionDriverKind,
   SessionTransferImportResponse,
   SessionTransferInspectResponse
 } from "@muxpilot/core";
@@ -97,15 +95,12 @@ export function AppShell() {
   const [forkSessionName, setForkSessionName] = useState("");
   const [forkSessionBusy, setForkSessionBusy] = useState(false);
   const [forkSessionError, setForkSessionError] = useState<string | null>(null);
-  const [forkSessionDriver, setForkSessionDriver] = useState<SessionDriverKind>("codex_app_server");
   const [createSessionCwd, setCreateSessionCwd] = useState("");
   const [createSessionName, setCreateSessionName] = useState("");
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
-  const [createSessionDriver, setCreateSessionDriver] = useState<SessionDriverKind>("codex_app_server");
   const [appServerCompatibility, setAppServerCompatibility] = useState<AppServerCompatibility | null>(null);
-  const [tmuxCompatibility, setTmuxCompatibility] = useState<TmuxCompatibility | null>(null);
   const [appServerCompatibilityLoading, setAppServerCompatibilityLoading] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
@@ -542,16 +537,14 @@ export function AppShell() {
     if (connectionState !== "connected") return undefined;
     let cancelled = false;
     setAppServerCompatibilityLoading(true);
-    void api.sessionDriverCompatibility()
+    void api.appServerCompatibility()
       .then((compatibility) => {
         if (cancelled) return;
-        setAppServerCompatibility(compatibility.drivers.codex_app_server);
-        setTmuxCompatibility(compatibility.drivers.codex_tmux);
+        setAppServerCompatibility(compatibility);
       })
       .catch(() => {
         if (cancelled) return;
         setAppServerCompatibility(null);
-        setTmuxCompatibility(null);
       })
       .finally(() => { if (!cancelled) setAppServerCompatibilityLoading(false); });
     return () => { cancelled = true; };
@@ -617,7 +610,6 @@ export function AppShell() {
   const openForkSession = useCallback((session: ManagedSession) => {
     setForkSessionSource(session);
     setForkSessionName(defaultForkSessionName(session));
-    setForkSessionDriver(session.driverKind ?? "codex_tmux");
     setForkSessionError(null);
   }, []);
 
@@ -779,11 +771,11 @@ export function AppShell() {
     setForkSessionBusy(true);
     setForkSessionError(null);
     try {
-      if (!runtimeDriverAvailable(forkSessionDriver, appServerCompatibility, tmuxCompatibility)) {
-        setForkSessionError(runtimeDriverUnavailableLabel(forkSessionDriver, appServerCompatibility, tmuxCompatibility));
+      if (!appServerCompatibility?.available) {
+        setForkSessionError(runtimeUnavailableLabel(appServerCompatibility));
         return;
       }
-      const response = await api.forkSession(forkSessionSource.id, { name, driverKind: forkSessionDriver });
+      const response = await api.forkSession(forkSessionSource.id, { name });
       syncSessionStoplight(response.session);
       setForkSessionSource(null);
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
@@ -884,14 +876,14 @@ export function AppShell() {
 
   async function restoreHistorySession(result: SessionHistoryResult) {
     if (sessionHistoryRestoreId) return;
-    if (!runtimeDriverAvailable(createSessionDriver, appServerCompatibility, tmuxCompatibility)) {
-      setSessionHistoryError(runtimeDriverUnavailableLabel(createSessionDriver, appServerCompatibility, tmuxCompatibility));
+    if (!appServerCompatibility?.available) {
+      setSessionHistoryError(runtimeUnavailableLabel(appServerCompatibility));
       return;
     }
     setSessionHistoryRestoreId(result.sessionId);
     setSessionHistoryError("");
     try {
-      const response = await api.restoreSession(result.sessionId, createSessionDriver);
+      const response = await api.restoreSession(result.sessionId);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
@@ -938,8 +930,7 @@ export function AppShell() {
     try {
       const response = await api.restoreSessionRecovery({
         incidentId: incident.id,
-        sessionIds: [...sessionRecoverySelectedIds],
-        driverKind: createSessionDriver
+        sessionIds: [...sessionRecoverySelectedIds]
       });
       for (const result of response.results) {
         if (result.session) syncSessionStoplight(result.session);
@@ -990,11 +981,11 @@ export function AppShell() {
     setCreateSessionError(null);
     try {
       const request: CreateSessionRequest = createSessionGitProbe?.isGit
-        ? { cwd, name, driverKind: createSessionDriver, workspace: {
+        ? { cwd, name, workspace: {
             mode: "git" as const,
             targetBranch: createSessionTargetBranch.trim()
           } }
-        : { cwd, name, driverKind: createSessionDriver, workspace: { mode: "directory" } };
+        : { cwd, name, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
@@ -1080,7 +1071,7 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
-      {sessionTransferOpen ? <SessionTransferDialog compatibility={appServerCompatibility} tmuxCompatibility={tmuxCompatibility} onClose={() => setSessionTransferOpen(false)} /> : null}
+      {sessionTransferOpen ? <SessionTransferDialog compatibility={appServerCompatibility} onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
           className="notification-rule-menu"
@@ -1168,10 +1159,7 @@ export function AppShell() {
           selectedIds={sessionRecoverySelectedIds}
           busy={sessionRecoveryBusy}
           errors={sessionRecoveryErrors}
-          driverKind={createSessionDriver}
           compatibility={appServerCompatibility}
-          tmuxCompatibility={tmuxCompatibility}
-          onDriverChange={setCreateSessionDriver}
           onToggle={toggleSessionRecoverySelection}
           onDismiss={() => void dismissSessionRecovery()}
           onRestore={() => void restoreSessionRecovery()}
@@ -1183,10 +1171,7 @@ export function AppShell() {
           name={forkSessionName}
           busy={forkSessionBusy}
           error={forkSessionError}
-          driverKind={forkSessionDriver}
           compatibility={appServerCompatibility}
-          tmuxCompatibility={tmuxCompatibility}
-          onDriverChange={setForkSessionDriver}
           onNameChange={(value) => {
             setForkSessionName(normalizeSessionNameInput(value));
             setForkSessionError(null);
@@ -1221,13 +1206,6 @@ export function AppShell() {
                     ? "Checking Codex app-server compatibility…"
                     : appServerCompatibilityLabel(appServerCompatibility)}
                 </p>
-                <RuntimeDriverField
-                  value={createSessionDriver}
-                  compatibility={appServerCompatibility}
-                  tmuxCompatibility={tmuxCompatibility}
-                  busy={createSessionBusy}
-                  onChange={setCreateSessionDriver}
-                />
                 <label className="rename-field">
                   <span>Directory</span>
                   <div className="session-directory-combobox">
@@ -1335,7 +1313,7 @@ export function AppShell() {
                   <Button
                     variant="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || !runtimeDriverAvailable(createSessionDriver, appServerCompatibility, tmuxCompatibility) || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
+                    disabled={createSessionBusy || createSessionNameInvalid || !appServerCompatibility?.available || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
                     busy={createSessionBusy}
                     busyLabel="Creating"
                   >
@@ -1345,13 +1323,6 @@ export function AppShell() {
               </>
             ) : (
               <div className="session-history-panel">
-                <RuntimeDriverField
-                  value={createSessionDriver}
-                  compatibility={appServerCompatibility}
-                  tmuxCompatibility={tmuxCompatibility}
-                  busy={Boolean(sessionHistoryRestoreId)}
-                  onChange={setCreateSessionDriver}
-                />
                 <label className="prompt-history-search">
                   <Search size={17} aria-hidden="true" />
                   <input
@@ -1427,10 +1398,7 @@ export function SessionRecoveryContent({
   selectedIds,
   busy,
   errors,
-  driverKind,
   compatibility,
-  tmuxCompatibility,
-  onDriverChange,
   onToggle,
   onDismiss,
   onRestore
@@ -1439,10 +1407,7 @@ export function SessionRecoveryContent({
   selectedIds: ReadonlySet<string>;
   busy: boolean;
   errors: Record<string, string>;
-  driverKind: SessionDriverKind;
   compatibility: AppServerCompatibility | null;
-  tmuxCompatibility: TmuxCompatibility | null;
-  onDriverChange: (value: SessionDriverKind) => void;
   onToggle: (sessionId: string) => void;
   onDismiss: () => void;
   onRestore: () => void;
@@ -1452,7 +1417,6 @@ export function SessionRecoveryContent({
       <p className="session-recovery-copy">
         muxpilot stopped unexpectedly. Reopen the conversations you had running before the interruption. Commands that were executing will not restart automatically.
       </p>
-      <RuntimeDriverField value={driverKind} compatibility={compatibility} tmuxCompatibility={tmuxCompatibility} busy={busy} onChange={onDriverChange} />
       <div className="session-recovery-results" role="group" aria-label="Sessions to restore">
         {incident.sessions.map((session) => (
           <label className="session-recovery-result" key={sessionHistoryResultKey(session)}>
@@ -1467,7 +1431,7 @@ export function SessionRecoveryContent({
       </div>
       <DialogActions>
         <Button variant="ghost" onClick={onDismiss} disabled={busy}>Not now</Button>
-        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Restoring">
+        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !compatibility?.available} busy={busy} busyLabel="Restoring">
           Restore selected ({selectedIds.size})
         </Button>
       </DialogActions>
@@ -1517,10 +1481,7 @@ function ForkSessionDialog({
   name,
   busy,
   error,
-  driverKind,
   compatibility,
-  tmuxCompatibility,
-  onDriverChange,
   onNameChange,
   onClose,
   onSubmit
@@ -1529,10 +1490,7 @@ function ForkSessionDialog({
   name: string;
   busy: boolean;
   error: string | null;
-  driverKind: SessionDriverKind;
   compatibility: AppServerCompatibility | null;
-  tmuxCompatibility: TmuxCompatibility | null;
-  onDriverChange: (value: SessionDriverKind) => void;
   onNameChange: (value: string) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1570,12 +1528,11 @@ function ForkSessionDialog({
           disabled={busy}
         />
       </label>
-      <RuntimeDriverField value={driverKind} compatibility={compatibility} tmuxCompatibility={tmuxCompatibility} busy={busy} onChange={onDriverChange} />
       {warning ? <p className="dialog-error" role="alert">{warning}</p> : null}
       {error ? <p className="dialog-error" role="alert">{error}</p> : null}
       <DialogActions>
         <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Forking">
+        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !compatibility?.available} busy={busy} busyLabel="Forking">
           Fork and open
         </Button>
       </DialogActions>
@@ -1714,7 +1671,7 @@ export function sessionDirectorySuggestionsFromSessions(sessions: ManagedSession
     sessions
       .filter((session) => !session.archived && session.status !== "missing")
       .map((session) => {
-        const path = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
+        const path = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.cwd;
         return {
           path,
           label: session.gitWorkspace ? directoryBaseName(session.gitWorkspace.repoRoot) : session.repo.name || directoryBaseName(path),
@@ -1972,9 +1929,8 @@ export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: st
   return suggestions.some((suggestion) => suggestion.value === preferred) ? preferred : suggestions[0]?.value ?? "";
 }
 
-function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
+function SessionTransferDialog({ compatibility, onClose }: {
   compatibility: AppServerCompatibility | null;
-  tmuxCompatibility: TmuxCompatibility | null;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"export" | "import">("export");
@@ -1990,7 +1946,6 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
   const [importDragging, setImportDragging] = useState(false);
   const [importFileName, setImportFileName] = useState("");
   const [mappingProbes, setMappingProbes] = useState<Record<string, SessionTransferMappingProbe>>({});
-  const [driverKind, setDriverKind] = useState<SessionDriverKind>("codex_app_server");
 
   useEffect(() => {
     void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
@@ -2106,7 +2061,6 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
           ...(preview.formatVersion === 2 && requirement.workspaceMode === "git"
             ? { targetBranch: mappings[requirement.sourceCwd]?.targetBranch.trim() }
             : {}),
-          driverKind
         }))
       });
       setResult(imported);
@@ -2217,7 +2171,6 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
             </> : null}
             {preview && !result ? <>
               <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
-              <RuntimeDriverField value={driverKind} compatibility={compatibility} tmuxCompatibility={tmuxCompatibility} busy={busy} onChange={setDriverKind} />
               <div className="session-transfer-mappings">
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
                   <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
@@ -2259,7 +2212,7 @@ function SessionTransferDialog({ compatibility, tmuxCompatibility, onClose }: {
               </div>
               <DialogActions>
                 <Button variant="ghost" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</Button>
-                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !runtimeDriverAvailable(driverKind, compatibility, tmuxCompatibility)} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
+                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !compatibility?.available} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
                   Import and resume all
                 </Button>
               </DialogActions>
@@ -2283,52 +2236,8 @@ export function appServerCompatibilityLabel(compatibility: AppServerCompatibilit
   return compatibility.detail;
 }
 
-export function runtimeDriverAvailable(
-  driverKind: SessionDriverKind,
-  compatibility: AppServerCompatibility | null,
-  tmuxCompatibility: TmuxCompatibility | null
-): boolean {
-  return driverKind === "codex_tmux" ? tmuxCompatibility?.available === true : compatibility?.available === true;
-}
-
-export function runtimeDriverUnavailableLabel(
-  driverKind: SessionDriverKind,
-  compatibility: AppServerCompatibility | null,
-  tmuxCompatibility: TmuxCompatibility | null
-): string {
-  return driverKind === "codex_tmux"
-    ? tmuxCompatibility?.detail ?? "tmux compatibility could not be loaded."
-    : compatibility?.detail ?? "Codex app-server compatibility could not be loaded.";
-}
-
-function RuntimeDriverField({
-  value,
-  compatibility,
-  tmuxCompatibility,
-  busy,
-  onChange
-}: {
-  value: SessionDriverKind;
-  compatibility: AppServerCompatibility | null;
-  tmuxCompatibility: TmuxCompatibility | null;
-  busy: boolean;
-  onChange: (value: SessionDriverKind) => void;
-}) {
-  return (
-    <label className="rename-field">
-      <span>Runtime</span>
-      <select value={value} disabled={busy} onChange={(event) => onChange(event.target.value as SessionDriverKind)}>
-        <option value="codex_app_server" disabled={!compatibility?.available}>Codex app server (recommended)</option>
-        <option value="codex_tmux" disabled={!tmuxCompatibility?.available}>Legacy tmux</option>
-      </select>
-      {value === "codex_app_server" && !compatibility?.available
-        ? <small className="session-git-probe-note">{compatibility?.detail ?? "Checking Codex app-server compatibility…"}{tmuxCompatibility?.available ? " Choose Legacy tmux for an explicit fallback." : ""}</small>
-        : null}
-      {value === "codex_tmux" && !tmuxCompatibility?.available
-        ? <small className="session-git-probe-note">{tmuxCompatibility?.detail ?? "Checking tmux compatibility…"}</small>
-        : null}
-    </label>
-  );
+export function runtimeUnavailableLabel(compatibility: AppServerCompatibility | null): string {
+  return compatibility?.detail ?? "Codex app-server compatibility could not be loaded.";
 }
 
 export function primaryInputFocusCommandForShortcut(

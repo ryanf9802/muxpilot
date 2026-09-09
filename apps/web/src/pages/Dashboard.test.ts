@@ -86,17 +86,17 @@ describe("DashboardPrimaryActions", () => {
 });
 
 describe("sessionDisplayName", () => {
-  it("adds tmux identity details for duplicate default node windows", () => {
+  it("adds stable session id details for duplicate names", () => {
     const sessions = [testSession({ id: "a", paneId: "%111", windowName: "node" }), testSession({ id: "b", paneId: "%112", windowName: "node" })];
 
-    expect(sessionDisplayName(sessions[0]!, sessions)).toBe("node · work:111.0 %111");
-    expect(sessionDisplayName(sessions[1]!, sessions)).toBe("node · work:112.0 %112");
+    expect(sessionDisplayName(sessions[0]!, sessions)).toBe("node · a");
+    expect(sessionDisplayName(sessions[1]!, sessions)).toBe("node · b");
   });
 
-  it("adds tmux identity details for a single generic node window", () => {
+  it("keeps a single session name clean", () => {
     const session = testSession({ id: "a", paneId: "%111", windowName: "node" });
 
-    expect(sessionDisplayName(session, [session])).toBe("node · work:111.0 %111");
+    expect(sessionDisplayName(session, [session])).toBe("node");
   });
 
   it("keeps a unique renamed session title clean", () => {
@@ -129,11 +129,11 @@ describe("sessionNameValidationMessage", () => {
 describe("SessionCard", () => {
   it("shows the runtime-unavailable reason without hiding preserved history", () => {
     const session = testSession({ id: "legacy", paneId: "%171", windowName: "legacy" });
-    session.runtimeUnavailableReason = "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.";
+    session.runtimeUnavailableReason = "Codex app-server is unavailable. Restart muxpilot after resolving compatibility.";
 
     const html = renderSessionCard(session);
 
-    expect(html).toContain("tmux is not installed");
+    expect(html).toContain("Codex app-server is unavailable");
     expect(html).toContain("Transcript size");
   });
 
@@ -877,7 +877,7 @@ function openAIUsageSummary(activitySummariesEnabled: boolean) {
 }
 
 function sessionBaseTestName(session: ManagedSession): string {
-  return session.tmux.windowName;
+  return session.name;
 }
 
 function testSession(
@@ -889,24 +889,11 @@ function testSession(
     repoName?: string;
   } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode" | "agentOwnership">>
 ): ManagedSession {
-  const windowIndex = Number(input.paneId.slice(1));
   return {
     id: input.id,
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: `@${windowIndex}`,
-      windowIndex,
-      windowName: input.windowName,
-      paneId: input.paneId,
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "node",
-      title: input.windowName,
-      pid: 123,
-      size: "120x40"
-    },
+    name: input.windowName,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: null, rolloutPath: null },
     repo: { root: input.repoRoot ?? "/repo", name: input.repoName ?? "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: null,
     codexJsonlPath: null,

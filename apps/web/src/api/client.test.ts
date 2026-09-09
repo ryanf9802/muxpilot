@@ -138,17 +138,6 @@ describe("api client request headers", () => {
     );
   });
 
-  it("loads aggregate runtime compatibility status", async () => {
-    const fetchMock = mockJsonResponse({ defaultDriver: "codex_app_server", drivers: {} });
-
-    await api.sessionDriverCompatibility();
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/session-drivers/compatibility",
-      expect.objectContaining({ credentials: "include" })
-    );
-  });
-
   it("loads lightweight session summaries with encoded server-side filters", async () => {
     const fetchMock = mockJsonResponse({ sessions: [] });
 

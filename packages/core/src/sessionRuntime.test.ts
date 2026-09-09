@@ -16,11 +16,11 @@ function legacySession(): ManagedSession {
     activitySummary: null, activitySummaryGeneratedAt: null, activitySummarySourceSequence: null,
     inputMode: "default", models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0, unreadCount: 0, pinned: false, archived: false
-  };
+  } as unknown as ManagedSession;
 }
 
 describe("session runtime compatibility", () => {
-  it("normalizes legacy tmux records without removing legacy fields", () => {
+  it("derives stable fields from a legacy record and removes retired runtime metadata", () => {
     const legacy = { ...legacySession(), resourceScope: "muxpilot-session.scope" };
     const normalized = normalizeManagedSessionRuntime(legacy);
 
@@ -28,12 +28,11 @@ describe("session runtime compatibility", () => {
       name: "codex",
       cwd: "/repo",
       provider: { kind: "codex", threadId: "thread-1", rolloutPath: "/rollout.jsonl" },
-      driverKind: "codex_tmux",
-      runtime: { kind: "tmux", pane: legacy.tmux },
-      capabilities: { verifiedInput: true, terminalAttach: true, hibernate: false },
-      resourceUnit: "muxpilot-session.scope",
-      tmux: legacy.tmux
+      resourceUnit: "muxpilot-session.scope"
     });
+    expect(normalized.runtime).toBeUndefined();
+    expect("driverKind" in normalized).toBe(false);
+    expect("tmux" in normalized).toBe(false);
   });
 
   it("preserves explicit app-server metadata and stable display fields", () => {
@@ -53,6 +52,9 @@ describe("session runtime compatibility", () => {
 
     expect(managedSessionName(session)).toBe("Feature work");
     expect(managedSessionCwd(session)).toBe("/repo/worktree");
-    expect(normalizeManagedSessionRuntime(session).driverKind).toBe("codex_app_server");
+    const normalized = normalizeManagedSessionRuntime(session);
+    expect(normalized.runtime).toEqual(session.runtime);
+    expect("driverKind" in normalized).toBe(false);
+    expect("tmux" in normalized).toBe(false);
   });
 });

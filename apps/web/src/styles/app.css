@@ -3933,12 +3933,12 @@ select:focus-visible {
   margin-left: 2px;
 }
 
-.session-header-runtime .tmux-command-metadata {
+.session-header-runtime .model-settings-metadata {
   flex: 0 0 auto;
   max-width: none;
 }
 
-.session-header-runtime .tmux-command-metadata .tmux-command-model {
+.session-header-runtime .model-settings-metadata .model-settings-model {
   max-width: none;
 }
 
@@ -4056,7 +4056,7 @@ select:focus-visible {
   background: color-mix(in srgb, var(--color-warning) 14%, var(--color-surface));
 }
 
-.tmux-command-button {
+.model-settings-button {
   flex: 0 1 auto;
   min-width: 0;
   min-height: 36px;
@@ -4074,18 +4074,18 @@ select:focus-visible {
   overflow: hidden;
 }
 
-.tmux-command-button:not(.tmux-command-display):hover:not(:disabled),
-.tmux-command-button:not(.tmux-command-display):focus-visible {
+.model-settings-button:not(.model-settings-display):hover:not(:disabled),
+.model-settings-button:not(.model-settings-display):focus-visible {
   border-color: color-mix(in srgb, var(--color-secondary) 52%, var(--color-border));
   background: color-mix(in srgb, var(--color-secondary) 8%, var(--color-surface));
   box-shadow: none;
 }
 
-.tmux-command-display {
+.model-settings-display {
   cursor: default;
 }
 
-.tmux-command-metadata {
+.model-settings-metadata {
   flex: 0 1 auto;
   min-height: 24px;
   max-width: min(210px, 52%);
@@ -4097,22 +4097,22 @@ select:focus-visible {
   border-radius: 6px;
 }
 
-.tmux-command-metadata .tmux-command-model {
+.model-settings-metadata .model-settings-model {
   max-width: clamp(70px, 15vw, 132px);
   font-size: 12px;
 }
 
-.tmux-command-metadata .tmux-command-effort {
+.model-settings-metadata .model-settings-effort {
   padding: 1px 5px;
   font-size: 9px;
 }
 
-.tmux-command-icon {
+.model-settings-icon {
   display: none;
   flex: 0 0 auto;
 }
 
-.tmux-command-label {
+.model-settings-label {
   min-width: 0;
   display: inline-flex;
   align-items: baseline;
@@ -4121,7 +4121,7 @@ select:focus-visible {
   overflow: hidden;
 }
 
-.tmux-command-model {
+.model-settings-model {
   min-width: 0;
   max-width: clamp(86px, 18vw, 150px);
   overflow: hidden;
@@ -4132,7 +4132,7 @@ select:focus-visible {
   line-height: 1.25;
 }
 
-.tmux-command-effort {
+.model-settings-effort {
   flex: 0 0 auto;
   min-width: 0;
   padding: 2px 6px;
@@ -4145,7 +4145,7 @@ select:focus-visible {
   text-transform: uppercase;
 }
 
-.tmux-command-copied {
+.model-settings-copied {
   flex: 0 0 auto;
   color: var(--color-success);
   font-size: 11px;
@@ -6216,17 +6216,17 @@ select:focus-visible {
     display: none;
   }
 
-  .session-header-runtime .tmux-command-metadata {
+  .session-header-runtime .model-settings-metadata {
     width: 28px;
     min-width: 28px;
     padding: 0;
   }
 
-  .session-header-runtime .tmux-command-metadata .tmux-command-icon {
+  .session-header-runtime .model-settings-metadata .model-settings-icon {
     display: block;
   }
 
-  .session-header-runtime .tmux-command-metadata .tmux-command-label {
+  .session-header-runtime .model-settings-metadata .model-settings-label {
     display: none;
   }
 

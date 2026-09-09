@@ -6,7 +6,7 @@ muxpilot can expose managed Codex sessions to one another through a constrained 
 
 Use Codex's built-in subagents for routine bounded delegation, especially standard code-review passes. They run inside the current Codex session and do not create more muxpilot sessions.
 
-Create a nested muxpilot session only when the operator explicitly requests one or when durable delegated work benefits from independent monitoring, transcript history, documents, and resource isolation. A nested session is a real Codex session with fresh model context and inherits its parent's app-server or legacy tmux driver.
+Create a nested muxpilot session only when the operator explicitly requests one or when durable delegated work benefits from independent monitoring, transcript history, documents, and resource isolation.
 
 ## Session Trees in the UI
 
@@ -37,7 +37,7 @@ A created child starts with fresh Codex context and inherits the parent's:
 - Default and Plan model/reasoning selections.
 - Fast-mode setting.
 
-It receives its own runtime service or pane, capability-bound tool server, resource unit, managed Git workspace identity when applicable, and private documents directory. The initial delegated task is delivered only after the child reaches a reconciled ready state.
+It receives its own runtime service, capability-bound tool server, resource unit, managed Git workspace identity when applicable, and private documents directory. The initial delegated task is delivered only after the child reaches a reconciled ready state.
 
 Claiming does not restart a session or replace its existing conversation. It records ownership and a new delegated-work baseline after verifying the session and its subtree are eligible.
 
@@ -90,17 +90,14 @@ Normalized muxpilot state can be compared with independent read-only evidence:
 | Tool | Evidence |
 | --- | --- |
 | `read_session_runtime` | Neutral runtime, exact systemd state, socket, resource unit, Codex version, and CLI attachment command. |
-| `read_session_process_tree` | `/proc` and cgroup evidence rooted at either the app-server service PID or legacy pane. |
+| `read_session_process_tree` | `/proc` and cgroup evidence rooted at the app-server service PID. |
 | `read_session_protocol_journal` | Bounded raw app-server request, response, notification, and connection evidence. |
-| `list_tmux_panes` | Verbatim bounded `tmux list-panes` output. |
-| `capture_tmux_pane` | A bounded exact pane capture with optional ANSI and wrap joining. |
-| `read_tmux_process_tree` | `/proc` command, status, cgroup, and child records for a pane. |
 | `list_codex_session_files` | Filesystem metadata for recent Codex JSONL files. |
 | `read_codex_session_file` | A bounded byte slice from an exact listed JSONL path. |
 
 These tools diagnose discrepancies; they do not decide which source is correct or authorize remediation.
 
-Pane capture is limited to 2,000 lines. Codex file listings return at most 500 entries per page, and an exact file read is limited to a 256 KiB byte slice. Paths must come from the configured Codex session root and pass the broker's relative-path checks.
+Codex file listings return at most 500 entries per page, and an exact file read is limited to a 256 KiB byte slice. Paths must come from the configured Codex session root and pass the broker's relative-path checks.
 
 ## Documents and Handoffs
 

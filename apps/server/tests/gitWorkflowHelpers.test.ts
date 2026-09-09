@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("standalone local Git workflow helpers", () => {
-  it("initializes an approved direct-tmux workflow and completes it with standalone proof", async () => {
+  it("initializes an approved direct Codex workflow and completes it with standalone proof", async () => {
     const root = await repository();
     await writeFile(join(root, "package.json"), JSON.stringify({ name: "standalone-test", private: true }));
     await git(root, ["add", "package.json"]);
@@ -74,7 +74,7 @@ describe("standalone local Git workflow helpers", () => {
     await expect(stat(worktree!)).rejects.toThrow();
   });
 
-  it("keeps one approved target per pane until the fixed-target retarget workflow is used", async () => {
+  it("keeps one approved target per session until the fixed-target retarget workflow is used", async () => {
     const root = await repository();
     await git(root, ["branch", "feature"]);
     const environment = standaloneEnvironment(root);
@@ -375,7 +375,7 @@ function standaloneEnvironment(root: string): NodeJS.ProcessEnv & Record<string,
   return {
     ...environment,
     MUXPILOT_GIT_STANDALONE_ROOT: join(root, "session", "standalone-state"),
-    MUXPILOT_GIT_STANDALONE_ID: "test-pane",
+    MUXPILOT_GIT_STANDALONE_ID: "test-session",
     MUXPILOT_HEAVY_VALIDATION_DIR: join(root, "heavy-validation"),
     MUXPILOT_HEAVY_COMPLETION_ENABLED: "0"
   } as NodeJS.ProcessEnv & Record<string, string>;

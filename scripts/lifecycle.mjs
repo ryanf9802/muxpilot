@@ -61,7 +61,6 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_SKILL_HOME",
   "MUXPILOT_GIT_WORKTREE_ROOT",
   "MUXPILOT_GIT_SESSION_ROOT",
-  "MUXPILOT_DEFAULT_SESSION_DRIVER",
   "MUXPILOT_RESOURCE_GOVERNOR",
   "MUXPILOT_AGENT_MEMORY_SOFT_PERCENT",
   "MUXPILOT_AGENT_MEMORY_HARD_PERCENT",
@@ -77,8 +76,6 @@ const RUNTIME_ENV_KEYS = [
   "MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS",
   "MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS",
   "MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS",
-  "TMUX",
-  "TMUX_TMPDIR",
   "VITE_MUXPILOT_SHADOW",
   "PATH"
 ];
@@ -469,16 +466,11 @@ function printStatus(mode, details, status) {
   console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
   console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
   console.log(`  runtime: ${state.dir}`);
-  const driverCompatibility = status.backendHealth?.sessionDriverCompatibility;
-  if (driverCompatibility) {
-    console.log(`  default session driver: ${driverCompatibility.defaultDriver}`);
-    console.log(`    app-server: ${driverCompatibility.drivers.codex_app_server.available ? "available" : driverCompatibility.drivers.codex_app_server.status}`);
-    console.log(`    legacy tmux: ${driverCompatibility.drivers.codex_tmux.available ? driverCompatibility.drivers.codex_tmux.version ?? "available" : driverCompatibility.drivers.codex_tmux.status}`);
-  }
+  const appServerCompatibility = status.backendHealth?.appServerCompatibility;
+  if (appServerCompatibility) console.log(`  app-server: ${appServerCompatibility.available ? "available" : appServerCompatibility.status}`);
   if (mode === "shadow") {
     console.log(`  isolation: active (loopback-only; new shadow sessions only)`);
     console.log(`  data: ${process.env.MUXPILOT_DATA_DIR}`);
-    console.log(`  tmux namespace: ${process.env.TMUX_TMPDIR}`);
   }
   const governor = process.env.MUXPILOT_RESOURCE_GOVERNOR ?? "auto";
   const dockerGuardSocket = resolve(process.env.MUXPILOT_DATA_DIR ?? config.dataDir, "runtime", "docker-guard.sock");
@@ -745,7 +737,7 @@ function formatBytes(value) {
 
 export function resourceGovernorSessionScopeLines(snapshot) {
   if (snapshot.enabled) {
-    return [`session scopes: active, ${snapshot.managedSessions ?? 0} managed, ${snapshot.unmanagedSessions ?? 0} legacy/unscoped`];
+    return [`session scopes: active, ${snapshot.managedSessions ?? 0} managed, ${snapshot.unmanagedSessions ?? 0} unmanaged`];
   }
   if (snapshot.unavailableReason === "user_systemd_unavailable") {
     return ["session scopes: unavailable; run sudo loginctl enable-linger \"$USER\", then restart muxpilot"];
@@ -991,10 +983,8 @@ export function shadowIsolationEnvironment(root, source = process.env) {
     MUXPILOT_SKILL_HOME: resolve(root),
     MUXPILOT_GIT_WORKTREE_ROOT: join(dataDir, "git-worktrees"),
     MUXPILOT_GIT_SESSION_ROOT: join(dataDir, "sessions"),
-    MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_app_server",
     MUXPILOT_RESOURCE_GOVERNOR: governor,
     MUXPILOT_HEAVY_VALIDATION_DIR: join(dataDir, "heavy"),
-    TMUX_TMPDIR: join(dataDir, "tmux"),
     VITE_MUXPILOT_SHADOW: "1",
     ...(source.MUXPILOT_SHADOW_RUNTIME_PATH ? { PATH: source.MUXPILOT_SHADOW_RUNTIME_PATH } : {})
   };
@@ -1017,14 +1007,12 @@ function assertShadowDependencyIsolation(root) {
 
 function applyShadowIsolation(config) {
   const shadow = shadowIsolationEnvironment(process.cwd());
-  for (const key of ["TMUX", "MUXPILOT_HTTPS_CERT", "MUXPILOT_HTTPS_KEY", "MUXPILOT_PWA_TRUST_DIR", "MUXPILOT_CORS_ORIGINS"]) {
+  for (const key of ["MUXPILOT_HTTPS_CERT", "MUXPILOT_HTTPS_KEY", "MUXPILOT_PWA_TRUST_DIR", "MUXPILOT_CORS_ORIGINS"]) {
     delete process.env[key];
   }
   Object.assign(process.env, shadow);
   mkdirSync(shadow.MUXPILOT_DATA_DIR, { recursive: true, mode: 0o700 });
-  mkdirSync(shadow.TMUX_TMPDIR, { recursive: true, mode: 0o700 });
   chmodSync(shadow.MUXPILOT_DATA_DIR, 0o700);
-  chmodSync(shadow.TMUX_TMPDIR, 0o700);
   applyRuntimeDefaults(config);
 }
 

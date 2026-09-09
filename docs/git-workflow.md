@@ -21,9 +21,8 @@ Managed sessions receive muxpilot's sandbox roots, launch instructions, bundled 
 
 ### Standalone sessions
 
-A Codex process started directly in tmux can initialize standalone mode with `muxpilot-git-init.mjs` after the operator explicitly approves an existing local target branch. Standalone mode provides the same worktree, target-locking, validation, review, integration, and cleanup discipline.
 
-Its pane-specific state lives under `/tmp` by default and reuses the same dependency candidates, target lock, and heavyweight lease as managed tasks. It does not retrofit the managed neutral workspace, sandbox roots, launch instructions, authenticated broker, resource scope, or automatic heavyweight queue continuation. Ordinary filesystem approvals may still be required.
+Its session-specific state lives under `/tmp` by default and reuses the same dependency candidates, target lock, and heavyweight lease as managed tasks. It does not retrofit the managed neutral workspace, sandbox roots, launch instructions, authenticated broker, resource scope, or automatic heavyweight queue continuation. Ordinary filesystem approvals may still be required.
 
 ## Target Branch Contract
 

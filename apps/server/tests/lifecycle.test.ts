@@ -135,7 +135,7 @@ describe("resource governor lifecycle status", () => {
       enabled: true,
       managedSessions: 2,
       unmanagedSessions: 3
-    })).toEqual(["session scopes: active, 2 managed, 3 legacy/unscoped"]);
+    })).toEqual(["session scopes: active, 2 managed, 3 unmanaged"]);
     expect(resourceGovernorSessionScopeLines({
       enabled: false,
       unavailableReason: "user_systemd_unavailable"
@@ -168,8 +168,7 @@ describe("shadow lifecycle isolation", () => {
     const environment = shadowIsolationEnvironment(root, {
       MUXPILOT_SHADOW_RESOURCE_GOVERNOR: "unexpected",
       MUXPILOT_PORT: "12777",
-      MUXPILOT_DATA_DIR: "/shared/production",
-      TMUX: "/tmp/tmux-production/default,1,0"
+      MUXPILOT_DATA_DIR: "/shared/production"
     });
 
     expect(environment).toMatchObject({
@@ -178,7 +177,6 @@ describe("shadow lifecycle isolation", () => {
       MUXPILOT_HOST: "127.0.0.1",
       MUXPILOT_PORT: "14177",
       MUXPILOT_WEB_PORT: "15177",
-      MUXPILOT_DEFAULT_SESSION_DRIVER: "codex_app_server",
       MUXPILOT_RESOURCE_GOVERNOR: "off"
     });
     expect(environment.MUXPILOT_DATA_DIR).toBe(join(root, "data", "shadow"));
@@ -187,9 +185,7 @@ describe("shadow lifecycle isolation", () => {
     expect(environment.MUXPILOT_GIT_WORKTREE_ROOT).toBe(join(root, "data", "shadow", "git-worktrees"));
     expect(environment.MUXPILOT_GIT_SESSION_ROOT).toBe(join(root, "data", "shadow", "sessions"));
     expect(environment.MUXPILOT_HEAVY_VALIDATION_DIR).toBe(join(root, "data", "shadow", "heavy"));
-    expect(environment.TMUX_TMPDIR).toBe(join(root, "data", "shadow", "tmux"));
     expect(environment.VITE_MUXPILOT_SHADOW).toBe("1");
-    expect(environment).not.toHaveProperty("TMUX");
   });
 
   it("allows an explicit shadow-only resource-governor opt-in", async () => {
@@ -200,8 +196,8 @@ describe("shadow lifecycle isolation", () => {
 
   it("can isolate the shadow runtime from host-only executables", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-shadow-path-"));
-    expect(shadowIsolationEnvironment(root, { MUXPILOT_SHADOW_RUNTIME_PATH: "/tmp/muxpilot-no-tmux-bin" }))
-      .toMatchObject({ PATH: "/tmp/muxpilot-no-tmux-bin" });
+    expect(shadowIsolationEnvironment(root, { MUXPILOT_SHADOW_RUNTIME_PATH: "/tmp/muxpilot-shadow-bin" }))
+      .toMatchObject({ PATH: "/tmp/muxpilot-shadow-bin" });
     expect(shadowIsolationEnvironment(root, {})).not.toHaveProperty("PATH");
   });
 

@@ -4,7 +4,6 @@ import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
   AppServerCompatibility,
-  SessionDriverCompatibilityResponse,
   CodexSkillsResponse,
   CreateSessionRequest,
   DashboardSessionSummary,
@@ -73,12 +72,9 @@ const modelSettingsSchema = z.object({
 });
 const restoreSessionRecoverySchema = z.object({
   incidentId: z.string().trim().min(1).max(200),
-  sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100),
-  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
-});
-const restoreSessionSchema = z.object({
-  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
-});
+  sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100)
+}).strict();
+const restoreSessionSchema = z.object({}).strict();
 const inputBodyFields = z.object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() });
 const inputBodySchema = inputBodyFields
   .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
@@ -93,7 +89,6 @@ const sessionNameSchema = z
 const createSessionSchema = z.object({
   cwd: z.string().trim().min(1).max(4096),
   name: sessionNameSchema,
-  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional(),
   workspace: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("directory") }),
     z.object({
@@ -101,11 +96,10 @@ const createSessionSchema = z.object({
       targetBranch: z.string().trim().min(1).max(1024)
     })
   ]).optional()
-});
+}).strict();
 const forkSessionSchema = z.object({
-  name: sessionNameSchema,
-  driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
-});
+  name: sessionNameSchema
+}).strict();
 const queuedInputSchema = inputBodySchema;
 const btwQuestionSchema = z.object({ text: z.string().trim().min(1).max(20_000) });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
@@ -136,10 +130,9 @@ const sessionTransferImportSchema = z.object({
   mappings: z.array(z.object({
     sourceCwd: z.string().min(1).max(4096),
     destinationCwd: z.string().min(1).max(4096),
-    targetBranch: z.string().min(1).max(1024).optional(),
-    driverKind: z.enum(["codex_tmux", "codex_app_server"]).optional()
-  })).max(500)
-});
+    targetBranch: z.string().min(1).max(1024).optional()
+  }).strict()).max(500)
+}).strict();
 const notificationDeviceIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,80}$/);
 const notificationRuleTypeSchema = z.enum(["done_task", "approval_gate", "status_change"]);
 const notificationSettingSchema = z.union([
@@ -199,8 +192,7 @@ export function registerRoutes(
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
   btw?: BtwService,
-  appServerCompatibility?: AppServerCompatibility,
-  sessionDriverCompatibility?: SessionDriverCompatibilityResponse
+  appServerCompatibility?: AppServerCompatibility
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -229,12 +221,6 @@ export function registerRoutes(
       throw error;
     }
   });
-
-  if (sessionDriverCompatibility) {
-    app.get("/api/session-drivers/compatibility", { preHandler: access.requireAccess }, async (): Promise<SessionDriverCompatibilityResponse> =>
-      sessionDriverCompatibility
-    );
-  }
 
   if (sessionTransfers) {
     app.get("/api/session-transfers/status", { preHandler: access.requireLocalAccess }, async () => ({
@@ -344,7 +330,7 @@ export function registerRoutes(
       await reply.code(404).send({ error: "Session not found" });
       return;
     }
-    const workspaceRoots = [session.gitWorkspace?.entryPath, session.repo.root, session.tmux.cwd]
+    const workspaceRoots = [session.gitWorkspace?.entryPath, session.repo.root, session.cwd]
       .filter((path): path is string => Boolean(path));
     return { skills: await discoverCodexSkills(config.codexHome, workspaceRoots) };
   });
@@ -398,7 +384,7 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body = restoreSessionSchema.parse(request.body ?? {}) satisfies RestoreSessionRequest;
     try {
-      return await manager.restoreSession(id, body.driverKind);
+      return await manager.restoreSession(id);
     } catch (error) {
       if (error instanceof SessionNotFoundError || error instanceof SessionRestoreError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
@@ -415,7 +401,7 @@ export function registerRoutes(
   app.post("/api/session-recovery/restore", { preHandler: access.requireAccess }, async (request, reply): Promise<RestoreSessionRecoveryResponse | void> => {
     const body = restoreSessionRecoverySchema.parse(request.body) as RestoreSessionRecoveryRequest;
     try {
-      return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds, body.driverKind);
+      return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds);
     } catch (error) {
       if (error instanceof SessionRestoreError || error instanceof SessionNotFoundError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
@@ -457,7 +443,7 @@ export function registerRoutes(
         await reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before forking a Git session", code: "git_skill_required" });
         return;
       }
-      const session = await manager.forkSession(id, body.name, body.driverKind);
+      const session = await manager.forkSession(id, body.name);
       return reply.code(201).send({ session });
     } catch (error) {
       if (error instanceof SessionNameError || error instanceof CreateSessionError || error instanceof SessionNotFoundError) {
@@ -849,22 +835,7 @@ export function dashboardSessionSummary(session: ManagedSession): DashboardSessi
     id: session.id,
     name: session.name,
     cwd: session.cwd,
-    driverKind: session.driverKind,
-    tmux: {
-      sessionId: "",
-      sessionName: session.tmux.sessionName,
-      windowId: session.tmux.windowId,
-      windowIndex: session.tmux.windowIndex,
-      windowName: session.tmux.windowName,
-      paneId: session.tmux.paneId,
-      paneIndex: session.tmux.paneIndex,
-      paneActive: false,
-      cwd: session.tmux.cwd,
-      currentCommand: "",
-      title: "",
-      pid: 0,
-      size: ""
-    },
+    provider: session.provider,
     repo: {
       root: session.repo.root,
       name: session.repo.name,
@@ -938,13 +909,6 @@ export function sessionMatchesQuery(session: ManagedSession, query: string): boo
     session.cwd,
     session.repo.name,
     session.repo.branch,
-    session.tmux.cwd,
-    session.tmux.sessionName,
-    session.tmux.windowId,
-    String(session.tmux.windowIndex),
-    session.tmux.windowName,
-    session.tmux.paneId,
-    String(session.tmux.paneIndex),
     session.preview,
     session.activitySummary,
     ...session.recentUserPrompts

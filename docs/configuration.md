@@ -1,6 +1,6 @@
 # Configuration Reference
 
-muxpilot is a single-operator developer console. The Web UI runs in a browser, and the Backend/API server is the trusted process that talks to Codex app-server services or legacy tmux panes on the host machine.
+muxpilot is a single-operator developer console. The Web UI runs in a browser, and the Backend/API server is the trusted process that manages Codex app-server services on the host machine.
 
 ## User Settings
 
@@ -60,9 +60,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_SLOW_REQUEST_MS`: response-time threshold for request logging, default `250`. Successful requests below the threshold are not logged; failed requests are always logged.
 - `MUXPILOT_RUNTIME_LOG_MAX_BYTES`: lifecycle rotation threshold for each supervisor, backend, and web log, default `67108864` (64 MiB). Rotation occurs before a managed process starts.
 - `MUXPILOT_RUNTIME_LOG_RETAINED_FILES`: number of rotated files retained per runtime log, default `3`. Values must be positive integers.
-- `MUXPILOT_DISCOVERY_INTERVAL_MS`: tmux discovery interval, default `1000`.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
-- `MUXPILOT_DEFAULT_SESSION_DRIVER`: runtime for new sessions, `codex_app_server` (default) or `codex_tmux`. tmux is an optional dependency detected once at startup. Configuring `codex_tmux` while tmux is unavailable fails startup instead of silently changing the default; installing or removing tmux takes effect after restarting muxpilot. The UI never silently falls back between runtimes.
 - `MUXPILOT_APP_START_TIMEOUT_MS`: endpoint-health wait after the supervisor launches, default `300000` (five minutes) for production and `30000` for development and shadow. The lifecycle command reports endpoint progress every 10 seconds while it waits. Values must be integers of at least `1000`.
 - `MUXPILOT_APP_SERVER_HIBERNATE_MS`: idle time before an eligible app-server service hibernates, default `900000` (15 minutes). Pending input, gates, child waits, heavyweight work, active turns, and background terminals block hibernation.
 - `MUXPILOT_RESOURCE_GOVERNOR`: `auto` (default) applies best-effort systemd cgroup and Docker limits to muxpilot-launched sessions; `off` disables both controls.
@@ -82,13 +80,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS`: time between process-group `SIGTERM` and `SIGKILL`, default `30000` (30 seconds).
 
 Per-run overrides can be placed before `--`, for example `muxpilot-git-run.mjs --heavy --runtime-timeout 20m --inactivity-timeout 5m -- make lint`. In managed sessions, a busy scheduler returns `QUEUED_NOT_RUN` without running the command; muxpilot reserves the ticket in FIFO order and sends an exact resume command when its slot is available. The runner emits queue/start/heartbeat/warning/termination lifecycle messages, records live state for the session UI, and retains the latest 20 command logs (up to 50 MiB each) in the session control directory.
-- `MUXPILOT_INPUT_SUBMIT_KEYS`: tmux keys sent after pasting a chat message, default `Enter`.
-- `MUXPILOT_INPUT_MODE_CYCLE_KEYS`: tmux key sequence used to cycle Codex between Normal and Plan input modes, default `BTab` for Shift+Tab.
-- Plan-action and question-option buttons use Codex menu selection keys directly; they do not use `MUXPILOT_INPUT_SUBMIT_KEYS`.
-- `MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS`: tmux keys for approving once, default `Enter`.
-- `MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS`: tmux keys for persistent prefix approval, default `Down Enter`.
-- `MUXPILOT_APPROVAL_DENY_KEYS`: tmux keys for denying/canceling an approval, default `Escape`.
-- App/connector permission forms are read from the live Codex terminal and navigated relative to their currently selected option; the legacy approval key settings above remain in effect for structured command and patch approvals.
+- Plan actions, questions, approvals, and connector permissions use structured app-server requests and responses.
 - `MUXPILOT_SUMMARY_MODEL`: OpenAI model for activity summaries, default `gpt-4.1-mini`.
 - `MUXPILOT_SUMMARY_INTERVAL_MS`: minimum per-session summary refresh interval, default `10000`.
 - `MUXPILOT_SUMMARY_DEBOUNCE_MS`: debounce before refreshing after new messages, default `0`.

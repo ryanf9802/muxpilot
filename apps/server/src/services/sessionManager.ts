@@ -28,34 +28,18 @@ import type {
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionDirectorySuggestion,
-  SessionDriverKind,
   SessionModelSettings,
   SessionModelSelections,
   SessionStatus,
   SessionTransferImportMapping,
   SessionTransferImportResult,
   TranscriptPageResponse,
-  TranscriptSearchResponse,
-  TmuxPane
+  TranscriptSearchResponse
 } from "@muxpilot/core";
 import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
 import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
-import {
-  interactiveApprovalKeys,
-  parseInteractiveApprovalPrompt,
-  type InteractiveApprovalPrompt
-} from "../codex/approvalPrompt.js";
-import {
-  composerContainsInput,
-  composerHasInput,
-  inputVerificationCaptureLines,
-  InputTransportError,
-  type InputTransportResult,
-  isCodexStartupFailureCapture,
-  TmuxAdapter
-} from "../tmux/tmuxAdapter.js";
 import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
 import {
@@ -67,7 +51,6 @@ import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
 import type { EventBus } from "./eventBus.js";
-import type { CodexProcessInfo } from "../codex/codexProcessResolver.js";
 import { reusableDependencyLinks, statusPath, type GitWorkspaceManager } from "./gitWorkspaceManager.js";
 import { accountAgentWorkTokens, agentWorkTokensUsed } from "./agentUsage.js";
 import type { PortableSession } from "./sessionTransfer.js";
@@ -83,20 +66,10 @@ interface ActivitySummaryScheduler {
   stop(): void;
 }
 
-interface CodexProcessLookup {
-  resolveForPane(panePid: number): Promise<CodexProcessInfo | null>;
-}
-
 interface CodexMetadataLookup {
   listModels(): Promise<CodexModel[]>;
   catalog(): Promise<CodexModelCatalogResponse>;
   effectiveServiceTier(cwd: string): Promise<string | null>;
-}
-
-interface ApprovalKeyMap {
-  approveOnce: string[];
-  approveForPrefix: string[];
-  deny: string[];
 }
 
 interface SessionManagerStartOptions {
@@ -148,14 +121,9 @@ const STEERABLE_SESSION_STATUSES = new Set<SessionStatus>([
 ]);
 type InputDeliveryIntent = "auto" | "steer";
 type InputDeliveryFailureCode =
-  | "paste_not_observed"
-  | "submit_not_accepted"
   | "no_codex_acknowledgement"
-  | "composer_changed"
-  | "unverified_legacy_submission"
   | "session_unavailable"
-  | "app_server_rejected"
-  | "tmux_failed";
+  | "app_server_rejected";
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -187,24 +155,19 @@ export class SessionManager {
 
   constructor(
     private readonly db: AppDatabase,
-    private readonly tmux: TmuxAdapter,
     private readonly codexStore: CodexSessionStore,
     private readonly events: EventBus,
     private readonly discoveryIntervalMs: number,
     private readonly parserIntervalMs: number,
-    private readonly approvalKeys: ApprovalKeyMap,
-    private readonly inputModeCycleKeys: string[],
     private readonly documents: SessionDocumentService,
     private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
-    private readonly codexProcessLookup: CodexProcessLookup | null = null,
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
     private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
     private readonly gitWorktreeRoot: string | null = null,
     private readonly managedEnvironment: Record<string, string> = {},
     private readonly codexMetadata: CodexMetadataLookup | null = null,
     private readonly sessionDrivers: SessionDriverRegistry | null = null,
-    private readonly appServerHibernateMs = 900_000,
-    private readonly defaultSessionDriver: SessionDriverKind = "codex_tmux"
+    private readonly appServerHibernateMs = 900_000
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -297,7 +260,7 @@ export class SessionManager {
     const scopeId = await this.ensureDocumentScope(session);
     return {
       documentsRoot: await this.requireDocuments().prepareBtwStaging(scopeId, exchangeId),
-      sourceCwd: session.tmux.cwd
+      sourceCwd: session.cwd
     };
   }
 
@@ -327,9 +290,7 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
     if ((await this.db.listQueuedInputs(sessionId)).length > 0) return { status: "not_ready" };
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return { status: "not_ready" };
-    const ready = session.driverKind === "codex_app_server"
-      ? readyAppServerInputSession(session)
-      : await this.readyLiveSession(session);
+    const ready = readyAppServerInputSession(session);
     if (!ready) return { status: "not_ready" };
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return { status: "not_ready" };
 
@@ -362,9 +323,7 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
-    const ready = session.driverKind === "codex_app_server"
-      ? readyAppServerInputSession(session)
-      : await this.readyLiveSession(session);
+    const ready = readyAppServerInputSession(session);
     if (!ready) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     this.deliveringInputSessionIds.add(sessionId);
@@ -429,7 +388,7 @@ export class SessionManager {
   private async prepareOrchestratedLaunch(options: AgentSessionLaunchOptions): Promise<{ options: AgentSessionLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
-    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with the raw tmux, process, and Codex file tools; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
+    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
     return {
       capabilityId: capability.capabilityId,
       options: {
@@ -451,9 +410,6 @@ export class SessionManager {
     await this.orchestrationProvider.bindCapability(capabilityId, sessionId);
     await this.db.setSessionOrchestrationAvailable(sessionId, true, nowIso());
     const session = requireSession(await this.db.getSession(sessionId));
-    if (session.driverKind !== "codex_app_server" && this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE === "1") {
-      await this.db.setSessionResourceScope(sessionId, sessionScopeName(capabilityId), nowIso());
-    }
     return requireSession(await this.db.getSession(sessionId));
   }
 
@@ -492,42 +448,14 @@ export class SessionManager {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
     const appServerDriver = this.appServerDriver(session);
-    if (appServerDriver) {
-      if (
-        session.archived ||
-        session.initializing ||
-        session.runtime?.kind !== "systemd_service" ||
-        session.runtime.state !== "connected" ||
-        (!isInputReadyStatus(session.status) && session.status !== "queued" && session.status !== "running" && session.status !== "working")
-      ) return false;
-      if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
-      this.deliveringInputSessionIds.add(sessionId);
-      try {
-        await appServerDriver.sendMessage(session, message, eventId());
-        const now = nowIso();
-        const status = activeInputStatus(session.inputMode);
-        await this.db.setSessionStatus(sessionId, status, now);
-        await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
-        this.publish("status.changed", sessionId, { status });
-        return true;
-      } finally {
-        this.deliveringInputSessionIds.delete(sessionId);
-      }
-    }
-    const ready = await this.readyLiveSession(session);
-    if (!ready) return false;
+    if (!appServerDriver || session.archived || session.initializing || session.runtime?.state !== "connected" ||
+      (!isInputReadyStatus(session.status) && session.status !== "queued" && session.status !== "running" && session.status !== "working")) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     this.deliveringInputSessionIds.add(sessionId);
     try {
-      try {
-        await this.sendRawInput(ready, message);
-      } catch (error) {
-        if (!(error instanceof InputTransportError) || error.reason !== "composer_changed") throw error;
-        const pane = await this.livePane(ready);
-        await this.tmux.submitComposedInput(pane.paneId, codexTerminalUserText(message));
-      }
+      await appServerDriver.sendMessage(session, message, eventId());
       const now = nowIso();
-      const status = activeInputStatus(ready.inputMode);
+      const status = activeInputStatus(session.inputMode);
       await this.db.setSessionStatus(sessionId, status, now);
       await this.db.addAudit("local", "resume_heavy_command", sessionId, "ok", now);
       this.publish("status.changed", sessionId, { status });
@@ -611,10 +539,8 @@ export class SessionManager {
 
   async restoreSessionRecovery(
     incidentId: string,
-    sessionIds: string[],
-    driverKind?: SessionDriverKind
+    sessionIds: string[]
   ): Promise<RestoreSessionRecoveryResponse> {
-    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
     const incident = await this.getSessionRecoveryIncident();
     if (!incident || incident.id !== incidentId) throw new SessionRestoreError("Recovery batch is no longer available");
     const selected = new Set(sessionIds);
@@ -624,7 +550,7 @@ export class SessionManager {
     const failedIds = new Set<string>();
     for (const candidate of candidates) {
       try {
-        const restored = await this.restoreSession(candidate.sessionId, driverKind);
+        const restored = await this.restoreSession(candidate.sessionId);
         results.push({
           sourceSessionId: candidate.sessionId,
           status: restored.restored ? "restored" : "reused_live",
@@ -708,28 +634,15 @@ export class SessionManager {
   }
 
   async discover(): Promise<void> {
-    const discoveryGeneration = ++this.discoveryGeneration;
-    const panes = await this.tmux.listPanes();
     const codexFiles = await this.codexStore.listRecent();
-    const growingCodexFilePaths = growingCodexFiles(codexFiles, this.codexFileObservations);
-    const reconsideredCodexFilePaths = reconsideredCodexFiles(codexFiles, this.codexFileObservations);
     this.codexFileObservations = new Map(
       codexFiles.map((file) => [file.path, { sizeBytes: file.sizeBytes, updatedAtMs: file.updatedAtMs }])
     );
-    const codexClaims = new Set<string>();
     const now = nowIso();
-    const seen = new Set<string>();
-    const paneIds = panes.map(tmuxPaneSessionId);
-    const paneCwdCounts = new Map<string, number>();
-    for (const pane of panes) paneCwdCounts.set(pane.cwd, (paneCwdCounts.get(pane.cwd) ?? 0) + 1);
-    const codexModels = await this.codexMetadata?.listModels().catch(() => []) ?? [];
-
     for (const session of await this.db.listSessions(true)) {
-      if (session.driverKind !== "codex_app_server" || !session.codexSessionId) continue;
+      if (!session.codexSessionId) continue;
       const rollout = codexFiles.find((file) => file.sessionId === session.codexSessionId);
-      if (!rollout) continue;
-      codexClaims.add(rollout.path);
-      if (session.codexJsonlPath === rollout.path && session.provider?.rolloutPath === rollout.path) continue;
+      if (!rollout || (session.codexJsonlPath === rollout.path && session.provider.rolloutPath === rollout.path)) continue;
       const updated = {
         ...session,
         provider: { kind: "codex" as const, threadId: session.codexSessionId, rolloutPath: rollout.path },
@@ -738,190 +651,6 @@ export class SessionManager {
       };
       await this.db.upsertSession(updated, now, true);
       this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? updated);
-    }
-
-    for (const [index, pane] of panes.entries()) {
-      const sessionId = paneIds[index] ?? tmuxPaneSessionId(pane);
-      const currentExisting = await this.db.getSession(sessionId);
-      const legacyId = legacyTmuxPaneSessionId(pane);
-      const legacyExisting = !currentExisting && legacyId !== sessionId
-        ? await this.db.getSession(legacyId)
-        : null;
-      const migratingLegacy = legacyExisting && sameLivePaneProcess(legacyExisting, pane)
-        ? legacyExisting
-        : null;
-      const existing = currentExisting ?? migratingLegacy;
-      const lookupId = existing?.id ?? sessionId;
-      const processInfo = await this.codexProcessLookup?.resolveForPane(pane.pid).catch(() => null) ?? null;
-      const include = await this.shouldIncludePane(pane, processInfo, existing);
-      if (!include) continue;
-
-      const match = await claimCodexFile(
-        pane,
-        existing,
-        codexFiles,
-        codexClaims,
-        processInfo,
-        (lines) => this.tmux.capturePane(pane.paneId, lines, false),
-        growingCodexFilePaths,
-        reconsideredCodexFilePaths,
-        paneCwdCounts.get(pane.cwd) === 1
-      );
-
-      seen.add(sessionId);
-      let repo = await loadRepoMetadata(pane.cwd);
-      const nextCodexSessionId = match?.sessionId ?? null;
-      const nextCodexJsonlPath = match?.path ?? null;
-      const sourceChanged = Boolean(
-        existing &&
-          (existing.codexSessionId !== nextCodexSessionId || existing.codexJsonlPath !== nextCodexJsonlPath)
-      );
-      if (sourceChanged) {
-        await this.db.clearSessionTranscript(lookupId);
-        if (nextCodexJsonlPath) await this.db.resetParserOffset(parserOffsetKey(lookupId, nextCodexJsonlPath));
-      }
-      const transcriptSyncing = nextCodexJsonlPath
-        ? sourceChanged || !existing || existing.transcriptSyncing === true
-        : false;
-      let inputMode =
-        (await detectLiveCollaborationMode(pane, (paneId, lines) => this.tmux.capturePane(paneId, lines, false))) ??
-        existing?.inputMode ??
-        "default";
-      const rawInferredStatus = await inferStatus(pane, existing?.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-      const liveApprovalPrompt =
-        rawInferredStatus !== "approval"
-          ? null
-          : await this.corroboratedLiveApproval(pane, (await this.db.activeApprovalContext(lookupId)).messages);
-      const inferredStatus =
-        rawInferredStatus === "approval" && !liveApprovalPrompt
-          ? rejectedApprovalFallbackStatus(pane, existing?.status)
-          : rawInferredStatus;
-      let latestUserMessage = await this.db.latestUserMessage(lookupId);
-      const latestTurnLifecycleMessage = await this.db.latestTurnLifecycleMessage(lookupId);
-      latestUserMessage = await this.reconcileInputDeliveryState(
-        lookupId,
-        pane,
-        latestUserMessage,
-        latestTurnLifecycleMessage,
-        inferredStatus,
-        inputMode
-      );
-      if (isPendingMuxpilotSubmission(latestUserMessage, latestTurnLifecycleMessage)) {
-        inputMode = latestUserMessage ? collaborationModeFromMessage(latestUserMessage) ?? inputMode : inputMode;
-      }
-      const latestQuestionMessage = await this.db.latestQuestionMessage(lookupId);
-      const status = resolveSessionStatus(
-        inferredStatus,
-        inputMode,
-        latestQuestionMessage,
-        await this.latestQuestionAnswerMessage(lookupId, latestQuestionMessage),
-        await this.db.latestPlanReadyMessage(lookupId),
-        latestUserMessage,
-        latestTurnLifecycleMessage,
-        this.pendingPlanActionStatus(lookupId),
-        this.answeredPlanMessageIds,
-        this.answeredQuestionMessageIds
-      );
-      const recoveredFromStartupError = Boolean(existing?.startupError) && status !== "startup_failed" && status !== "unknown";
-      const startupError = sourceChanged || recoveredFromStartupError ? null : existing?.startupError ?? null;
-      const effectiveStatus = startupError ? "startup_failed" : status;
-      const jsonlModelSettings = match ? await readLatestCodexModelSettings(match) : null;
-      const paneModelSettings = await readLiveCodexModelSettings(
-        pane,
-        (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
-      );
-      const liveModelSettings = mergeModelSettings(jsonlModelSettings, paneModelSettings);
-      const models = mergeSessionModels(existing?.models, inputMode, liveModelSettings);
-      const activeModel = activeSessionModel(models, inputMode);
-      const discoveredFastModeAvailable = codexFastModeAvailable(codexModels, activeModel);
-      const fastModeAvailable = discoveredFastModeAvailable ?? (sourceChanged ? null : existing?.fastModeAvailable ?? null);
-      const observedFastMode = nextCodexJsonlPath ? await readLatestCodexFastMode(nextCodexJsonlPath) : null;
-      const storedFastMode = sourceChanged ? null : existing?.fastMode ?? null;
-      const configuredFastMode = observedFastMode === null && storedFastMode === null
-        ? serviceTierFastMode(await this.codexMetadata?.effectiveServiceTier(pane.cwd).catch(() => null) ?? null)
-        : null;
-      const fastMode = observedFastMode ?? storedFastMode ?? configuredFastMode;
-      const storedGitWorkspace = await this.gitWorkspaces?.getBySession(lookupId) ?? null;
-      if (storedGitWorkspace) repo = await loadRepoMetadata(storedGitWorkspace.summary.entryPath);
-      const refreshedGitWorkspace = storedGitWorkspace ? await this.gitWorkspaces?.refresh(storedGitWorkspace) : null;
-      const activeGitWorkspace = refreshedGitWorkspace?.summary ?? existing?.gitWorkspace ?? null;
-      const heavyCommandStatus = !startupError && isInputReadyStatus(effectiveStatus) && activeGitWorkspace
-        ? await this.heavyCommandQueue?.sessionStatusForWorkspace(activeGitWorkspace.id) ?? null
-        : null;
-      const projectedStatus = heavyCommandStatus ?? effectiveStatus;
-      const session: ManagedSession = {
-        id: sessionId,
-        tmux: pane,
-        repo,
-        codexSessionId: nextCodexSessionId,
-        codexJsonlPath: nextCodexJsonlPath,
-        discoveryConfidence: match ? "high" : looksLikeCodexPane(pane) ? "medium" : "low",
-        status: projectedStatus,
-        initializing: existing?.initializing === true,
-        startupError,
-        lastActivityAt: sourceChanged ? null : existing?.lastActivityAt ?? null,
-        preview: sourceChanged ? "" : existing?.preview ?? "",
-        recentUserPrompts: sourceChanged ? [] : existing?.recentUserPrompts ?? [],
-        activitySummary: sourceChanged ? null : existing?.activitySummary ?? null,
-        activitySummaryGeneratedAt: sourceChanged ? null : existing?.activitySummaryGeneratedAt ?? null,
-        activitySummarySourceSequence: sourceChanged ? null : existing?.activitySummarySourceSequence ?? null,
-        inputMode,
-        models,
-        fastMode,
-        fastModeAvailable,
-        transcriptSize: sourceChanged ? 0 : existing?.transcriptSize ?? 0,
-        transcriptSyncing,
-        unreadCount: sourceChanged ? 0 : existing?.unreadCount ?? 0,
-        pinned: existing?.pinned ?? false,
-        archived: existing?.archived ?? false,
-        gitWorkspace: activeGitWorkspace,
-        forkedFrom: existing?.forkedFrom ?? null,
-        documentScopeId: existing?.documentScopeId ?? activeGitWorkspace?.id ?? null
-      };
-
-      if (effectiveStatus === "approval" && liveApprovalPrompt) {
-        this.liveApprovals.set(
-          sessionId,
-          materializeInteractiveApproval(session, liveApprovalPrompt.prompt, liveApprovalPrompt.contextMessage)
-        );
-      } else {
-        this.liveApprovals.delete(sessionId);
-      }
-      if (!liveApprovalPrompt) this.resolvingRepositoryApprovals.delete(sessionId);
-
-      const changed = !existing || sessionChanged(existing, session);
-      if (migratingLegacy) {
-        const parserOffsetMove = nextCodexJsonlPath
-          ? {
-              from: parserOffsetKey(migratingLegacy.id, nextCodexJsonlPath),
-              to: parserOffsetKey(session.id, nextCodexJsonlPath)
-            }
-          : null;
-        await this.db.rekeySession(migratingLegacy.id, session, parserOffsetMove, now);
-        this.liveApprovals.delete(migratingLegacy.id);
-        this.resolvingRepositoryApprovals.delete(migratingLegacy.id);
-      } else {
-        await this.db.upsertSession(session, now, true);
-      }
-      await this.recordTouchedRepository(session, now);
-      if (changed) this.publish("session.updated", session.id, await this.db.getSession(session.id) ?? session);
-      await this.processQueuedInputs(session.id);
-      if (liveApprovalPrompt) {
-        await this.resolveRememberedRepositoryApproval(session, liveApprovalPrompt.prompt);
-      }
-    }
-
-    for (const session of await this.db.listSessions(true)) {
-      if (session.driverKind === "codex_app_server") continue;
-      if (!seen.has(session.id) && !session.initializing && session.status !== "missing") {
-        const readyGeneration = this.readySessionDiscoveryGeneration.get(session.id);
-        if (readyGeneration !== undefined && discoveryGeneration <= readyGeneration) continue;
-        this.readySessionDiscoveryGeneration.delete(session.id);
-        if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session is missing");
-        this.liveApprovals.delete(session.id);
-        await this.db.setSessionStatus(session.id, "missing", now);
-        this.publish("status.changed", session.id, { status: "missing" });
-      }
     }
     await this.recordRecoveryRoster();
   }
@@ -1019,13 +748,6 @@ export class SessionManager {
     try {
       const offsetKey = parserOffsetKey(session.id, source);
       const hasOffset = await this.db.hasParserOffset(offsetKey);
-      if (
-        session.driverKind !== "codex_app_server" &&
-        !hasOffset &&
-        (await this.db.latestMessageSequence(session.id)) > 0
-      ) {
-        await this.db.clearSessionTranscript(session.id);
-      }
       const offset = await this.db.getParserOffset(offsetKey);
       const result = await parseCodexJsonl(source, offset);
       if (result.contextUsage) {
@@ -1209,18 +931,11 @@ export class SessionManager {
     const descendants = agentDescendants(allSessions, session.id);
     const liveDescendants = descendants.filter(isLiveAgentSession);
     const worstDescendant = highestPrioritySession(liveDescendants);
-    const tmuxUnavailableReason = withOrigin.driverKind !== "codex_app_server"
-      ? this.tmux.unavailableReason()
-      : null;
     return this.withResourceUsage({
       ...withOrigin,
-      status: tmuxUnavailableReason
-        ? "missing"
-        : !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
+      status: !withOrigin.agentOwnership?.completedAt && withOrigin.agentOwnership?.budgetExhaustedAt
           ? "blocked"
           : withOrigin.status,
-      runtimeUnavailableReason: tmuxUnavailableReason,
-      capabilities: tmuxUnavailableReason ? unavailableSessionCapabilities() : withOrigin.capabilities,
       agentSummary: descendants.length > 0 ? {
         liveDescendantCount: liveDescendants.length,
         totalDescendantCount: descendants.length,
@@ -1235,14 +950,13 @@ export class SessionManager {
     return collapseHistoryByIdentity(results, limit);
   }
 
-  async restoreSession(sessionId: string, driverKind?: SessionDriverKind): Promise<{ session: ManagedSession; restored: boolean }> {
-    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
+  async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
     const initial = await this.db.getSession(sessionId);
     if (!initial) throw new SessionNotFoundError("Session not found");
     if (!initial.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
     const key = recoveryIdentityForSession(initial);
     const prior = this.restoreLocks.get(key) ?? Promise.resolve();
-    const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key, driverKind));
+    const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key));
     this.restoreLocks.set(key, restore);
     try {
       const result = await restore;
@@ -1255,8 +969,7 @@ export class SessionManager {
 
   private async restoreSessionUnlocked(
     sessionId: string,
-    restoreIdentity: string,
-    requestedDriverKind?: SessionDriverKind
+    restoreIdentity: string
   ): Promise<{ session: ManagedSession; restored: boolean }> {
     const source = await this.db.getSession(sessionId) ??
       (await this.db.listSessions(true)).find((session) => recoveryIdentityForSession(session) === restoreIdentity) ?? null;
@@ -1265,62 +978,22 @@ export class SessionManager {
 
     const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
-      if (live.driverKind === "codex_app_server") {
-        const session = await this.resumeAppServerSession(live);
-        if (session.archived) await this.db.markSessionArchived(session.id, false, nowIso());
-        const updated = requireSession(await this.db.getSession(session.id));
-        this.publish("session.updated", updated.id, updated);
-        return { session: updated, restored: false };
-      }
-      if (live.archived) await this.db.markSessionArchived(live.id, false, nowIso());
-      const session = requireSession(await this.db.getSession(live.id));
-      this.publish("session.updated", session.id, session);
-      return { session, restored: false };
-    }
-
-    const restoreDriver = requestedDriverKind ?? "codex_app_server";
-    if (restoreDriver === "codex_app_server") {
-      if (!this.sessionDrivers?.has("codex_app_server")) {
-        throw new SessionRestoreError("Codex app-server is unavailable; explicitly choose the tmux fallback to restore this session");
-      }
-      const restored = await this.resumeAppServerSession(source);
-      await this.db.markSessionArchived(restored.id, false, nowIso());
-      await this.db.addAudit("local", "restore_session:codex_app_server", source.id, "ok", nowIso());
-      const updated = requireSession(await this.db.getSession(restored.id));
+      const session = await this.resumeAppServerSession(live);
+      if (session.archived) await this.db.markSessionArchived(session.id, false, nowIso());
+      const updated = requireSession(await this.db.getSession(session.id));
       this.publish("session.updated", updated.id, updated);
-      return { session: updated, restored: true };
+      return { session: updated, restored: false };
     }
 
-    this.tmux.requireAvailable();
-
-    const storedGitWorkspace = await this.gitWorkspaces?.getBySession(source.id) ?? null;
-    const cwd = storedGitWorkspace
-      ? await this.gitWorkspaces!.ensureControlPath(storedGitWorkspace)
-      : await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
-    const launchWorkspace = storedGitWorkspace
-      ? await this.gitWorkspaces!.get(storedGitWorkspace.id) ?? storedGitWorkspace
-      : null;
-    const name = restoreSessionName(source);
-    const documentScopeId = await this.ensureDocumentScope(source);
-    const documentOptions = await this.withDocumentLaunchOptions(
-      launchWorkspace
-        ? managedCodexLaunchOptions(launchWorkspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment)
-        : { environment: this.managedEnvironment },
-      documentScopeId
-    );
-    const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    const launch = await this.tmux.createCodexResumeWindowInMuxpilotSession(
-      cwd,
-      name,
-      source.codexSessionId,
-      prepared.options
-    );
-    let session = await this.rebindRestoredSession(source, launch.pane);
-    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
-    this.finishSessionInitialization(session.id, launch.ready);
-    await this.db.addAudit("local", "restore_session", source.id, "ok", nowIso());
-    this.publish("session.updated", session.id, session);
-    return { session, restored: true };
+    if (!this.sessionDrivers?.has()) {
+      throw new SessionRestoreError("Codex app-server is unavailable; muxpilot is running in read-only history mode");
+    }
+    const restored = await this.resumeAppServerSession(source);
+    await this.db.markSessionArchived(restored.id, false, nowIso());
+    await this.db.addAudit("local", "restore_session:codex_app_server", source.id, "ok", nowIso());
+    const updated = requireSession(await this.db.getSession(restored.id));
+    this.publish("session.updated", updated.id, updated);
+    return { session: updated, restored: true };
   }
 
   async importPortableSession(
@@ -1329,7 +1002,7 @@ export class SessionManager {
     mapping: SessionTransferImportMapping,
     importedDocuments: SessionDocumentSnapshot[] | null = null
   ): Promise<SessionTransferImportResult> {
-    this.assertPortableRuntimeAvailable(mapping);
+    this.requireAppServerDriver();
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     const existing = (await this.db.listSessions(true)).find((session) => session.codexSessionId === portable.codexSessionId) ?? null;
     let selectedTranscript = transcript;
@@ -1361,29 +1034,12 @@ export class SessionManager {
     const placeholderId = `imported:${eventId()}`;
     const repo = await loadRepoMetadata(destination);
     const portableName = portable.name ?? portable.sessionName;
-    const syntheticPane: TmuxPane = {
-      sessionId: "muxpilot",
-      sessionName: "muxpilot",
-      windowId: "@imported",
-      windowIndex: -1,
-      windowName: portableName,
-      paneId: `%imported-${portable.codexSessionId}`,
-      paneIndex: -1,
-      paneActive: false,
-      cwd: destination,
-      currentCommand: "codex",
-      title: portableName,
-      pid: 0,
-      size: "0x0"
-    };
     const documentScopeId = portable.workspaceMode === "directory" ? this.requireDocuments().newScopeId() : null;
     const session: ManagedSession = {
       id: placeholderId,
       name: portableName,
       cwd: destination,
       provider: { kind: "codex", threadId: portable.codexSessionId, rolloutPath: transcriptPath },
-      driverKind: "codex_tmux",
-      tmux: syntheticPane,
       repo,
       codexSessionId: portable.codexSessionId,
       codexJsonlPath: transcriptPath,
@@ -1426,7 +1082,7 @@ export class SessionManager {
     await this.db.upsertSession(session, nowIso());
 
     await this.ingestSession(session);
-    const restored = await this.restoreSession(placeholderId, mapping.driverKind);
+    const restored = await this.restoreSession(placeholderId);
     return {
       codexSessionId: portable.codexSessionId,
       sessionName: portable.sessionName,
@@ -1437,7 +1093,7 @@ export class SessionManager {
   }
 
   async validatePortableMapping(portable: PortableSession, mapping: SessionTransferImportMapping): Promise<void> {
-    this.assertPortableRuntimeAvailable(mapping);
+    this.requireAppServerDriver();
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     if (portable.workspaceMode !== "git") return;
     if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
@@ -1448,8 +1104,8 @@ export class SessionManager {
     if (!probe.localBranches.includes(targetBranch)) throw new SessionRestoreError(`Local target branch '${targetBranch}' does not exist for '${portable.sessionName}'`);
   }
 
-  assertPortableRuntimeAvailable(mapping: Pick<SessionTransferImportMapping, "driverKind">): void {
-    if (mapping.driverKind === "codex_tmux") this.tmux.requireAvailable();
+  assertPortableRuntimeAvailable(_mapping: SessionTransferImportMapping): void {
+    this.requireAppServerDriver();
   }
 
   async enqueueInput(
@@ -1459,7 +1115,6 @@ export class SessionManager {
     actorSessionId: string | null = null
   ): Promise<QueuedInput> {
     const storedSession = await this.db.getSession(sessionId);
-    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
     const session = requireSession(storedSession);
     if (session.status === "input_failed") {
       throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
@@ -1553,43 +1208,9 @@ export class SessionManager {
   async getPendingApproval(sessionId: string): Promise<ApprovalRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return null;
-    if (session.driverKind === "codex_app_server") {
-      if (session.status !== "approval") return null;
-      const message = await this.db.latestApprovalMessage(sessionId);
-      const approval = message ? materializeApproval(message) : null;
-      return approval ? this.repositoryScopedApproval(sessionId, approval) : null;
-    }
-    const interactive = await this.captureInteractiveApprovalPrompt(session);
-    if (interactive) {
-      const context = await this.db.activeApprovalContext(sessionId);
-      const contextMessage = matchingInteractiveApprovalContext(
-        interactive,
-        context.messages
-      );
-      if (!contextMessage && context.hasContext) {
-        this.liveApprovals.delete(sessionId);
-        return null;
-      }
-      const approval = materializeInteractiveApproval(session, interactive, contextMessage);
-      this.liveApprovals.set(sessionId, approval);
-      if (session.status !== "approval") {
-        const now = nowIso();
-        await this.db.setSessionStatus(sessionId, "approval", now);
-        this.publish("status.changed", sessionId, { status: "approval" });
-        this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
-      }
-      return this.repositoryScopedApproval(sessionId, approval);
-    }
     if (session.status !== "approval") return null;
-    if (!(await this.isApprovalGateVisible(session))) {
-      this.liveApprovals.delete(sessionId);
-      return null;
-    }
-    const liveApproval = this.liveApprovals.get(sessionId);
-    if (liveApproval) return this.repositoryScopedApproval(sessionId, liveApproval);
     const message = await this.db.latestApprovalMessage(sessionId);
-    if (!message) return null;
-    const approval = materializeApproval(message);
+    const approval = message ? materializeApproval(message) : null;
     return approval ? this.repositoryScopedApproval(sessionId, approval) : null;
   }
 
@@ -1608,11 +1229,8 @@ export class SessionManager {
   async getPendingQuestion(sessionId: string): Promise<QuestionRequest | null> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return null;
-    if (session.driverKind === "codex_app_server" && session.status !== "question") return null;
-    const latestQuestionMessage = await this.db.latestQuestionMessage(
-      sessionId,
-      session.driverKind === "codex_app_server"
-    );
+    if (session.status !== "question") return null;
+    const latestQuestionMessage = await this.db.latestQuestionMessage(sessionId, true);
     const message = activeQuestionMessage(
       latestQuestionMessage,
       await this.latestQuestionAnswerMessage(sessionId, latestQuestionMessage),
@@ -1632,12 +1250,7 @@ export class SessionManager {
     actorSessionId: string | null = null,
     delivery: InputDeliveryIntent = "auto"
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
-    const storedSession = await this.db.getSession(sessionId);
-    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
-    const session = requireSession(storedSession);
-    if (session.driverKind !== "codex_app_server") {
-      return this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery);
-    }
+    requireSession(await this.db.getSession(sessionId));
     return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery));
   }
 
@@ -1649,13 +1262,13 @@ export class SessionManager {
     delivery: InputDeliveryIntent = "auto"
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     let session = requireSession(await this.db.getSession(sessionId));
-    if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated") {
+    if (session.runtime?.state === "hibernated") {
       session = await this.wakeAppServerSessionExclusive(session);
     }
     if (session.status === "input_failed") {
       throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
     }
-    if (delivery === "steer" && session.driverKind === "codex_app_server") {
+    if (delivery === "steer") {
       return this.sendSteeredInputExclusive(session, text, actorSessionId);
     }
     if (await this.shouldQueueInput(session, text)) {
@@ -1805,18 +1418,8 @@ export class SessionManager {
     return !isInputReadyStatus(session.status);
   }
 
-  private async sendRawInput(session: ManagedSession, text: string): Promise<InputTransportResult | void> {
-    const pane = await this.livePane(session);
-    return this.tmux.sendInput(pane.paneId, codexTerminalUserText(text));
-  }
-
   private async sendSessionNotice(session: ManagedSession, text: string): Promise<void> {
-    const driver = this.appServerDriver(session);
-    if (driver) {
-      await driver.sendMessage(session, text, eventId());
-      return;
-    }
-    await this.sendRawInput(session, text);
+    await this.requireAppServerDriver().sendMessage(session, text, eventId());
   }
 
   private async recordSubmittedInput(
@@ -1844,7 +1447,6 @@ export class SessionManager {
           deliveryPhase: "persisted",
           attemptCount: 1,
           replayCount: 0,
-          enterRetryCount: 0,
           lastAttemptAt: timestamp,
           promptHash: inputPromptHash(session.id, text),
           promptLength: text.length,
@@ -1862,9 +1464,7 @@ export class SessionManager {
 
   async agentSendInput(actorSessionId: string, targetSessionId: string, text: string, mode?: CollaborationMode): Promise<ManagedSession> {
     requireSession(await this.db.getSession(actorSessionId));
-    const storedTarget = await this.db.getSession(targetSessionId);
-    if (storedTarget && storedTarget.driverKind !== "codex_app_server") this.tmux.requireAvailable();
-    const target = requireSession(storedTarget);
+    const target = requireSession(await this.db.getSession(targetSessionId));
     if (target.archived || target.status === "missing") throw new AgentSessionError("Messages can only be sent to live sessions");
     const usage = target.contextUsage;
     const ownership = target.agentOwnership;
@@ -1918,10 +1518,10 @@ export class SessionManager {
       if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
         throw new AgentSessionError(`This root already has ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
       }
-      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd ?? actor.tmux.cwd;
+      const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd;
       const request: CreateSessionRequest = actor.gitWorkspace
-        ? { cwd, name, driverKind: actor.driverKind, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
-        : { cwd, name, driverKind: actor.driverKind, workspace: { mode: "directory" } };
+        ? { cwd, name, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
+        : { cwd, name, workspace: { mode: "directory" } };
       const childMode = mode ?? "default";
       const inheritedSettings = { ...actor.models[childMode], fastMode: actor.fastMode };
       const child = await this.createSession(request, inheritedSettings);
@@ -2160,22 +1760,13 @@ export class SessionManager {
       const target = await this.requireAgentControlRecord(actorSessionId, targetSessionId);
       if (target.agentOwnership?.completedAt) return;
       const descendants = agentDescendants(await this.db.listSessions(true), target.id).reverse();
-      if ([...descendants, target].some((session) => session.driverKind !== "codex_app_server")) {
-        this.tmux.requireAvailable();
-      }
       for (const session of [...descendants, target]) {
         const current = await this.db.getSession(session.id);
         if (!current?.agentOwnership || current.agentOwnership.completedAt) continue;
         if (current.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(current.gitWorkspace.id, "owning agent session was finished");
-        if (current.driverKind === "codex_app_server") {
-          if (current.runtime?.kind === "systemd_service" && current.runtime.state !== "hibernated" && current.runtime.state !== "stopped") {
-            await this.requireAppServerDriver().kill(current);
-            await this.db.upsertSession({ ...current, runtime: { ...current.runtime, state: "stopped" } }, nowIso());
-          }
-        } else {
-          const panes = await this.tmux.listPanes();
-          const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === current.id);
-          if (pane) await this.tmux.killPane(pane.paneId);
+        if (current.runtime && current.runtime.state !== "hibernated" && current.runtime.state !== "stopped") {
+          await this.requireAppServerDriver().kill(current);
+          await this.db.upsertSession({ ...current, runtime: { ...current.runtime, state: "stopped" } }, nowIso());
         }
         const completedAt = nowIso();
         const completed = await this.db.completeAgentSession(current.id, completedAt);
@@ -2188,50 +1779,31 @@ export class SessionManager {
   async resumeAgentWait(sessionId: string, message: string): Promise<boolean> {
     const storedSession = await this.db.getSession(sessionId);
     if (!storedSession || storedSession.status === "missing") return false;
-    if (storedSession.driverKind === "codex_app_server") {
-      return this.serializeRuntimeOperation(sessionId, async () => {
-        if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
-        const session = await this.db.getSession(sessionId);
-        if (!session || session.archived || !readyAppServerInputSession(session)) return false;
-        if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
-        if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
+    return this.serializeRuntimeOperation(sessionId, async () => {
+      if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+      const session = await this.db.getSession(sessionId);
+      if (!session || session.archived || !readyAppServerInputSession(session)) return false;
+      if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
 
-        const driver = this.appServerDriver(session);
-        if (!driver) return false;
-        this.deliveringInputSessionIds.add(sessionId);
-        try {
-          await driver.sendMessage(session, message, eventId());
-          const now = nowIso();
-          const status = activeInputStatus(session.inputMode);
-          await this.db.setSessionStatus(sessionId, status, now);
-          await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
-          this.publish("status.changed", sessionId, { status });
-          return true;
-        } catch (error) {
-          await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, error instanceof Error ? error.message : String(error), nowIso());
-          return false;
-        } finally {
-          this.deliveringInputSessionIds.delete(sessionId);
-        }
-      });
-    }
-    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
-    const session = storedSession;
-    const ready = await this.readyLiveSession(session);
-    if (!ready) return false;
-    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
-    this.deliveringInputSessionIds.add(sessionId);
-    try {
-      await this.sendRawInput(ready, message);
-      const now = nowIso();
-      const status = activeInputStatus(ready.inputMode);
-      await this.db.setSessionStatus(sessionId, status, now);
-      await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
-      this.publish("status.changed", sessionId, { status });
-      return true;
-    } finally {
-      this.deliveringInputSessionIds.delete(sessionId);
-    }
+      const driver = this.appServerDriver(session);
+      if (!driver) return false;
+      this.deliveringInputSessionIds.add(sessionId);
+      try {
+        await driver.sendMessage(session, message, eventId());
+        const now = nowIso();
+        const status = activeInputStatus(session.inputMode);
+        await this.db.setSessionStatus(sessionId, status, now);
+        await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
+        this.publish("status.changed", sessionId, { status });
+        return true;
+      } catch (error) {
+        await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, error instanceof Error ? error.message : String(error), nowIso());
+        return false;
+      } finally {
+        this.deliveringInputSessionIds.delete(sessionId);
+      }
+    });
   }
 
   private withAgentMutation<T>(operation: () => Promise<T>): Promise<T> {
@@ -2241,9 +1813,7 @@ export class SessionManager {
   }
 
   private async interruptSessionRuntime(session: ManagedSession): Promise<void> {
-    const driver = this.appServerDriver(session);
-    if (driver) await driver.interrupt(session, null);
-    else await this.tmux.interrupt(session.tmux.paneId);
+    await this.requireAppServerDriver().interrupt(session, null);
   }
 
   private async waitForAgentChildReady(sessionId: string): Promise<void> {
@@ -2263,79 +1833,39 @@ export class SessionManager {
     message: ChatMessage,
     mode: CollaborationMode
   ): Promise<ChatMessage> {
-    if (this.deliveringInputSessionIds.has(session.id)) {
-      throw new InputDeliveryError("Another input delivery is already in progress for this session");
-    }
+    if (this.deliveringInputSessionIds.has(session.id)) throw new InputDeliveryError("Another input delivery is already in progress for this session");
     this.deliveringInputSessionIds.add(session.id);
     let current = message;
     try {
       current = await this.updateInputDelivery(current, { deliveryPhase: "delivering" });
-      const appServerDriver = this.appServerDriver(session);
-      if (appServerDriver) {
-        if (session.inputMode !== mode) {
-          await appServerDriver.setPreferences(session, { mode });
-          await this.db.setSessionInputMode(session.id, mode, nowIso());
-        }
-        const receipt = await appServerDriver.sendMessage(
-          { ...session, inputMode: mode },
-          message.text,
-          message.id
-        );
-        const latest = await this.db.latestUserMessage(session.id);
-        if (latest?.id === current.id) current = latest;
-        current = await this.updateInputDelivery(current, {
-          state: "acknowledged",
-          deliveryPhase: "acknowledged",
-          acknowledgedBy: "app_server_receipt",
-          clientMessageId: receipt.clientMessageId,
-          threadId: receipt.threadId,
-          turnId: receipt.turnId,
-          acceptedAt: receipt.acceptedAt,
-          failureReason: null
-        });
-        await this.db.addAudit("local", "input_delivery_app_server", session.id, JSON.stringify({
-          promptHash: inputPromptHash(session.id, message.text),
-          promptLength: message.text.length,
-          clientMessageId: receipt.clientMessageId,
-          threadId: receipt.threadId,
-          turnId: receipt.turnId
-        }), receipt.acceptedAt);
-        return current;
+      const driver = this.requireAppServerDriver();
+      if (session.inputMode !== mode) {
+        await driver.setPreferences(session, { mode });
+        await this.db.setSessionInputMode(session.id, mode, nowIso());
       }
-      const liveSession = await this.ensureInputMode(session, mode);
-      const result = await this.sendRawInput(liveSession, message.text);
+      const receipt = await driver.sendMessage({ ...session, inputMode: mode }, message.text, message.id);
+      const latest = await this.db.latestUserMessage(session.id);
+      if (latest?.id === current.id) current = latest;
       current = await this.updateInputDelivery(current, {
-        deliveryPhase: "awaiting_ack",
-        transportPasteRetryCount: result?.pasteReplayCount ?? 0,
-        enterRetryCount: result?.submitKeyRetryCount ?? 0,
-        failureReason: null
+        state: "acknowledged", deliveryPhase: "acknowledged", acknowledgedBy: "app_server_receipt",
+        clientMessageId: receipt.clientMessageId, threadId: receipt.threadId, turnId: receipt.turnId,
+        acceptedAt: receipt.acceptedAt, failureReason: null
       });
-      await this.db.addAudit("local", "input_delivery_transport", session.id, JSON.stringify({
-        promptHash: inputPromptHash(session.id, message.text),
-        promptLength: message.text.length,
-        transportPasteRetryCount: result?.pasteReplayCount ?? 0,
-        enterRetryCount: result?.submitKeyRetryCount ?? 0
-      }), nowIso());
+      await this.db.addAudit("local", "input_delivery_app_server", session.id, JSON.stringify({
+        promptHash: inputPromptHash(session.id, message.text), promptLength: message.text.length,
+        clientMessageId: receipt.clientMessageId, threadId: receipt.threadId, turnId: receipt.turnId
+      }), receipt.acceptedAt);
       return current;
     } catch (error) {
-      const reason = error instanceof InputTransportError
-        ? error.reason
-        : session.driverKind === "codex_app_server" ? "app_server_rejected" : "tmux_failed";
-      const failureReason = inputDeliveryFailureMessage(reason);
+      const reason: InputDeliveryFailureCode = "app_server_rejected";
       current = await this.updateInputDelivery(current, {
-        state: "failed",
-        deliveryPhase: "failed",
-        failureCode: reason,
-        transportPasteRetryCount: error instanceof InputTransportError ? error.result.pasteReplayCount : 0,
-        enterRetryCount: error instanceof InputTransportError ? error.result.submitKeyRetryCount : 0,
-        failureReason
+        state: "failed", deliveryPhase: "failed", failureCode: reason,
+        failureReason: inputDeliveryFailureMessage(reason)
       });
       const failedAt = nowIso();
       await this.db.setSessionStatus(session.id, "input_failed", failedAt);
       await this.db.addAudit("local", "input_delivery_failed", session.id, JSON.stringify({
-        promptHash: inputPromptHash(session.id, message.text),
-        promptLength: message.text.length,
-        reason
+        promptHash: inputPromptHash(session.id, message.text), promptLength: message.text.length, reason
       }), failedAt);
       this.publish("message.appended", session.id, current);
       this.publish("status.changed", session.id, { status: "input_failed" });
@@ -2347,133 +1877,38 @@ export class SessionManager {
   }
 
   async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
-    const storedSession = await this.db.getSession(sessionId);
-    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
-    const session = requireSession(storedSession);
+    const session = requireSession(await this.db.getSession(sessionId));
     const approval = await this.getPendingApproval(sessionId);
     if (!approval) throw new ApprovalResolutionError("No pending approval for this session");
-    if (!approval.options.some((option) => option.decision === request.decision)) {
-      throw new ApprovalResolutionError("This choice is not available for the pending approval");
-    }
-    if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) {
-      throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
-    }
+    if (!approval.options.some((option) => option.decision === request.decision)) throw new ApprovalResolutionError("This choice is not available for the pending approval");
+    if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
     const workspace = await this.db.getGitWorkspaceBySession(sessionId);
-    const codexDecision = request.decision === "approve_for_prefix" && workspace ? "approve_once" : request.decision;
-
-    if (session.driverKind === "codex_app_server") {
-      try {
-        await this.appServerDriver(session)?.answerApproval(
-          session,
-          approval.requestId ?? approval.id,
-          codexDecision
-        );
-      } catch (error) {
-        throw new ApprovalResolutionError(
-          `Could not submit the approval to Codex app-server: ${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-      const now = nowIso();
-      if (request.decision === "approve_for_prefix" && approval.prefixRule?.length && workspace) {
-        await this.db.addRepositoryApprovalRule(
-          workspace.commonGitDir,
-          normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace),
-          now
-        );
-      }
-      await this.db.setSessionStatus(sessionId, "waiting", now);
-      await this.db.addAudit("local", `approval:${request.decision}`, sessionId, "ok", now);
-      this.publish("status.changed", sessionId, { status: "waiting" });
-      this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
-      return;
+    const decision = request.decision === "approve_for_prefix" && workspace ? "approve_once" : request.decision;
+    try {
+      await this.requireAppServerDriver().answerApproval(session, approval.requestId ?? approval.id, decision);
+    } catch (error) {
+      throw new ApprovalResolutionError("Could not submit the approval to Codex app-server: " + (error instanceof Error ? error.message : String(error)));
     }
-
-    const interactive = await this.captureInteractiveApprovalPrompt(session);
-    let keys: string[];
-    if (interactive) {
-      if (!interactiveApprovalMatches(approval, interactive)) {
-        throw new ApprovalResolutionError("The pending approval changed before this choice was submitted");
-      }
-      if (!interactive.options.some((option) => option.decision === codexDecision)) {
-        throw new ApprovalResolutionError("This choice is no longer available for the pending approval");
-      }
-      const interactiveKeys =
-        codexDecision === "deny" ? this.approvalKeys.deny : interactiveApprovalKeys(interactive, codexDecision);
-      if (!interactiveKeys) throw new ApprovalResolutionError("Could not select this approval choice");
-      keys = interactiveKeys;
-    } else {
-      const active = await this.isApprovalGateVisible(session);
-      if (!active) throw new ApprovalResolutionError("The tmux pane is not showing an approval gate");
-      keys = this.keysForDecision(codexDecision);
-    }
-
     const now = nowIso();
-    await this.tmux.sendKeys(session.tmux.paneId, keys);
-    if (request.decision === "approve_for_prefix" && approval.prefixRule?.length) {
-      if (workspace) {
-        await this.db.addRepositoryApprovalRule(
-          workspace.commonGitDir,
-          normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace),
-          now
-        );
-      }
+    if (request.decision === "approve_for_prefix" && approval.prefixRule?.length && workspace) {
+      await this.db.addRepositoryApprovalRule(workspace.commonGitDir, normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace), now);
     }
     await this.db.setSessionStatus(sessionId, "waiting", now);
-    await this.db.addAudit("local", `approval:${request.decision}`, sessionId, "ok", now);
+    await this.db.addAudit("local", "approval:" + request.decision, sessionId, "ok", now);
     this.publish("status.changed", sessionId, { status: "waiting" });
     this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
   }
 
-  private async resolveRememberedRepositoryApproval(
-    session: ManagedSession,
-    prompt: InteractiveApprovalPrompt
-  ): Promise<void> {
-    if (!prompt.prefixRule?.length || !prompt.options.some((option) => option.decision === "approve_once")) return;
-    const signature = JSON.stringify(prompt.prefixRule);
-    if (this.resolvingRepositoryApprovals.get(session.id) === signature) return;
-    const workspace = await this.db.getGitWorkspaceBySession(session.id);
-    if (
-      !workspace ||
-      !(await this.db.hasRepositoryApprovalRule(
-        workspace.commonGitDir,
-        normalizeRepositoryApprovalPrefix(prompt.prefixRule, workspace)
-      ))
-    ) return;
-    const keys = interactiveApprovalKeys(prompt, "approve_once");
-    if (!keys) return;
-    await this.tmux.sendKeys(session.tmux.paneId, keys);
-    this.resolvingRepositoryApprovals.set(session.id, signature);
-    const now = nowIso();
-    await this.db.setSessionStatus(session.id, "waiting", now);
-    await this.db.addAudit("local", "approval:repository_prefix", session.id, prompt.prefixRule.join(" "), now);
-    this.liveApprovals.delete(session.id);
-    this.publish("status.changed", session.id, { status: "waiting" });
-  }
-
   async answerQuestion(sessionId: string, request: QuestionAnswerRequest): Promise<void> {
-    const storedSession = await this.db.getSession(sessionId);
-    if (storedSession && storedSession.driverKind !== "codex_app_server") this.tmux.requireAvailable();
-    const session = requireSession(storedSession);
+    const session = requireSession(await this.db.getSession(sessionId));
     const question = await this.getPendingQuestion(sessionId);
     if (!question) throw new QuestionResolutionError("No pending question for this session");
     const normalized = normalizeQuestionAnswer(question, request);
     try {
-      if (session.driverKind === "codex_app_server") {
-        await this.appServerDriver(session)?.answerQuestion(
-          session,
-          question.requestId ?? question.id,
-          normalized
-        );
-      } else {
-        await this.answerInteractiveQuestion(session, question, normalized);
-      }
+      await this.requireAppServerDriver().answerQuestion(session, question.requestId ?? question.id, normalized);
     } catch (error) {
       if (error instanceof QuestionResolutionError) throw error;
-      throw new QuestionResolutionError(
-        session.driverKind === "codex_app_server"
-          ? `Could not submit the answer to Codex app-server: ${error instanceof Error ? error.message : String(error)}`
-          : "Could not submit the answer to the active Codex question. The pane may have changed or become unavailable; restore or restart the session and try again."
-      );
+      throw new QuestionResolutionError(`Could not submit the answer to Codex app-server: ${error instanceof Error ? error.message : String(error)}`);
     }
     this.answeredQuestionMessageIds.add(question.messageId);
     const now = nowIso();
@@ -2489,7 +1924,7 @@ export class SessionManager {
 
     for (const session of await this.db.listSessions(false)) {
       if (session.status === "missing") continue;
-      const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
+      const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.cwd;
       const next = await directorySuggestionFromPath(candidate, "active", session.lastActivityAt, {
         label: session.repo.name,
         repoRoot: session.repo.root,
@@ -2531,14 +1966,12 @@ export class SessionManager {
   async createSessionInDirectory(
     cwd: string,
     name: string,
-    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
-    driverKind: SessionDriverKind = this.defaultSessionDriver
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
   ): Promise<ManagedSession> {
-    if (driverKind === "codex_tmux") this.tmux.requireAvailable();
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    if (driverKind === "codex_app_server") this.requireAppServerDriver();
-    const preferences = driverKind === "codex_app_server" && launchSettings === undefined
+    this.requireAppServerDriver();
+    const preferences = launchSettings === undefined
       ? await this.defaultAppServerPreferences()
       : undefined;
     const resolvedLaunchSettings = launchSettings ?? (preferences ? {
@@ -2551,26 +1984,17 @@ export class SessionManager {
       ...resolvedLaunchSettings
     }, documentScopeId);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    if (driverKind === "codex_app_server") {
-      const session = await this.launchAppServerSession({
-        operation: "start",
-        directory,
-        repoPath: directory,
-        sessionName,
-        options: prepared.options,
-        orchestrationCapabilityId: prepared.capabilityId,
-        preferences,
-        documentScopeId
-      });
-      await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
-      this.publish("session.updated", session.id, session);
-      return session;
-    }
-    const launch = await this.tmux.createCodexWindowInMuxpilotSession(directory, sessionName, prepared.options);
-    let session = await this.persistInitializingSession(launch.pane, directory, null, null, undefined, documentScopeId);
-    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
-    this.finishSessionInitialization(session.id, launch.ready);
-    await this.db.addAudit("local", "create_session", session.id, "ok", nowIso());
+    const session = await this.launchAppServerSession({
+      operation: "start",
+      directory,
+      repoPath: directory,
+      sessionName,
+      options: prepared.options,
+      orchestrationCapabilityId: prepared.capabilityId,
+      preferences,
+      documentScopeId
+    });
+    await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
     this.publish("session.updated", session.id, session);
     return session;
   }
@@ -2581,15 +2005,13 @@ export class SessionManager {
   ): Promise<ManagedSession> {
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
-    const driverKind = request.driverKind ?? this.defaultSessionDriver;
-    if (driverKind === "codex_app_server") this.requireAppServerDriver();
-    else this.tmux.requireAvailable();
+    this.requireAppServerDriver();
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
     if (request.workspace?.mode !== "git") {
-      return this.createSessionInDirectory(directory, sessionName, launchSettings, driverKind);
+      return this.createSessionInDirectory(directory, sessionName, launchSettings);
     }
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
@@ -2599,7 +2021,7 @@ export class SessionManager {
       targetBranch: request.workspace.targetBranch
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
-    const preferences = driverKind === "codex_app_server" && launchSettings === undefined
+    const preferences = launchSettings === undefined
       ? await this.defaultAppServerPreferences()
       : undefined;
     const resolvedLaunchSettings = launchSettings ?? (preferences ? {
@@ -2613,39 +2035,24 @@ export class SessionManager {
       fastMode: resolvedLaunchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    if (driverKind === "codex_app_server") {
-      const session = await this.launchAppServerSession({
-        operation: "start",
-        directory: controlPath,
-        repoPath: workspace.summary.entryPath,
-        sessionName,
-        options: prepared.options,
-        orchestrationCapabilityId: prepared.capabilityId,
-        gitWorkspace: workspace.summary,
-        gitWorkspaceId: workspace.id,
-        preferences,
-        documentScopeId: workspace.id
-      });
-      await this.db.addAudit("local", "create_git_session", session.id, workspace.id, nowIso());
-      this.publish("session.updated", session.id, session);
-      return session;
-    }
-    const launch = await this.tmux.createCodexWindowInMuxpilotSession(
-      controlPath,
+    const session = await this.launchAppServerSession({
+      operation: "start",
+      directory: controlPath,
+      repoPath: workspace.summary.entryPath,
       sessionName,
-      prepared.options
-    );
-    const sessionId = tmuxPaneSessionId(launch.pane);
-    await this.gitWorkspaces.bind(workspace.id, sessionId);
-    let session = await this.persistInitializingSession(launch.pane, workspace.summary.entryPath, workspace.summary, null, undefined, workspace.id);
-    session = await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
-    this.finishSessionInitialization(session.id, launch.ready);
-    await this.db.addAudit("local", "create_git_session", sessionId, workspace.id, nowIso());
+      options: prepared.options,
+      orchestrationCapabilityId: prepared.capabilityId,
+      gitWorkspace: workspace.summary,
+      gitWorkspaceId: workspace.id,
+      preferences,
+      documentScopeId: workspace.id
+    });
+    await this.db.addAudit("local", "create_git_session", session.id, workspace.id, nowIso());
     this.publish("session.updated", session.id, session);
     return session;
   }
 
-  async forkSession(sessionId: string, name: string, driverKind?: SessionDriverKind): Promise<ManagedSession> {
+  async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
     const sourceThreadId = source.provider?.threadId ?? source.codexSessionId;
@@ -2656,62 +2063,8 @@ export class SessionManager {
       sessionId: source.id,
       sessionName: sessionName(source)
     };
-    const selectedDriver = driverKind ?? source.driverKind ?? "codex_tmux";
-    if (selectedDriver === "codex_app_server") {
-      this.requireAppServerDriver();
-      return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
-    }
-    this.tmux.requireAvailable();
-
-    let launch;
-    let orchestrationCapabilityId: string | null = null;
-    let gitWorkspace: GitWorkspaceSummary | null = null;
-    let documentScopeId: string;
-    let repoPath: string;
-    if (source.gitWorkspace) {
-      if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
-      const workspace = await this.gitWorkspaces.provision({
-        sessionName: sessionNameValue,
-        entryPath: source.gitWorkspace.entryPath,
-        targetBranch: source.gitWorkspace.targetBranch
-      });
-      const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
-      documentScopeId = workspace.id;
-      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
-      const documentOptions = await this.withDocumentLaunchOptions(
-        managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
-        documentScopeId
-      );
-      const prepared = await this.prepareOrchestratedLaunch(
-        documentOptions
-      );
-      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(
-        controlPath,
-        sessionNameValue,
-        sourceThreadId,
-        prepared.options
-      );
-      const forkSessionId = tmuxPaneSessionId(launch.pane);
-      orchestrationCapabilityId = prepared.capabilityId;
-      await this.gitWorkspaces.bind(workspace.id, forkSessionId);
-      gitWorkspace = workspace.summary;
-      repoPath = workspace.summary.entryPath;
-    } else {
-      repoPath = await requireExistingDirectory(source.repo.root ?? source.tmux.cwd);
-      documentScopeId = this.requireDocuments().newScopeId();
-      await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
-      const documentOptions = await this.withDocumentLaunchOptions({ environment: this.managedEnvironment }, documentScopeId);
-      const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-      launch = await this.tmux.createCodexForkWindowInMuxpilotSession(repoPath, sessionNameValue, sourceThreadId, prepared.options);
-      orchestrationCapabilityId = prepared.capabilityId;
-    }
-
-    let session = await this.persistInitializingSession(launch.pane, repoPath, gitWorkspace, forkedFrom, source, documentScopeId);
-    session = await this.bindOrchestratedLaunch(orchestrationCapabilityId, session.id);
-    this.finishSessionInitialization(session.id, launch.ready);
-    await this.db.addAudit("local", "fork_session", session.id, source.id, nowIso());
-    this.publish("session.updated", session.id, session);
-    return session;
+    this.requireAppServerDriver();
+    return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
   }
 
   private async forkAppServerSession(
@@ -2751,7 +2104,7 @@ export class SessionManager {
         ...inheritedSettings
       }, documentScopeId);
     } else {
-      repoPath = await requireExistingDirectory(source.cwd ?? source.repo.root ?? source.tmux.cwd);
+      repoPath = await requireExistingDirectory(source.cwd ?? source.repo.root);
       directory = repoPath;
       documentScopeId = this.requireDocuments().newScopeId();
       await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
@@ -2842,7 +2195,7 @@ export class SessionManager {
   }
 
   private async appServerHibernationBlockers(session: ManagedSession): Promise<string[]> {
-    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+    if (!session.runtime) {
       return ["unsupported_runtime"];
     }
     const blockers: string[] = [];
@@ -2874,14 +2227,13 @@ export class SessionManager {
   }
 
   async hibernateIdleAppServerSessions(nowMs = Date.now()): Promise<void> {
-    if (this.appServerHibernationRunning || !this.sessionDrivers?.has("codex_app_server")) return;
+    if (this.appServerHibernationRunning || !this.sessionDrivers?.has()) return;
     this.appServerHibernationRunning = true;
     try {
       const sessions = (await this.db.listSessions(true))
         .filter((session) =>
           !session.archived &&
-          session.driverKind === "codex_app_server" &&
-          session.runtime?.kind === "systemd_service" &&
+          session.runtime !== undefined &&
           session.runtime.state === "connected" &&
           session.status === "idle"
         )
@@ -2931,7 +2283,7 @@ export class SessionManager {
   }
 
   private async wakeAppServerSessionExclusive(session: ManagedSession, audit = true): Promise<ManagedSession> {
-    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+    if (session.runtime?.kind !== "systemd_service") {
       throw new SessionRuntimeActionError("Only app-server sessions can be woken");
     }
     if (session.runtime.state !== "hibernated") {
@@ -3055,7 +2407,7 @@ export class SessionManager {
       await this.gitWorkspaces.ensureControlPath(workspace);
       launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
     } else {
-      await requireExistingDirectory(session.cwd ?? session.repo.root ?? session.tmux.cwd);
+      await requireExistingDirectory(session.cwd ?? session.repo.root);
       launchOptions = { environment: this.managedEnvironment };
     }
     const selected = session.models[mode];
@@ -3092,7 +2444,7 @@ export class SessionManager {
       directory = await this.gitWorkspaces.ensureControlPath(workspace);
       launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
     } else {
-      directory = await requireExistingDirectory(session.cwd ?? session.repo.root ?? session.tmux.cwd);
+      directory = await requireExistingDirectory(session.cwd ?? session.repo.root);
       launchOptions = { environment: this.managedEnvironment };
     }
     const documentOptions = await this.withDocumentLaunchOptions({
@@ -3138,12 +2490,11 @@ export class SessionManager {
         name: session.name ?? sessionName(session),
         cwd: directory,
         provider: { ...launch.provider, rolloutPath },
-        driverKind: "codex_app_server",
         runtime: launch.runtime,
         capabilities: launch.capabilities,
         codexSessionId: launch.provider.threadId,
         codexJsonlPath: rolloutPath,
-        resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : current.resourceUnit,
+        resourceUnit: launch.runtime.unit,
         startupError: null
       };
       await driver.setPreferences(resumedSession, {
@@ -3207,10 +2558,8 @@ export class SessionManager {
       name,
       cwd,
       provider: launch.provider,
-      driverKind: "codex_app_server",
       runtime: launch.runtime,
       capabilities: launch.capabilities,
-      tmux: appServerCompatibilityPane(launch.sessionId, name, cwd),
       repo: await loadRepoMetadata(repoPath),
       codexSessionId: launch.provider.threadId,
       codexJsonlPath: launch.provider.rolloutPath,
@@ -3235,7 +2584,7 @@ export class SessionManager {
       archived: false,
       forkedFrom,
       gitWorkspace,
-      resourceUnit: launch.runtime.kind === "systemd_service" ? launch.runtime.unit : null,
+      resourceUnit: launch.runtime.unit,
       documentScopeId
     };
     await this.db.upsertSession(session, now);
@@ -3245,54 +2594,10 @@ export class SessionManager {
   }
 
   private requireAppServerDriver(): AgentSessionDriver {
-    if (!this.sessionDrivers?.has("codex_app_server")) {
+    if (!this.sessionDrivers?.has()) {
       throw new CreateSessionError("App-server sessions are unavailable", 503);
     }
-    return this.sessionDrivers.require("codex_app_server");
-  }
-
-  private async persistInitializingSession(
-    pane: TmuxPane,
-    repoPath: string,
-    gitWorkspace: GitWorkspaceSummary | null = null,
-    forkedFrom: SessionForkOrigin | null = null,
-    preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">,
-    documentScopeId?: string | null
-  ): Promise<ManagedSession> {
-    const now = nowIso();
-    const session: ManagedSession = {
-      id: tmuxPaneSessionId(pane),
-      tmux: pane,
-      repo: await loadRepoMetadata(repoPath),
-      codexSessionId: null,
-      codexJsonlPath: null,
-      discoveryConfidence: "medium",
-      status: "unknown",
-      initializing: true,
-      startupError: null,
-      lastActivityAt: null,
-      preview: "",
-      recentUserPrompts: [],
-      activitySummary: null,
-      activitySummaryGeneratedAt: null,
-      activitySummarySourceSequence: null,
-      inputMode: preferences?.inputMode ?? "default",
-      models: preferences?.models ?? emptySessionModels(),
-      fastMode: preferences?.fastMode ?? null,
-      fastModeAvailable: preferences?.fastModeAvailable ?? null,
-      transcriptSize: 0,
-      transcriptSyncing: false,
-      unreadCount: 0,
-      pinned: false,
-      archived: false,
-      forkedFrom,
-      gitWorkspace,
-      documentScopeId: documentScopeId ?? null
-    };
-    await this.db.upsertSession(session, now);
-    const persisted = requireSession(await this.db.setSessionInitializing(session.id, true, now));
-    await this.recordTouchedRepository(persisted, now);
-    return persisted;
+    return this.sessionDrivers.require();
   }
 
   private finishSessionInitialization(sessionId: string, ready: Promise<void>): void {
@@ -3330,257 +2635,70 @@ export class SessionManager {
     const storedSession = await this.db.getSession(sessionId);
     if (action.type === "kill" && storedSession?.status === "missing") {
       const timestamp = nowIso();
-      if (storedSession.agentOwnership?.completedAt && !storedSession.archived) {
-        await this.db.markSessionArchived(sessionId, true, timestamp);
-      }
-      const updatedSession = await this.db.getSession(sessionId) ?? storedSession;
+      if (storedSession.agentOwnership?.completedAt && !storedSession.archived) await this.db.markSessionArchived(sessionId, true, timestamp);
+      const updated = await this.db.getSession(sessionId) ?? storedSession;
       await this.db.addAudit("local", action.type, sessionId, "already_missing", timestamp);
-      this.publish("session.updated", sessionId, updatedSession);
-      return updatedSession;
-    }
-    if (storedSession && storedSession.driverKind !== "codex_app_server" && tmuxRuntimeAction(action)) {
-      this.tmux.requireAvailable();
+      this.publish("session.updated", sessionId, updated);
+      return updated;
     }
     const session = requireSession(storedSession);
-    if (action.type === "extendAgentBudget") {
-      return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
-    }
+    const driver = this.requireAppServerDriver();
+    if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     if (action.type === "interrupt") {
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
-      const driver = this.appServerDriver(session);
-      if (driver) await driver.interrupt(session, null);
-      else await this.tmux.interrupt(session.tmux.paneId);
-      const now = nowIso();
-      await this.db.setSessionStatus(sessionId, "waiting", now);
+      await driver.interrupt(session, null);
+      await this.db.setSessionStatus(sessionId, "waiting", nowIso());
       this.publish("status.changed", sessionId, { status: "waiting" });
     }
-    if (action.type === "hibernate") {
-      await this.hibernateAppServerSession(session, false);
-    }
-    if (action.type === "wake") {
-      await this.wakeAppServerSession(session, false);
-    }
+    if (action.type === "hibernate") await this.hibernateAppServerSession(session, false);
+    if (action.type === "wake") await this.wakeAppServerSession(session, false);
     if (action.type === "choosePlanAction") {
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
-      const driver = this.appServerDriver(session);
       let plan: string | null = null;
       if (action.action !== "stay_in_plan") {
         plan = extractLastCompleteProposedPlan(latestPlanMessage.text);
         if (plan === null) throw new InputModeSwitchError("Pending proposed plan is incomplete");
-        const changes = await this.requireDocuments().persistApprovedPlan(
-          await this.ensureDocumentScope(session),
-          latestPlanMessage.sequence,
-          plan
-        );
-        if (changes.created.length > 0 || changes.updated.length > 0) {
-          this.publishDocumentsUpdated(sessionId, changes);
-        }
+        const changes = await this.requireDocuments().persistApprovedPlan(await this.ensureDocumentScope(session), latestPlanMessage.sequence, plan);
+        if (changes.created.length > 0 || changes.updated.length > 0) this.publishDocumentsUpdated(sessionId, changes);
       }
-      if (driver) {
-        await this.performAppServerPlanAction(session, latestPlanMessage, action.action, plan);
-      } else {
-        const pane = await this.livePane(session);
-        await this.tmux.sendKeys(pane.paneId, keysForPlanAction(action.action));
-        this.answeredPlanMessageIds.add(latestPlanMessage.id);
-        const now = nowIso();
-        const mode = inputModeForPlanAction(action.action);
-        const status = activeInputStatus(mode);
-        await this.db.setSessionInputMode(sessionId, mode, now);
-        await this.db.setSessionStatus(sessionId, status, now);
-        this.pendingPlanActionStatuses.set(sessionId, { status, expiresAtMs: Date.now() + PLAN_ACTION_START_GRACE_MS });
-        this.publish("status.changed", sessionId, { status });
-      }
+      await this.performAppServerPlanAction(session, latestPlanMessage, action.action, plan);
     }
     if (action.type === "rename") {
       const name = requireSessionName(action.name);
-      const driver = this.appServerDriver(session);
-      if (driver) await driver.rename(session, name);
-      else await this.tmux.renameWindow(session.tmux.paneId, name);
-      if (driver) {
-        const current = requireSession(await this.db.getSession(sessionId));
-        await this.db.upsertSession({ ...current, name }, nowIso());
-      } else await this.refreshRenamedSession(session);
+      await driver.rename(session, name);
+      const current = requireSession(await this.db.getSession(sessionId));
+      await this.db.upsertSession({ ...current, name }, nowIso());
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
     if (action.type === "kill") {
       this.readySessionDiscoveryGeneration.delete(sessionId);
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session was killed");
-      const driver = this.appServerDriver(session);
-      if (driver) {
-        await driver.kill(session);
-        const current = requireSession(await this.db.getSession(sessionId));
-        await this.db.upsertSession({
-          ...current,
-          status: "missing",
-          runtime: current.runtime?.kind === "systemd_service"
-            ? { ...current.runtime, state: "stopped" }
-            : current.runtime
-        }, nowIso());
-      } else {
-        await this.tmux.killPane(session.tmux.paneId);
-      }
+      await driver.kill(session);
+      const current = requireSession(await this.db.getSession(sessionId));
+      await this.db.upsertSession({ ...current, status: "missing", runtime: current.runtime ? { ...current.runtime, state: "stopped" } : undefined }, nowIso());
     }
     if (action.type === "archiveTranscript") {
       this.readySessionDiscoveryGeneration.delete(sessionId);
       await this.db.markSessionArchived(sessionId, true, nowIso());
     }
     if (action.type === "setInputMode") {
-      const appServerDriver = this.appServerDriver(session);
-      if (appServerDriver) await appServerDriver.setPreferences(session, { mode: action.mode });
-      else await this.ensureInputMode(session, action.mode);
+      await driver.setPreferences(session, { mode: action.mode });
       const updatedAt = nowIso();
-      const updatedSession = await this.db.setSessionInputMode(sessionId, action.mode, updatedAt);
-      await this.db.addAudit(
-        "local",
-        "set_input_mode",
-        sessionId,
-        JSON.stringify({
-          previousMode: session.inputMode,
-          requestedMode: action.mode,
-          switchMethod: appServerDriver ? "structured_settings" : "cycle_keys",
-          cycleKeys: appServerDriver ? null : this.inputModeCycleKeys,
-          resultingMode: updatedSession?.inputMode ?? null
-        }),
-        updatedAt
-      );
+      const updated = await this.db.setSessionInputMode(sessionId, action.mode, updatedAt);
+      await this.db.addAudit("local", "set_input_mode", sessionId, JSON.stringify({ previousMode: session.inputMode, requestedMode: action.mode, switchMethod: "structured_settings", resultingMode: updated?.inputMode ?? null }), updatedAt);
     }
-    if (action.type === "setModelSettings") {
-      await this.setModelSettings(session, action.mode, action.model, action.reasoningEffort);
-    }
-    if (action.type === "setFastMode") {
-      await this.setFastMode(session, action.enabled);
-    }
-    if (action.type === "setAgentParent") {
-      await this.operatorSetAgentParent(sessionId, action.parentSessionId);
-    }
-    if (action.type === "retryInputDelivery") {
-      await this.retryInputDelivery(session);
-    }
-    if (action.type === "dismissInputDeliveryFailure") {
-      await this.dismissInputDeliveryFailure(session);
-    }
-    if (action.type === "detach") {
-      this.publish("notification.created", sessionId, { title: "Detach requested", body: "Detach is managed by tmux clients." });
-    }
-    if (action.type === "kill" && session.driverKind !== "codex_app_server") await this.discover();
-    if (action.type === "kill" && session.agentOwnership?.completedAt) {
-      await this.db.markSessionArchived(sessionId, true, nowIso());
-    }
+    if (action.type === "setModelSettings") await this.setModelSettings(session, action.mode, action.model, action.reasoningEffort);
+    if (action.type === "setFastMode") await this.setFastMode(session, action.enabled);
+    if (action.type === "setAgentParent") await this.operatorSetAgentParent(sessionId, action.parentSessionId);
+    if (action.type === "retryInputDelivery") await this.retryInputDelivery(session);
+    if (action.type === "dismissInputDeliveryFailure") await this.dismissInputDeliveryFailure(session);
+    if (action.type === "kill" && session.agentOwnership?.completedAt) await this.db.markSessionArchived(sessionId, true, nowIso());
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
     return updatedSession;
-  }
-
-  private async reconcileInputDeliveryState(
-    sessionId: string,
-    pane: TmuxPane,
-    message: ChatMessage | null,
-    lifecycle: ChatMessage | null,
-    inferredStatus: SessionStatus,
-    inputMode: CollaborationMode
-  ): Promise<ChatMessage | null> {
-    if (!message) return null;
-    const submission = muxpilotSubmission(message);
-    if (!submission || submission.state === "dismissed" || submission.state === "acknowledged") return message;
-
-    const acknowledgingLifecycle = lifecycle && lifecycle.sequence > message.sequence ? lifecycle.text : null;
-    const acknowledged = acknowledgingLifecycle !== null || isDeliveryAcknowledgingStatus(inferredStatus);
-    if (acknowledged) {
-      const updated = await this.updateInputDelivery(message, {
-        state: "acknowledged",
-        deliveryPhase: "acknowledged",
-        acknowledgedBy: acknowledgingLifecycle ?? "active_status",
-        failureReason: null
-      });
-      await this.db.addAudit("local", "input_delivery_acknowledged", sessionId, JSON.stringify({
-        promptHash: inputPromptHash(sessionId, message.text),
-        source: recordValue(updated.payload.muxpilotSubmission)?.acknowledgedBy ?? "unknown"
-      }), nowIso());
-      return updated;
-    }
-
-    const attemptedAt = typeof submission.lastAttemptAt === "string" ? submission.lastAttemptAt : message.timestamp;
-    const attemptedAtMs = Date.parse(attemptedAt);
-    if (!Number.isFinite(attemptedAtMs) || Date.now() - attemptedAtMs < INPUT_DELIVERY_ACK_TIMEOUT_MS) return message;
-    if (submission.state === "failed") return message;
-    if (typeof submission.deliveryPhase !== "string") return this.failInputDelivery(message, "unverified_legacy_submission");
-    if (this.deliveringInputSessionIds.has(sessionId)) return message;
-    if (!isInputReadyStatus(inferredStatus)) return this.failInputDelivery(message, "no_codex_acknowledgement");
-
-    let capture: string;
-    try {
-      capture = await this.tmux.capturePane(
-        pane.paneId,
-        inputVerificationCaptureLines(codexTerminalUserText(message.text), paneWidth(pane)),
-        true
-      );
-    } catch {
-      return this.failInputDelivery(message, "tmux_failed");
-    }
-    const terminalText = codexTerminalUserText(message.text);
-    const enterRetryCount = numericSubmissionField(submission, "enterRetryCount");
-    if (composerContainsInput(capture, terminalText)) {
-      if (enterRetryCount >= 1) return this.failInputDelivery(message, "submit_not_accepted");
-      this.deliveringInputSessionIds.add(sessionId);
-      try {
-        await this.tmux.submitInput(pane.paneId);
-        const attemptedAt = nowIso();
-        const updated = await this.updateInputDelivery(message, {
-          deliveryPhase: "awaiting_ack",
-          enterRetryCount: enterRetryCount + 1,
-          lastAttemptAt: attemptedAt,
-          failureReason: null
-        });
-        await this.db.addAudit("local", "input_delivery_enter_retry", sessionId, JSON.stringify({
-          promptHash: inputPromptHash(sessionId, message.text),
-          enterRetryCount: enterRetryCount + 1
-        }), attemptedAt);
-        return updated;
-      } catch {
-        return this.failInputDelivery(message, "tmux_failed");
-      } finally {
-        this.deliveringInputSessionIds.delete(sessionId);
-      }
-    }
-
-    if (composerHasInput(capture)) return this.failInputDelivery(message, "composer_changed");
-    const replayCount = numericSubmissionField(submission, "replayCount");
-    if (replayCount >= 1) return this.failInputDelivery(message, "no_codex_acknowledgement");
-
-    const session = await this.db.getSession(sessionId);
-    if (!session) return this.failInputDelivery(message, "session_unavailable");
-    this.deliveringInputSessionIds.add(sessionId);
-    let current = await this.updateInputDelivery(message, {
-      deliveryPhase: "replaying",
-      replayCount: replayCount + 1,
-      attemptCount: numericSubmissionField(submission, "attemptCount") + 1,
-      lastAttemptAt: nowIso(),
-      failureReason: null
-    });
-    try {
-      const mode = collaborationModeFromMessage(message) ?? inputMode;
-      const liveSession = await this.ensureInputMode(session, mode);
-      const result = await this.sendRawInput(liveSession, message.text);
-      const replayedAt = nowIso();
-      current = await this.updateInputDelivery(current, {
-        deliveryPhase: "awaiting_ack",
-        transportPasteRetryCount: numericSubmissionField(submission, "transportPasteRetryCount") + (result?.pasteReplayCount ?? 0),
-        enterRetryCount: enterRetryCount + (result?.submitKeyRetryCount ?? 0),
-        lastAttemptAt: replayedAt
-      });
-      await this.db.addAudit("local", "input_delivery_replayed", sessionId, JSON.stringify({
-        promptHash: inputPromptHash(sessionId, message.text),
-        replayCount: replayCount + 1
-      }), replayedAt);
-      return current;
-    } catch (error) {
-      return this.failInputDelivery(current, error instanceof InputTransportError ? error.reason : "tmux_failed");
-    } finally {
-      this.deliveringInputSessionIds.delete(sessionId);
-    }
   }
 
   private async failInputDelivery(message: ChatMessage, reason: InputDeliveryFailureCode): Promise<ChatMessage> {
@@ -3601,117 +2719,12 @@ export class SessionManager {
   }
 
   private async retryInputDelivery(session: ManagedSession): Promise<void> {
-    if (this.deliveringInputSessionIds.has(session.id)) {
-      throw new InputDeliveryError("Another input delivery is already in progress for this session");
-    }
+    if (this.deliveringInputSessionIds.has(session.id)) throw new InputDeliveryError("Another input delivery is already in progress for this session");
     const message = await this.db.latestUserMessage(session.id);
     const submission = message ? muxpilotSubmission(message) : null;
     const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
-    if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) {
-      throw new InputDeliveryError("There is no failed input delivery to retry");
-    }
-    const appServerDriver = this.appServerDriver(session);
-    if (appServerDriver) {
-      await this.retryAppServerInputDelivery(session, message, submission, appServerDriver);
-      return;
-    }
-    const pane = await this.livePane(session);
-    const inferred = await inferStatus(pane, session.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-    if (!isInputReadyStatus(inferred)) throw new InputDeliveryError("Codex is not ready to retry this input");
-
-    const attemptedAt = nowIso();
-    const attemptCount = typeof submission.attemptCount === "number" ? submission.attemptCount + 1 : 2;
-    const mode = collaborationModeFromMessage(message) ?? session.inputMode;
-    const terminalText = codexTerminalUserText(message.text);
-    let capture: string;
-    try {
-      capture = await this.tmux.capturePane(
-        pane.paneId,
-        inputVerificationCaptureLines(terminalText, paneWidth(pane)),
-        true
-      );
-    } catch (error) {
-      throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
-    }
-    if (composerContainsInput(capture, terminalText)) {
-      const modeSession = await this.ensureInputMode(session, mode);
-      const retryPane = await this.livePane(modeSession);
-      let pending = await this.updateInputDelivery(message, {
-        state: "pending",
-        deliveryPhase: "delivering",
-        attemptCount,
-        replayCount: 0,
-        enterRetryCount: 0,
-        lastAttemptAt: attemptedAt,
-        failureCode: null,
-        failureReason: null
-      });
-      this.deliveringInputSessionIds.add(session.id);
-      try {
-        const result = await this.tmux.submitComposedInput(retryPane.paneId, terminalText);
-        pending = await this.updateInputDelivery(pending, {
-          deliveryPhase: "awaiting_ack",
-          enterRetryCount: result.submitKeyRetryCount,
-          lastAttemptAt: nowIso()
-        });
-      } catch (error) {
-        const reason = error instanceof InputTransportError ? error.reason : "tmux_failed";
-        const failed = await this.updateInputDelivery(pending, {
-          state: "failed",
-          deliveryPhase: "failed",
-          failureCode: reason,
-          failureReason: inputDeliveryFailureMessage(reason)
-        });
-        const failedAt = nowIso();
-        await this.db.setSessionStatus(session.id, "input_failed", failedAt);
-        await this.db.addAudit("local", "input_delivery_failed", session.id, JSON.stringify({
-          promptHash: inputPromptHash(session.id, message.text),
-          promptLength: message.text.length,
-          reason
-        }), failedAt);
-        this.publish("message.appended", session.id, failed);
-        this.publish("status.changed", session.id, { status: "input_failed" });
-        throw new InputDeliveryError(error instanceof Error ? error.message : String(error));
-      } finally {
-        this.deliveringInputSessionIds.delete(session.id);
-      }
-      const status = activeInputStatus(mode);
-      await this.db.setSessionStatus(session.id, status, attemptedAt);
-      await this.db.addAudit("local", "input_delivery_existing_composer_submitted", session.id, JSON.stringify({
-        promptHash: inputPromptHash(session.id, message.text),
-        enterRetryCount: recordValue(pending.payload.muxpilotSubmission)?.enterRetryCount ?? 0
-      }), nowIso());
-      this.publish("message.appended", session.id, pending);
-      this.publish("status.changed", session.id, { status });
-      return;
-    }
-    if (composerHasInput(capture)) {
-      throw new InputDeliveryError("The Codex composer contains different input; it was not overwritten");
-    }
-    let pending = await this.updateInputDelivery(message, {
-      state: "pending",
-      deliveryPhase: "persisted",
-      attemptCount,
-      replayCount: 0,
-      enterRetryCount: 0,
-      lastAttemptAt: attemptedAt,
-      failureCode: null,
-      failureReason: null
-    });
-    pending = await this.deliverSubmittedInput(session, pending, mode);
-    const queuedInputId = typeof submission.queuedInputId === "string" ? submission.queuedInputId : null;
-    if (queuedInputId) {
-      const queued = await this.db.getQueuedInput(session.id, queuedInputId);
-      if (queued) {
-        const sentAt = nowIso();
-        await this.db.updateQueuedInput({ ...queued, status: "sent", error: null, updatedAt: sentAt, sentAt });
-        this.publish("queue.updated", session.id, { queuedInputs: await this.db.listQueuedInputs(session.id) });
-      }
-    }
-    const status = activeInputStatus(mode);
-    await this.db.setSessionStatus(session.id, status, attemptedAt);
-    this.publish("message.appended", session.id, pending);
-    this.publish("status.changed", session.id, { status });
+    if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) throw new InputDeliveryError("There is no failed input delivery to retry");
+    await this.retryAppServerInputDelivery(session, message, submission, this.requireAppServerDriver());
   }
 
   private async retryAppServerInputDelivery(
@@ -3788,9 +2801,8 @@ export class SessionManager {
   }
 
   private appServerDriver(session: ManagedSession): AgentSessionDriver | null {
-    if (session.driverKind !== "codex_app_server") return null;
     if (!this.sessionDrivers) throw new Error("App-server session driver registry is unavailable");
-    return this.sessionDrivers.require("codex_app_server");
+    return this.sessionDrivers.require();
   }
 
   private pendingPlanActionStatus(sessionId: string): SessionStatus | null {
@@ -3799,45 +2811,6 @@ export class SessionManager {
     if (pending.expiresAtMs > Date.now()) return pending.status;
     this.pendingPlanActionStatuses.delete(sessionId);
     return null;
-  }
-
-  private async answerInteractiveQuestion(
-    session: ManagedSession,
-    question: QuestionRequest,
-    request: QuestionAnswerRequest
-  ): Promise<void> {
-    const pane = await this.livePane(session);
-    for (const prompt of question.questions) {
-      const values = request.answers[prompt.id]?.answers.map((answer) => answer.trim()).filter(Boolean) ?? [];
-      const value = values[0];
-      if (!value) throw new QuestionResolutionError(`Answer is required for question: ${prompt.id}`);
-      const optionIndex = prompt.options.findIndex((option) => option.label === value);
-      if (optionIndex >= 0) {
-        await this.submitInteractiveQuestionAnswer(pane.paneId, optionIndex, values.slice(1));
-        continue;
-      }
-      if (value === NONE_OF_THE_ABOVE_ANSWER && prompt.options.length > 0) {
-        await this.submitInteractiveQuestionAnswer(pane.paneId, prompt.options.length, values.slice(1));
-        continue;
-      }
-      if (prompt.options.length > 0) {
-        await this.submitInteractiveQuestionAnswer(pane.paneId, prompt.options.length, values);
-        continue;
-      }
-      await this.tmux.pasteText(pane.paneId, codexTerminalUserText(values.join("\n\n")));
-      await this.tmux.sendKeys(pane.paneId, ["Enter"]);
-    }
-  }
-
-  private async submitInteractiveQuestionAnswer(paneId: string, optionIndex: number, notes: string[]): Promise<void> {
-    const note = notes.join("\n\n").trim();
-    if (!note) {
-      await this.tmux.sendKeys(paneId, menuSelectionKeys(optionIndex));
-      return;
-    }
-    await this.tmux.sendKeys(paneId, [...menuNavigationKeys(optionIndex), "Tab"]);
-    await this.tmux.pasteText(paneId, codexTerminalUserText(note));
-    await this.tmux.sendKeys(paneId, ["Enter"]);
   }
 
   private async processQueuedInputs(sessionId: string): Promise<void> {
@@ -3860,9 +2833,7 @@ export class SessionManager {
         return;
       }
 
-      const readySession = session.driverKind === "codex_app_server"
-        ? readyAppServerInputSession(session)
-        : await this.readyLiveSession(session);
+      const readySession = readyAppServerInputSession(session);
       if (!readySession) return;
 
       const sending = { ...input, status: "sending" as const, error: null, updatedAt: nowIso() };
@@ -3909,21 +2880,6 @@ export class SessionManager {
     }
   }
 
-  private async readyLiveSession(session: ManagedSession): Promise<ManagedSession | null> {
-    if (session.initializing) return null;
-    let liveSession: ManagedSession;
-    try {
-      liveSession = await this.liveSession(session);
-    } catch {
-      return null;
-    }
-
-    if (liveSession.initializing) return null;
-    const status = await inferStatus(liveSession.tmux, liveSession.status, (paneId, lines) => this.tmux.capturePane(paneId, lines, false));
-    if (!isInputReadyStatus(status)) return null;
-    return { ...liveSession, status };
-  }
-
   private async markQueuedInputFailed(input: QueuedInput, error: string): Promise<void> {
     const failed = { ...input, status: "failed" as const, error, updatedAt: nowIso(), sentAt: null };
     await this.db.updateQueuedInput(failed);
@@ -3931,138 +2887,17 @@ export class SessionManager {
     this.publish("queue.updated", input.sessionId, { queuedInputs: await this.db.listQueuedInputs(input.sessionId) });
   }
 
-  private keysForDecision(decision: ApprovalDecision): string[] {
-    if (decision === "approve_once") return this.approvalKeys.approveOnce;
-    if (decision === "approve_for_prefix") return this.approvalKeys.approveForPrefix;
-    if (decision === "deny") return this.approvalKeys.deny;
-    throw new ApprovalResolutionError("This approval choice requires an interactive permission prompt");
-  }
-
-  private async captureInteractiveApprovalPrompt(session: ManagedSession): Promise<InteractiveApprovalPrompt | null> {
-    try {
-      const capture = await this.tmux.capturePane(session.tmux.paneId, 100, false);
-      return parseInteractiveApprovalPrompt(capture);
-    } catch {
-      return null;
-    }
-  }
-
-  private async corroboratedLiveApproval(
-    pane: TmuxPane,
-    contextMessages: ChatMessage[]
-  ): Promise<{ prompt: InteractiveApprovalPrompt; contextMessage: ChatMessage } | null> {
-    try {
-      const prompt = parseInteractiveApprovalPrompt(await this.tmux.capturePane(pane.paneId, 100, false));
-      if (!prompt) return null;
-      const contextMessage = matchingInteractiveApprovalContext(prompt, contextMessages);
-      return contextMessage ? { prompt, contextMessage } : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async isApprovalGateVisible(session: ManagedSession): Promise<boolean> {
-    try {
-      const capture = await this.tmux.capturePane(session.tmux.paneId, 100, false);
-      return looksLikeApprovalScreen(capture);
-    } catch {
-      return looksLikeApprovalScreen(`${session.tmux.title}\n${session.tmux.windowName}`);
-    }
-  }
-
-  private async ensureInputMode(session: ManagedSession, mode: CollaborationMode): Promise<ManagedSession> {
-    let liveSession = await this.liveSession(session);
-    const currentMode = await detectLiveCollaborationMode(
-      liveSession.tmux,
-      (paneId, lines) => this.tmux.capturePane(paneId, lines, false)
-    );
-    if (currentMode === mode || (currentMode === null && session.inputMode === mode)) return liveSession;
-
-    await this.tmux.sendKeys(liveSession.tmux.paneId, this.inputModeCycleKeys);
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      await delay(120);
-      liveSession = await this.liveSession(liveSession);
-      if (detectCollaborationModeFromPane(liveSession.tmux) === mode) return liveSession;
-      try {
-        const capture = await this.tmux.capturePane(liveSession.tmux.paneId, 30, false);
-        if (detectCollaborationModeFromText(capture) === mode) return liveSession;
-      } catch {
-        // The pane title remains the primary signal when capture is unavailable.
-      }
-    }
-
-    return liveSession;
-  }
-
   private async setFastMode(session: ManagedSession, enabled: boolean): Promise<void> {
-    if (!canToggleFastMode(session.status)) {
-      throw new FastModeSwitchError("Fast mode cannot be changed in the session's current state");
-    }
-    if (session.fastModeAvailable === false) {
-      throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
-    }
-    const appServerDriver = this.appServerDriver(session);
-    if (appServerDriver) {
-      try {
-        await appServerDriver.setPreferences(session, { fastMode: enabled });
-      } catch (error) {
-        throw new FastModeSwitchError(error instanceof Error ? error.message : String(error));
-      }
-      const updatedAt = nowIso();
-      await this.db.setSessionFastMode(session.id, enabled, updatedAt);
-      await this.db.addAudit(
-        "local",
-        "set_fast_mode",
-        session.id,
-        JSON.stringify({ enabled, method: "structured_settings" }),
-        updatedAt
-      );
-      return;
-    }
-    if (!session.codexJsonlPath) {
-      throw new FastModeSwitchError("Fast mode is unavailable until the Codex session is detected");
-    }
-
-    const observed = await readLatestCodexFastMode(session.codexJsonlPath);
-    if (observed === enabled || (observed === null && session.fastMode === enabled)) {
-      await this.db.setSessionFastMode(session.id, enabled, nowIso());
-      return;
-    }
-
-    const pane = await this.livePane(session);
-    const terminalText = codexTerminalUserText("/fast");
+    if (!canToggleFastMode(session.status)) throw new FastModeSwitchError("Fast mode cannot be changed in the sessions current state");
+    if (session.fastModeAvailable === false) throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
     try {
-      const capture = await this.tmux.capturePane(
-        pane.paneId,
-        inputVerificationCaptureLines(terminalText, paneWidth(pane)),
-        true
-      );
-      if (composerContainsInput(capture, terminalText)) {
-        await this.tmux.submitComposedInput(pane.paneId, terminalText);
-      } else if (composerHasInput(capture)) {
-        throw new FastModeSwitchError("The Codex composer contains different input; it was not overwritten");
-      } else {
-        await this.tmux.sendInput(pane.paneId, "/fast");
-      }
+      await this.requireAppServerDriver().setPreferences(session, { fastMode: enabled });
     } catch (error) {
-      if (error instanceof FastModeSwitchError) throw error;
       throw new FastModeSwitchError(error instanceof Error ? error.message : String(error));
     }
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      await delay(100);
-      if (await readLatestCodexFastMode(session.codexJsonlPath) !== enabled) continue;
-      const updatedAt = nowIso();
-      await this.db.setSessionFastMode(session.id, enabled, updatedAt);
-      await this.db.addAudit(
-        "local",
-        "set_fast_mode",
-        session.id,
-        JSON.stringify({ enabled, command: "/fast" }),
-        updatedAt
-      );
-      return;
-    }
-    throw new FastModeSwitchError("Codex did not confirm the Fast mode change");
+    const updatedAt = nowIso();
+    await this.db.setSessionFastMode(session.id, enabled, updatedAt);
+    await this.db.addAudit("local", "set_fast_mode", session.id, JSON.stringify({ enabled, method: "structured_settings" }), updatedAt);
   }
 
   private async setModelSettings(
@@ -4122,61 +2957,22 @@ export class SessionManager {
       fastModeAvailable: codexFastModeAvailable(catalog.models, models.default.model)
     };
   }
-
-  private async liveSession(session: ManagedSession): Promise<ManagedSession> {
-    const pane = await this.livePane(session);
-    return { ...session, tmux: pane };
-  }
-
-  private async livePane(session: ManagedSession): Promise<TmuxPane> {
-    this.tmux.requireAvailable();
-    const panes = await this.tmux.listPanes();
-    const pane = panes.find((candidate) => tmuxPaneSessionId(candidate) === session.id);
-    if (pane) return pane;
-    if (panes.some((candidate) => candidate.paneId === session.tmux.paneId)) {
-      throw new Error("Session pane no longer matches this chat session");
-    }
-    throw new Error("Session pane is no longer available in tmux");
-  }
-
   private async findLiveSessionByRecoveryIdentity(identity: string): Promise<ManagedSession | null> {
-    const sessions = await this.db.listSessions(true);
-    for (const session of sessions) {
-      if (recoveryIdentityForSession(session) !== identity) continue;
-      if (session.driverKind === "codex_app_server") {
-        if (await this.isLiveAppServerRuntime(session)) return session;
-        continue;
-      }
-      if (session.status === "missing") continue;
-      try {
-        return await this.liveSession(session);
-      } catch {
-        // Discovery will mark stale rows missing on the next tick.
-      }
+    for (const session of await this.db.listSessions(true)) {
+      if (recoveryIdentityForSession(session) === identity && await this.isLiveAppServerRuntime(session)) return session;
     }
     return null;
   }
 
   private async findLiveSessionByCodexSessionId(codexSessionId: string): Promise<ManagedSession | null> {
-    const sessions = await this.db.listSessions(true);
-    for (const session of sessions) {
-      if (session.codexSessionId !== codexSessionId) continue;
-      if (session.driverKind === "codex_app_server") {
-        if (await this.isLiveAppServerRuntime(session)) return session;
-        continue;
-      }
-      if (session.status === "missing") continue;
-      try {
-        return await this.liveSession(session);
-      } catch {
-        // Discovery will mark stale rows missing on the next tick.
-      }
+    for (const session of await this.db.listSessions(true)) {
+      if (session.codexSessionId === codexSessionId && await this.isLiveAppServerRuntime(session)) return session;
     }
     return null;
   }
 
   private async isLiveAppServerRuntime(session: ManagedSession): Promise<boolean> {
-    if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") return false;
+    if (!session.runtime) return false;
     try {
       const evidence = await this.requireAppServerDriver().runtimeEvidence(session);
       return evidence.activeState === "active" && evidence.socketPresent;
@@ -4185,55 +2981,8 @@ export class SessionManager {
     }
   }
 
-  private async rebindRestoredSession(source: ManagedSession, pane: TmuxPane): Promise<ManagedSession> {
-    const now = nowIso();
-    const repo = await loadRepoMetadata(source.gitWorkspace?.entryPath ?? pane.cwd);
-    const parserOffsetMove =
-      source.codexJsonlPath ? { from: parserOffsetKey(source.id, source.codexJsonlPath), to: parserOffsetKey(tmuxPaneSessionId(pane), source.codexJsonlPath) } : null;
-    const session: ManagedSession = {
-      id: tmuxPaneSessionId(pane),
-      tmux: pane,
-      repo,
-      codexSessionId: source.codexSessionId,
-      codexJsonlPath: source.codexJsonlPath,
-      discoveryConfidence: "medium",
-      status: "unknown",
-      initializing: true,
-      startupError: null,
-      lastActivityAt: source.lastActivityAt,
-      preview: source.preview,
-      recentUserPrompts: source.recentUserPrompts,
-      activitySummary: source.activitySummary,
-      activitySummaryGeneratedAt: source.activitySummaryGeneratedAt,
-      activitySummarySourceSequence: source.activitySummarySourceSequence,
-      inputMode: source.inputMode,
-      models: source.models,
-      fastMode: source.fastMode ?? null,
-      fastModeAvailable: source.fastModeAvailable ?? null,
-      transcriptSize: source.transcriptSize,
-      transcriptSyncing: source.transcriptSyncing === true,
-      unreadCount: source.unreadCount,
-      pinned: source.pinned,
-      archived: false,
-      forkedFrom: source.forkedFrom ?? null,
-      gitWorkspace: source.gitWorkspace ?? null,
-      documentScopeId: source.documentScopeId ?? null
-    };
-    const rebound = await this.db.rekeySession(source.id, session, parserOffsetMove, now);
-    if (!rebound) throw new SessionRestoreError("Session not found");
-    await this.recordTouchedRepository(session, now);
-    return requireSession(rebound);
-  }
-
-  private async refreshRenamedSession(session: ManagedSession): Promise<void> {
-    const liveSession = await this.liveSession(session);
-    const now = nowIso();
-    await this.db.upsertSession(liveSession, now);
-    await this.recordTouchedRepository(liveSession, now);
-  }
-
   private async recordTouchedRepository(session: ManagedSession, updatedAt: string): Promise<void> {
-    const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
+    const candidate = session.gitWorkspace?.entryPath ?? session.repo.root ?? session.cwd;
     const path = await existingDirectoryPath(candidate);
     if (!path) return;
     await this.db.upsertTouchedRepository(
@@ -4261,33 +3010,6 @@ export class SessionManager {
       timestamp: nowIso()
     };
     this.events.publish(event);
-  }
-
-  private async shouldIncludePane(
-    pane: TmuxPane,
-    processInfo: CodexProcessInfo | null,
-    existing: ManagedSession | null
-  ): Promise<boolean> {
-    if (processInfo) return true;
-    const sameExistingProcess = Boolean(existing && sameLivePaneProcess(existing, pane));
-    if (sameExistingProcess && (existing?.initializing || existing?.startupError)) return true;
-    if (isShellCommand(pane.currentCommand)) {
-      try {
-        const capture = await this.tmux.capturePane(pane.paneId, 80, false);
-        return looksLikeCodexScreen(visibleTail(capture));
-      } catch {
-        return sameExistingProcess;
-      }
-    }
-    if (looksLikeCodexPane(pane)) return true;
-    if (!sameExistingProcess && pane.currentCommand !== "node") return false;
-
-    try {
-      const capture = await this.tmux.capturePane(pane.paneId, 80, false);
-      return looksLikeCodexScreen(visibleTail(capture));
-    } catch {
-      return sameExistingProcess;
-    }
   }
 
   private async latestQuestionAnswerMessage(sessionId: string, questionMessage: ChatMessage | null): Promise<ChatMessage | null> {
@@ -4320,6 +3042,10 @@ export function normalizeRepositoryApprovalPrefix(prefixRule: string[], workspac
     }
     return normalized;
   });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export class ApprovalResolutionError extends Error {
@@ -4517,19 +3243,9 @@ function inputPromptHash(sessionId: string, text: string): string {
 }
 
 function inputDeliveryFailureMessage(reason: InputDeliveryFailureCode): string {
-  if (reason === "paste_not_observed") return "Codex did not display the pasted input.";
-  if (reason === "submit_not_accepted") return "Codex kept the input in the composer after the submit key was retried.";
-  if (reason === "composer_changed") return "The Codex composer changed before the input could be safely replayed.";
-  if (reason === "unverified_legacy_submission") return "Codex remained ready and did not acknowledge the submitted input.";
   if (reason === "session_unavailable") return "The session became unavailable before the input could be replayed.";
   if (reason === "app_server_rejected") return "Codex app-server did not accept the input.";
-  if (reason === "tmux_failed") return "Muxpilot could not deliver the input through tmux.";
-  return "Codex remained ready and did not acknowledge the submitted input after one safe replay.";
-}
-
-function paneWidth(pane: TmuxPane): number {
-  const width = Number.parseInt(pane.size.split("x", 1)[0] ?? "", 10);
-  return Number.isFinite(width) && width > 0 ? width : 120;
+  return "Codex app-server did not acknowledge the input.";
 }
 
 function isTurnCompletionMessage(message: ChatMessage): boolean {
@@ -4547,7 +3263,7 @@ function requireSessionName(input: string): string {
 }
 
 function restoreSessionName(session: ManagedSession): string {
-  for (const candidate of [session.tmux.windowName, session.repo.name, "restored"]) {
+  for (const candidate of [session.name, session.repo.name, "restored"]) {
     const name = normalizeSessionName(candidate);
     if (isValidSessionName(name)) return name;
   }
@@ -4649,7 +3365,7 @@ function recoveryCandidateFromSession(session: ManagedSession): SessionRecoveryC
     sessionName: sessionName(session),
     repoName: session.repo.name,
     repoBranch: workspace?.targetBranch ?? session.repo.branch,
-    cwd: session.tmux.cwd,
+    cwd: session.cwd,
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,
     matchedPrompts: session.recentUserPrompts.map((text, index) => ({
@@ -4702,7 +3418,7 @@ function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
 }
 
 function sessionName(session: ManagedSession): string {
-  return session.tmux.windowName.trim() || session.tmux.sessionName.trim() || session.repo.name || "session";
+  return session.name.trim() || session.repo.name || "session";
 }
 
 function historyResultPreference(first: SessionHistoryResult, second: SessionHistoryResult): number {
@@ -4834,228 +3550,7 @@ function isPlanActionInput(text: string): boolean {
   );
 }
 
-function codexTerminalUserText(text: string): string {
-  return text.endsWith(" ") ? text : `${text} `;
-}
-
-function keysForPlanAction(action: PlanActionChoice): string[] {
-  if (action === "implement") return ["Enter"];
-  if (action === "clear_context_implement") return ["Down", "Enter"];
-  return ["Down", "Down", "Enter"];
-}
-
-function inputModeForPlanAction(action: PlanActionChoice): CollaborationMode {
-  return action === "stay_in_plan" ? "plan" : "default";
-}
-
-function menuSelectionKeys(index: number): string[] {
-  return [...menuNavigationKeys(index), "Enter"];
-}
-
-function menuNavigationKeys(index: number): string[] {
-  return Array.from({ length: index }, () => "Down");
-}
-
 const NONE_OF_THE_ABOVE_ANSWER = "None of the above";
-
-async function claimCodexFile(
-  pane: TmuxPane,
-  existing: ManagedSession | null,
-  files: CodexSessionFile[],
-  claims: Set<string>,
-  processInfo: CodexProcessInfo | null,
-  capturePane: (lines: number) => Promise<string>,
-  growingPaths: ReadonlySet<string>,
-  reconsideredPaths: ReadonlySet<string>,
-  allowUncorroboratedSuccessor: boolean
-): Promise<CodexSessionFile | null> {
-  const exact = files.filter((file) => file.cwd === pane.cwd);
-  const existingMatch = exact.find((file) => file.path === existing?.codexJsonlPath);
-  const compatibleExact = exact.filter((file) => !claims.has(file.path) || file.path === existingMatch?.path);
-
-  const resumedMatch = matchByResumedSessionId(processInfo, compatibleExact);
-  // A fresh context can start a new rollout without changing the long-lived
-  // process argv. Use that resume id immediately only for an unbound pane;
-  // established bindings must pass live continuity checks before falling back.
-  if (resumedMatch && !existingMatch && !claims.has(resumedMatch.path)) {
-    claims.add(resumedMatch.path);
-    return resumedMatch;
-  }
-
-  const alternativeChanged = compatibleExact.some(
-    (file) => file.path !== existingMatch?.path && reconsideredPaths.has(file.path)
-  );
-  if (existingMatch && !claims.has(existingMatch.path) && (growingPaths.has(existingMatch.path) || !alternativeChanged)) {
-    claims.add(existingMatch.path);
-    return existingMatch;
-  }
-
-  const visibleMatch = await visibleCodexFileForPane(compatibleExact, capturePane, existingMatch?.path);
-  if (visibleMatch && !claims.has(visibleMatch.path)) {
-    claims.add(visibleMatch.path);
-    return visibleMatch;
-  }
-
-  const growingSuccessor = uniqueGrowingSuccessor(compatibleExact, existingMatch, growingPaths);
-  if (
-    growingSuccessor &&
-    (!resumedMatch || allowUncorroboratedSuccessor) &&
-    !claims.has(growingSuccessor.path)
-  ) {
-    claims.add(growingSuccessor.path);
-    return growingSuccessor;
-  }
-
-  if (resumedMatch && !claims.has(resumedMatch.path)) {
-    claims.add(resumedMatch.path);
-    return resumedMatch;
-  }
-
-  const startTimeMatch = matchByProcessStart(processInfo, compatibleExact);
-  if (startTimeMatch && !claims.has(startTimeMatch.path)) {
-    claims.add(startTimeMatch.path);
-    return startTimeMatch;
-  }
-
-  if (existingMatch && !claims.has(existingMatch.path)) {
-    claims.add(existingMatch.path);
-    return existingMatch;
-  }
-
-  const unclaimedExact = exact.filter((file) => !claims.has(file.path));
-  if (unclaimedExact.length === 1) {
-    const match = unclaimedExact[0];
-    if (match) claims.add(match.path);
-    return match ?? null;
-  }
-
-  const repoName = basename(pane.cwd);
-  const fuzzy = files.filter((file) => file.cwd && basename(file.cwd) === repoName && !claims.has(file.path));
-  if (fuzzy.length === 0) return null;
-  const match = await bestCodexFileForPane(fuzzy, processInfo, capturePane);
-  if (match) claims.add(match.path);
-  return match;
-}
-
-function growingCodexFiles(
-  files: CodexSessionFile[],
-  previous: ReadonlyMap<string, { sizeBytes: number; updatedAtMs: number }>
-): Set<string> {
-  return new Set(
-    files
-      .filter((file) => {
-        const observed = previous.get(file.path);
-        return Boolean(observed && (file.sizeBytes > observed.sizeBytes || file.updatedAtMs > observed.updatedAtMs));
-      })
-      .map((file) => file.path)
-  );
-}
-
-function reconsideredCodexFiles(
-  files: CodexSessionFile[],
-  previous: ReadonlyMap<string, { sizeBytes: number; updatedAtMs: number }>
-): Set<string> {
-  // Reconsider persisted bindings once after startup, before file growth has
-  // established which rollout is live.
-  if (previous.size === 0) return new Set(files.map((file) => file.path));
-  return new Set(
-    files
-      .filter((file) => {
-        const observed = previous.get(file.path);
-        return !observed || file.sizeBytes !== observed.sizeBytes || file.updatedAtMs !== observed.updatedAtMs;
-      })
-      .map((file) => file.path)
-  );
-}
-
-function uniqueGrowingSuccessor(
-  candidates: CodexSessionFile[],
-  existing: CodexSessionFile | undefined,
-  growingPaths: ReadonlySet<string>
-): CodexSessionFile | null {
-  if (!existing || growingPaths.has(existing.path)) return null;
-  const successors = candidates.filter(
-    (file) =>
-      file.path !== existing.path &&
-      file.startedAtMs !== null &&
-      (existing.startedAtMs === null || file.startedAtMs > existing.startedAtMs) &&
-      growingPaths.has(file.path)
-  );
-  return successors.length === 1 ? successors[0] ?? null : null;
-}
-
-async function bestCodexFileForPane(
-  candidates: CodexSessionFile[],
-  processInfo: CodexProcessInfo | null,
-  capturePane: (lines: number) => Promise<string>
-): Promise<CodexSessionFile | null> {
-  if (candidates.length === 0) return null;
-  if (candidates.length === 1) return candidates[0] ?? null;
-
-  const resumedMatch = matchByResumedSessionId(processInfo, candidates);
-  if (resumedMatch) return resumedMatch;
-
-  const visibleMatch = await visibleCodexFileForPane(candidates, capturePane);
-  if (visibleMatch) return visibleMatch;
-
-  return matchByProcessStart(processInfo, candidates);
-}
-
-async function visibleCodexFileForPane(
-  candidates: CodexSessionFile[],
-  capturePane: (lines: number) => Promise<string>,
-  stablePath?: string | null
-): Promise<CodexSessionFile | null> {
-  if (candidates.length <= 1) return null;
-
-  try {
-    const capture = await capturePane(120);
-    const scored = await Promise.all(
-      candidates.map(async (file) => ({
-        file,
-        score: await transcriptOverlapScore(file, capture)
-      }))
-    );
-    scored.sort(
-      (a, b) =>
-        b.score - a.score ||
-        Number(b.file.path === stablePath) - Number(a.file.path === stablePath) ||
-        b.file.updatedAtMs - a.file.updatedAtMs
-    );
-    const best = scored[0];
-    const stable = stablePath ? scored.find((candidate) => candidate.file.path === stablePath) : null;
-    if (stable && stable.score > 0 && best && best.file.path !== stable.file.path && best.score <= stable.score) {
-      return stable.file;
-    }
-    if (best && best.score > 0) return best.file;
-  } catch {
-    // Leave ambiguous candidates unbound when visible transcript matching is unavailable.
-  }
-
-  return null;
-}
-
-function matchByResumedSessionId(processInfo: CodexProcessInfo | null, candidates: CodexSessionFile[]): CodexSessionFile | null {
-  if (!processInfo?.sessionId) return null;
-  return candidates.find((file) => file.sessionId === processInfo.sessionId) ?? null;
-}
-
-function matchByProcessStart(processInfo: CodexProcessInfo | null, candidates: CodexSessionFile[]): CodexSessionFile | null {
-  if (!processInfo?.startedAtMs) return null;
-  const withStart = candidates.filter((file) => file.startedAtMs !== null);
-  if (withStart.length === 0) return null;
-  const scored = withStart
-    .map((file) => ({
-      file,
-      delta: Math.abs((file.startedAtMs ?? 0) - processInfo.startedAtMs!)
-    }))
-    .sort((a, b) => a.delta - b.delta || b.file.updatedAtMs - a.file.updatedAtMs);
-  const best = scored[0];
-  const next = scored[1];
-  if (!best || best.delta > 10 * 60 * 1000) return null;
-  if (next && next.delta === best.delta) return null;
-  return best.file;
-}
 
 interface CodexTailAnalysis {
   sizeBytes: number;
@@ -5230,40 +3725,6 @@ function codexFastModeFromLine(line: string): boolean | null {
   }
 }
 
-async function readLiveCodexModelSettings(
-  pane: TmuxPane,
-  capturePane: (paneId: string, lines: number) => Promise<string>
-): Promise<SessionModelSettings | null> {
-  try {
-    return codexModelSettingsFromPaneText(await capturePane(pane.paneId, 40));
-  } catch {
-    return null;
-  }
-}
-
-export function codexModelSettingsFromPaneText(text: string): SessionModelSettings | null {
-  let latest: SessionModelSettings | null = null;
-  const effortPattern = "minimal|low|medium|high|xhigh|none";
-  const bannerPattern = new RegExp(
-    `^\\s*[│┃|]?\\s*model:\\s+([a-z0-9][a-z0-9._-]*)\\s+(${effortPattern})\\b.*\\/model\\b`,
-    "i"
-  );
-  const statusLinePattern = new RegExp(
-    `^\\s*([a-z0-9][a-z0-9._-]*)\\s+(${effortPattern})\\s*[·•]\\s*(?:~|/|[a-z]:[\\\\/])`,
-    "i"
-  );
-
-  for (const line of text.split("\n")) {
-    const match = bannerPattern.exec(line) ?? statusLinePattern.exec(line);
-    if (!match) continue;
-    const model = match[1];
-    const reasoningEffort = match[2];
-    if (!model || !reasoningEffort) continue;
-    latest = { model, reasoningEffort: reasoningEffort.toLowerCase() };
-  }
-  return latest;
-}
-
 function latestCodexModelSettingsFromText(text: string): SessionModelSettings | null {
   let latest: SessionModelSettings | null = null;
   for (const line of text.split("\n")) {
@@ -5344,27 +3805,15 @@ function parserOffsetKey(sessionId: string, source: string): string {
   return `${sessionId}:${source}`;
 }
 
-export function tmuxPaneSessionId(pane: TmuxPane): string {
-  const legacyIdentity = `${pane.sessionId}:${pane.windowId}:${pane.paneId}`;
-  if (!pane.serverPid || !pane.sessionCreatedAt) return stableId(legacyIdentity);
-  return stableId(`${pane.serverPid}:${pane.sessionCreatedAt}:${legacyIdentity}`);
-}
-
-export function legacyTmuxPaneSessionId(pane: TmuxPane): string {
-  return stableId(`${pane.sessionId}:${pane.windowId}:${pane.paneId}`);
-}
-
-function sameLivePaneProcess(session: ManagedSession, pane: TmuxPane): boolean {
-  return session.tmux.pid > 0 && session.tmux.pid === pane.pid;
-}
-
 export function sessionChanged(previous: ManagedSession, next: ManagedSession): boolean {
   return JSON.stringify(sessionDiscoverySnapshot(previous)) !== JSON.stringify(sessionDiscoverySnapshot(next));
 }
 
 function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unknown> {
   return {
-    tmux: session.tmux,
+    name: session.name,
+    cwd: session.cwd,
+    runtime: session.runtime ?? null,
     repo: session.repo,
     codexSessionId: session.codexSessionId,
     codexJsonlPath: session.codexJsonlPath,
@@ -5498,145 +3947,9 @@ function mergeModelSettings(
   };
 }
 
-function detectCollaborationModeFromPane(pane: TmuxPane): CollaborationMode | null {
-  return detectCollaborationModeFromText(`${pane.title}\n${pane.windowName}`);
-}
-
-async function detectLiveCollaborationMode(
-  pane: TmuxPane,
-  capturePane: (paneId: string, lines: number) => Promise<string>
-): Promise<CollaborationMode | null> {
-  const paneMode = detectCollaborationModeFromPane(pane);
-  if (paneMode) return paneMode;
-  try {
-    return detectCollaborationModeFromText(await capturePane(pane.paneId, 30));
-  } catch {
-    return null;
-  }
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function detectCollaborationModeFromText(text: string): CollaborationMode | null {
-  const lines = text
-    .split("\n")
-    .map((line) => line.toLowerCase().replace(/[_-]+/g, " ").trim())
-    .filter(Boolean);
-  if (lines.some((line) =>
-    /^›\s*plan\b/.test(line) ||
-    line === "plan mode" ||
-    line.startsWith("plan mode prompt:") ||
-    (/context \d+% left/.test(line) && line.endsWith("plan mode"))
-  )) return "plan";
-  if (lines.some((line) => line === "normal mode" || line === "default mode")) return "default";
-  return null;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function looksLikeCodexPane(pane: TmuxPane): boolean {
-  const haystack = `${pane.title} ${pane.windowName} ${pane.currentCommand}`.toLowerCase();
-  return haystack.includes("codex") || haystack.includes("action required") || haystack.includes("plan mode");
-}
-
-function isShellCommand(command: string): boolean {
-  return ["bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "pwsh"].includes(command.toLowerCase());
-}
-
-function looksLikeCodexScreen(capture: string): boolean {
-  const haystack = capture.toLowerCase();
-  return (
-    haystack.includes("openai codex") ||
-    haystack.includes("use /skills to list available skills") ||
-    haystack.includes("context ") ||
-    haystack.includes("plan mode") ||
-    haystack.includes("gpt-") ||
-    haystack.includes("press enter to confirm") ||
-    haystack.includes("would you like to run")
-  );
-}
-
-function looksLikeApprovalScreen(capture: string): boolean {
-  const visible = visibleTail(capture);
-  if (parseInteractiveApprovalPrompt(visible)) return true;
-  const haystack = visible.toLowerCase();
-  return (
-    haystack.includes("approval required") ||
-    haystack.includes("ask for approval") ||
-    haystack.includes("allow and don't ask") ||
-    haystack.includes("don't ask again") ||
-    haystack.includes("run the command") ||
-    haystack.includes("run this command") ||
-    (haystack.includes("yes, proceed") && haystack.includes("press enter to confirm")) ||
-    haystack.includes("would you like to run")
-  );
-}
-
-async function inferStatus(
-  pane: TmuxPane,
-  previous: SessionStatus | undefined,
-  capturePane: (paneId: string, lines: number) => Promise<string>
-): Promise<SessionStatus> {
-  const titleStatus = inferStatusFromTitle(pane);
-
-  try {
-    const capture = await capturePane(pane.paneId, 100);
-    const screenStatus = inferStatusFromScreen(capture);
-    if (screenStatus === "approval") return screenStatus;
-    if (titleStatus === "working") return titleStatus;
-    if (screenStatus) return screenStatus;
-    if (titleStatus) return titleStatus;
-    if (looksLikeCodexScreen(capture)) return "waiting";
-  } catch {
-    // Fall back to tmux metadata when pane capture is unavailable.
-  }
-
-  if (titleStatus) return titleStatus;
-  if (previous && previous !== "missing" && previous !== "approval") return previous;
-  return "unknown";
-}
-
-function inferStatusFromTitle(pane: TmuxPane): SessionStatus | null {
-  const title = pane.title.toLowerCase();
-  if (title.includes("working") || title.includes("running") || /[\u2800-\u28ff]/u.test(pane.title)) return "working";
-  if (looksLikeBlockedStatus(title)) return "blocked";
-  if (title.includes("waiting")) return "waiting";
-  return null;
-}
-
-function rejectedApprovalFallbackStatus(pane: TmuxPane, previous: SessionStatus | undefined): SessionStatus {
-  const titleStatus = inferStatusFromTitle(pane);
-  if (titleStatus && titleStatus !== "approval") return titleStatus;
-  if (previous && previous !== "approval" && previous !== "missing") return previous;
-  return "waiting";
-}
-
 function startupReadyStatus(status: SessionStatus | undefined): SessionStatus {
   if (!status || status === "unknown" || status === "missing" || status === "startup_failed") return "waiting";
   return status;
-}
-
-function appServerCompatibilityPane(sessionId: string, name: string, cwd: string): TmuxPane {
-  const target = `app-server:${sessionId}`;
-  return {
-    sessionId: target,
-    sessionName: name,
-    windowId: target,
-    windowIndex: -1,
-    windowName: name,
-    paneId: target,
-    paneIndex: -1,
-    paneActive: false,
-    cwd,
-    currentCommand: "codex app-server",
-    title: "Codex app-server",
-    pid: 0,
-    size: "0x0"
-  };
 }
 
 function appServerLaunchSession(launch: AgentSessionLaunchResult, name: string, cwd: string): ManagedSession {
@@ -5645,15 +3958,13 @@ function appServerLaunchSession(launch: AgentSessionLaunchResult, name: string, 
     name,
     cwd,
     provider: launch.provider,
-    driverKind: "codex_app_server",
     runtime: launch.runtime,
     capabilities: launch.capabilities
   } as ManagedSession;
 }
 
 function isRecoverableAppServerSession(session: ManagedSession): boolean {
-  return session.driverKind === "codex_app_server"
-    && !session.archived
+  return !session.archived
     && session.runtime?.kind === "systemd_service"
     && (session.runtime.state === "connected" || session.runtime.state === "starting")
     && Boolean(session.provider?.threadId ?? session.codexSessionId);
@@ -5673,46 +3984,10 @@ class AppServerRuntimeStoppedError extends Error {
   }
 }
 
-function inferStatusFromScreen(capture: string): SessionStatus | null {
-  if (isCodexStartupFailureCapture(capture)) return "startup_failed";
-  const visible = visibleTail(capture);
-  if (parseInteractiveApprovalPrompt(capture)) return "approval";
-  const lines = visible.split("\n");
-  const latestWorkingLine = lines.findLastIndex((line) => {
-    const normalized = line.toLowerCase();
-    return normalized.includes("working (") || normalized.includes("esc to interrupt");
-  });
-  const latestComposerLine = lines.findLastIndex((line) => /^\s*›(?!\s*\d+\.)/.test(line));
-  if (latestComposerLine > latestWorkingLine) return "waiting";
-  if (latestWorkingLine >= 0) return "working";
-  if (looksLikeApprovalScreen(visible)) return "approval";
-  if (looksLikeBlockedStatus(visible)) return "blocked";
-  return null;
-}
-
-function visibleTail(text: string): string {
-  return text.trimEnd().split("\n").slice(-30).join("\n");
-}
-
-function looksLikeBlockedStatus(text: string): boolean {
-  return /(^|\n)\s*(?:[│┃|>›·•*-]\s*)?(?:status:\s*)?blocked(?:\s*(?:$|\n|\(|:|-))/i.test(text);
-}
-
 function requireSession(session: ManagedSession | null): ManagedSession {
   if (!session) throw new Error("Session not found");
   if (session.status === "missing") throw new Error("Session runtime is no longer available");
   return session;
-}
-
-function tmuxRuntimeAction(action: SessionAction): boolean {
-  return action.type === "interrupt" ||
-    action.type === "choosePlanAction" ||
-    action.type === "rename" ||
-    action.type === "kill" ||
-    action.type === "setInputMode" ||
-    action.type === "setFastMode" ||
-    action.type === "retryInputDelivery" ||
-    action.type === "detach";
 }
 
 function requireLiveAgentSession(session: ManagedSession | null): ManagedSession {
@@ -5810,222 +4085,6 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
     options: approvalOptions(approval.options, prefixRule),
     createdAt: stringValue(approval.createdAt) ?? message.timestamp
   };
-}
-
-function materializeInteractiveApproval(
-  session: ManagedSession,
-  prompt: InteractiveApprovalPrompt,
-  latestMessage: ChatMessage | null
-): ApprovalRequest {
-  const toolCall = latestMessage?.type === "tool_call" ? recordValue(latestMessage.payload.payload) : null;
-  const callId = stringValue(toolCall?.call_id);
-  const toolName = prompt.kind === "permissions" ? permissionToolCallName(prompt, toolCall) : null;
-  const id =
-    callId ??
-    stableId(
-      `${session.id}:${prompt.kind}:${prompt.title}:${prompt.command ?? ""}:${prompt.reason ?? ""}:${prompt.prefixRule?.join(" ") ?? ""}:${prompt.options
-        .map((option) => option.decision)
-        .join(":")}`
-    );
-  return {
-    id,
-    sessionId: session.id,
-    messageId: latestMessage?.id ?? id,
-    kind: prompt.kind,
-    title: prompt.title,
-    command: prompt.command,
-    toolName,
-    cwd: null,
-    reason: prompt.reason,
-    prefixRule: prompt.prefixRule,
-    options: prompt.options.map(({ decision, label, description }) => ({ decision, label, description })),
-    createdAt: latestMessage?.timestamp ?? nowIso()
-  };
-}
-
-function interactiveApprovalMatches(approval: ApprovalRequest, prompt: InteractiveApprovalPrompt): boolean {
-  return (
-    approval.kind === prompt.kind &&
-    approval.title === prompt.title &&
-    approval.command === prompt.command &&
-    approval.reason === prompt.reason &&
-    stringArraysEqual(approval.prefixRule, prompt.prefixRule) &&
-    approval.options.map((option) => option.decision).join(":") === prompt.options.map((option) => option.decision).join(":")
-  );
-}
-
-function interactiveApprovalHasTranscriptContext(
-  prompt: InteractiveApprovalPrompt,
-  latestMessage: ChatMessage | null
-): boolean {
-  if (!latestMessage || latestMessage.type !== "tool_call") return false;
-  const payload = recordValue(latestMessage.payload.payload);
-  if (!payload) return false;
-  if (payload.type === "function_call") {
-    if (prompt.kind === "permissions") return permissionToolCallName(prompt, payload) !== null;
-    const name = stringValue(payload.name)?.replace(/^_+/, "");
-    if (prompt.kind === "patch") return name === "apply_patch";
-    return prompt.kind === "command" && name === "exec_command";
-  }
-  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return false;
-  const input = stringValue(payload.input);
-  if (prompt.kind === "permissions") return permissionToolCallName(prompt, payload) !== null;
-  if (prompt.kind === "patch") return Boolean(input && /tools\.apply_patch\s*\(/.test(input));
-  if (prompt.kind !== "command") return false;
-  if (!input || !/tools\.exec_command\s*\(/.test(input)) return false;
-  if (/["']?sandbox_permissions["']?\s*:\s*["']require_escalated["']/.test(input)) return true;
-  return nestedExecCommandMatchesPrompt(input, prompt);
-}
-
-function matchingInteractiveApprovalContext(
-  prompt: InteractiveApprovalPrompt,
-  contextMessages: ChatMessage[]
-): ChatMessage | null {
-  return contextMessages.find((message) => {
-    if (message.type === "approval_request") {
-      const approval = materializeApproval(message);
-      if (!approval || approval.kind !== prompt.kind) return false;
-      if (!approval.command || !prompt.command) return true;
-      return commandMatchesVisibleText(normalizeCommandText(approval.command), prompt.command);
-    }
-    return interactiveApprovalHasTranscriptContext(prompt, message);
-  }) ?? null;
-}
-
-function nestedExecCommandMatchesPrompt(input: string, prompt: InteractiveApprovalPrompt): boolean {
-  const command = nestedExecCommand(input);
-  if (!command) return false;
-  const normalizedCommand = normalizeCommandText(command);
-  const visibleCommands = [prompt.prefixRule?.join(" ") ?? null, prompt.command]
-    .filter((candidate): candidate is string => Boolean(candidate));
-  return visibleCommands.some((visibleCommand) => commandMatchesVisibleText(normalizedCommand, visibleCommand));
-}
-
-function commandMatchesVisibleText(normalizedCommand: string, visibleCommand: string): boolean {
-  const minElidedCommandContextLength = 16;
-  const normalizedVisibleCommand = normalizeCommandText(visibleCommand);
-  if (
-    normalizedCommand === normalizedVisibleCommand ||
-    normalizedCommand.startsWith(`${normalizedVisibleCommand} `)
-  ) {
-    return true;
-  }
-
-  const elisionPattern = /(?:\u2026|\.{3,})/u;
-  if (!elisionPattern.test(normalizedVisibleCommand)) return false;
-  const fragments = normalizedVisibleCommand
-    .split(elisionPattern)
-    .map(normalizeCommandText)
-    .filter(Boolean);
-  if (fragments.reduce((length, fragment) => length + fragment.length, 0) < minElidedCommandContextLength) return false;
-
-  let cursor = 0;
-  for (const [index, fragment] of fragments.entries()) {
-    const fragmentIndex = normalizedCommand.indexOf(fragment, cursor);
-    if (fragmentIndex < 0 || index === 0 && fragmentIndex !== 0) return false;
-    cursor = fragmentIndex + fragment.length;
-  }
-  return /(?:\u2026|\.{3,})$/u.test(normalizedVisibleCommand) || cursor === normalizedCommand.length;
-}
-
-function nestedExecCommand(input: string): string | null {
-  const callIndex = input.lastIndexOf("tools.exec_command");
-  if (callIndex < 0) return null;
-  const call = input.slice(callIndex);
-  const match = call.match(/(?:["']cmd["']|\bcmd)\s*:\s*(["'])((?:\\[\s\S]|(?!\1)[\s\S])*)\1/);
-  if (!match?.[1] || match[2] === undefined) return null;
-  try {
-    if (match[1] === '"') return JSON.parse(`"${match[2]}"`) as string;
-    return match[2].replace(/\\([\\'])/g, "$1").replace(/\\n/g, "\n").replace(/\\r/g, "\r").replace(/\\t/g, "\t");
-  } catch {
-    return null;
-  }
-}
-
-function normalizeCommandText(value: string): string {
-  return value.trim().replace(/\s+/g, " ");
-}
-
-function stringArraysEqual(first: string[] | null, second: string[] | null): boolean {
-  if (first === null || second === null) return first === second;
-  return first.length === second.length && first.every((value, index) => value === second[index]);
-}
-
-interface McpToolCall {
-  server: string;
-  tool: string;
-  name: string;
-}
-
-function permissionToolCallName(
-  prompt: InteractiveApprovalPrompt,
-  payload: Record<string, unknown> | null
-): string | null {
-  if (!payload) return null;
-  const calls = mcpToolCalls(payload);
-  const target = mcpPermissionTarget(prompt.title);
-  if (target) {
-    return calls.find((call) => call.server === target.server && call.tool === target.tool)?.name ?? null;
-  }
-
-  const appCall = calls.find((call) => call.server === "codex_apps");
-  if (appCall) return appCall.name;
-  if (payload.type !== "function_call") return null;
-  return functionCallName(payload);
-}
-
-function mcpPermissionTarget(title: string): { server: string; tool: string } | null {
-  const match = title.match(/^Allow the (.+?) MCP server to run tool ["“]([^"”]+)["”]\?$/i);
-  if (!match?.[1] || !match[2]) return null;
-  return { server: match[1], tool: match[2] };
-}
-
-function mcpToolCalls(payload: Record<string, unknown>): McpToolCall[] {
-  if (payload.type === "function_call") {
-    const call = functionMcpToolCall(payload);
-    return call ? [call] : [];
-  }
-  if (payload.type !== "custom_tool_call" || payload.name !== "exec") return [];
-  const input = stringValue(payload.input);
-  if (!input) return [];
-
-  const calls: McpToolCall[] = [];
-  for (const match of input.matchAll(/tools\.mcp__([A-Za-z0-9_]+?)__([A-Za-z0-9_]+)\s*\(/g)) {
-    if (!match[1] || !match[2]) continue;
-    calls.push(mcpToolCall(match[1], match[2]));
-  }
-  return calls;
-}
-
-function functionMcpToolCall(payload: Record<string, unknown>): McpToolCall | null {
-  const namespace = stringValue(payload.namespace);
-  const tool = stringValue(payload.name)?.replace(/^_+/, "");
-  if (!namespace?.startsWith("mcp__") || !tool) return null;
-  const qualifiedServer = namespace.slice("mcp__".length);
-  if (qualifiedServer.startsWith("codex_apps__")) {
-    const app = qualifiedServer.slice("codex_apps__".length);
-    return { server: "codex_apps", tool: `${app}_${tool}`, name: `codex_apps.${app}.${tool}` };
-  }
-  return mcpToolCall(qualifiedServer, tool);
-}
-
-function mcpToolCall(server: string, tool: string): McpToolCall {
-  if (server === "codex_apps") {
-    const separator = tool.indexOf("_");
-    if (separator > 0) {
-      const app = tool.slice(0, separator);
-      const appTool = tool.slice(separator + 1);
-      return { server, tool, name: `codex_apps.${app}.${appTool}` };
-    }
-  }
-  return { server, tool, name: `${server}.${tool}` };
-}
-
-function functionCallName(payload: Record<string, unknown>): string | null {
-  const name = stringValue(payload.name)?.replace(/^_+/, "") ?? null;
-  const namespace = stringValue(payload.namespace)?.replace(/__/g, ".") ?? null;
-  if (namespace && name) return `${namespace}.${name}`;
-  return name ?? namespace;
 }
 
 function approvalOptions(value: unknown, prefixRule: string[] | null): ApprovalRequest["options"] {
@@ -6250,7 +4309,6 @@ function unavailableSessionCapabilities(): SessionCapabilities {
     questions: false,
     planActions: false,
     fastMode: false,
-    rawTerminalCapture: false,
     terminalAttach: false,
     hibernate: false
   };

@@ -298,7 +298,7 @@ export function Dashboard() {
     }
   }
 
-  async function killPane(session: ManagedSession) {
+  async function killSession(session: ManagedSession) {
     setMenu(null);
     setActionError(null);
 
@@ -314,7 +314,7 @@ export function Dashboard() {
         return next;
       });
       await refreshSessionStoplight();
-      setActionError(error instanceof Error ? error.message : "Could not kill pane.");
+      setActionError(error instanceof Error ? error.message : "Could not end session.");
     } finally {
       setBusyAction(null);
     }
@@ -544,7 +544,7 @@ export function Dashboard() {
           <ContextMenuItem
             className="danger"
             icon={<Skull size={16} />}
-            onClick={() => void killPane(menu.session)}
+            onClick={() => void killSession(menu.session)}
             disabled={Boolean(busyAction) || menu.session.initializing === true || menu.session.capabilities?.kill === false}
             aria-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill"}
             data-busy={busyAction?.sessionId === menu.session.id && busyAction.type === "kill" ? true : undefined}
@@ -758,13 +758,6 @@ export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query
     sessionBaseName(session),
     session.repo.name,
     session.repo.branch,
-    session.tmux.cwd,
-    session.tmux.sessionName,
-    session.tmux.windowId,
-    String(session.tmux.windowIndex),
-    session.tmux.windowName,
-    session.tmux.paneId,
-    String(session.tmux.paneIndex),
     session.preview,
     session.activitySummary,
     ...session.recentUserPrompts

@@ -1,6 +1,5 @@
 # Deployment Guide
 
-The supported deployment is a developer-controlled host on a trusted LAN. muxpilot intentionally runs on the host machine, not in Docker, because the backend owns same-user Codex app-server services, optional legacy tmux panes, and local Codex evidence.
 
 Do not expose muxpilot directly to the internet.
 
@@ -26,9 +25,7 @@ Production defaults:
 - Runtime state: `./data/runtime/prod/`
 - Logs: `supervisor.log`, `server.log`, `web.log`
 - PIDs: `supervisor.pid`, `server.pid`, `web.pid`
-- New-session runtime: `codex_app_server`; set `MUXPILOT_DEFAULT_SESSION_DRIVER=codex_tmux` only for a deliberate legacy default.
 
-The app-server runtime requires an available systemd user manager. muxpilot probes Codex protocol compatibility before enabling it and reports missing systemd or incompatible Codex versions without silently creating tmux sessions. Enable user lingering when needed with `sudo loginctl enable-linger "$USER"`, then restart muxpilot. tmux is optional and detected once at startup. Existing tmux sessions remain intact when it is absent, are shown as unavailable, and can be restored through app-server; install tmux and restart muxpilot to use the legacy runtime again.
 
 App-server Unix sockets live below `XDG_RUNTIME_DIR` so their paths remain within the platform limit even when muxpilot is installed in a deeply nested checkout. Durable environment metadata and protocol journals remain below `MUXPILOT_DATA_DIR`.
 

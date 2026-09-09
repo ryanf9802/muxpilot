@@ -127,7 +127,6 @@ import {
   RuntimeAttachButton,
   sessionTranscriptSource,
   shellQuote,
-  tmuxAttachCommand,
   ModelSettingsButton,
   TranscriptSyncIndicator,
   VimModeToggle,
@@ -174,8 +173,8 @@ describe("child session attention", () => {
     const parent = managedSession({ id: "parent" });
     const child = managedSession({
       id: "child",
+      name: "research-child",
       status: "question",
-      tmux: { ...managedSession().tmux, windowName: "research-child" },
       agentOwnership: {
         parentSessionId: parent.id,
         rootSessionId: parent.id,
@@ -346,7 +345,6 @@ describe("SessionHeaderMeta", () => {
       session: {
         repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
         gitWorkspace: null,
-        driverKind: "codex_app_server",
         runtime: {
           kind: "systemd_service",
           state: "connected",
@@ -764,16 +762,16 @@ describe("sessionCreateSessionCwd", () => {
     expect(
       sessionCreateSessionCwd({
         repo: { root: "/home/dev/muxpilot" },
-        tmux: { cwd: "/home/dev/muxpilot/apps/web" }
+        cwd: "/home/dev/muxpilot/apps/web"
       })
     ).toBe("/home/dev/muxpilot");
   });
 
-  it("falls back to the tmux cwd when the repo root is unavailable", () => {
+  it("falls back to the session cwd when the repo root is unavailable", () => {
     expect(
       sessionCreateSessionCwd({
         repo: { root: null },
-        tmux: { cwd: "/tmp/scratch" }
+        cwd: "/tmp/scratch"
       })
     ).toBe("/tmp/scratch");
   });
@@ -1095,7 +1093,6 @@ describe("shouldQueueComposerInput", () => {
 
 describe("canSteerComposerInput", () => {
   const appServerSession = managedSession({
-    driverKind: "codex_app_server",
     capabilities: {
       start: true,
       sendMessage: true,
@@ -1109,7 +1106,6 @@ describe("canSteerComposerInput", () => {
       questions: true,
       planActions: true,
       fastMode: true,
-      rawTerminalCapture: false,
       terminalAttach: true,
       hibernate: true
     },
@@ -1590,12 +1586,8 @@ describe("ModeToggle", () => {
   });
 });
 
-describe("tmux command helpers", () => {
-  it("builds a WSL bash command for the session tmux window", () => {
-    expect(tmuxAttachCommand(managedSession())).toBe("tmux select-window -t 'work:1' && tmux attach-session -t 'work'");
-  });
-
-  it("shell-quotes tmux targets for bash", () => {
+describe("runtime presentation helpers", () => {
+  it("shell-quotes runtime targets for bash", () => {
     expect(shellQuote("work'session:2")).toBe("'work'\\''session:2'");
   });
 
@@ -1629,7 +1621,6 @@ describe("tmux command helpers", () => {
 
   it("renders app-server model state as a settings button", () => {
     const session = managedSession({
-      driverKind: "codex_app_server",
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
         plan: { model: null, reasoningEffort: null }
@@ -1641,10 +1632,10 @@ describe("tmux command helpers", () => {
     expect(html).toContain("medium");
     expect(html).toContain('aria-haspopup="dialog"');
     expect(html).toContain("Change model settings");
-    expect(html).not.toContain("tmux select-window");
+    expect(html).not.toContain("select-window");
   });
 
-  it("renders legacy tmux model state without model settings affordances", () => {
+  it("renders model state without a settings affordance when no opener is supplied", () => {
     const session = managedSession({
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
@@ -1653,7 +1644,7 @@ describe("tmux command helpers", () => {
     });
     const html = renderToStaticMarkup(createElement(ModelSettingsButton, { session, catalog: null }));
 
-    expect(html).toContain('class="tmux-command-button tmux-command-display"');
+    expect(html).toContain('class="model-settings-button model-settings-display"');
     expect(html).toContain("gpt-5.5");
     expect(html).toContain("medium");
     expect(html).not.toContain("<button");
@@ -1662,7 +1653,6 @@ describe("tmux command helpers", () => {
 
   it("renders model state as compact selectable title metadata", () => {
     const session = managedSession({
-      driverKind: "codex_app_server",
       models: {
         default: { model: "gpt-5.5", reasoningEffort: "medium" },
         plan: { model: "gpt-5.5", reasoningEffort: "high" }
@@ -1670,9 +1660,9 @@ describe("tmux command helpers", () => {
     });
     const html = renderToStaticMarkup(createElement(ModelSettingsButton, { session, catalog: null, compact: true, onOpen: () => undefined }));
 
-    expect(html).toContain('class="tmux-command-button tmux-command-metadata"');
+    expect(html).toContain('class="model-settings-button model-settings-metadata"');
     expect(html).toContain("Change model settings");
-    expect(html).toContain("tmux-command-icon");
+    expect(html).toContain("model-settings-icon");
     expect(html).toContain("gpt-5.5");
   });
 
@@ -3070,7 +3060,7 @@ describe("MarkdownBlock", () => {
 
   it("resolves an archived cross-session document from the lazy complete inventory", async () => {
     const current = managedSession({ id: "current", documentScopeId: "currentScope" });
-    const remote = managedSession({ id: "remote", archived: true, documentScopeId: "remoteScope", tmux: { ...managedSession().tmux, windowName: "performance" } });
+    const remote = managedSession({ id: "remote", name: "performance", archived: true, documentScopeId: "remoteScope" });
     const loadAllSessions = vi.fn(async () => [remote]);
     const loadDocuments = vi.fn(async () => [{ name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-01T00:00:00.000Z" }]);
 
@@ -3281,21 +3271,9 @@ function gitWorkspace(overrides: Partial<GitWorkspaceSummary> = {}): GitWorkspac
 function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession {
   return {
     id: "session-a",
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "codex",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/workspace/muxpilot",
-      currentCommand: "node",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
-    },
+    name: "codex",
+    cwd: "/workspace/muxpilot",
+    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex-session.jsonl" },
     repo: repo("muxpilot", "main"),
     codexSessionId: "codex-session",
     codexJsonlPath: "/tmp/codex-session.jsonl",

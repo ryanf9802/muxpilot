@@ -14,7 +14,7 @@
 
 muxpilot gives one operator a single place to watch multiple Codex sessions, answer the ones that need attention, and send follow-up prompts without hunting through terminal windows. Use it from the development machine or check in from a phone on the same network.
 
-It is a local companion to Codex, not a hosted agent platform or a general remote shell. New sessions use Codex app-server by default; existing and explicitly selected tmux sessions remain fully supported. The backend runs as your user and stores its durable operator state in SQLite.
+muxpilot is a local companion to Codex, not a hosted agent platform or a general remote shell. Codex app-server is the sole session runtime, with muxpilot-owned user services and SQLite-backed operator state.
 
 > [!WARNING]
 > muxpilot is designed for one trusted machine and optional same-LAN access. Do not expose it directly to the internet.
@@ -25,7 +25,7 @@ Running one coding agent in a terminal is easy. Running several across repositor
 
 muxpilot adds an operator layer without replacing the tools already doing the work:
 
-- **One dashboard for every session.** Group Codex sessions by repository and see their branch, worktree, activity, and attention state, including preserved legacy tmux sessions when present.
+- **One dashboard for every session.** Group Codex sessions by repository and see their branch, worktree, activity, and attention state.
 - **Structured conversations.** Read Codex JSONL as a focused transcript instead of a raw terminal dump.
 - **Interactive control.** Send or queue prompts with verified delivery, answer questions and approvals, act on proposed plans, switch Normal, Plan, Fast, and Vim controls, interrupt work, and start or fork sessions.
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
@@ -47,18 +47,17 @@ Desktop or phone browser
                                               │
                          ┌────────────────────┼────────────────────┐
                          ▼                    ▼                    ▼
-             Codex app-server          legacy tmux             SQLite
-              systemd services          CLI panes
+              app-server services      Codex JSONL             SQLite
 ```
 
-For app-server sessions, structured protocol state and muxpilot-owned systemd services are authoritative for lifecycle and input. Legacy sessions retain tmux pane semantics. Codex session files remain durable transcript evidence, and SQLite holds queued input, prompt history, gates, recovery state, and parsed messages.
+Structured app-server protocol state and muxpilot-owned systemd services are authoritative for lifecycle and input. Codex session files provide durable transcript evidence, and SQLite holds queued input, prompt history, gates, recovery state, and parsed messages.
 
 ## Quick start
 
 ### Requirements
 
 - WSL2 Ubuntu or another local Linux-like host
-- systemd user services (recommended app-server runtime); [tmux](https://github.com/tmux/tmux) only for the legacy runtime
+- systemd user services
 - [Codex CLI](https://github.com/openai/codex)
 - Node.js 24 or newer
 - pnpm 11.12.0, matching the repository's `packageManager` pin
@@ -110,7 +109,7 @@ muxpilot is intentionally local-first:
 - Loopback access is trusted and does not require an access key.
 - LAN access is opt-in and requires a generated access key by default.
 - The browser talks to constrained HTTP and WebSocket endpoints; it cannot submit arbitrary shell commands.
-- The server runs as the current user because it owns app-server services and reads that user's Codex session files. When the optional legacy runtime is enabled, it also uses that user's tmux socket.
+- The server runs as the current user because it owns app-server services and reads that user's Codex session files.
 - HTTPS support uses a local certificate authority. Keep its private key private.
 - Internet-reachable deployment, multi-user isolation, and remote shell access are out of scope.
 

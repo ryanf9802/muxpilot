@@ -31,20 +31,13 @@ describe("dashboard session summaries", () => {
     expect(summary.activitySummary).toBe("y".repeat(512));
     expect(summary.gitWorkspace?.dependencyLinks).toEqual([]);
     expect(session.gitWorkspace.dependencyLinks).toHaveLength(1);
-    expect(summary).not.toHaveProperty("provider");
+    expect(summary.provider).toEqual(session.provider);
     expect(summary).not.toHaveProperty("runtime");
     expect(summary).not.toHaveProperty("resourceUnit");
     expect(summary.codexJsonlPath).toBeNull();
     expect(summary.models).toEqual({
       default: { model: null, reasoningEffort: null },
       plan: { model: null, reasoningEffort: null }
-    });
-    expect(summary.tmux).toMatchObject({
-      cwd: session.tmux.cwd,
-      windowName: session.tmux.windowName,
-      currentCommand: "",
-      title: "",
-      pid: 0
     });
   });
 
@@ -92,21 +85,7 @@ function testSession(): ManagedSession {
     id: "session-1",
     name: "Session",
     cwd: "/repo",
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "codex",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "codex",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
-    },
+    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "codex-session",
     codexJsonlPath: null,

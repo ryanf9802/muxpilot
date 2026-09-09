@@ -129,14 +129,6 @@ export class SessionOrchestrationBroker {
     switch (request.action) {
       case "list_sessions": return this.listSessions(actorId, args.scope === "tree");
       case "read_session": return this.readSession(requiredString(args.sessionId, "sessionId"), boundedInteger(args.limit, 1, 30, 12));
-      case "list_tmux_panes": return this.rawEvidence.listTmuxPanes();
-      case "capture_tmux_pane": return this.rawEvidence.captureTmuxPane(
-        requiredPaneId(args.paneId),
-        boundedInteger(args.lines, 1, 2_000, 200),
-        args.includeAnsi === true,
-        args.joinWrappedLines === true
-      );
-      case "read_tmux_process_tree": return this.rawEvidence.readTmuxProcessTree(requiredPaneId(args.paneId));
       case "read_session_runtime": return this.rawEvidence.readSessionRuntime(
         await this.authorizedEvidenceSession(actorId, requiredString(args.sessionId, "sessionId"))
       );
@@ -399,12 +391,6 @@ function delegatedActorSessionId(payload: Record<string, unknown>): string | nul
 function requiredString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
   return value.trim();
-}
-
-function requiredPaneId(value: unknown): string {
-  const paneId = requiredString(value, "paneId");
-  if (!/^%\d+$/.test(paneId)) throw new Error("paneId must be an exact tmux pane id");
-  return paneId;
 }
 
 function boundedInteger(value: unknown, min: number, max: number, fallback?: number): number {

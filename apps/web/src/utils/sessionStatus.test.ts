@@ -125,7 +125,9 @@ describe("childSessionAttentionItems", () => {
 function session(id: string, status: SessionStatus): ManagedSession {
   return {
     id,
-    tmux: { sessionId: "$1", sessionName: "muxpilot", windowId: `@${id}`, windowIndex: 1, windowName: id, paneId: `%${id}`, paneIndex: 0, paneActive: false, cwd: "/repo", currentCommand: "node", title: id, pid: 1, size: "80x24" },
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: `codex-${id}`, rolloutPath: null },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: `codex-${id}`,
     codexJsonlPath: null,

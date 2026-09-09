@@ -211,10 +211,7 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       listSessions: vi.fn(async () => [session])
     } as unknown as SessionManager;
     const rawEvidence: RawSessionEvidence = {
-      listTmuxPanes: vi.fn(async () => ({ fields: ["pane_id"], output: "%7\n" })),
-      captureTmuxPane: vi.fn(async () => ({ paneId: "%7", output: "raw pane\n" })),
-      readTmuxProcessTree: vi.fn(async () => ({ paneId: "%7", rootPid: 700, processes: [], truncated: false })),
-      readSessionRuntime: vi.fn(async () => ({ sessionId: session.id, driverKind: session.driverKind })),
+      readSessionRuntime: vi.fn(async () => ({ sessionId: session.id })),
       readSessionProcessTree: vi.fn(async () => ({ sessionId: session.id, rootPid: 700, processes: [], truncated: false })),
       readSessionProtocolJournal: vi.fn(async () => ({ sessionId: session.id, fileSize: 3, startOffset: 0, endOffset: 3, text: "rpc" })),
       listCodexSessionFiles: vi.fn(async () => ({ root: "/codex/sessions", files: [], nextOffset: null })),
@@ -266,9 +263,6 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     });
     const call = (action: string, args: Record<string, unknown> = {}) => internals.handle(JSON.stringify({ version: 1, token, action, args }));
 
-    await expect(call("capture_tmux_pane", { paneId: "%7", lines: 50, includeAnsi: true }))
-      .resolves.toEqual({ paneId: "%7", output: "raw pane\n" });
-    expect(rawEvidence.captureTmuxPane).toHaveBeenCalledWith("%7", 50, true, false);
     await expect(call("read_session_runtime", { sessionId: session.id }))
       .resolves.toMatchObject({ sessionId: session.id });
     expect(rawEvidence.readSessionRuntime).toHaveBeenCalledWith(session);
@@ -315,9 +309,9 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     const tools = definitions.map((tool) => tool.name);
 
     expect(tools).toEqual(expect.arrayContaining([
-      "list_tmux_panes",
-      "capture_tmux_pane",
-      "read_tmux_process_tree",
+      "read_session_runtime",
+      "read_session_process_tree",
+      "read_session_protocol_journal",
       "list_codex_session_files",
       "read_codex_session_file"
     ]));
@@ -329,21 +323,9 @@ describe("SessionOrchestrationBroker raw evidence", () => {
 function managedSession(): ManagedSession {
   return {
     id: "session-1",
-    tmux: {
-      sessionId: "$1",
-      sessionName: "muxpilot",
-      windowId: "@1",
-      windowIndex: 0,
-      windowName: "work",
-      paneId: "%7",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "node",
-      title: "Codex",
-      pid: 700,
-      size: "120x40"
-    },
+    name: "work",
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: "codex-1", rolloutPath: "/codex/sessions/rollout.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "codex-1",
     codexJsonlPath: "/codex/sessions/rollout.jsonl",

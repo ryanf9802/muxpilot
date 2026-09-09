@@ -419,21 +419,9 @@ async function eventually(check: () => boolean | Promise<boolean>): Promise<void
 function testSession(id: string): ManagedSession {
   return {
     id,
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "codex",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "codex",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
-    },
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: "codex-source", rolloutPath: "/tmp/codex.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "codex-source",
     codexJsonlPath: "/tmp/codex.jsonl",

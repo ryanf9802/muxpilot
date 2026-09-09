@@ -1,5 +1,4 @@
 # Shadow Testing
-
 Shadow mode runs a second muxpilot lane for app-server burn-in while production remains live. Start it from a dedicated checkout or Git worktree of the branch under test. Keep the checkout path short (for example `/home/user/mp-s`), because Linux Unix sockets have a 107-byte pathname limit; the Codex workflow validates every shadow-owned socket before installation or startup.
 
 ```bash
@@ -13,7 +12,6 @@ Open `http://localhost:15177` in the Windows or Linux browser. WSL localhost for
 
 Shadow startup refuses dependency links that resolve to another checkout. If the worktree was created by muxpilot and shares `node_modules` with production, use the Git workflow dependency-localization helper for its registered Node dependency paths before starting shadow mode; this prevents branch code from loading production's older core build.
 
-For Codex-driven live testing, use `$muxpilot-start-shadow` after the branch commit is integrated. Its helper creates a hard host-scope boundary around dependency installation and startup, then proves the production supervisor/server/web PIDs and cgroups, every pre-existing tmux pane, and every pre-existing active app-server service retained their identities. Raw `pnpm app start shadow` remains appropriate for a human shell that is already outside a muxpilot session scope.
 
 If the helper reports that frozen installation completed but its deferred-command continuation is lost before startup, rerun it with `--dependencies-installed-at <exact-installed-sha>`. Installation is skipped only when that SHA is an ancestor of the requested commit and Git proves that package manifests, pnpm lock/workspace inputs, install configuration, and patch artifacts are unchanged. Startup still takes fresh production snapshots before and after launching shadow.
 
@@ -23,15 +21,12 @@ Shadow mode forcibly uses:
 - `data/shadow/muxpilot.db` and `data/runtime/shadow/` in the checkout that launched it;
 - `data/shadow/git-worktrees/` and `data/shadow/sessions/` for managed Git and session documents;
 - `data/shadow/heavy/` for heavyweight queue state;
-- a private tmux server namespace under `data/shadow/tmux/` for explicit legacy-tmux tests;
 - a shadow-namespaced app-server capability identity, so even a reused session ID cannot select a production unit;
-- app-server as the new-session default.
+- app-server as the sole session runtime.
 
-An unused private tmux namespace has no server process or panes. Its missing socket is treated as an empty pane inventory; selecting the explicit legacy-tmux driver creates the namespace on demand.
 
 App-server systemd services receive the launching muxpilot server's executable search path in their private environment file. This is required when `codex` and its Node interpreter are installed through a user-level version manager such as NVM.
 
-For a tmux-absent acceptance run, set `MUXPILOT_SHADOW_RUNTIME_PATH` to an executable allowlist that contains the required `node`, `pnpm`, `codex`, `git`, and `systemctl` commands but no `tmux`. The host-side `$muxpilot-start-shadow` verifier keeps its normal `PATH` so it can snapshot production tmux panes before and after startup; only the shadow supervisor and its descendants receive the allowlisted path.
 
 These values override `.env` and `.env.local`. Shadow mode disables LAN/HTTPS exposure and resource governance by default, does not synchronize bundled skills into `~/.codex`, and does not read or copy the production database.
 
@@ -65,5 +60,3 @@ Use newly created shadow sessions for each check:
 8. Export and import a disposable shadow session, then verify transfer mappings without involving an active production thread.
 9. Compare memory for warm-idle, hibernated, active, background-terminal, and several concurrent shadow app-server sessions.
 10. Run `pnpm app stop shadow`, confirm `pnpm app status prod` is unchanged, and verify no shadow-owned app-server or heavy unit remains active.
-
-When the burn-in is complete, switching production to the feature branch remains a separate, explicit restart. Existing tmux-backed production records stay on tmux; they are not automatically converted.

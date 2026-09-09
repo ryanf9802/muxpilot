@@ -570,21 +570,9 @@ function testNotificationSettings(
 function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
   return {
     id: "a",
-    tmux: {
-      sessionId: "tmux",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "muxpilot",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "node",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
-    },
+    name: "muxpilot",
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: "codex", rolloutPath: "/tmp/codex.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
     codexSessionId: "codex",
     codexJsonlPath: "/tmp/codex.jsonl",
@@ -607,8 +595,7 @@ function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
 }
 
 function namedSession(id: string, status: ManagedSession["status"], agentOwnership: ManagedSession["agentOwnership"] = null): ManagedSession {
-  const session = testSession({ id, status, agentOwnership });
-  return { ...session, tmux: { ...session.tmux, windowName: id } };
+  return testSession({ id, name: id, status, agentOwnership });
 }
 
 function agentOwnership(rootSessionId: string): NonNullable<ManagedSession["agentOwnership"]> {

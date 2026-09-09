@@ -3,8 +3,7 @@
 Prerequisites:
 
 - WSL2 Ubuntu or another local Linux-like host.
-- A persistent user-systemd manager for the default Codex app-server runtime.
-- tmux only when using or retaining legacy sessions.
+- A persistent user-systemd manager for the Codex app-server runtime.
 - Codex CLI.
 - Node.js 24 or newer.
 - pnpm 11.12.0, matching the repository's `packageManager` pin.
@@ -25,7 +24,6 @@ Open:
 http://127.0.0.1:12778
 ```
 
-`pnpm app start` installs or updates muxpilot's bundled Git, heavyweight-queue, session-orchestration, and documents skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a supervisor in the background, and waits until the backend and web UI are healthy. Skill synchronization also runs when production is already active. You do not need to leave the terminal open. The app runs under your user account so it can own per-session app-server services and sockets and read `~/.codex/sessions`. tmux is probed once during startup; when it is absent, app-server sessions remain fully functional and legacy tmux controls are shown as unavailable until muxpilot restarts.
 
 Useful production commands:
 
@@ -63,9 +61,7 @@ pnpm app stop dev
 pnpm app restart dev
 ```
 
-The dashboard shows managed app-server sessions and discovered legacy Codex/tmux panes grouped by repository. Session cards include status, repo/branch metadata, recent user prompts, optional prompt-only activity summaries, resource/context indicators, nested agent sessions, and usage data when available. Opening a session shows the structured transcript, verified/queued input, interactive gates, documents, BTW, heavyweight and Git state, skill suggestions, and the evidence supported by that runtime. See the [Usage Guide](usage.md).
 
-App-server and nested agent sessions require a persistent user-systemd manager so each runtime receives an independent service or resource scope. Legacy operator sessions can continue under tmux. Follow [Resource Controls](configuration.md#resource-controls) before using session orchestration.
 
 ## Phone Access On The Same Network
 
@@ -140,8 +136,6 @@ If you move sessions between hosts, set the same `MUXPILOT_SESSION_FILE_KEY` on 
 - Native Linux: use [Native Linux LAN Access](./linux-lan.md) to install and verify the required local firewall rule.
 - Windows 11 + WSL2: use [Windows WSL LAN Access](./windows-wsl-lan.md) to install and verify the required Windows/Hyper-V firewall rules.
 - Access key rejected: open the Connect device modal on the host machine and use the current generated access key.
-- No sessions: create an app-server session from the dashboard. For legacy discovery, confirm Codex is running inside tmux on the desktop user account that started the backend.
-- Input not reaching a legacy session: confirm tmux is installed, muxpilot was restarted after installation, the pane still exists, and the backend user owns or can access that tmux socket.
 - Skill suggestions missing: confirm `MUXPILOT_CODEX_HOME` points at the Codex home that contains your skills/plugins.
 - Stale PID or port conflict: run `pnpm app status`, inspect `data/runtime/<mode>/`, and stop the conflicting process before starting again.
 - Submitted input is preserved but blocked: open the session's `input_failed` banner and retry only after checking the live composer, or dismiss it without assuming Codex received it.

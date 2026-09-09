@@ -54,9 +54,9 @@ const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
-const SESSION_RUNTIME_BACKUP_SETTING = "session_runtime_backup_v2";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
-export const SESSION_RUNTIME_BACKUP_SUFFIX = ".pre-runtime-v2.sqlite3";
+const SESSION_RUNTIME_BACKUP_SETTING = "session_runtime_backup_v3";
+export const SESSION_RUNTIME_BACKUP_SUFFIX = ".pre-app-server-only-v3.sqlite3";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 
 export interface SessionRecoveryRuntimeState {
@@ -3750,6 +3750,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
+    this.normalizeStoredSessionsForAppServerRuntime();
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
@@ -3820,6 +3821,19 @@ export class SyncAppDatabase {
       const status = wasContextPaused && !ownership.budgetExhaustedAt && row.status === "blocked" ? "waiting" : row.status;
       session.status = status;
       update.run(JSON.stringify(session), status, row.id);
+    }
+  }
+
+  private normalizeStoredSessionsForAppServerRuntime(): void {
+    const rows = this.db.prepare("SELECT id, data_json, status FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json" | "status">>;
+    const update = this.db.prepare("UPDATE managed_sessions SET data_json = ?, status = ? WHERE id = ?");
+    for (const row of rows) {
+      const session = normalizeManagedSessionRuntime(JSON.parse(row.data_json) as ManagedSession);
+      const hasRuntime = session.runtime?.kind === "systemd_service";
+      const status = hasRuntime || row.status === "missing" ? row.status : "missing";
+      if (session.status !== status) session.status = status;
+      const normalized = JSON.stringify(session);
+      if (normalized !== row.data_json || status !== row.status) update.run(normalized, status, row.id);
     }
   }
 

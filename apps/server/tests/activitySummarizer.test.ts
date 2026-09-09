@@ -299,7 +299,7 @@ describe("ActivitySummarizer", () => {
     const db = await tempDb();
     const session = testSession("session-rebound");
     db.upsertSession(session, "2026-07-07T00:00:00.000Z");
-    db.appendMessage(testMessage(session.id, 1, "user", "Pane A prompt"));
+    db.appendMessage(testMessage(session.id, 1, "user", "Session A prompt"));
     const client = new ControlledSummaryClient();
     const updated: string[] = [];
     const summarizer = new ActivitySummarizer({
@@ -323,15 +323,15 @@ describe("ActivitySummarizer", () => {
       },
       "2026-07-07T00:00:01.000Z"
     );
-    db.appendMessage(testMessage(session.id, 1, "user", "Pane B prompt"));
-    client.resolve("Pane A summary");
+    db.appendMessage(testMessage(session.id, 1, "user", "Session B prompt"));
+    client.resolve("Session A summary");
 
     await expect(refresh).resolves.toBe(false);
     summarizer.stop();
 
     expect(updated).toEqual([]);
     expect(db.getSession(session.id)?.activitySummary).toBeNull();
-    expect(client.calls[0]?.prompts.map((message) => message.text)).toEqual(["Pane A prompt"]);
+    expect(client.calls[0]?.prompts.map((message) => message.text)).toEqual(["Session A prompt"]);
     db.close();
   });
 });
@@ -380,21 +380,9 @@ async function tempDb(): Promise<AppDatabase> {
 function testSession(id: string): ManagedSession {
   return {
     id,
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "codex",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "node",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
-    },
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: "codex-session", rolloutPath: null },
     repo: {
       root: "/repo",
       name: "repo",

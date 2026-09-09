@@ -37,8 +37,7 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
-  runtimeDriverAvailable,
-  runtimeDriverUnavailableLabel,
+  runtimeUnavailableLabel,
   sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
@@ -76,7 +75,7 @@ describe("shell connection state", () => {
     })).toBe("A persistent user-systemd manager is required.");
   });
 
-  it("requires detected availability for either runtime and explains missing tmux", () => {
+  it("explains unavailable app-server runtime", () => {
     const appServer: AppServerCompatibility = {
       status: "available",
       available: true,
@@ -85,17 +84,7 @@ describe("shell connection state", () => {
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: []
     };
-    const tmux = {
-      status: "executable_missing" as const,
-      available: false,
-      version: null,
-      detail: "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.",
-      checkedAt: "2026-09-01T12:00:00.000Z"
-    };
-
-    expect(runtimeDriverAvailable("codex_app_server", appServer, tmux)).toBe(true);
-    expect(runtimeDriverAvailable("codex_tmux", appServer, tmux)).toBe(false);
-    expect(runtimeDriverUnavailableLabel("codex_tmux", appServer, tmux)).toBe(tmux.detail);
+    expect(runtimeUnavailableLabel(appServer)).toBe("ready");
   });
 
   it("renders every interrupted session selected with crash limitations and failures", () => {
@@ -124,7 +113,6 @@ describe("shell connection state", () => {
       selectedIds: new Set(["session-1"]),
       busy: false,
       errors: { "session-1": "Directory is unavailable" },
-      driverKind: "codex_app_server",
       compatibility: {
         status: "available",
         available: true,
@@ -133,14 +121,6 @@ describe("shell connection state", () => {
         checkedAt: "2026-09-01T20:00:00.000Z",
         missingCapabilities: []
       },
-      tmuxCompatibility: {
-        status: "executable_missing",
-        available: false,
-        version: null,
-        detail: "tmux is not installed. Install tmux and restart muxpilot to enable the legacy runtime.",
-        checkedAt: "2026-09-01T20:00:00.000Z"
-      },
-      onDriverChange: () => undefined,
       onToggle: () => undefined,
       onDismiss: () => undefined,
       onRestore: () => undefined
@@ -152,13 +132,12 @@ describe("shell connection state", () => {
     expect(html).toContain("checked=\"\"");
     expect(html).toContain("Restore selected (1)");
     expect(html).toContain("Directory is unavailable");
-    expect(html).toContain('<option value="codex_tmux" disabled="">Legacy tmux</option>');
+    expect(html).not.toContain("Runtime");
   });
 
   it("builds a valid editable name for a fork", () => {
     const session = testSession({ id: "fork-name" });
     session.name = "a-very-long-session-name-that-needs-truncation";
-    session.tmux.windowName = "stale-runtime-name";
 
     expect(defaultForkSessionName(session)).toBe("a-very-long-session-name-th-fork");
     expect(defaultForkSessionName(session)).toHaveLength(32);
@@ -829,7 +808,7 @@ describe("syncSessionIntoStoplightSessions", () => {
     expect(syncSessionIntoStoplightSessions([starting], transientMissing)).toEqual([transientMissing]);
   });
 
-  it("keeps completed agent history visible after its pane becomes missing", () => {
+  it("keeps completed agent history visible after its runtime becomes missing", () => {
     const completed = testSession({
       id: "child",
       status: "missing",
@@ -966,21 +945,9 @@ function testSession(
 ): ManagedSession {
   return {
     id: input.id,
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "muxpilot",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: input.cwd ?? "/repo",
-      currentCommand: "node",
-      title: "muxpilot",
-      pid: 123,
-      size: "120x40"
-    },
+    name: input.repoName ?? "repo",
+    cwd: input.cwd ?? "/repo",
+    provider: { kind: "codex", threadId: null, rolloutPath: null },
     repo: {
       root: input.repoRoot === undefined ? "/repo" : input.repoRoot,
       name: input.repoName ?? "repo",

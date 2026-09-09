@@ -1,12 +1,10 @@
 # Runtime Reliability Reference
 
-muxpilot sits between a browser, Codex app-server or legacy tmux runtimes, append-only Codex transcripts, and local SQLite state. This guide describes how those sources are supervised and reconciled, and what an operator can inspect when a state transition fails.
 
 ## Supervised Application Lifecycle
 
 `pnpm app start [prod|dev|shadow]` builds or starts the selected lane, launches a background supervisor, and waits for the backend and web endpoints to become healthy. The supervisor owns the server and web child processes and restarts either one after an unexpected exit.
 
-Production, development, and shadow use separate ports, databases, logs, PID files, and runtime directories. Shadow additionally forces private Git/session/heavy roots and a separate tmux namespace; its exact ownership cleanup is described in [Shadow Testing](shadow-testing.md). `pnpm app status` classifies each lane as `running`, `stopped`, `unmanaged`, `partial`, `unhealthy`, `stale-pid`, or `port-conflict`. `restart all` restarts only lanes that were already running.
 
 Stop and restart terminate tracked descendants and process groups, not only the parent package-manager PID. This prevents Vite, `tsx watch`, or other children from retaining listeners after the supervisor exits.
 
@@ -14,19 +12,14 @@ See [Setup](setup.md), [Deployment](deployment.md), and [Configuration](configur
 
 ## Managed Codex Launches
 
-muxpilot launches new, resumed, and forked Codex sessions through a repo-owned wrapper. Each launch disables Codex's startup update prompt for that process, applies the requested collaboration/model settings, and injects only the capability-bound MCP servers needed by the session.
-
-If Codex exits during its first 15 seconds, the wrapper retries up to three times unless the command is missing, cannot execute, or was interrupted. A final startup failure leaves the tmux pane open with `startup_failed` state and the exit evidence visible instead of immediately losing the pane.
-
-A small child supervisor learns the durable stdio tool-server commands started by Codex. If context compaction starts an identical replacement without retiring the older process, it keeps the replacement and terminates the stale tree. When the Codex runtime exits, it cleans up the tool-server children it learned rather than leaving duplicate servers behind.
+muxpilot launches new, resumed, and forked Codex sessions as muxpilot-owned app-server user services. Each launch applies the requested collaboration and model settings, provisions a private Unix socket, and injects only the capability-bound MCP servers needed by the session. The service and its cgroup own the complete process tree.
 
 ## Runtime and Transcript Reconciliation
 
-For app-server sessions, muxpilot reconciles the exact thread through initialize, resume, and thread/read before accepting input; service, socket, protocol, rollout, and database evidence are considered together. Tmux remains authoritative only for legacy panes. Codex JSONL files remain durable conversation evidence, while SQLite holds muxpilot's parsed and local state.
 
-At startup muxpilot synchronously discovers current panes so the newest sessions appear quickly, then catches up transcript history in the background with recent JSONL files first. Notifications start only after catch-up establishes a quiet baseline, preventing old status transitions from producing a burst of alerts.
+At startup muxpilot reconnects persisted app-server services and thread identities, then catches up transcript history in the background with recent JSONL files first. Notifications start only after catch-up establishes a quiet baseline, preventing old status transitions from producing a burst of alerts.
 
-Discovery and parsing continue on independent intervals. The parser persists byte offsets and can make multiple bounded passes over a growing transcript. When a pane starts writing to a different Codex JSONL source, muxpilot changes the source identity and resets the displayed transcript instead of mixing two conversations.
+Runtime reconciliation and parsing continue independently. The parser persists byte offsets and can make multiple bounded passes over a growing transcript. When a session binds to a different Codex JSONL source, muxpilot changes the source identity and resets the displayed transcript instead of mixing two conversations.
 
 Initializing sessions remain visible while Codex reaches its ready screen. Live WebSocket events update the dashboard immediately, while periodic reconciliation repairs missed or stale client state.
 
@@ -36,34 +29,27 @@ Operator and agent messages are persisted before runtime delivery begins. A subm
 
 Delivery then follows a guarded state machine:
 
-1. Load the exact text into a tmux paste buffer and paste it into the Codex composer.
-2. Verify the composer contains the expected prompt, including wrapped or collapsed paste displays.
-3. Send the configured submit keys and wait for Codex acknowledgement through transcript lifecycle or an active status.
-4. If the prompt is still present, retry the submit key once.
-5. If Codex is still ready and the composer is empty, replay the preserved prompt once.
-6. Stop with `input_failed` rather than guessing after the safe retry budget is exhausted.
-
-Those steps describe the legacy tmux adapter. App-server delivery supplies a stable `clientUserMessageId` to `turn/start` and acknowledges only a structured receipt or matching projected item. If the response is lost, **Retry input** performs an authoritative `thread/read` and searches exact client IDs. A matching item is reconciled without resending; an absent identity remains failed because Codex does not currently guarantee client-ID idempotency.
-
-The acknowledgement deadline is 30 seconds. muxpilot never overwrites a composer containing different text. Failures distinguish missing paste observation, rejected submit, no acknowledgement, changed composer, unavailable session, legacy unverified state, and tmux transport failure.
+1. Send the structured request with a stable client message ID and exact provider/thread identity.
+2. Persist the app-server receipt and associated turn identity.
+3. Reconcile uncertain transport outcomes with `thread/read` before attempting any retry.
+4. Stop with `input_failed` rather than guessing when acknowledgement cannot be established.
 
 While an ordinary app-server turn is active, the composer can steer that exact turn with `turn/steer`. The driver supplies its tracked active turn as the `expectedTurnId` precondition. A definitive completed, changed, or non-steerable turn response converts the same durable submission into an ordinary queued input. Transport-uncertain steering is reconciled by stable client message ID and is never blindly queued or resent.
 
-An input failure blocks new composer messages. The session view preserves the exact submitted message and exposes **Retry input** and **Dismiss**. Retry first verifies Codex is ready and either submits an exact matching existing draft or restores the preserved prompt into an empty composer. Dismiss clears the blocking state without claiming that Codex received the message.
+An input failure blocks new composer messages. The session view preserves the exact submitted message and exposes **Retry input** and **Dismiss**. Retry first reconciles the stable client message ID against authoritative app-server state. Dismiss clears the blocking state without claiming that Codex received the message.
 
-Pending deliveries are reconciled after backend restart, pane rediscovery, transcript rollover, and queued-input processing. A matching Codex lifecycle event marks the persisted submission acknowledged; a completed restored delivery is not sent again.
+Pending deliveries are reconciled after backend restart, service reconnection, transcript rollover, and queued-input processing. A matching Codex lifecycle event marks the persisted submission acknowledged; a completed restored delivery is not sent again.
 
 ## Queued Input
 
 Input is queued when Codex is busy or another item is already queued. The queue is persisted in SQLite and bound to the current Codex transcript source. Operators can edit the text or collaboration mode, or delete the item, until delivery begins.
 
-Only one queued item is processed at a time. It advances when discovery reports a ready pane and no unresolved interactive gate or failed delivery remains. A source change prevents queued text from leaking into a different Codex run.
+Only one queued item is processed at a time. It advances when app-server reports a ready session and no unresolved interactive gate or failed delivery remains. A source change prevents queued text from leaking into a different Codex run.
 
 ## Crash Session Recovery
 
-During clean operation muxpilot records the non-archived Codex runtimes that are open. If the server later starts after an unclean shutdown, it reconciles current service/socket or tmux state. Missing conversations appear in one recovery dialog with all candidates selected by default.
+Before shutdown, muxpilot records the non-archived app-server sessions expected to remain available. After an unclean restart, stopped or missing services become recovery candidates. Restoring a candidate resumes its exact Codex thread through a new app-server service while retaining muxpilot metadata, documents, and managed Git bindings.
 
-Restoring a candidate resumes the exact Codex thread through app-server by default, or through an explicitly selected legacy tmux window, and reconnects muxpilot metadata, documents, hierarchy, orchestration, and managed Git binding. It restores the durable conversation, not a command that was executing when the host stopped. Dismissed candidates remain available through session History.
 
 Eligible idle app-server sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
 
@@ -128,6 +114,5 @@ Use the narrowest evidence that answers the problem:
 1. `pnpm app status` for supervisor, endpoint, PID, and port ownership.
 2. `pnpm app logs <mode> --process all --lines 80` for recent server/web/supervisor errors.
 3. The session status, failed-input banner, heavy-command modal, and Git workspace panel.
-4. For agent orchestration mismatches, use the muxpilot MCP tools to compare persisted state with neutral runtime/service, process-tree, protocol-journal, rollout, and legacy tmux evidence as described in [Agent Orchestration](agent-orchestration.md#raw-evidence-tools).
 
-A ready pane with no queued input can simply be idle. Do not resend or overwrite a draft unless the persisted submission, transcript source, terminal composer, and queue state all support that exact action.
+A ready session with no queued input can simply be idle. Do not resend input unless the persisted submission, provider/thread identity, app-server reconciliation state, and queue state support that exact action.

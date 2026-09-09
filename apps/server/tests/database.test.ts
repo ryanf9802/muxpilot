@@ -20,8 +20,14 @@ describe("AppDatabase session visibility", () => {
     const stored = raw.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(legacy.id) as { data_json: string };
     const legacyData = JSON.parse(stored.data_json) as Record<string, unknown>;
     for (const key of ["name", "cwd", "provider", "driverKind", "runtime", "capabilities", "resourceUnit"]) delete legacyData[key];
+    legacyData.tmux = {
+      sessionId: "legacy-session",
+      sessionName: "work",
+      windowName: "codex",
+      cwd: "/repo"
+    };
     raw.prepare("UPDATE managed_sessions SET data_json = ? WHERE id = ?").run(JSON.stringify(legacyData), legacy.id);
-    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v2'").run();
+    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v3'").run();
     raw.close();
 
     const reopened = new AppDatabase(path);
@@ -30,10 +36,11 @@ describe("AppDatabase session visibility", () => {
       name: "codex",
       cwd: "/repo",
       provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
-      driverKind: "codex_tmux",
-      runtime: { kind: "tmux", pane: legacy.tmux },
-      capabilities: { verifiedInput: true, terminalAttach: true, hibernate: false }
+      status: "missing"
     });
+    expect(session).not.toHaveProperty("driverKind");
+    expect(session).not.toHaveProperty("tmux");
+    expect(session?.runtime).toBeUndefined();
     expect(existsSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`)).toBe(true);
     const backup = new DatabaseSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`, { readOnly: true });
     expect(backup.prepare("PRAGMA integrity_check").get()).toMatchObject({ integrity_check: "ok" });
@@ -52,7 +59,7 @@ describe("AppDatabase session visibility", () => {
     await initial.upsertSession(testSession("backup-failure"), "2026-08-31T00:00:00.000Z");
     await initial.close();
     const raw = new DatabaseSync(path);
-    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v2'").run();
+    raw.prepare("DELETE FROM app_settings WHERE key = 'session_runtime_backup_v3'").run();
     raw.close();
     writeFileSync(`${path}${SESSION_RUNTIME_BACKUP_SUFFIX}`, "not sqlite");
 
@@ -555,7 +562,11 @@ describe("AppDatabase activity summaries", () => {
 
   it("reconciles a delayed rollout echo by an unambiguous receipt turn identity", async () => {
     const db = await tempDb();
-    const session = { ...testSession("session-delayed-rollout-echo"), codexSessionId: "thread-app" };
+    const session = {
+      ...testSession("session-delayed-rollout-echo"),
+      codexSessionId: "thread-app",
+      provider: { kind: "codex" as const, threadId: "thread-app", rolloutPath: "/tmp/codex.jsonl" }
+    };
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     const submitted = {
       ...testMessage(session.id, 1, "user", "Queued during recovery", "2026-07-07T00:00:01.000Z"),
@@ -859,7 +870,7 @@ describe("AppDatabase activity summaries", () => {
     const newSession = {
       ...oldSession,
       id: "session-rekey-new",
-      tmux: { ...oldSession.tmux, paneId: "%9", windowId: "@9", windowName: "restored" },
+      name: "restored",
       status: "unknown" as const,
       archived: false
     };
@@ -2000,7 +2011,7 @@ describe("AppDatabase touched repositories", () => {
       {
         ...testSession("session-1"),
         repo: { root: "/repo/backfilled", name: "backfilled", branch: "main", dirty: false, worktree: null },
-        tmux: { ...testSession("session-1").tmux, cwd: "/repo/backfilled" },
+        cwd: "/repo/backfilled",
         lastActivityAt: "2026-07-08T04:00:00.000Z"
       },
       "2026-07-08T04:00:01.000Z"
@@ -2040,20 +2051,15 @@ function itemSpans(page: TranscriptPageResponse): Array<[number, number, string]
 function testSession(id: string): ManagedSession {
   return {
     id,
-    tmux: {
-      sessionId: "tmux-session",
-      sessionName: "work",
-      windowId: "@1",
-      windowIndex: 1,
-      windowName: "codex",
-      paneId: "%1",
-      paneIndex: 0,
-      paneActive: true,
-      cwd: "/repo",
-      currentCommand: "node",
-      title: "codex",
-      pid: 123,
-      size: "120x40"
+    name: id,
+    cwd: "/repo",
+    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
+    runtime: {
+      kind: "systemd_service",
+      unit: `muxpilot-codex-${id}.service`,
+      socketPath: `/tmp/${id}.sock`,
+      state: "connected",
+      codexVersion: "0.152.0"
     },
     repo: {
       root: "/repo",
@@ -2088,10 +2094,10 @@ function sessionHistoryResult(session: ManagedSession): SessionHistoryResult {
     codexJsonlPath: session.codexJsonlPath,
     status: session.status,
     archived: session.archived,
-    sessionName: session.tmux.windowName,
+    sessionName: session.name,
     repoName: session.repo.name,
     repoBranch: session.repo.branch,
-    cwd: session.tmux.cwd,
+    cwd: session.cwd,
     lastActivityAt: session.lastActivityAt,
     transcriptSize: session.transcriptSize,
     matchedPrompts: [],

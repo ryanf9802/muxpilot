@@ -35,7 +35,6 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
   questions: true,
   planActions: true,
   fastMode: true,
-  rawTerminalCapture: false,
   terminalAttach: true,
   hibernate: true
 };
@@ -355,7 +354,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     if (!launchOptions) throw new Error("Clear-context implementation requires fresh-thread launch options");
     const previousThreadId = requireThreadId(session);
     const settings = {
-      cwd: session.cwd ?? session.tmux.cwd,
+      cwd: session.cwd,
       model: launchOptions.model,
       developerInstructions: launchOptions.developerInstructions,
       runtimeWorkspaceRoots: launchOptions.writableRoots
@@ -812,7 +811,7 @@ export const PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX = [
 ].join(" ");
 
 function requireAppServerSession(session: ManagedSession): SystemdSessionRuntimeRef {
-  if (session.driverKind !== "codex_app_server" || session.runtime?.kind !== "systemd_service") {
+  if (session.runtime?.kind !== "systemd_service") {
     throw new Error("Session is not owned by the app-server driver");
   }
   return session.runtime;
@@ -836,7 +835,7 @@ function requireSourceThread(spec: AgentSessionLaunchSpec): string {
 
 function turnOptions(session: ManagedSession): Record<string, unknown> {
   const selected = session.models[session.inputMode];
-  const cwd = session.cwd ?? session.tmux.cwd;
+  const cwd = session.cwd;
   if (!cwd || !isAbsolute(cwd)) throw new Error("App-server session cwd must be absolute");
   return {
     cwd,

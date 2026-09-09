@@ -109,26 +109,7 @@ export type MessageType =
   | "question_request"
   | "parser_notice";
 
-export interface TmuxPane {
-  sessionId: string;
-  sessionName: string;
-  serverPid?: number;
-  sessionCreatedAt?: number;
-  windowId: string;
-  windowIndex: number;
-  windowName: string;
-  paneId: string;
-  paneIndex: number;
-  paneActive: boolean;
-  cwd: string;
-  currentCommand: string;
-  title: string;
-  pid: number;
-  size: string;
-}
-
 export type AgentProviderKind = "codex";
-export type SessionDriverKind = "codex_tmux" | "codex_app_server";
 
 export interface AgentProviderRef {
   kind: AgentProviderKind;
@@ -136,15 +117,13 @@ export interface AgentProviderRef {
   rolloutPath: string | null;
 }
 
-export type SessionRuntimeRef =
-  | { kind: "tmux"; pane: TmuxPane }
-  | {
-      kind: "systemd_service";
-      unit: string;
-      socketPath: string;
-      state: "starting" | "connected" | "hibernated" | "stopped" | "failed";
-      codexVersion: string | null;
-    };
+export interface SessionRuntimeRef {
+  kind: "systemd_service";
+  unit: string;
+  socketPath: string;
+  state: "starting" | "connected" | "hibernated" | "stopped" | "failed";
+  codexVersion: string | null;
+}
 
 export interface SessionCapabilities {
   start: boolean;
@@ -159,7 +138,6 @@ export interface SessionCapabilities {
   questions: boolean;
   planActions: boolean;
   fastMode: boolean;
-  rawTerminalCapture: boolean;
   terminalAttach: boolean;
   hibernate: boolean;
 }
@@ -177,24 +155,6 @@ export interface AppServerCompatibility {
   detail: string;
   checkedAt: string;
   missingCapabilities: string[];
-}
-
-export type TmuxCompatibilityStatus = "available" | "executable_missing" | "probe_failed";
-
-export interface TmuxCompatibility {
-  status: TmuxCompatibilityStatus;
-  available: boolean;
-  version: string | null;
-  detail: string;
-  checkedAt: string;
-}
-
-export interface SessionDriverCompatibilityResponse {
-  defaultDriver: SessionDriverKind;
-  drivers: {
-    codex_app_server: AppServerCompatibility;
-    codex_tmux: TmuxCompatibility;
-  };
 }
 
 export interface RepoMetadata {
@@ -372,14 +332,12 @@ export interface SessionForkOrigin {
 export interface ManagedSession {
   id: string;
   /** Stable display name independent of the process transport. */
-  name?: string;
+  name: string;
   /** Stable working directory independent of the process transport. */
-  cwd?: string;
-  provider?: AgentProviderRef;
-  driverKind?: SessionDriverKind;
+  cwd: string;
+  provider: AgentProviderRef;
   runtime?: SessionRuntimeRef;
   capabilities?: SessionCapabilities;
-  tmux: TmuxPane;
   repo: RepoMetadata;
   codexSessionId: string | null;
   codexJsonlPath: string | null;
@@ -750,17 +708,15 @@ export type CreateSessionRequest =
   | {
       cwd: string;
       name: string;
-      driverKind?: SessionDriverKind;
       workspace: {
         mode: "git";
         targetBranch: string;
       };
     }
-  | { cwd: string; name: string; driverKind?: SessionDriverKind; workspace?: { mode: "directory" } };
+  | { cwd: string; name: string; workspace?: { mode: "directory" } };
 
 export interface ForkSessionRequest {
   name: string;
-  driverKind?: SessionDriverKind;
 }
 
 export interface ForkSessionResponse {
@@ -814,9 +770,7 @@ export interface RestoreSessionResponse {
   restored: boolean;
 }
 
-export interface RestoreSessionRequest {
-  driverKind?: SessionDriverKind;
-}
+export type RestoreSessionRequest = Record<string, never>;
 
 export interface SessionRecoveryCandidate extends SessionHistoryResult {
   previousStatus: SessionStatus;
@@ -835,7 +789,6 @@ export interface SessionRecoveryResponse {
 export interface RestoreSessionRecoveryRequest {
   incidentId: string;
   sessionIds: string[];
-  driverKind?: SessionDriverKind;
 }
 
 export interface RestoreSessionRecoveryResult {
@@ -864,7 +817,6 @@ export interface SessionTransferPreviewSession {
   transcriptBytes: number;
   lastActivityAt: string | null;
   documentCount: number;
-  driverKind?: SessionDriverKind;
 }
 
 export interface SessionTransferPreviewBranch {
@@ -889,7 +841,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3 | 4 | 5;
+  formatVersion: 2 | 3 | 4 | 5 | 6;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
@@ -898,7 +850,6 @@ export interface SessionTransferImportMapping {
   sourceCwd: string;
   destinationCwd: string;
   targetBranch?: string;
-  driverKind?: SessionDriverKind;
 }
 
 export interface SessionTransferImportRequest {
@@ -978,9 +929,9 @@ export type DashboardGitWorkspaceSummary = Omit<GitWorkspaceSummary, "dependency
 
 /**
  * A structurally compatible session record with bounded preview content and a slim Git workspace.
- * Full provider, transcript, document, and workspace state remains available from the session APIs.
+ * Full transcript, document, and workspace state remains available from the session APIs.
  */
-export type DashboardSessionSummary = Omit<ManagedSession, "gitWorkspace"> & {
+export type DashboardSessionSummary = Omit<ManagedSession, "gitWorkspace" | "runtime" | "resourceUnit"> & {
   gitWorkspace?: DashboardGitWorkspaceSummary | null;
 };
 

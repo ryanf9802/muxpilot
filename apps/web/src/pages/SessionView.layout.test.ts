@@ -35,7 +35,7 @@ describe("mobile session viewport layout", () => {
     const mobileStyles = cssBlock(styles, "@media (max-width: 819px)");
     const mobileBackdropRule = cssBlock(mobileStyles, ".dialog-backdrop");
     const mobileSideRule = cssBlock(mobileStyles, ".dialog-backdrop[data-placement=\"end\"]");
-    const mobileFullHeightRule = cssBlock(mobileStyles, ".documents-modal,\n  .btw-drawer");
+    const mobileFullHeightRule = cssBlock(mobileStyles, ".documents-modal,\n  .btw-drawer,\n  .model-settings-drawer");
     expect(backdropRule).toContain("place-items: center;");
     expect(panelRule).toContain("width: min(100%, var(--modal-max-width, 560px));");
     expect(panelRule).toContain("max-height: 100%;");
@@ -67,15 +67,15 @@ describe("mobile session viewport layout", () => {
   it("assigns direct controls to deliberate responsive groups", () => {
     const headerRule = cssBlock(styles, ".session-header");
     const runtimeRule = cssBlock(styles, ".session-header-runtime");
-    const runtimeModelRule = cssBlock(styles, ".session-header-runtime .tmux-command-metadata .tmux-command-model");
+    const runtimeModelRule = cssBlock(styles, ".session-header-runtime .model-settings-metadata .model-settings-model");
     const actionsRule = cssBlock(styles, ".session-actions");
     const groupRule = cssBlock(styles, ".session-action-group");
     const compactStyles = cssBlock(styles, "@media (max-width: 959px)");
     const compactButtonRule = cssBlock(compactStyles, ".session-actions button");
     const narrowStyles = cssBlock(styles, "@media (max-width: 819px)");
-    const narrowModelRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata");
-    const narrowModelIconRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata .tmux-command-icon");
-    const narrowModelLabelRule = cssBlock(narrowStyles, ".session-header-runtime .tmux-command-metadata .tmux-command-label");
+    const narrowModelRule = cssBlock(narrowStyles, ".session-header-runtime .model-settings-metadata");
+    const narrowModelIconRule = cssBlock(narrowStyles, ".session-header-runtime .model-settings-metadata .model-settings-icon");
+    const narrowModelLabelRule = cssBlock(narrowStyles, ".session-header-runtime .model-settings-metadata .model-settings-label");
     const narrowMetaRule = cssBlock(narrowStyles, ".session-header-meta");
     const narrowMetadataRule = cssBlock(narrowStyles, ".session-header-runtime-detail,\n  .session-header-memory-usage");
     const compactStatusRule = cssBlock(narrowStyles, ".session-header-status-compact .session-header-runtime > .status");

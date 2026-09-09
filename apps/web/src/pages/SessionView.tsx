@@ -461,10 +461,10 @@ export function shouldQueueComposerInput(
 }
 
 export function canSteerComposerInput(
-  session: Pick<ManagedSession, "driverKind" | "capabilities" | "status" | "initializing" | "runtime"> | null,
+  session: Pick<ManagedSession, "capabilities" | "status" | "initializing" | "runtime"> | null,
   heavyCommandActive: boolean
 ): boolean {
-  if (!session || session.driverKind !== "codex_app_server" || !session.capabilities?.steer) return false;
+  if (!session || !session.capabilities?.steer) return false;
   if (session.initializing || heavyCommandActive) return false;
   if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") return false;
   return session.status === "working"
@@ -768,7 +768,8 @@ export function loadingSessionFromLocationState(state: unknown, routeSessionId: 
   const loadingSession = value as Partial<ManagedSession>;
   if (
     loadingSession.id !== routeSessionId ||
-    !loadingSession.tmux ||
+    typeof loadingSession.name !== "string" ||
+    typeof loadingSession.cwd !== "string" ||
     !loadingSession.repo ||
     !loadingSession.models ||
     (loadingSession.inputMode !== "default" && loadingSession.inputMode !== "plan")
@@ -1090,8 +1091,8 @@ export function sessionTranscriptSource(session: ManagedSession): TranscriptSour
   };
 }
 
-export function sessionCreateSessionCwd(session: { repo: Pick<ManagedSession["repo"], "root">; tmux: Pick<ManagedSession["tmux"], "cwd">; gitWorkspace?: Pick<GitWorkspaceSummary, "entryPath"> | null }): string {
-  return session.gitWorkspace?.entryPath ?? session.repo.root ?? session.tmux.cwd;
+export function sessionCreateSessionCwd(session: { cwd: string; repo: Pick<ManagedSession["repo"], "root">; gitWorkspace?: Pick<GitWorkspaceSummary, "entryPath"> | null }): string {
+  return session.gitWorkspace?.entryPath ?? session.repo.root ?? session.cwd;
 }
 
 export function shouldReplaceTranscriptForSource(currentSourceKey: string | null, nextSourceKey: string): boolean {
@@ -1301,7 +1302,7 @@ export function SessionView() {
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelSettingsError, setModelSettingsError] = useState("");
   const [modelSettingsApplying, setModelSettingsApplying] = useState<CollaborationMode | null>(null);
-  const [copiedTmuxCommand, setCopiedTmuxCommand] = useState(false);
+  const [copiedAttachCommand, setCopiedAttachCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
@@ -1767,7 +1768,7 @@ export function SessionView() {
       setModelSettingsError("");
       setModelSettingsApplying(null);
       modelCatalogRequestSessionRef.current = null;
-      setCopiedTmuxCommand(false);
+      setCopiedAttachCommand(false);
       setGitPanelOpen(false);
       setDocumentsOpen(false);
       setRequestedDocument(null);
@@ -2076,9 +2077,9 @@ export function SessionView() {
   }, [id]);
 
   useEffect(() => {
-    if (session?.driverKind !== "codex_app_server" || modelCatalog || modelCatalogLoading || modelCatalogRequestSessionRef.current === id) return;
+    if (!session || modelCatalog || modelCatalogLoading || modelCatalogRequestSessionRef.current === id) return;
     void loadModelCatalog();
-  }, [id, loadModelCatalog, modelCatalog, modelCatalogLoading, session?.driverKind]);
+  }, [id, loadModelCatalog, modelCatalog, modelCatalogLoading, session]);
 
   async function applyModelSettings(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
     setModelSettingsApplying(mode);
@@ -2711,15 +2712,15 @@ export function SessionView() {
     }
   }
 
-  async function copyTmuxCommand() {
+  async function copyAttachCommand() {
     if (!session) return;
     const command = runtimeAttachCommand(session);
     try {
       await copyText(command);
-      setCopiedTmuxCommand(true);
-      window.setTimeout(() => setCopiedTmuxCommand(false), 1600);
+      setCopiedAttachCommand(true);
+      window.setTimeout(() => setCopiedAttachCommand(false), 1600);
     } catch {
-      setCopiedTmuxCommand(false);
+      setCopiedAttachCommand(false);
     }
   }
 
@@ -2859,10 +2860,10 @@ export function SessionView() {
         <div ref={adaptiveHeaderStatus.runtimeRef} className="session-header-runtime">
           <RuntimeAttachButton
             session={readySession}
-            copied={copiedTmuxCommand}
+            copied={copiedAttachCommand}
             accessMode={accessMode}
             enabled={!completed && readySession.capabilities?.terminalAttach !== false}
-            onCopy={() => void copyTmuxCommand()}
+            onCopy={() => void copyAttachCommand()}
           />
           <HeavyCommandIndicator commands={heavyCommands} onOpen={() => setHeavyCommandsOpen(true)} />
           <ModelSettingsButton
@@ -4348,7 +4349,7 @@ export function SessionTitleHeading({
 
 export function SessionHeaderMeta({ session }: {
   session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> &
-    Partial<Pick<ManagedSession, "contextUsage" | "driverKind" | "runtime" | "resourceUsage">>;
+    Partial<Pick<ManagedSession, "contextUsage" | "runtime" | "resourceUsage">>;
 }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
@@ -4573,18 +4574,18 @@ export function ModelSettingsButton({
   const model = sessionModelDisplay(session, catalog);
   const content = (
     <>
-      <SlidersHorizontal className="tmux-command-icon" size={15} aria-hidden="true" />
-      <span className="tmux-command-label">
-        <span className="tmux-command-model">{model.model}</span>
-        <span className="tmux-command-effort">{model.reasoningEffort}</span>
+      <SlidersHorizontal className="model-settings-icon" size={15} aria-hidden="true" />
+      <span className="model-settings-label">
+        <span className="model-settings-model">{model.model}</span>
+        <span className="model-settings-effort">{model.reasoningEffort}</span>
       </span>
     </>
   );
-  const className = `tmux-command-button${compact ? " tmux-command-metadata" : ""}`;
-  const selectable = session.driverKind === "codex_app_server" && Boolean(onOpen);
+  const className = `model-settings-button${compact ? " model-settings-metadata" : ""}`;
+  const selectable = Boolean(onOpen);
   if (!selectable) {
     return (
-      <div className={`${className} tmux-command-display`} title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
+      <div className={`${className} model-settings-display`} title={`${model.model} / ${model.reasoningEffort}`} aria-label={`${model.model} ${model.reasoningEffort}`}>
         {content}
       </div>
     );
@@ -4610,7 +4611,7 @@ export function RuntimeAttachButton({
   enabled,
   onCopy
 }: {
-  session: Pick<ManagedSession, "tmux" | "runtime" | "driverKind">;
+  session: Pick<ManagedSession, "runtime">;
   copied: boolean;
   accessMode: AccessMode | null;
   enabled: boolean;
@@ -4653,26 +4654,17 @@ function fallbackModelSettings(...settings: SessionModelSettings[]): SessionMode
   };
 }
 
-export function tmuxAttachCommand(session: Pick<ManagedSession, "tmux">): string {
-  const sessionTarget = shellQuote(session.tmux.sessionName);
-  const windowTarget = shellQuote(`${session.tmux.sessionName}:${session.tmux.windowIndex}`);
-  return `tmux select-window -t ${windowTarget} && tmux attach-session -t ${sessionTarget}`;
+export function runtimeAttachCommand(session: Pick<ManagedSession, "runtime">): string {
+  if (session.runtime?.kind !== "systemd_service") throw new Error("Session has no attachable app-server runtime");
+  return `codex --remote ${shellQuote(`unix://${session.runtime.socketPath}`)}`;
 }
 
-export function runtimeAttachCommand(session: Pick<ManagedSession, "tmux" | "runtime" | "driverKind">): string {
-  if (session.driverKind === "codex_app_server" && session.runtime?.kind === "systemd_service") {
-    return `codex --remote ${shellQuote(`unix://${session.runtime.socketPath}`)}`;
-  }
-  return tmuxAttachCommand(session);
-}
-
-export function runtimeLabel(session: Partial<Pick<ManagedSession, "driverKind" | "runtime">>): string {
-  if (session.driverKind !== "codex_app_server") return "Legacy tmux";
+export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime">>): string {
   if (session.runtime?.kind !== "systemd_service") return "App server";
   return session.runtime.state === "hibernated" ? "App server · sleeping" : `App server · ${session.runtime.state}`;
 }
 
-function runtimeDetail(session: Partial<Pick<ManagedSession, "driverKind" | "runtime">>): string {
+function runtimeDetail(session: Partial<Pick<ManagedSession, "runtime">>): string {
   if (session.runtime?.kind !== "systemd_service") return runtimeLabel(session);
   return `${runtimeLabel(session)} · ${session.runtime.unit}${session.runtime.codexVersion ? ` · Codex ${session.runtime.codexVersion}` : ""}`;
 }

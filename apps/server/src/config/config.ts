@@ -7,16 +7,6 @@ import { z } from "zod";
 
 loadEnvFiles();
 
-const keySequence = (fallback: string[]) =>
-  z.preprocess((value) => {
-    if (Array.isArray(value)) return value;
-    if (typeof value !== "string") return fallback;
-    return value
-      .split(/\s+/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-  }, z.array(z.string().min(1)).min(1));
-
 const booleanFlag = z.preprocess((value) => {
   if (typeof value !== "string") return value ?? false;
   const normalized = value.trim().toLowerCase();
@@ -60,7 +50,6 @@ const schema = z.object({
   logLevel: z.string().default("info"),
   discoveryIntervalMs: z.coerce.number().int().positive().default(1000),
   parserIntervalMs: z.coerce.number().int().positive().default(1000),
-  defaultSessionDriver: z.enum(["codex_app_server", "codex_tmux"]).default("codex_app_server"),
   appServerHibernateMs: z.coerce.number().int().positive().default(900_000),
   resourceGovernor: z.enum(["auto", "off"]).default("auto"),
   agentMemorySoftPercent: percentage.default(50),
@@ -88,14 +77,7 @@ const schema = z.object({
   sessionFileKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value : undefined),
     z.string().min(16).optional()
-  ),
-  inputSubmitKeys: keySequence(["Enter"]),
-  inputModeCycleKeys: keySequence(["BTab"]),
-  approvalKeys: z.object({
-    approveOnce: keySequence(["Enter"]),
-    approveForPrefix: keySequence(["Down", "Enter"]),
-    deny: keySequence(["Escape"])
-  })
+  )
 }).superRefine((value, context) => {
   if (value.agentMemoryHardPercent < value.agentMemorySoftPercent) {
     context.addIssue({
@@ -127,6 +109,9 @@ export function loadConfig(): AppConfig {
 }
 
 export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: boolean } = {}): AppConfig {
+  if (env.MUXPILOT_DEFAULT_SESSION_DRIVER !== undefined) {
+    throw new Error("MUXPILOT_DEFAULT_SESSION_DRIVER is no longer supported; Codex app-server is the only session runtime");
+  }
   const parsed = schema.parse({
     lanEnabled: env.MUXPILOT_LAN_ENABLED,
     host: env.MUXPILOT_HOST ?? defaultHost(env.MUXPILOT_LAN_ENABLED),
@@ -147,7 +132,6 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     logLevel: env.MUXPILOT_LOG_LEVEL,
     discoveryIntervalMs: env.MUXPILOT_DISCOVERY_INTERVAL_MS,
     parserIntervalMs: env.MUXPILOT_PARSER_INTERVAL_MS,
-    defaultSessionDriver: env.MUXPILOT_DEFAULT_SESSION_DRIVER,
     appServerHibernateMs: env.MUXPILOT_APP_SERVER_HIBERNATE_MS,
     resourceGovernor: env.MUXPILOT_RESOURCE_GOVERNOR,
     agentMemorySoftPercent: env.MUXPILOT_AGENT_MEMORY_SOFT_PERCENT,
@@ -169,14 +153,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,
     summaryDebounceMs: env.MUXPILOT_SUMMARY_DEBOUNCE_MS,
     openaiPricingJson: env.MUXPILOT_OPENAI_PRICING_JSON,
-    sessionFileKey: env.MUXPILOT_SESSION_FILE_KEY,
-    inputSubmitKeys: env.MUXPILOT_INPUT_SUBMIT_KEYS,
-    inputModeCycleKeys: env.MUXPILOT_INPUT_MODE_CYCLE_KEYS,
-    approvalKeys: {
-      approveOnce: env.MUXPILOT_APPROVAL_APPROVE_ONCE_KEYS,
-      approveForPrefix: env.MUXPILOT_APPROVAL_APPROVE_PREFIX_KEYS,
-      deny: env.MUXPILOT_APPROVAL_DENY_KEYS
-    }
+    sessionFileKey: env.MUXPILOT_SESSION_FILE_KEY
   });
 
   const dataDir = resolve(parsed.dataDir);
