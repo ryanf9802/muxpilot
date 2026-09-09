@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildExpandedTranscriptItems, buildTranscriptItems } from "./transcript.js";
 import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
 import { serializeGitWorkflowEvent } from "./gitWorkflowEvent.js";
+import { serializeSessionWaitEvent } from "./sessionWaitEvent.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
@@ -139,6 +140,28 @@ describe("buildTranscriptItems", () => {
           type: "status",
           text: "Heavyweight command queued · session released while waiting",
           payload: expect.objectContaining({ muxpilotHeavyCommandQueue: expect.any(Object) })
+        })
+      })
+    ]);
+  });
+
+  it("renders session waits as standalone system actions", () => {
+    const items = buildTranscriptItems([
+      message(1, serializeSessionWaitEvent({
+        version: 1,
+        kind: "timeout",
+        sessions: [{ id: "child-1", name: "Review child", effectiveStatus: "idle" }]
+      }))
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        type: "user_action",
+        message: expect.objectContaining({
+          role: "system",
+          type: "status",
+          text: "Agent session wait timed out",
+          payload: expect.objectContaining({ agentSessionWait: expect.objectContaining({ kind: "timeout" }) })
         })
       })
     ]);

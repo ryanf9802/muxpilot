@@ -2,7 +2,7 @@ import { appendFile, mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatMessage, ManagedSession, TmuxPane } from "@muxpilot/core";
+import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type TmuxPane } from "@muxpilot/core";
 import type { CodexProcessInfo } from "../src/codex/codexProcessResolver.js";
 import { CodexSessionStore, type CodexSessionFile } from "../src/codex/codexSessionStore.js";
 import { AppDatabase } from "../src/db/database.js";
@@ -3012,6 +3012,33 @@ describe("SessionManager transcript isolation", () => {
         turnId: "turn-active"
       }
     });
+    await harness.db.close();
+  });
+
+  it("delivers an app-server agent wait only when ready without using the input queue", async () => {
+    const sendMessage = vi.fn(async (_session: ManagedSession, _text: string, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-wait",
+      turnId: "turn-wait",
+      acceptedAt: "2026-09-08T20:00:00.000Z"
+    }));
+    const driver = { kind: "codex_app_server", sendMessage } as unknown as AgentSessionDriver;
+    const harness = await createHarness({ sessionDrivers: new SessionDriverRegistry([driver]) });
+    const session = appServerSession("app-wait", "thread-wait", "working");
+    const wake = serializeSessionWaitEvent({ version: 1, kind: "timeout", sessions: [{ id: "child-1" }] });
+    await harness.db.upsertSession(session, "2026-09-08T19:59:00.000Z");
+
+    await expect(harness.manager.resumeAgentWait(session.id, wake))
+      .resolves.toBe(false);
+    expect(await harness.manager.listQueuedInputs(session.id)).toEqual([]);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    await harness.db.setSessionStatus(session.id, "idle", "2026-09-08T20:00:01.000Z");
+    await expect(harness.manager.resumeAgentWait(session.id, wake))
+      .resolves.toBe(true);
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), wake, expect.any(String));
+    expect(await harness.manager.listQueuedInputs(session.id)).toEqual([]);
     await harness.db.close();
   });
 

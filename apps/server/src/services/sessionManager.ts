@@ -2186,14 +2186,37 @@ export class SessionManager {
   }
 
   async resumeAgentWait(sessionId: string, message: string): Promise<boolean> {
-    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
-    const session = await this.db.getSession(sessionId);
-    if (!session || session.status === "missing") return false;
-    if (session.driverKind === "codex_app_server") {
-      if (!isInputReadyStatus(session.status)) return false;
-      const result = await this.sendInput(sessionId, message);
-      return "session" in result;
+    const storedSession = await this.db.getSession(sessionId);
+    if (!storedSession || storedSession.status === "missing") return false;
+    if (storedSession.driverKind === "codex_app_server") {
+      return this.serializeRuntimeOperation(sessionId, async () => {
+        if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+        const session = await this.db.getSession(sessionId);
+        if (!session || session.archived || !readyAppServerInputSession(session)) return false;
+        if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
+        if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
+
+        const driver = this.appServerDriver(session);
+        if (!driver) return false;
+        this.deliveringInputSessionIds.add(sessionId);
+        try {
+          await driver.sendMessage(session, message, eventId());
+          const now = nowIso();
+          const status = activeInputStatus(session.inputMode);
+          await this.db.setSessionStatus(sessionId, status, now);
+          await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, "ok", now);
+          this.publish("status.changed", sessionId, { status });
+          return true;
+        } catch (error) {
+          await this.db.addAudit("muxpilot", "resume_agent_wait", sessionId, error instanceof Error ? error.message : String(error), nowIso());
+          return false;
+        } finally {
+          this.deliveringInputSessionIds.delete(sessionId);
+        }
+      });
     }
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
+    const session = storedSession;
     const ready = await this.readyLiveSession(session);
     if (!ready) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;

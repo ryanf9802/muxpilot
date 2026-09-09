@@ -8,6 +8,8 @@ import {
   normalizeHeavyCommandQueueEvent,
   serializeGitWorkflowEvent,
   serializeHeavyCommandQueueEvent,
+  serializeSessionWaitEvent,
+  withSessionWaitEventPayload,
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
 } from "@muxpilot/core";
@@ -118,6 +120,7 @@ import {
   transcriptFindMatches,
   transcriptVimNavigationCommand,
   transcriptSourceKey,
+  UserAction,
   visibleTranscriptFindEntries,
   replaceSkillToken,
   resizeComposerTextarea,
@@ -130,7 +133,6 @@ import {
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
-  UserAction,
   UserText
 } from "./SessionView.js";
 import { ApiError } from "../api/client.js";
@@ -2570,6 +2572,29 @@ describe("Git workflow automation events", () => {
     expect(visibleTranscriptFindEntries([item], new Set(), {})[0]?.text).toContain(
       "Agent → Git Changes integrated locally main @ 01234567 main"
     );
+  });
+});
+
+describe("session wait automation events", () => {
+  it("renders a compact full-width timeout panel with target details", () => {
+    const event = {
+      version: 1 as const,
+      kind: "timeout" as const,
+      sessions: [{ id: "child-1", name: "Review child", effectiveStatus: "idle" }]
+    };
+    const waitMessage = {
+      ...message("session-a", 1, "Agent session wait timed out", "system", "status"),
+      payload: withSessionWaitEventPayload({}, { event, rawText: serializeSessionWaitEvent(event) })
+    };
+    const html = renderToStaticMarkup(createElement(UserAction, { message: waitMessage }));
+
+    expect(html).toContain("session-wait-event");
+    expect(html).toContain('data-tone="warning"');
+    expect(html).toContain("Timed out");
+    expect(html).toContain("Review child");
+    expect(html).toContain("idle");
+    expect(html).toContain("Raw automation payload");
+    expect(copyableMessageText(waitMessage)).toContain("<muxpilot_session_wait>");
   });
 });
 

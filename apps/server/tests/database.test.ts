@@ -161,6 +161,37 @@ describe("AppDatabase session visibility", () => {
     await db.close();
   });
 
+  it("removes only valid internal wait markers from the persisted input queue", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const session = testSession("wait-queue-repair");
+    const db = new AppDatabase(path);
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    await db.appendQueuedInput(testQueuedInput(session.id, {
+      id: "valid-wait",
+      text: serializeSessionWaitEvent({ version: 1, kind: "timeout", sessions: [] }),
+      status: "queued"
+    }));
+    await db.appendQueuedInput(testQueuedInput(session.id, {
+      id: "malformed-wait",
+      text: '<muxpilot_session_wait>{"version":2,"kind":"timeout","sessions":[]}</muxpilot_session_wait>',
+      status: "queued"
+    }));
+    await db.appendQueuedInput(testQueuedInput(session.id, {
+      id: "operator-input",
+      text: "Keep this queued message",
+      status: "queued"
+    }));
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    expect((await restarted.listQueuedInputs(session.id)).map((input) => input.id)).toEqual([
+      "malformed-wait",
+      "operator-input"
+    ]);
+    await restarted.close();
+  });
+
   it("persists runtime and pending crash-recovery state", async () => {
     const db = await tempDb();
     const updatedAt = "2026-08-17T20:00:00.000Z";

@@ -3824,6 +3824,9 @@ export class SyncAppDatabase {
   }
 
   private normalizePersistedSessionWaitMessages(): void {
+    const queuedRows = this.db
+      .prepare("SELECT id, text FROM queued_inputs WHERE LTRIM(text) LIKE '<muxpilot_session_wait>%'")
+      .all() as unknown as Array<{ id: string; text: string }>;
     const rawRows = this.db
       .prepare(
         `SELECT * FROM messages
@@ -3831,7 +3834,7 @@ export class SyncAppDatabase {
          ORDER BY session_id, sequence`
       )
       .all() as unknown as MessageRow[];
-    if (rawRows.length === 0) return;
+    if (queuedRows.length === 0 && rawRows.length === 0) return;
     const systemRows = this.db
       .prepare("SELECT * FROM messages WHERE role = 'system' AND type = 'status'")
       .all() as unknown as MessageRow[];
@@ -3839,6 +3842,9 @@ export class SyncAppDatabase {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      for (const row of queuedRows) {
+        if (normalizeSessionWaitEvent(row.text)) this.db.prepare("DELETE FROM queued_inputs WHERE id = ?").run(row.id);
+      }
       for (const row of rawRows) {
         const normalized = normalizeSessionWaitEvent(row.text);
         if (!normalized) continue;

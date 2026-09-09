@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import type { ChatMessage, SessionStatus } from "@muxpilot/core";
+import {
+  normalizeSessionWaitEvent,
+  sessionWaitEventSummary,
+  withSessionWaitEventPayload,
+  type ChatMessage,
+  type SessionStatus
+} from "@muxpilot/core";
 import type { JsonRpcNotification } from "./jsonRpcConnection.js";
 
 export interface AppServerEventIdentity {
@@ -225,13 +231,20 @@ function completedItemMessage(
   const mapped = completedItemContent(type, item);
   if (!mapped || !mapped.text) return null;
   const identityPayload = { ...eventIdentity };
+  const waitEvent = mapped.role === "user" ? normalizeSessionWaitEvent(mapped.text) : null;
   return {
     id: stableProjectionId(eventIdentity, type ?? "unknown"),
-    type: mapped.type,
-    role: mapped.role,
+    type: waitEvent ? "status" : mapped.type,
+    role: waitEvent ? "system" : mapped.role,
     timestamp,
-    text: mapped.text,
-    payload: {
+    text: waitEvent ? sessionWaitEventSummary(waitEvent.event) : mapped.text,
+    payload: waitEvent ? withSessionWaitEventPayload({
+      source: "codex_app_server",
+      method: notification.method,
+      codexItemIdentity: identityPayload,
+      appServerIdentity: identityPayload,
+      item
+    }, waitEvent) : {
       source: "codex_app_server",
       method: notification.method,
       codexItemIdentity: identityPayload,

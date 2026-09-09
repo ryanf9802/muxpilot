@@ -4827,6 +4827,27 @@ select:focus-visible {
 .workflow-automation-event > summary::before,
 .workflow-automation-event .queue-automation-direction { color: var(--workflow-event-color); }
 
+.session-wait-event {
+  --session-wait-color: var(--color-success);
+  background: color-mix(in srgb, var(--session-wait-color) 8%, var(--color-input));
+  border-color: color-mix(in srgb, var(--session-wait-color) 34%, var(--color-border));
+}
+
+.session-wait-event[data-tone="warning"] { --session-wait-color: var(--color-warning); }
+
+.session-wait-badge {
+  padding: 2px 7px;
+  color: var(--session-wait-color);
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1.35;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: color-mix(in srgb, var(--session-wait-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--session-wait-color) 38%, transparent);
+  border-radius: 999px;
+}
+
 .queue-automation-event > summary {
   display: flex;
   align-items: center;

@@ -11,6 +11,12 @@ import {
   normalizeGitWorkflowEvent,
   withGitWorkflowEventPayload
 } from "./gitWorkflowEvent.js";
+import {
+  normalizeSessionWaitEvent,
+  sessionWaitEventFromPayload,
+  sessionWaitEventSummary,
+  withSessionWaitEventPayload
+} from "./sessionWaitEvent.js";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "./userContext.js";
 
 type InternalTranscriptItem =
@@ -253,6 +259,18 @@ function displayMessage(message: ChatMessage): ChatMessage | null {
       payload: withGitWorkflowEventPayload(message.payload, workflowEvent)
     };
   }
+  const embeddedWaitEvent = sessionWaitEventFromPayload(message.payload);
+  const normalizedWaitEvent = embeddedWaitEvent ? null : normalizeSessionWaitEvent(message.text);
+  const waitEvent = embeddedWaitEvent ?? normalizedWaitEvent?.event;
+  if (waitEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: sessionWaitEventSummary(waitEvent),
+      payload: normalizedWaitEvent ? withSessionWaitEventPayload(message.payload, normalizedWaitEvent) : message.payload
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -327,6 +345,7 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 function isUserActionMessage(message: ChatMessage): boolean {
   return Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
+    || Boolean(sessionWaitEventFromPayload(message.payload))
     || isTurnAbortedStatus(message)
     || isInstructionsLoadedStatus(message);
 }

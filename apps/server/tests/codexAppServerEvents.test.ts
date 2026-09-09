@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectAppServerEvent } from "../src/services/sessionDrivers/codexAppServerEvents.js";
+import { serializeSessionWaitEvent } from "@muxpilot/core";
 
 const receivedAt = "2026-09-01T12:00:00.000Z";
 
@@ -115,6 +116,29 @@ describe("projectAppServerEvent", () => {
         turn: { id: "turn-1", status: "completed", items: [{ id: "plan-1", type: "plan", text: "1. Build it" }] }
       }
     }, receivedAt)?.status).toBe("plan_ready");
+  });
+
+  it("projects orchestration wake inputs as system status events", () => {
+    const marker = serializeSessionWaitEvent({
+      version: 1,
+      kind: "resume_requested",
+      sessions: [{ id: "child-1", effectiveStatus: "idle" }]
+    });
+    expect(projectAppServerEvent({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "wake-1", type: "userMessage", content: [{ type: "text", text: marker }] }
+      }
+    }, receivedAt)).toMatchObject({
+      message: {
+        type: "status",
+        role: "system",
+        text: "Agent session wait resumed",
+        payload: { agentSessionWait: { kind: "resume_requested" } }
+      }
+    });
   });
 
   it("maps explicit wait flags and fails unknown states closed", () => {

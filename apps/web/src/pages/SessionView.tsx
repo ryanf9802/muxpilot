@@ -111,11 +111,16 @@ import {
   normalizeGitWorkspaceSummary,
   normalizeGitWorkflowEvent,
   normalizeHeavyCommandQueueEvent,
+  normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
+  serializeSessionWaitEvent,
+  sessionWaitEventFromPayload,
+  sessionWaitEventSummary,
   transcriptMessages,
   withGitWorkflowEventPayload,
-  withHeavyCommandQueueEventPayload
+  withHeavyCommandQueueEventPayload,
+  withSessionWaitEventPayload
 } from "@muxpilot/core";
 import { api, ApiError } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
@@ -5333,6 +5338,41 @@ export function UserAction({
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
+  const waitEvent = sessionWaitEventFromPayload(message.payload);
+  if (waitEvent) {
+    const tone = waitEvent.kind === "timeout" ? "warning" : "success";
+    return (
+      <details
+        className={`queue-automation-event session-wait-event${onOpenMenu ? " user-action-copyable" : ""}`}
+        data-tone={tone}
+        data-transcript-item-id={itemId}
+        {...menuTrigger.triggerProps}
+      >
+        <summary>
+          <span className="queue-automation-main">
+            <span className="session-wait-badge">{waitEvent.kind === "timeout" ? "Timed out" : "Resumed"}</span>
+            <strong>{sessionWaitEventSummary(waitEvent)}</strong>
+            <span className="queue-automation-command">{sessionWaitTargetsSummary(waitEvent.sessions)}</span>
+          </span>
+          <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
+        </summary>
+        <div className="queue-automation-details">
+          <dl>
+            {waitEvent.sessions.map((session, index) => (
+              <div key={waitSessionKey(session, index)}>
+                <dt>{waitSessionName(session, index)}</dt>
+                <dd>{waitSessionStatus(session)}</dd>
+              </div>
+            ))}
+          </dl>
+          <details className="queue-automation-payload">
+            <summary>Raw automation payload</summary>
+            <pre>{serializeSessionWaitEvent(waitEvent)}</pre>
+          </details>
+        </div>
+      </details>
+    );
+  }
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
   if (queueEvent) {
     const { event, rawText, legacy } = queueEvent;
@@ -5448,6 +5488,7 @@ function TranscriptRange({
 }
 
 function label(message: ChatMessage): string {
+  if (sessionWaitEventFromPayload(message.payload)) return "Session wait";
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
   if (gitWorkflowEventFromPayload(message.payload)) return "Git workflow";
   if (isSubagentMessage(message)) return "Subagent";
@@ -5524,6 +5565,8 @@ function displayText(message: ChatMessage): string | null {
 }
 
 export function copyableMessageText(message: ChatMessage): string {
+  const waitEvent = sessionWaitEventFromPayload(message.payload);
+  if (waitEvent) return serializeSessionWaitEvent(waitEvent);
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
   if (queueEvent) return queueEvent.rawText;
   const workflowEvent = gitWorkflowEventFromPayload(message.payload);
@@ -6091,6 +6134,18 @@ function displayMessage(message: ChatMessage): ChatMessage | null {
       payload: withGitWorkflowEventPayload(message.payload, workflowEvent)
     };
   }
+  const embeddedWaitEvent = sessionWaitEventFromPayload(message.payload);
+  const normalizedWaitEvent = embeddedWaitEvent ? null : normalizeSessionWaitEvent(message.text);
+  const waitEvent = embeddedWaitEvent ?? normalizedWaitEvent?.event;
+  if (waitEvent) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: sessionWaitEventSummary(waitEvent),
+      payload: normalizedWaitEvent ? withSessionWaitEventPayload(message.payload, normalizedWaitEvent) : message.payload
+    };
+  }
   if (message.role !== "user") return message;
   const subagentNotification = normalizeSubagentNotificationText(message.text);
   if (subagentNotification) {
@@ -6189,8 +6244,31 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 function isUserActionMessage(message: ChatMessage): boolean {
   return Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
+    || Boolean(sessionWaitEventFromPayload(message.payload))
     || isTurnAbortedStatus(message)
     || isInstructionsLoadedStatus(message);
+}
+
+function sessionWaitTargetsSummary(sessions: Array<Record<string, unknown>>): string {
+  if (sessions.length === 0) return "No target snapshot";
+  if (sessions.length === 1) return `${waitSessionName(sessions[0]!, 0)} · ${waitSessionStatus(sessions[0]!)}`;
+  return `${sessions.length} target sessions`;
+}
+
+function waitSessionKey(session: Record<string, unknown>, index: number): string {
+  return typeof session.id === "string" ? session.id : `target-${index}`;
+}
+
+function waitSessionName(session: Record<string, unknown>, index: number): string {
+  if (typeof session.name === "string" && session.name.trim()) return session.name;
+  if (typeof session.id === "string" && session.id.trim()) return session.id;
+  return `Target ${index + 1}`;
+}
+
+function waitSessionStatus(session: Record<string, unknown>): string {
+  if (typeof session.effectiveStatus === "string" && session.effectiveStatus.trim()) return session.effectiveStatus;
+  if (typeof session.status === "string" && session.status.trim()) return session.status;
+  return "unknown";
 }
 
 function isTurnAbortedStatus(message: ChatMessage): boolean {
