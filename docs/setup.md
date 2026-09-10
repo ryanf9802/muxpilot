@@ -6,7 +6,7 @@ Prerequisites:
 - A persistent user-systemd manager for the Codex app-server runtime.
 - Codex CLI.
 - Node.js 24 or newer.
-- pnpm 11.12.0, matching the repository's `packageManager` pin.
+- pnpm 11.21.0, matching the repository's `packageManager` pin.
 
 Fresh install:
 

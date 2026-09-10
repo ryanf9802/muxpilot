@@ -60,7 +60,7 @@ Structured app-server protocol state and muxpilot-owned systemd services are aut
 - systemd user services
 - [Codex CLI](https://github.com/openai/codex)
 - Node.js 24 or newer
-- pnpm 11.12.0, matching the repository's `packageManager` pin
+- pnpm 11.21.0, matching the repository's `packageManager` pin
 
 ### Install and run
 

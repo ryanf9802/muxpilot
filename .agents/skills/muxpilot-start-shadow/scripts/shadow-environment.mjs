@@ -99,10 +99,6 @@ export function verifyProductionUnchanged(before, after) {
       throw new Error(`production ${role} identity changed`);
     }
   }
-  const panes = new Map(after.tmuxPanes.map((pane) => [pane.identity, pane.pid]));
-  for (const pane of before.tmuxPanes) {
-    if (panes.get(pane.identity) !== pane.pid) throw new Error(`production tmux pane changed: ${pane.identity}`);
-  }
   const services = new Map(after.appServerServices.map((service) => [service.unit, service]));
   for (const service of before.appServerServices) {
     const current = services.get(service.unit);
@@ -113,7 +109,7 @@ export function verifyProductionUnchanged(before, after) {
   const sessions = new Map(after.sessions.map((session) => [session.id, session]));
   for (const session of before.sessions) {
     const current = sessions.get(session.id);
-    if (!current || current.codexSessionId !== session.codexSessionId || current.driverKind !== session.driverKind || current.tmuxPaneId !== session.tmuxPaneId || current.tmuxPid !== session.tmuxPid) {
+    if (!current || current.codexSessionId !== session.codexSessionId || current.providerKind !== session.providerKind || current.providerThreadId !== session.providerThreadId) {
       throw new Error(`production session identity changed: ${session.id}`);
     }
   }

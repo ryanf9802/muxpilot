@@ -143,33 +143,14 @@ async function productionSnapshot(root) {
   }));
   return {
     processes,
-    tmuxPanes: listTmuxPanes(),
     appServerServices: listActiveAppServerServices(),
     sessions: sessionResponse.sessions.map((session) => ({
       id: String(session.id ?? ""),
       codexSessionId: session.codexSessionId == null ? null : String(session.codexSessionId),
-      driverKind: session.driverKind == null ? null : String(session.driverKind),
-      tmuxPaneId: session.tmux?.paneId == null ? null : String(session.tmux.paneId),
-      tmuxPid: session.tmux?.pid == null ? null : Number(session.tmux.pid)
+      providerKind: session.provider?.kind == null ? null : String(session.provider.kind),
+      providerThreadId: session.provider?.threadId == null ? null : String(session.provider.threadId)
     })).sort((left, right) => left.id.localeCompare(right.id))
   };
-}
-
-function listTmuxPanes() {
-  const environment = { ...process.env };
-  delete environment.TMUX;
-  delete environment.TMUX_TMPDIR;
-  const result = spawnSync("tmux", ["list-panes", "-a", "-F", "#{session_name}\t#{window_id}\t#{pane_id}\t#{pane_pid}"], {
-    encoding: "utf8",
-    env: environment
-  });
-  if (result.error || result.status !== 0) fail("could not snapshot production tmux panes");
-  return result.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => {
-    const [session, window, pane, rawPid] = line.split("\t");
-    const pid = Number(rawPid);
-    if (!session || !window || !pane || !Number.isInteger(pid) || pid <= 0) fail("invalid production tmux pane snapshot");
-    return { identity: `${session}:${window}:${pane}`, pid };
-  }).sort((left, right) => left.identity.localeCompare(right.identity));
 }
 
 function listActiveAppServerServices() {

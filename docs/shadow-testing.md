@@ -1,6 +1,8 @@
 # Shadow Testing
 Shadow mode runs a second muxpilot lane for app-server burn-in while production remains live. Start it from a dedicated checkout or Git worktree of the branch under test. Keep the checkout path short (for example `/home/user/mp-s`), because Linux Unix sockets have a 107-byte pathname limit; the Codex workflow validates every shadow-owned socket before installation or startup.
 
+The shadow harness uses the app-server stack. Its production safety snapshots cover the muxpilot supervisor, backend and web processes, active app-server services, and provider/thread identities for existing sessions.
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm app start shadow

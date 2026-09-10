@@ -29,7 +29,7 @@ Use this workflow only after the implementation workflow has printed `INTEGRATED
 
 4. Treat `MUXPILOT_SHADOW_STARTED_OUTSIDE_SESSION_SCOPE` as the only success marker. Report production and shadow PIDs/cgroups plus the shadow URL.
 
-The helper refuses a dirty or mismatched checkout, the production checkout itself, a different Git repository, any checkout too long for its owned Unix socket paths, a muxpilot session cgroup after relaunch, missing production health, changed production PIDs/cgroups, lost or replaced production tmux panes, changed existing app-server service identities, non-shadow health, and shadow children inside a muxpilot session cgroup. Once lifecycle startup is attempted, every later failure runs shadow-only cleanup before returning.
+The helper refuses a dirty or mismatched checkout, the production checkout itself, a different Git repository, any checkout too long for its owned Unix socket paths, a muxpilot session cgroup after relaunch, missing production health, changed production PIDs/cgroups, changed existing app-server service or session/thread identities, non-shadow health, and shadow children inside a muxpilot session cgroup. Once lifecycle startup is attempted, every later failure runs shadow-only cleanup before returning.
 
 Do not replace the helper with raw `pnpm install` or `pnpm app start shadow` from the requesting session. Do not route persistent shadow lifecycle through the heavyweight queue. Do not copy the production database, import an active production session, or point a test session at a production-controlled Codex thread.
 
@@ -37,4 +37,4 @@ Keep the detached checkout while shadow is running. Stop it under the same host-
 
 `node .agents/skills/muxpilot-start-shadow/scripts/start-shadow.mjs --expected-commit <running-shadow-sha> --prod-checkout <production-checkout> --stop-checkout <shadow-checkout>`
 
-Treat `MUXPILOT_SHADOW_STOPPED_OUTSIDE_SESSION_SCOPE` as the only successful stop marker. The stop path verifies the exact clean shadow checkout, runs lifecycle cleanup in a host scope, waits for both shadow ports to be released, and proves production process, pane, app-server service, and session identities were unchanged.
+Treat `MUXPILOT_SHADOW_STOPPED_OUTSIDE_SESSION_SCOPE` as the only successful stop marker. The stop path verifies the exact clean shadow checkout, runs lifecycle cleanup in a host scope, waits for both shadow ports to be released, and proves production process, app-server service, and session/thread identities were unchanged.
