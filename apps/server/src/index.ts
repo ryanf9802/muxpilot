@@ -32,6 +32,7 @@ import { createSessionDriverRegistry } from "./services/sessionDrivers/appServer
 import { CodexGoalStore } from "./codex/codexGoalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
 import { ApprovalReviewer } from "./services/approvalReviewer.js";
+import { SessionImageService } from "./services/sessionImages.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -53,6 +54,7 @@ app.addHook("onResponse", (request, reply, done) => {
   done();
 });
 const db = new AppDatabase(config.dbPath);
+const sessionImages = new SessionImageService(config.dataDir, db);
 const codex = new CodexSessionStore(config.codexHome);
 const events = new EventBus();
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
@@ -147,7 +149,8 @@ const manager = new SessionManager(
   managedEnvironment,
   codexModels,
   sessionDrivers,
-  config.appServerHibernateMs
+  config.appServerHibernateMs,
+  (sessionId, imageId) => sessionImages.path(sessionId, imageId)
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 const rawSessionEvidence = new RawSessionEvidenceReader(
@@ -234,7 +237,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility);
+registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages);
 
 app.get("/healthz", async () => ({
   ok: true,

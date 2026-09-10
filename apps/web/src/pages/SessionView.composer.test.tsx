@@ -1,10 +1,13 @@
 // @vitest-environment happy-dom
 
-import { act, useState } from "react";
+import { EditorView } from "@codemirror/view";
+import { getCM } from "@replit/codemirror-vim";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CodexSkill } from "@muxpilot/core";
-import { SkillTextArea } from "./SessionView.js";
+import { composerContent, SkillTextArea } from "./SessionView.js";
+import { api } from "../api/client.js";
 
 const skills: CodexSkill[] = [
   { name: "first-skill", description: "First skill", source: "user" }
@@ -22,16 +25,18 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  vi.restoreAllMocks();
 });
 
-describe("native composer lifecycle", () => {
-  it("keeps the native textarea, focus, and caret across passive updates", () => {
+describe("composer lifecycle", () => {
+  it("keeps the editor, focus, and caret across passive updates", () => {
     renderComposer({ placeholder: "Queue message", skills });
-    const textarea = requireTextarea();
+    const editor = requireEditor();
+    const view = requireView(editor);
 
     act(() => {
-      textarea.focus();
-      textarea.setSelectionRange(3, 3);
+      view.focus();
+      view.dispatch({ selection: { anchor: 3 } });
     });
 
     renderComposer({
@@ -39,68 +44,69 @@ describe("native composer lifecycle", () => {
       skills: [...skills, { name: "second-skill", description: "Second skill", source: "user" }]
     });
 
-    expect(requireTextarea()).toBe(textarea);
-    expect(container?.querySelector(".cm-editor")).toBeNull();
-    expect(document.activeElement).toBe(textarea);
-    expect(textarea.selectionStart).toBe(3);
-    expect(textarea.selectionEnd).toBe(3);
-    expect(textarea.autocomplete).toBe("off");
-    expect(textarea.getAttribute("autocapitalize")).toBe("sentences");
-    expect(textarea.inputMode).toBe("text");
+    expect(requireEditor()).toBe(editor);
+    expect(requireView(editor)).toBe(view);
+    expect(view.hasFocus).toBe(true);
+    expect(view.state.selection.main.head).toBe(3);
+    expect(view.contentDOM.getAttribute("autocomplete")).toBe("off");
+    expect(getCM(view)).toBeNull();
   });
 
-  it("forwards composed input and does not submit from a composing key event", () => {
+  it("forwards edits and submits from Ctrl-Enter", () => {
     const onChange = vi.fn();
     const onSubmitShortcut = vi.fn();
-    renderControlledComposer({ onChange, onSubmitShortcut });
-    const textarea = requireTextarea();
+    renderComposer({ placeholder: "Message Codex", skills, value: "", onChange, onSubmitShortcut });
+    const view = requireView(requireEditor());
 
     act(() => {
-      textarea.focus();
-      setNativeTextareaValue(textarea, "ㅎ");
-      textarea.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        data: "ㅎ",
-        inputType: "insertCompositionText",
-        isComposing: true
-      }));
+      view.dispatch({ changes: { from: 0, insert: "hello" } });
     });
-    expect(requireTextarea()).toBe(textarea);
-    expect(textarea.value).toBe("ㅎ");
+    expect(onChange).toHaveBeenLastCalledWith("hello");
 
     act(() => {
-      setNativeTextareaValue(textarea, "한");
-      textarea.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        data: "한",
-        inputType: "insertCompositionText",
-        isComposing: true
-      }));
-    });
-
-    expect(onChange).toHaveBeenLastCalledWith("한");
-    expect(requireTextarea()).toBe(textarea);
-    expect(textarea.value).toBe("한");
-    expect(document.activeElement).toBe(textarea);
-
-    act(() => {
-      textarea.dispatchEvent(new KeyboardEvent("keydown", {
-        bubbles: true,
-        ctrlKey: true,
-        isComposing: true,
-        key: "Enter"
-      }));
-    });
-    expect(onSubmitShortcut).not.toHaveBeenCalled();
-
-    act(() => {
-      textarea.dispatchEvent(new KeyboardEvent("keydown", {
+      view.contentDOM.dispatchEvent(new KeyboardEvent("keydown", {
         bubbles: true,
         ctrlKey: true,
         key: "Enter"
       }));
     });
     expect(onSubmitShortcut).toHaveBeenCalledOnce();
+  });
+
+  it("preserves the order of text and inline images", () => {
+    expect(composerContent("before [[muxpilot-image:abc.png:image/png]] after")).toEqual({
+      text: "before  after",
+      content: [
+        { type: "text", text: "before " },
+        { type: "image", id: "abc.png", mimeType: "image/png" },
+        { type: "text", text: " after" }
+      ]
+    });
+  });
+
+  it("inserts a pasted image at the caret and replaces its upload marker in place", async () => {
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.spyOn(api, "uploadImage").mockResolvedValue({ image: { type: "image", id: "stored.png", mimeType: "image/png" } });
+    const onChange = vi.fn();
+    renderComposer({ placeholder: "Message Codex", skills, value: "before after", onChange });
+    const view = requireView(requireEditor());
+    act(() => {
+      view.focus();
+      view.dispatch({ selection: { anchor: 7 } });
+    });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { files: [new File([new Uint8Array([137, 80, 78, 71])], "paste.png", { type: "image/png" })] }
+    });
+
+    await act(async () => {
+      view.contentDOM.dispatchEvent(paste);
+      await Promise.resolve();
+    });
+
+    expect(view.state.doc.toString()).toBe("before [[muxpilot-image:stored.png:image/png]]after");
+    expect(onChange).toHaveBeenLastCalledWith("before [[muxpilot-image:stored.png:image/png]]after");
   });
 });
 
@@ -135,53 +141,14 @@ function renderComposer({
   });
 }
 
-function renderControlledComposer({
-  onChange,
-  onSubmitShortcut
-}: {
-  onChange: (value: string) => void;
-  onSubmitShortcut: () => void;
-}): void {
-  if (!container) {
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-  }
-  act(() => {
-    root?.render(<ControlledComposer onChange={onChange} onSubmitShortcut={onSubmitShortcut} />);
-  });
+function requireEditor(): HTMLElement {
+  const editor = container?.querySelector<HTMLElement>(".cm-editor");
+  if (!editor) throw new Error("Expected a CodeMirror editor");
+  return editor;
 }
 
-function ControlledComposer({
-  onChange,
-  onSubmitShortcut
-}: {
-  onChange: (value: string) => void;
-  onSubmitShortcut: () => void;
-}) {
-  const [value, setValue] = useState("");
-  return (
-    <SkillTextArea
-      value={value}
-      onChange={(nextValue) => {
-        setValue(nextValue);
-        onChange(nextValue);
-      }}
-      onSubmitShortcut={onSubmitShortcut}
-      skills={skills}
-      placeholder="Message Codex"
-    />
-  );
-}
-
-function requireTextarea(): HTMLTextAreaElement {
-  const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
-  if (!textarea) throw new Error("Expected a native textarea");
-  return textarea;
-}
-
-function setNativeTextareaValue(textarea: HTMLTextAreaElement, value: string): void {
-  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-  if (!setter) throw new Error("Expected the native textarea value setter");
-  setter.call(textarea, value);
+function requireView(editor: HTMLElement): EditorView {
+  const view = EditorView.findFromDOM(editor);
+  if (!view) throw new Error("Expected an EditorView");
+  return view;
 }

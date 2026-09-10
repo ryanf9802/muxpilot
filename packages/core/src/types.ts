@@ -406,8 +406,12 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
   timestamp: string;
   text: string;
-  payload: Record<string, unknown> & { interactionOutcome?: TranscriptInteractionOutcome };
+  payload: Record<string, unknown> & { interactionOutcome?: TranscriptInteractionOutcome; content?: MessageContentPart[] };
 }
+
+export type MessageContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; id: string; mimeType: "image/png" | "image/jpeg" | "image/webp" };
 
 export type ApprovalKind = "command" | "tool" | "patch" | "permissions";
 
@@ -507,6 +511,7 @@ export interface QueuedInput {
   id: string;
   sessionId: string;
   text: string;
+  content?: MessageContentPart[];
   mode: CollaborationMode;
   status: QueuedInputStatus;
   error: string | null;
@@ -524,11 +529,13 @@ export interface QueuedInputResponse {
 
 export interface CreateQueuedInputRequest {
   text: string;
+  content?: MessageContentPart[];
   mode?: CollaborationMode;
 }
 
 export interface UpdateQueuedInputRequest {
   text: string;
+  content?: MessageContentPart[];
   mode?: CollaborationMode;
 }
 
@@ -710,6 +717,7 @@ export interface PwaTrustInfo {
 
 export interface SendInputRequest {
   text: string;
+  content?: MessageContentPart[];
   mode?: CollaborationMode;
   delivery?: "auto" | "steer";
 }

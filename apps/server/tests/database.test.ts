@@ -1627,6 +1627,11 @@ describe("AppDatabase queued inputs", () => {
     const input = testQueuedInput(session.id, {
       id: "agent-queued-1",
       text: "Delegated follow-up",
+      content: [
+        { type: "text", text: "Delegated " },
+        { type: "image", id: "screen.png", mimeType: "image/png" },
+        { type: "text", text: "follow-up" }
+      ],
       status: "queued",
       actorSessionId: "parent-session"
     });

@@ -5805,6 +5805,32 @@ select:focus-visible {
   font-weight: inherit;
 }
 
+.composer-inline-image {
+  display: inline-flex;
+  vertical-align: middle;
+  margin: 2px 4px;
+}
+
+.composer-inline-image img {
+  display: block;
+  max-width: min(240px, 55vw);
+  max-height: 150px;
+  border-radius: 7px;
+  object-fit: contain;
+}
+
+.composer-inline-image-pending { opacity: 0.55; }
+.user-mixed-content { white-space: normal; }
+.user-mixed-content > * { margin: 0; }
+.user-mixed-content img {
+  display: block;
+  max-width: min(100%, 680px);
+  max-height: 70vh;
+  margin: 8px 0;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
 .vim-editor,
 .prompt-editor {
   min-width: 0;

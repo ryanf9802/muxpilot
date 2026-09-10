@@ -22,6 +22,13 @@ import type {
   SystemdSessionRuntimeRef
 } from "./types.js";
 
+function protocolInput(text: string, content?: import("@muxpilot/core").MessageContentPart[]): Array<Record<string, string>> {
+  if (!content?.length) return [{ type: "text", text }];
+  return content.map((part): Record<string, string> => part.type === "text"
+    ? { type: "text", text: part.text }
+    : { type: "localImage", path: part.id });
+}
+
 export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
   start: true,
   sendMessage: true,
@@ -166,9 +173,9 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     };
   }
 
-  async sendMessage(session: ManagedSession, text: string, clientMessageId: string): Promise<DriverInputReceipt> {
+  async sendMessage(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt> {
     const { threadId, protocol } = this.protocolFor(session);
-    const response = await protocol.startTurn(threadId, text, clientMessageId, turnOptions(session));
+    const response = await protocol.startTurn(threadId, text, clientMessageId, turnOptions(session), protocolInput(text, content));
     this.activeTurns.set(session.id, response.turn.id);
     return receipt(threadId, response.turn.id, clientMessageId, this.now());
   }
@@ -183,14 +190,15 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   async steer(
     session: ManagedSession,
     text: string,
-    clientMessageId: string
+    clientMessageId: string,
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<DriverInputReceipt> {
     const { threadId, protocol } = this.protocolFor(session);
     const expectedTurnId = this.activeTurns.get(session.id);
     if (!expectedTurnId) throw new AppServerSteerUnavailableError("Codex has no active turn to steer");
     let response: TurnSteerResponse;
     try {
-      response = await protocol.steerTurn(threadId, expectedTurnId, text, clientMessageId);
+      response = await protocol.steerTurn(threadId, expectedTurnId, text, clientMessageId, protocolInput(text, content));
     } catch (error) {
       if (isDefinitiveSteerRejection(error)) {
         throw new AppServerSteerUnavailableError(error instanceof Error ? error.message : String(error));

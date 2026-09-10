@@ -56,6 +56,19 @@ describe("CodexAppServerDriver", () => {
       turnId: "turn-1",
       acceptedAt: "2026-09-01T12:00:00.000Z"
     });
+    harness.rpc.request.mockResolvedValueOnce({ turn: { id: "turn-image" } });
+    await harness.driver.sendMessage(session, "caption", "client-image", [
+      { type: "text", text: "before " },
+      { type: "image", id: "/data/session-images/session-1/paste.png", mimeType: "image/png" },
+      { type: "text", text: " after" }
+    ]);
+    expect(harness.rpc.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({
+      input: [
+        { type: "text", text: "before " },
+        { type: "localImage", path: "/data/session-images/session-1/paste.png" },
+        { type: "text", text: " after" }
+      ]
+    }));
     harness.rpc.request.mockResolvedValueOnce({ turnId: "turn-1" });
     await expect(harness.driver.steer(session, "follow up", "client-2")).resolves.toMatchObject({
       clientMessageId: "client-2",
@@ -63,7 +76,7 @@ describe("CodexAppServerDriver", () => {
     });
     expect(harness.rpc.request).toHaveBeenCalledWith("turn/steer", {
       threadId: "thread-1",
-      expectedTurnId: "turn-1",
+      expectedTurnId: "turn-image",
       input: [{ type: "text", text: "follow up" }],
       clientUserMessageId: "client-2"
     });

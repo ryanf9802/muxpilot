@@ -409,6 +409,22 @@ describe("api client request headers", () => {
       body: JSON.stringify({ text: "change direction", mode: "default", delivery: "steer" })
     }));
   });
+
+  it("sends ordered image content with a session message", async () => {
+    const fetchMock = mockJsonResponse({ ok: true, session: {}, message: {}, queuedInput: null });
+    const content = [
+      { type: "text" as const, text: "before " },
+      { type: "image" as const, id: "paste.png", mimeType: "image/png" as const },
+      { type: "text" as const, text: " after" }
+    ];
+
+    await api.send("session-1", "before  after", "default", "auto", content);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/input", expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ text: "before  after", mode: "default", delivery: "auto", content })
+    }));
+  });
 });
 
 function mockJsonResponse(body: unknown) {

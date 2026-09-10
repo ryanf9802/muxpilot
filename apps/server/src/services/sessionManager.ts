@@ -184,7 +184,8 @@ export class SessionManager {
     private readonly managedEnvironment: Record<string, string> = {},
     private readonly codexMetadata: CodexMetadataLookup | null = null,
     private readonly sessionDrivers: SessionDriverRegistry | null = null,
-    private readonly appServerHibernateMs = 900_000
+    private readonly appServerHibernateMs = 900_000,
+    private readonly imagePath: ((sessionId: string, imageId: string) => string) | null = null
   ) {}
 
   start(options: SessionManagerStartOptions = {}): void {
@@ -1157,7 +1158,8 @@ export class SessionManager {
     sessionId: string,
     text: string,
     mode?: CollaborationMode,
-    actorSessionId: string | null = null
+    actorSessionId: string | null = null,
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<QueuedInput> {
     const storedSession = await this.db.getSession(sessionId);
     const session = requireSession(storedSession);
@@ -1169,6 +1171,7 @@ export class SessionManager {
       id: eventId(),
       sessionId,
       text,
+      content,
       mode: mode ?? session.inputMode,
       status: "queued",
       error: null,
@@ -1186,7 +1189,7 @@ export class SessionManager {
     return input;
   }
 
-  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode): Promise<QueuedInput> {
+  async updateQueuedInput(sessionId: string, queuedInputId: string, text: string, mode?: CollaborationMode, content?: import("@muxpilot/core").MessageContentPart[]): Promise<QueuedInput> {
     const current = await this.db.getQueuedInput(sessionId, queuedInputId);
     if (!current) throw new QueuedInputError("Queued input not found", 404);
     if (current.status === "sending") throw new QueuedInputError("Queued input is already sending");
@@ -1194,6 +1197,7 @@ export class SessionManager {
     const updated: QueuedInput = {
       ...current,
       text,
+      content,
       mode: mode ?? current.mode,
       status: "queued",
       error: null,
@@ -1293,10 +1297,11 @@ export class SessionManager {
     text: string,
     mode?: CollaborationMode,
     actorSessionId: string | null = null,
-    delivery: InputDeliveryIntent = "auto"
+    delivery: InputDeliveryIntent = "auto",
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     requireSession(await this.db.getSession(sessionId));
-    return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery));
+    return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery, content));
   }
 
   private async sendInputExclusive(
@@ -1304,7 +1309,8 @@ export class SessionManager {
     text: string,
     mode?: CollaborationMode,
     actorSessionId: string | null = null,
-    delivery: InputDeliveryIntent = "auto"
+    delivery: InputDeliveryIntent = "auto",
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     let session = requireSession(await this.db.getSession(sessionId));
     if (session.runtime?.state === "hibernated") {
@@ -1314,14 +1320,14 @@ export class SessionManager {
       throw new InputDeliveryError("Retry or dismiss the failed input before sending another message");
     }
     if (delivery === "steer") {
-      return this.sendSteeredInputExclusive(session, text, actorSessionId);
+      return this.sendSteeredInputExclusive(session, text, actorSessionId, content);
     }
     if (await this.shouldQueueInput(session, text)) {
-      return { queuedInput: await this.enqueueInput(sessionId, text, mode, actorSessionId) };
+      return { queuedInput: await this.enqueueInput(sessionId, text, mode, actorSessionId, content) };
     }
     const targetMode = mode ?? session.inputMode;
     const now = nowIso();
-    let message = await this.recordSubmittedInput(session, text, targetMode, now, null, actorSessionId);
+    let message = await this.recordSubmittedInput(session, text, targetMode, now, null, actorSessionId, "turn_start", content);
     this.publish("message.appended", sessionId, message);
     message = await this.deliverSubmittedInput(session, message, targetMode);
     const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
@@ -1342,7 +1348,8 @@ export class SessionManager {
   private async sendSteeredInputExclusive(
     session: ManagedSession,
     text: string,
-    actorSessionId: string | null = null
+    actorSessionId: string | null = null,
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const targetMode = session.inputMode;
     const driver = this.appServerDriver(session);
@@ -1358,10 +1365,10 @@ export class SessionManager {
       || heavyweightActive
       || !STEERABLE_SESSION_STATUSES.has(session.status)
     ) {
-      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId) };
+      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId, content) };
     }
     if (this.deliveringInputSessionIds.has(session.id)) {
-      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId) };
+      return { queuedInput: await this.enqueueInput(session.id, text, targetMode, actorSessionId, content) };
     }
 
     const submittedAt = nowIso();
@@ -1372,7 +1379,8 @@ export class SessionManager {
       submittedAt,
       null,
       actorSessionId,
-      "steer"
+      "steer",
+      content
     );
     this.publish("message.appended", session.id, message);
     this.deliveringInputSessionIds.add(session.id);
@@ -1381,10 +1389,10 @@ export class SessionManager {
       let receipt: DriverInputReceipt;
       let acknowledgedBy = "app_server_steer_receipt";
       try {
-        receipt = await driver.steer(session, text, message.id);
+        receipt = await driver.steer(session, text, message.id, this.driverContent(session.id, content));
       } catch (error) {
         if (error instanceof AppServerSteerUnavailableError) {
-          const queuedInput = await this.enqueueInput(session.id, text, targetMode, actorSessionId);
+          const queuedInput = await this.enqueueInput(session.id, text, targetMode, actorSessionId, content);
           message = await this.updateInputDelivery(message, {
             state: "pending",
             deliveryPhase: "queued",
@@ -1474,7 +1482,8 @@ export class SessionManager {
     timestamp: string,
     queuedInputId: string | null = null,
     actorSessionId: string | null = null,
-    deliveryKind: "turn_start" | "steer" = "turn_start"
+    deliveryKind: "turn_start" | "steer" = "turn_start",
+    content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<ChatMessage> {
     const message: Omit<ChatMessage, "sequence"> = {
       id: eventId(),
@@ -1484,6 +1493,7 @@ export class SessionManager {
       timestamp,
       text,
       payload: {
+        ...(content?.length ? { content } : {}),
         collaborationMode: mode,
         muxpilotSubmission: {
           codexSessionId: session.codexSessionId,
@@ -1888,7 +1898,8 @@ export class SessionManager {
         await driver.setPreferences(session, { mode });
         await this.db.setSessionInputMode(session.id, mode, nowIso());
       }
-      const receipt = await driver.sendMessage({ ...session, inputMode: mode }, message.text, message.id);
+      const content = Array.isArray(message.payload.content) ? message.payload.content as import("@muxpilot/core").MessageContentPart[] : undefined;
+      const receipt = await driver.sendMessage({ ...session, inputMode: mode }, message.text, message.id, this.driverContent(session.id, content));
       const latest = await this.db.latestUserMessage(session.id);
       if (latest?.id === current.id) current = latest;
       current = await this.updateInputDelivery(current, {
@@ -1919,6 +1930,13 @@ export class SessionManager {
     } finally {
       this.deliveringInputSessionIds.delete(session.id);
     }
+  }
+
+  private driverContent(sessionId: string, content?: import("@muxpilot/core").MessageContentPart[]): import("@muxpilot/core").MessageContentPart[] | undefined {
+    if (!content?.length) return undefined;
+    const imagePath = this.imagePath;
+    if (!imagePath) throw new InputDeliveryError("Image delivery is unavailable");
+    return content.map((part) => part.type === "image" ? { ...part, id: imagePath(sessionId, part.id) } : part);
   }
 
   async resolveApproval(
@@ -3046,7 +3064,9 @@ export class SessionManager {
               sending.mode,
               now,
               sending.id,
-              sending.actorSessionId
+              sending.actorSessionId,
+              "turn_start",
+              sending.content
             );
         this.publish("message.appended", sessionId, message);
         message = await this.deliverSubmittedInput(readySession, message, sending.mode);

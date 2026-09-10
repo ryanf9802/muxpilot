@@ -226,20 +226,35 @@ export const api = {
       method: "POST"
     }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
-  enqueueInput: (id: string, text: string, mode?: CollaborationMode) =>
-    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode }) }),
-  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode) =>
+  enqueueInput: (id: string, text: string, mode?: CollaborationMode, content?: import("@muxpilot/core").MessageContentPart[]) =>
+    json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode, content }) }),
+  updateQueuedInput: (id: string, queuedId: string, text: string, mode?: CollaborationMode, content?: import("@muxpilot/core").MessageContentPart[]) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, {
       method: "PATCH",
-      body: JSON.stringify({ text, mode })
+      body: JSON.stringify({ text, mode, content })
     }),
   deleteQueuedInput: (id: string, queuedId: string) =>
     json<{ ok: true }>(`/api/sessions/${id}/queued-inputs/${queuedId}`, { method: "DELETE" }),
-  send: (id: string, text: string, mode?: CollaborationMode, delivery?: "auto" | "steer") =>
-    json<SendInputResponse>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode, delivery }) }),
+  uploadImage: (id: string, file: File) => file.arrayBuffer().then((buffer) =>
+    json<{ image: import("@muxpilot/core").MessageContentPart & { type: "image" } }>(`/api/sessions/${id}/images`, {
+      method: "POST",
+      body: JSON.stringify({ mimeType: file.type, data: arrayBufferBase64(buffer) })
+    })),
+  imageUrl: (id: string, imageId: string) => `/api/sessions/${encodeURIComponent(id)}/images/${encodeURIComponent(imageId)}`,
+  send: (id: string, text: string, mode?: CollaborationMode, delivery?: "auto" | "steer", content?: import("@muxpilot/core").MessageContentPart[]) =>
+    json<SendInputResponse>(`/api/sessions/${id}/input`, { method: "POST", body: JSON.stringify({ text, mode, delivery, content }) }),
   action: (id: string, action: SessionAction) =>
     json<SessionActionResponse>(`/api/sessions/${id}/actions`, { method: "POST", body: JSON.stringify(action) }),
 };
+
+function arrayBufferBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
 
 async function responseError(response: Response): Promise<string> {
   const text = await response.text();

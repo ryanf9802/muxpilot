@@ -18,6 +18,7 @@ import type {
   RestoreSessionRecoveryResponse,
   SessionRecoveryResponse,
   SendInputRequest,
+  MessageContentPart,
   SessionDirectoriesResponse,
   SessionHistoryResponse,
   SessionSummaryListResponse,
@@ -61,6 +62,7 @@ import { SessionTransferError, type SessionTransferService } from "../services/s
 import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
+import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const modelSettingsSchema = z.object({
@@ -77,12 +79,30 @@ const restoreSessionRecoverySchema = z.object({
   sessionIds: z.array(z.string().trim().min(1).max(500)).min(1).max(100)
 }).strict();
 const restoreSessionSchema = z.object({}).strict();
-const inputBodyFields = z.object({ text: z.string().max(200_000).default(""), mode: collaborationModeSchema.optional() });
+const contentPartSchema: z.ZodType<MessageContentPart> = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string().max(200_000) }).strict(),
+  z.object({ type: z.literal("image"), id: z.string().regex(/^[A-Za-z0-9_-]+\.(png|jpg|webp)$/), mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]) }).strict()
+]);
+const inputBodyFields = z.object({ text: z.string().max(200_000).default(""), content: z.array(contentPartSchema).max(21).optional(), mode: collaborationModeSchema.optional() });
 const inputBodySchema = inputBodyFields
-  .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
+  .refine((value) => (value.content?.filter((part) => part.type === "image").length ?? 0) <= 10, { message: "A message can contain at most 10 images" })
+  .refine((value) => (value.content?.filter((part) => part.type === "text").reduce((sum, part) => sum + part.text.length, 0) ?? 0) <= 200_000, { message: "Message text is too long" })
+  .refine((value) => value.content?.length
+    ? value.content.some((part) => part.type === "image" || Boolean(part.text.trim()))
+    : Boolean(value.text.trim()), { message: "Input is empty" });
 const sendInputSchema = inputBodyFields
   .extend({ delivery: z.enum(["auto", "steer"]).optional() })
-  .refine((value) => Boolean(value.text.trim()), { message: "Input is empty" });
+  .refine((value) => (value.content?.filter((part) => part.type === "image").length ?? 0) <= 10, { message: "A message can contain at most 10 images" })
+  .refine((value) => (value.content?.filter((part) => part.type === "text").reduce((sum, part) => sum + part.text.length, 0) ?? 0) <= 200_000, { message: "Message text is too long" })
+  .refine((value) => value.content?.length
+    ? value.content.some((part) => part.type === "image" || Boolean(part.text.trim()))
+    : Boolean(value.text.trim()), { message: "Input is empty" });
+const imageUploadSchema = z.object({ mimeType: z.enum(["image/png", "image/jpeg", "image/webp"]), data: z.string().max(14_000_000) }).strict();
+function canonicalInputText(value: { text: string; content?: MessageContentPart[] }): string {
+  return value.content?.length
+    ? value.content.filter((part) => part.type === "text").map((part) => part.text).join("")
+    : value.text;
+}
 const sessionNameSchema = z
   .string()
   .max(4096)
@@ -203,7 +223,8 @@ export function registerRoutes(
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
   btw?: BtwService,
-  appServerCompatibility?: AppServerCompatibility
+  appServerCompatibility?: AppServerCompatibility,
+  sessionImages?: SessionImageService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -655,7 +676,8 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body: SendInputRequest = sendInputSchema.parse(request.body);
     try {
-      const result = await manager.sendInput(id, body.text, body.mode, null, body.delivery);
+      await sessionImages?.validate(id, body.content);
+      const result = await manager.sendInput(id, canonicalInputText(body), body.mode, null, body.delivery, body.content);
       return reply.code(202).send("queuedInput" in result
         ? { ok: true, session: null, message: null, queuedInput: result.queuedInput }
         : { ok: true, ...result, queuedInput: null });
@@ -669,6 +691,31 @@ export function registerRoutes(
       if (error instanceof SessionRuntimeActionError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
+      if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.post("/api/sessions/:id/images", { preHandler: access.requireAccess, bodyLimit: 14_500_000 }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!sessionImages) return reply.code(503).send({ error: "Image storage is unavailable" });
+    try {
+      const body = imageUploadSchema.parse(request.body);
+      return reply.code(201).send({ image: await sessionImages.store(id, body.mimeType, body.data) });
+    } catch (error) {
+      if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.get("/api/sessions/:id/images/:imageId", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, imageId } = request.params as { id: string; imageId: string };
+    if (!sessionImages) return reply.code(503).send({ error: "Image storage is unavailable" });
+    try {
+      const image = await sessionImages.read(id, imageId);
+      return reply.type(image.mimeType).header("Cache-Control", "private, max-age=31536000, immutable").send(image.bytes);
+    } catch (error) {
+      if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });
@@ -734,10 +781,12 @@ export function registerRoutes(
     const { id } = request.params as { id: string };
     const body = queuedInputSchema.parse(request.body);
     try {
-      const input = await manager.enqueueInput(id, body.text, body.mode);
+      await sessionImages?.validate(id, body.content);
+      const input = await manager.enqueueInput(id, canonicalInputText(body), body.mode, null, body.content);
       return reply.code(201).send({ queuedInput: input });
     } catch (error) {
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });
@@ -746,10 +795,12 @@ export function registerRoutes(
     const { id, queuedId } = request.params as { id: string; queuedId: string };
     const body = queuedInputSchema.parse(request.body);
     try {
-      const input = await manager.updateQueuedInput(id, queuedId, body.text, body.mode);
+      await sessionImages?.validate(id, body.content);
+      const input = await manager.updateQueuedInput(id, queuedId, canonicalInputText(body), body.mode, body.content);
       return { queuedInput: input };
     } catch (error) {
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });

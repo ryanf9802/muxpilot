@@ -40,6 +40,7 @@ import {
   GutterMarker,
   MatchDecorator,
   ViewPlugin,
+  WidgetType,
   type DecorationSet,
   type ViewUpdate,
   gutter,
@@ -79,6 +80,7 @@ import type {
   CodexSkill,
   CodexModelCatalogResponse,
   CollaborationMode,
+  MessageContentPart,
   GitWorkspaceSummary,
   HeavyCommand,
   ManagedSession,
@@ -181,6 +183,7 @@ export interface PendingUserMessage {
   id: string;
   sessionId: string;
   text: string;
+  content?: MessageContentPart[];
   mode: CollaborationMode;
   timestamp: string;
   matchAfter?: string;
@@ -278,7 +281,7 @@ export function loadComposerDraft(sessionId: string): string {
     const parsed = JSON.parse(value) as unknown;
     if (!parsed || typeof parsed !== "object" || !("text" in parsed)) return "";
     const text = (parsed as { text?: unknown }).text;
-    return typeof text === "string" ? text : "";
+    return typeof text === "string" ? text.replace(/\[\[muxpilot-upload:[A-Za-z0-9_-]+\]\]/g, "[Image upload interrupted]") : "";
   } catch {
     return "";
   }
@@ -386,6 +389,25 @@ function sanitizeQuestionAnswerDraft(
 
 export function composerHasContent(value: string): boolean {
   return Boolean(value.trim());
+}
+
+const IMAGE_TOKEN = /\[\[muxpilot-image:([A-Za-z0-9_-]+\.(?:png|jpg|webp)):(image\/(?:png|jpeg|webp))\]\]/g;
+export function composerContent(value: string): { text: string; content: MessageContentPart[] } {
+  const content: MessageContentPart[] = [];
+  let cursor = 0;
+  for (const match of value.matchAll(IMAGE_TOKEN)) {
+    if (match.index! > cursor) content.push({ type: "text", text: value.slice(cursor, match.index) });
+    content.push({ type: "image", id: match[1]!, mimeType: match[2]! as "image/png" | "image/jpeg" | "image/webp" });
+    cursor = match.index! + match[0].length;
+  }
+  if (cursor < value.length) content.push({ type: "text", text: value.slice(cursor) });
+  return { text: content.filter((part) => part.type === "text").map((part) => part.text).join(""), content };
+}
+
+function composerSource(text: string, content?: MessageContentPart[]): string {
+  return content?.length
+    ? content.map((part) => part.type === "text" ? part.text : `[[muxpilot-image:${part.id}:${part.mimeType}]]`).join("")
+    : text;
 }
 
 export function loadVimModePreference(): boolean {
@@ -688,14 +710,16 @@ export function createPendingUserMessage(
   sessionId: string,
   text: string,
   mode: CollaborationMode,
-  timestamp = new Date().toISOString()
+  timestamp = new Date().toISOString(),
+  content?: MessageContentPart[]
 ): PendingUserMessage {
   return {
     id: `pending-user-${timestamp}`,
     sessionId,
     text,
     mode,
-    timestamp
+    timestamp,
+    content
   };
 }
 
@@ -708,7 +732,7 @@ export function pendingUserMessageToChatMessage(message: PendingUserMessage): Ch
     role: "user",
     timestamp: message.timestamp,
     text: message.text,
-    payload: { collaborationMode: message.mode }
+    payload: { collaborationMode: message.mode, ...(message.content?.length ? { content: message.content } : {}) }
   };
 }
 
@@ -1283,6 +1307,7 @@ export function SessionView() {
   const [planActionBusy, setPlanActionBusy] = useState<PlanAction | null>(null);
   const [planActionError, setPlanActionError] = useState("");
   const [submitBusy, setSubmitBusy] = useState(false);
+  const [composerUploading, setComposerUploading] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputDeliveryError, setInputDeliveryError] = useState("");
   const [agentGuardError, setAgentGuardError] = useState("");
@@ -2561,11 +2586,16 @@ export function SessionView() {
 
   async function submit(event: Pick<FormEvent, "preventDefault">, delivery: "auto" | "steer" | "queue" = "auto") {
     event.preventDefault();
-    if (submitBusy || btwSubmitting || composerLocked) return;
+    if (submitBusy || btwSubmitting || composerLocked || composerUploading) return;
     if (!composerHasContent(text)) return;
     const value = text.trimEnd();
-    const btwInput = parseBtwComposerInput(value);
+    const parsedContent = composerContent(value);
+    const btwInput = parseBtwComposerInput(parsedContent.text);
     if (btwInput) {
+      if (parsedContent.content.some((part) => part.type === "image")) {
+        setInputDeliveryError("BTW questions do not support images; send this to the main session instead.");
+        return;
+      }
       blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
       openBtwDrawer();
       updateComposerText("");
@@ -2573,7 +2603,7 @@ export function SessionView() {
       if (!await askBtwQuestion(btwInput.question)) updateComposerText(value);
       return;
     }
-    const pendingMessage = createPendingUserMessage(id, value, session?.inputMode ?? "default");
+    const pendingMessage = createPendingUserMessage(id, parsedContent.text, session?.inputMode ?? "default", undefined, parsedContent.content);
     blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
     updateComposerText("");
     setPendingUserMessage(pendingMessage);
@@ -2583,11 +2613,11 @@ export function SessionView() {
     try {
       const queued = delivery === "queue" || (delivery === "auto" && shouldQueueComposerInput(session, queuedInputs));
       if (queued) {
-        await api.enqueueInput(id, value, session?.inputMode ?? "default");
+        await api.enqueueInput(id, parsedContent.text, session?.inputMode ?? "default", parsedContent.content);
         await loadQueuedInputs(id, requestTokenRef.current);
         setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
       } else {
-        const response = await api.send(id, value, session?.inputMode ?? "default", delivery === "steer" ? "steer" : "auto");
+        const response = await api.send(id, parsedContent.text, session?.inputMode ?? "default", delivery === "steer" ? "steer" : "auto", parsedContent.content);
         if (response.queuedInput) {
           await loadQueuedInputs(id, requestTokenRef.current);
           setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
@@ -2840,7 +2870,8 @@ export function SessionView() {
   async function updateQueuedInput(inputId: string, value: string, mode: CollaborationMode) {
     const targetId = id;
     const token = requestTokenRef.current;
-    await api.updateQueuedInput(targetId, inputId, value, mode);
+    const parsed = composerContent(value);
+    await api.updateQueuedInput(targetId, inputId, parsed.text, mode, parsed.content);
     await loadQueuedInputs(targetId, token);
   }
 
@@ -3267,6 +3298,7 @@ export function SessionView() {
           <div className="composer-stack">
           {queuedInputs.length ? (
             <QueuedInputList
+              sessionId={id}
               inputs={queuedInputs}
               skills={codexSkills}
               vimEnabled={effectiveVimEnabled}
@@ -3322,6 +3354,8 @@ export function SessionView() {
               focusRequestKey={composerFocusRequest ? String(composerFocusRequest.nonce) : null}
               focusCommand={composerFocusRequest?.command ?? "focus"}
               disabled={submitBusy || btwSubmitting || composerLocked}
+              sessionId={id}
+              onUploadingChange={setComposerUploading}
             />
             {steerAvailable ? (
               <div className="composer-action-stack">
@@ -3332,7 +3366,7 @@ export function SessionView() {
                   aria-label={submitBusy ? "Steering" : "Steer now"}
                   title="Steer now"
                   data-busy={submitBusy || undefined}
-                  disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+                  disabled={submitBusy || btwSubmitting || composerLocked || composerUploading || !composerHasContent(text)}
                 >
                   {submitBusy ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
                 </button>
@@ -3341,7 +3375,7 @@ export function SessionView() {
                   type="button"
                   aria-label="Queue"
                   title="Queue"
-                  disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+                  disabled={submitBusy || btwSubmitting || composerLocked || composerUploading || !composerHasContent(text)}
                   onClick={(event) => void submit(event, "queue")}
                 >
                   <Clock3 size={16} />
@@ -3354,7 +3388,7 @@ export function SessionView() {
                 aria-busy={submitBusy}
                 aria-label={submitBusy ? "Sending" : shouldQueueComposerInput(readySession, queuedInputs) ? "Queue" : "Send"}
                 data-busy={submitBusy || undefined}
-                disabled={submitBusy || btwSubmitting || composerLocked || !composerHasContent(text)}
+                disabled={submitBusy || btwSubmitting || composerLocked || composerUploading || !composerHasContent(text)}
               >
                 {submitBusy ? <LoaderCircle className="spin" size={20} /> : <Send size={20} />}
               </button>
@@ -3853,6 +3887,40 @@ function codeMirrorSkillHighlightExtension(skillNames: Set<string>): Extension {
   );
 }
 
+class ComposerImageWidget extends WidgetType {
+  constructor(private readonly src: string, private readonly pending: boolean) { super(); }
+  eq(other: ComposerImageWidget): boolean { return other.src === this.src && other.pending === this.pending; }
+  toDOM(): HTMLElement {
+    const wrapper = document.createElement("span");
+    wrapper.className = `composer-inline-image${this.pending ? " composer-inline-image-pending" : ""}`;
+    const image = document.createElement("img");
+    image.src = this.src;
+    image.alt = this.pending ? "Uploading image" : "Pasted image";
+    wrapper.append(image);
+    return wrapper;
+  }
+  ignoreEvent(): boolean { return false; }
+}
+
+function composerImageExtension(sessionId: string, previews: Map<string, string>): Extension {
+  const matcher = new MatchDecorator({
+    regexp: /\[\[muxpilot-(image|upload):([^\]]+)\]\]/g,
+    decoration: (match) => {
+      if (match[1] === "upload") return Decoration.replace({ widget: new ComposerImageWidget(previews.get(match[2]!) ?? "", true) });
+      const [id] = match[2]!.split(":");
+      return Decoration.replace({ widget: new ComposerImageWidget(api.imageUrl(sessionId, id!), false) });
+    }
+  });
+  return ViewPlugin.fromClass(class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) { this.decorations = matcher.createDeco(view); }
+    update(update: ViewUpdate) { this.decorations = matcher.updateDeco(update, this.decorations); }
+  }, {
+    decorations: (value) => value.decorations,
+    provide: (plugin) => EditorView.atomicRanges.of((view) => view.plugin(plugin)?.decorations ?? Decoration.none)
+  });
+}
+
 export function runVimCtrlJCommand(view: EditorView): boolean {
   const cm = getCM(view);
   const vimState = cm?.state.vim ?? null;
@@ -3927,7 +3995,9 @@ function VimPromptEditor({
   selectionRequest,
   focusRequestKey,
   focusCommand = "focus",
-  onCaretChange
+  onCaretChange,
+  sessionId,
+  onUploadingChange
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -3943,6 +4013,8 @@ function VimPromptEditor({
   focusRequestKey?: string | null;
   focusCommand?: PrimaryInputFocusCommand;
   onCaretChange: (caret: number) => void;
+  sessionId: string;
+  onUploadingChange?: (uploading: boolean) => void;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -3959,6 +4031,8 @@ function VimPromptEditor({
   const skillNamesKey = useMemo(() => [...skillNames].sort().join("\0"), [skillNames]);
   const skillHighlightCompartment = useMemo(() => new Compartment(), []);
   const placeholderCompartment = useMemo(() => new Compartment(), []);
+  const previewsRef = useRef(new Map<string, string>());
+  const uploadCountRef = useRef(0);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -4051,6 +4125,24 @@ function VimPromptEditor({
       placeholderCompartment.of(placeholder ? codeMirrorPlaceholder(placeholder) : []),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
+      composerImageExtension(sessionId, previewsRef.current),
+      EditorView.domEventHandlers({
+        paste(event, view) {
+          const files = Array.from(event.clipboardData?.files ?? []).filter((file) => file.type.startsWith("image/"));
+          if (!files.length) return false;
+          event.preventDefault();
+          insertComposerImages(view, files, view.state.selection.main.from, view.state.selection.main.to);
+          return true;
+        },
+        drop(event, view) {
+          const files = Array.from(event.dataTransfer?.files ?? []).filter((file) => file.type.startsWith("image/"));
+          if (!files.length) return false;
+          event.preventDefault();
+          const position = view.posAtCoords({ x: event.clientX, y: event.clientY }) ?? view.state.selection.main.from;
+          insertComposerImages(view, files, position, position);
+          return true;
+        }
+      }),
       EditorView.updateListener.of((update) => {
         if (update.docChanged) {
           const nextValue = update.state.doc.toString();
@@ -4069,6 +4161,35 @@ function VimPromptEditor({
         }
       })
     ];
+
+    function insertComposerImages(view: EditorView, files: File[], position: number, selectionTo: number): void {
+      const existing = (view.state.doc.toString().match(/\[\[muxpilot-(?:image|upload):/g) ?? []).length;
+      for (const file of files.slice(0, Math.max(0, 10 - existing))) {
+        const uploadId = crypto.randomUUID();
+        const token = `[[muxpilot-upload:${uploadId}]]`;
+        previewsRef.current.set(uploadId, URL.createObjectURL(file));
+        view.dispatch({ changes: { from: position, to: selectionTo, insert: token }, selection: { anchor: position + token.length } });
+        selectionTo = position;
+        position += token.length;
+        uploadCountRef.current += 1;
+        onUploadingChange?.(true);
+        void api.uploadImage(sessionId, file).then(({ image }) => {
+          const current = view.state.doc.toString();
+          const from = current.indexOf(token);
+          if (from >= 0) view.dispatch({ changes: { from, to: from + token.length, insert: `[[muxpilot-image:${image.id}:${image.mimeType}]]` } });
+        }).catch(() => {
+          const current = view.state.doc.toString();
+          const from = current.indexOf(token);
+          if (from >= 0) view.dispatch({ changes: { from, to: from + token.length, insert: "[Image upload failed]" } });
+        }).finally(() => {
+          const preview = previewsRef.current.get(uploadId);
+          if (preview) URL.revokeObjectURL(preview);
+          previewsRef.current.delete(uploadId);
+          uploadCountRef.current -= 1;
+          onUploadingChange?.(uploadCountRef.current > 0);
+        });
+      }
+    }
 
     if (vimEnabled) extensions.splice(1, 0, vim({ status: true }), vimRelativeLineNumbers());
 
@@ -4091,7 +4212,7 @@ function VimPromptEditor({
       view.destroy();
       if (viewRef.current === view) viewRef.current = null;
     };
-  }, [disabled, placeholderCompartment, skillHighlightCompartment, vimEnabled]);
+  }, [disabled, placeholderCompartment, sessionId, skillHighlightCompartment, vimEnabled]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -4128,10 +4249,11 @@ export function SkillTextArea({
   skills,
   onSkillSearch,
   placeholder,
-  rows,
   focusRequestKey,
   focusCommand = "focus",
-  disabled
+  disabled,
+  sessionId = "",
+  onUploadingChange
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -4142,13 +4264,12 @@ export function SkillTextArea({
   skills: CodexSkill[];
   onSkillSearch?: () => void;
   placeholder?: string;
-  rows?: number;
   focusRequestKey?: string | null;
   focusCommand?: PrimaryInputFocusCommand;
   disabled?: boolean;
+  sessionId?: string;
+  onUploadingChange?: (uploading: boolean) => void;
 }) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const mirrorRef = useRef<HTMLDivElement>(null);
   const [caret, setCaret] = useState(0);
   const [focused, setFocused] = useState(false);
   const [dismissedTokenStart, setDismissedTokenStart] = useState<number | null>(null);
@@ -4160,11 +4281,6 @@ export function SkillTextArea({
   const open = focused && Boolean(token) && token?.start !== dismissedTokenStart && suggestions.length > 0;
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
 
-  useLayoutEffect(() => {
-    if (!textareaRef.current) return;
-    resizeComposerTextarea(textareaRef.current, mirrorRef.current);
-  }, [placeholder, value]);
-
   useEffect(() => {
     setSelectedIndex(0);
     setDismissedTokenStart(null);
@@ -4174,44 +4290,13 @@ export function SkillTextArea({
     if (focused && token) onSkillSearch?.();
   }, [focused, onSkillSearch, token?.start, token?.query]);
 
-  useEffect(() => {
-    if (vimEnabled || !focusRequestKey || disabled) return;
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.focus();
-    if (focusCommand === "insertStart") {
-      textarea.setSelectionRange(0, 0);
-      setCaret(0);
-      return;
-    }
-    if (focusCommand === "appendEnd") {
-      const end = textarea.value.length;
-      textarea.setSelectionRange(end, end);
-      setCaret(end);
-      return;
-    }
-    syncCaret(textarea);
-  }, [disabled, focusCommand, focusRequestKey, vimEnabled]);
-
-  function syncCaret(element: HTMLTextAreaElement) {
-    setCaret(element.selectionStart ?? 0);
-  }
-
   function acceptSkill(skill: CodexSkill) {
     if (!token) return;
     const next = replaceSkillToken(value, token, skill.name);
     onChange(next.text);
-    if (vimEnabled) {
-      vimSelectionNonceRef.current += 1;
-      setVimSelectionRequest({ caret: next.caret, nonce: vimSelectionNonceRef.current });
-      setCaret(next.caret);
-      return;
-    }
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(next.caret, next.caret);
-      setCaret(next.caret);
-    });
+    vimSelectionNonceRef.current += 1;
+    setVimSelectionRequest({ caret: next.caret, nonce: vimSelectionNonceRef.current });
+    setCaret(next.caret);
   }
 
   function handleSuggestionCommand(command: SkillSuggestionCommand): boolean {
@@ -4233,45 +4318,9 @@ export function SkillTextArea({
     return true;
   }
 
-  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.nativeEvent.isComposing) return;
-    if (shouldSubmitComposer(event)) {
-      event.preventDefault();
-      onSubmitShortcut?.();
-      return;
-    }
-    if (!open || suggestions.length === 0) return;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      handleSuggestionCommand("next");
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      handleSuggestionCommand("previous");
-      return;
-    }
-    if (event.key === "Enter" || event.key === "Tab") {
-      event.preventDefault();
-      handleSuggestionCommand("accept");
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      handleSuggestionCommand("dismiss");
-    }
-  }
-
-  function syncMirrorScroll(element: HTMLTextAreaElement) {
-    if (!mirrorRef.current) return;
-    mirrorRef.current.scrollTop = element.scrollTop;
-    mirrorRef.current.scrollLeft = element.scrollLeft;
-  }
-
   return (
     <div className={`skill-textarea${vimEnabled ? " skill-textarea-vim" : ""}`}>
-      {vimEnabled ? (
-        <VimPromptEditor
+      <VimPromptEditor
           value={value}
           onChange={onChange}
           onSubmitShortcut={onSubmitShortcut}
@@ -4287,45 +4336,14 @@ export function SkillTextArea({
           skills={skills}
           placeholder={placeholder}
           disabled={disabled}
-          vimEnabled
+          vimEnabled={Boolean(vimEnabled)}
           selectionRequest={vimSelectionRequest}
           focusRequestKey={focusRequestKey}
           focusCommand={focusCommand}
           onCaretChange={setCaret}
+          sessionId={sessionId}
+          onUploadingChange={onUploadingChange}
         />
-      ) : (
-        <>
-          <div className="skill-textarea-mirror" ref={mirrorRef} aria-hidden="true">
-            {renderComposerHighlights(value, skillNames)}
-          </div>
-          <textarea
-            {...freeformComposerField}
-            ref={textareaRef}
-            value={value}
-            onChange={(event) => {
-              onChange(event.target.value);
-              syncCaret(event.target);
-              syncMirrorScroll(event.target);
-            }}
-            onKeyDown={handleKeyDown}
-            onKeyUp={(event) => syncCaret(event.currentTarget)}
-            onClick={(event) => syncCaret(event.currentTarget)}
-            onSelect={(event) => syncCaret(event.currentTarget)}
-            onFocus={() => {
-              setFocused(true);
-              onFocus?.();
-            }}
-            onBlur={() => {
-              setFocused(false);
-              onBlur?.();
-            }}
-            onScroll={(event) => syncMirrorScroll(event.currentTarget)}
-            placeholder={placeholder}
-            rows={rows}
-            disabled={disabled}
-          />
-        </>
-      )}
       {open ? (
         <div className="skill-suggestions" role="listbox" aria-label="Codex skills">
           {suggestions.map((skill, index) => (
@@ -4849,6 +4867,7 @@ function approvalDecisionIcon(decision: ApprovalDecision): ReactNode {
 }
 
 function QueuedInputList({
+  sessionId,
   inputs,
   skills,
   vimEnabled,
@@ -4856,6 +4875,7 @@ function QueuedInputList({
   onUpdate,
   onDelete
 }: {
+  sessionId: string;
   inputs: QueuedInput[];
   skills: CodexSkill[];
   vimEnabled: boolean;
@@ -4871,7 +4891,7 @@ function QueuedInputList({
   function startEdit(input: QueuedInput) {
     if (!queuedInputEditable(input)) return;
     setEditingId(input.id);
-    setDraft(input.text);
+    setDraft(composerSource(input.text, input.content));
     setError("");
   }
 
@@ -4927,6 +4947,7 @@ function QueuedInputList({
                     skills={skills}
                     onSkillSearch={onSkillSearch}
                     disabled={busy}
+                    sessionId={sessionId}
                   />
                   {input.error ? <p className="queued-input-error">{input.error}</p> : null}
                   <div className="queued-input-actions">
@@ -4947,7 +4968,7 @@ function QueuedInputList({
               ) : (
                 <>
                   <div className={`queued-input-read${multiline ? " queued-input-read-multiline" : ""}`}>
-                    <PlainText text={input.text} />
+                    <MixedUserContent sessionId={sessionId} text={input.text} content={input.content} />
                     <div className="queued-input-actions">
                       <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
                         <Pencil size={16} /> Edit
@@ -5657,7 +5678,7 @@ function MessageContent({
     );
   }
 
-  if (message.role === "user") return <UserText text={message.text} />;
+  if (message.role === "user") return <UserMessageContent message={message} />;
 
   return <PlainText text={message.text} />;
 }
@@ -6042,6 +6063,20 @@ function trimPlanWrapperWhitespace(text: string): string {
 export function UserText({ text }: { text: string }) {
   const { body, skills } = userTextDisplayParts(text);
   return <MarkdownBlock text={body} components={userMarkdownComponents(skills)} />;
+}
+
+function UserMessageContent({ message }: { message: ChatMessage }) {
+  const content = Array.isArray(message.payload.content) ? message.payload.content as MessageContentPart[] : null;
+  return <MixedUserContent sessionId={message.sessionId} text={message.text} content={content ?? undefined} />;
+}
+
+function MixedUserContent({ sessionId, text, content }: { sessionId: string; text: string; content?: MessageContentPart[] }) {
+  if (!content?.some((part) => part.type === "image")) return <UserText text={text} />;
+  return <div className="user-mixed-content">{content.map((part, index) => part.type === "text"
+    ? <UserText key={index} text={part.text} />
+    : <a key={index} href={api.imageUrl(sessionId, part.id)} target="_blank" rel="noreferrer">
+        <img src={api.imageUrl(sessionId, part.id)} alt="User-provided image" />
+      </a>)}</div>;
 }
 
 function userMarkdownComponents(skillNames: string[]): Components {

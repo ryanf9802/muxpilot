@@ -85,6 +85,11 @@ describe("CodexAppServerProtocol", () => {
     await protocol.forkThread("thread-1", { cwd: "/fork" });
     await protocol.startTurn("thread-1", "hello", "client-1", { collaborationMode: { mode: "default" } });
     await protocol.steerTurn("thread-1", "turn-1", "one more thing", "client-2");
+    await protocol.startTurn("thread-1", "", "client-image", {}, [
+      { type: "text", text: "before" },
+      { type: "localImage", path: "/tmp/screenshot.png" },
+      { type: "text", text: "after" }
+    ]);
     await protocol.interruptTurn("thread-1", "turn-1");
     await protocol.renameThread("thread-1", "New name");
     await protocol.updateThreadSettings("thread-1", { model: "gpt-5.6" });
@@ -102,6 +107,15 @@ describe("CodexAppServerProtocol", () => {
       expectedTurnId: "turn-1",
       input: [{ type: "text", text: "one more thing" }],
       clientUserMessageId: "client-2"
+    });
+    expect(request).toHaveBeenCalledWith("turn/start", {
+      threadId: "thread-1",
+      input: [
+        { type: "text", text: "before" },
+        { type: "localImage", path: "/tmp/screenshot.png" },
+        { type: "text", text: "after" }
+      ],
+      clientUserMessageId: "client-image"
     });
     expect(request).toHaveBeenCalledWith("turn/interrupt", { threadId: "thread-1", turnId: "turn-1" });
   });

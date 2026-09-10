@@ -179,15 +179,16 @@ export class CodexAppServerProtocol {
     threadId: string,
     text: string,
     clientUserMessageId: string,
-    options: Record<string, unknown> = {}
+    options: Record<string, unknown> = {},
+    input?: Array<Record<string, string>>
   ): Promise<TurnIdentityResponse> {
     requireNonEmpty(threadId, "threadId");
-    requireNonEmpty(text, "text");
+    if (!text.trim() && !input?.some((part) => part.type === "localImage" || part.type === "image")) requireNonEmpty(text, "text");
     requireNonEmpty(clientUserMessageId, "clientUserMessageId");
     return requireTurnIdentityResponse(await this.rpc.request<unknown>("turn/start", {
       ...options,
       threadId,
-      input: [{ type: "text", text }],
+      input: input ?? [{ type: "text", text }],
       clientUserMessageId
     }));
   }
@@ -196,16 +197,17 @@ export class CodexAppServerProtocol {
     threadId: string,
     expectedTurnId: string,
     text: string,
-    clientUserMessageId: string
+    clientUserMessageId: string,
+    input?: Array<Record<string, string>>
   ): Promise<TurnSteerResponse> {
     requireNonEmpty(threadId, "threadId");
     requireNonEmpty(expectedTurnId, "expectedTurnId");
-    requireNonEmpty(text, "text");
+    if (!text.trim() && !input?.some((part) => part.type === "localImage" || part.type === "image")) requireNonEmpty(text, "text");
     requireNonEmpty(clientUserMessageId, "clientUserMessageId");
     return requireTurnSteerResponse(await this.rpc.request<unknown>("turn/steer", {
       threadId,
       expectedTurnId,
-      input: [{ type: "text", text }],
+      input: input ?? [{ type: "text", text }],
       clientUserMessageId
     }));
   }

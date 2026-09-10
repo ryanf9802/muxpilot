@@ -140,6 +140,7 @@ interface QueuedInputRow {
   id: string;
   session_id: string;
   text: string;
+  content_json: string | null;
   mode: string;
   status: string;
   error: string | null;
@@ -2877,13 +2878,14 @@ export class SyncAppDatabase {
     this.db
       .prepare(
         `INSERT INTO queued_inputs
-          (id, session_id, text, mode, status, error, codex_session_id, codex_jsonl_path, actor_session_id, created_at, updated_at, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, session_id, text, content_json, mode, status, error, codex_session_id, codex_jsonl_path, actor_session_id, created_at, updated_at, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.id,
         input.sessionId,
         input.text,
+        input.content ? JSON.stringify(input.content) : null,
         input.mode,
         input.status,
         input.error,
@@ -3185,6 +3187,7 @@ export class SyncAppDatabase {
       .prepare(
         `UPDATE queued_inputs
          SET text = ?,
+             content_json = ?,
              mode = ?,
              status = ?,
              error = ?,
@@ -3197,6 +3200,7 @@ export class SyncAppDatabase {
       )
       .run(
         input.text,
+        input.content ? JSON.stringify(input.content) : null,
         input.mode,
         input.status,
         input.error,
@@ -3478,6 +3482,7 @@ export class SyncAppDatabase {
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
         text TEXT NOT NULL,
+        content_json TEXT,
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
         error TEXT,
@@ -3653,6 +3658,7 @@ export class SyncAppDatabase {
     this.db.exec("DROP TABLE IF EXISTS session_summaries; DROP TABLE IF EXISTS openai_usage_events;");
     this.db.prepare("DELETE FROM app_settings WHERE key = 'activity_summaries_enabled'").run();
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
+    this.addColumnIfMissing("queued_inputs", "content_json", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
@@ -4302,6 +4308,7 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     id: row.id,
     sessionId: row.session_id,
     text: row.text,
+    content: row.content_json ? JSON.parse(row.content_json) as QueuedInput["content"] : undefined,
     mode: collaborationMode(row.mode) ?? "default",
     status: queuedInputStatus(row.status),
     error: row.error,
