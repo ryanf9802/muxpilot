@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionStatus } from "@muxpilot/core";
+import type { ChatMessage, SessionStatus } from "@muxpilot/core";
 import type { AppServerReconciliationState } from "../src/db/database.js";
 import {
   CodexAppServerReconciler,
@@ -107,7 +107,7 @@ describe("CodexAppServerReconciler", () => {
     expect(store.applyAppServerProjection).toHaveBeenLastCalledWith(expect.objectContaining({ status: "plan_ready" }));
   });
 
-  it("keeps deltas transient and preserves plan-ready across the following idle notification", async () => {
+  it("keeps deltas transient and restores plan-ready from the pending plan on idle", async () => {
     const store = projectionStore([]);
     const publish = vi.fn();
     const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish });
@@ -118,13 +118,114 @@ describe("CodexAppServerReconciler", () => {
     });
     expect(store.applyAppServerProjection).not.toHaveBeenCalled();
 
-    store.getAppServerReconciliationState.mockResolvedValueOnce(reconciliationState("plan_ready"));
+    store.latestPlanReadyMessage.mockResolvedValueOnce(planMessage());
     await reconciler.handle("session-1", {
       method: "thread/status/changed",
       params: { threadId: "thread-1", status: { type: "idle" } },
       receivedAt: "2026-09-01T12:00:01.000Z"
     });
-    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: null }));
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "plan_ready" }));
+  });
+
+  it("preserves plan-ready through companion prose and summary-only completion", async () => {
+    const store = projectionStore([], "plan");
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "plan-1", type: "plan", text: "Final plan" }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+    await reconciler.handle("session-1", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "agent-1", type: "agentMessage", text: "Plan prepared", phase: "final_answer" }
+      },
+      receivedAt: "2026-09-01T12:00:01.000Z"
+    });
+    store.latestPlanReadyMessage.mockResolvedValue(planMessage());
+    await reconciler.handle("session-1", {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "idle" } },
+      receivedAt: "2026-09-01T12:00:02.000Z"
+    });
+    await reconciler.handle("session-1", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          itemsView: "summary",
+          items: [{ id: "agent-1", type: "agentMessage", text: "Plan prepared" }]
+        }
+      },
+      receivedAt: "2026-09-01T12:00:03.000Z"
+    });
+
+    expect(store.applyAppServerProjection.mock.calls.map(([projection]) => projection.status)).toEqual([
+      "plan_ready",
+      null,
+      "plan_ready",
+      "plan_ready"
+    ]);
+    expect((await store.getSession("session-1"))?.status).toBe("plan_ready");
+  });
+
+  it("restores an idle session with an unresolved persisted plan as plan-ready", async () => {
+    const store = projectionStore([], "plan");
+    store.latestPlanReadyMessage.mockResolvedValue(planMessage());
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      "2026-09-01T12:05:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "plan_ready" }));
+  });
+
+  it("keeps idle when there is no unresolved persisted plan", async () => {
+    const store = projectionStore([], "plan");
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "idle" } },
+      receivedAt: "2026-09-01T12:05:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "idle" }));
+  });
+
+  it("allows a new turn to advance beyond a pending plan", async () => {
+    const store = projectionStore([], "plan");
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    await reconciler.handle("session-1", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "plan-1", type: "plan", text: "Final plan" }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    await reconciler.handle("session-1", {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-2" } },
+      receivedAt: "2026-09-01T12:01:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenLastCalledWith(expect.objectContaining({ status: "planning" }));
   });
 
   it("rejects foreign thread projections as a durable defense in depth", async () => {
@@ -212,19 +313,22 @@ describe("CodexAppServerReconciler", () => {
 
 function projectionStore(order: string[], inputMode: "default" | "plan" = "default") {
   let status: SessionStatus = "generating";
+  let state: AppServerReconciliationState | null = null;
   return {
     applyAppServerProjection: vi.fn(async (projection) => {
       order.push("apply");
       if (projection.status) status = projection.status;
+      state = { ...reconciliationState(projection.status), ...projection, evidence: projection.evidence };
       return {
         message: projection.message ? { ...projection.message, sessionId: projection.sessionId, sequence: 1 } : null,
         messageInserted: Boolean(projection.message),
         messageChanged: Boolean(projection.message),
         statusChanged: Boolean(projection.status),
-        state: { ...reconciliationState(projection.status), ...projection, evidence: projection.evidence }
+        state
       };
     }),
-    getAppServerReconciliationState: vi.fn(async () => { order.push("read"); return null; }),
+    getAppServerReconciliationState: vi.fn(async () => { order.push("read"); return state; }),
+    latestPlanReadyMessage: vi.fn(async () => null),
     getSession: vi.fn(async () => {
       order.push("session");
       return {
@@ -239,6 +343,19 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
       processesRemoved: 0,
       reconciliationReset: false
     }))
+  };
+}
+
+function planMessage(): ChatMessage {
+  return {
+    id: "plan-message-1",
+    sessionId: "session-1",
+    sequence: 1,
+    type: "assistant",
+    role: "assistant",
+    timestamp: "2026-09-01T12:00:00.000Z",
+    text: "<proposed_plan>Final plan</proposed_plan>",
+    payload: {}
   };
 }
 

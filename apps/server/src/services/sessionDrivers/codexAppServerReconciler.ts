@@ -1,4 +1,4 @@
-import type { ManagedSession } from "@muxpilot/core";
+import type { ChatMessage, ManagedSession } from "@muxpilot/core";
 import type {
   AppServerProjectionInput,
   AppServerProjectionRepairResult,
@@ -15,6 +15,7 @@ export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
   getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null>;
   getSession(sessionId: string): Promise<ManagedSession | null>;
+  latestPlanReadyMessage(sessionId: string): Promise<ChatMessage | null>;
   repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult>;
 }
 
@@ -32,7 +33,14 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return;
     const current = await this.store.getAppServerReconciliationState(sessionId);
     const normalizedProjection = normalizePlanModeStatus(projection, existingSession.inputMode);
-    const applied = await this.store.applyAppServerProjection(input(sessionId, preservePlanReady(normalizedProjection, current), event.receivedAt));
+    const pendingPlan = normalizedProjection.status === "idle"
+      ? await this.store.latestPlanReadyMessage(sessionId)
+      : null;
+    const applied = await this.store.applyAppServerProjection(input(
+      sessionId,
+      preservePlanReady(normalizedProjection, current, pendingPlan),
+      event.receivedAt
+    ));
     const session = applied.messageChanged || applied.statusChanged
       ? await this.requireSession(sessionId)
       : null;
@@ -94,10 +102,19 @@ function input(sessionId: string, projection: AppServerEventProjection, observed
 
 function preservePlanReady(
   projection: AppServerEventProjection,
-  current: AppServerReconciliationState | null
+  current: AppServerReconciliationState | null,
+  pendingPlan: ChatMessage | null
 ): AppServerEventProjection {
-  if (current?.status !== "plan_ready" || projection.status !== "idle") return projection;
-  return { ...projection, status: null };
+  if (projection.status === "idle" && pendingPlan) return { ...projection, status: "plan_ready" };
+  if (
+    current?.status === "plan_ready"
+    && current.turnId === projection.identity.turnId
+    && projection.method === "item/completed"
+    && projection.message?.role === "assistant"
+  ) {
+    return { ...projection, status: null };
+  }
+  return projection;
 }
 
 function normalizePlanModeStatus(
