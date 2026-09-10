@@ -18,7 +18,6 @@ import {
   applyPlanActionResponse,
   AgentGuardBanner,
   ApprovalBanner,
-  ApprovalModeSelector,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
   blurActiveElementForVimSubmit,
@@ -368,19 +367,6 @@ describe("SessionHeaderMeta", () => {
     expect(html).toContain("App server · connected");
     expect(html).toContain('class="session-header-memory-usage"');
     expect(html).toContain("128 MiB memory");
-  });
-});
-
-describe("ApprovalModeSelector", () => {
-  it("shows all per-session approval modes with Ask selected by default", () => {
-    const html = renderToStaticMarkup(createElement(ApprovalModeSelector, {
-      mode: "ask",
-      onChange: () => undefined
-    }));
-    expect(html).toContain('aria-label="Session permissions"');
-    expect(html).toContain("Ask for approval");
-    expect(html).toContain("Auto approval");
-    expect(html).toContain("Full approval");
   });
 });
 

@@ -117,6 +117,60 @@ describe("ModelSettingsDrawer", () => {
     expect(otherModel.checked).toBe(true);
     act(() => root.unmount());
   });
+
+  it("compacts reviewer apply and session permissions into the model drawer", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const applyReviewer = vi.fn(async () => undefined);
+    const changeApprovalMode = vi.fn(async () => undefined);
+
+    await act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open
+          title="Settings"
+          description="Choose settings"
+          selections={session().models}
+          activeMode="default"
+          catalog={catalog}
+          loading={false}
+          error=""
+          applying={null}
+          reviewerSettings={{ model: "gpt-other", reasoningEffort: "low" }}
+          approvalMode="ask"
+          onClose={() => undefined}
+          onRetry={() => undefined}
+          onApply={async () => undefined}
+          onApplyReviewer={applyReviewer}
+          onApprovalModeChange={changeApprovalMode}
+        />
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[aria-label="Current Auto reviewer model"]')).not.toBeNull();
+    expect(button(container, "Apply Reviewer").disabled).toBe(false);
+    await act(async () => {
+      button(container, "Apply Reviewer").click();
+      await Promise.resolve();
+    });
+    expect(applyReviewer).toHaveBeenCalledWith("gpt-default", "medium");
+
+    const permissions = container.querySelector<HTMLSelectElement>('select[aria-label="Session permissions"]')!;
+    expect(Array.from(permissions.options).map((option) => option.text)).toEqual([
+      "Ask for approval",
+      "Auto approval",
+      "Full approval"
+    ]);
+    await act(async () => {
+      permissions.value = "auto";
+      permissions.dispatchEvent(new Event("change", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(changeApprovalMode).toHaveBeenCalledWith("auto");
+    act(() => root.unmount());
+  });
 });
 
 function button(container: HTMLElement, label: string): HTMLButtonElement {

@@ -3432,7 +3432,40 @@ select:focus-visible {
   background: var(--color-surface);
 }
 
-.model-settings-actions .app-button-primary { min-width: 132px; }
+.model-settings-actions .app-button-primary { min-width: 116px; }
+
+.model-settings-permissions > label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  background: var(--color-surface-raised);
+}
+
+.model-settings-permissions > label > span {
+  display: grid;
+  gap: 3px;
+}
+
+.model-settings-permissions strong { font-size: 13px; }
+.model-settings-permissions small { color: var(--color-text-muted); font-size: 11px; line-height: 1.35; }
+
+.model-settings-permissions select {
+  max-width: 156px;
+  min-height: 34px;
+  padding: 5px 25px 5px 8px;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface);
+  font: inherit;
+  font-size: 12px;
+}
+
+.model-settings-permissions select[aria-invalid="true"] { border-color: var(--color-danger); }
 
 .runtime-attach-button { flex: 0 0 auto; }
 
@@ -4215,29 +4248,6 @@ select:focus-visible {
   white-space: nowrap;
   max-width: min(240px, 100%);
   overflow: hidden;
-}
-
-.approval-mode-selector {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  color: var(--color-text-muted);
-}
-
-.approval-mode-selector select {
-  max-width: 148px;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 6px 24px 6px 8px;
-  background: var(--color-surface);
-  color: var(--color-text);
-  font: inherit;
-  font-size: 12px;
-}
-
-.approval-mode-selector select[aria-invalid="true"] {
-  border-color: var(--color-danger);
 }
 
 .model-settings-button:not(.model-settings-display):hover:not(:disabled),
@@ -6317,6 +6327,8 @@ select:focus-visible {
   .model-settings-actions .app-button { width: 100%; min-width: 0; }
   .model-settings-actions .app-button-primary { order: 1; }
   .model-settings-actions .app-button-ghost { grid-column: 1 / -1; order: 2; }
+  .model-settings-permissions > label { grid-template-columns: minmax(0, 1fr); }
+  .model-settings-permissions select { width: 100%; max-width: none; }
   .btw-exchange-list { gap: 10px; padding: 14px 13px 18px; }
   .btw-composer-shell { padding-inline: 13px; }
   .btw-composer-heading > span { display: none; }

@@ -1,9 +1,11 @@
-import { ClipboardList, MessageSquare } from "lucide-react";
+import { ClipboardList, MessageSquare, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type {
   CodexModel,
   CodexModelCatalogResponse,
   CollaborationMode,
+  ApprovalMode,
+  ApprovalReviewerSettings,
   ManagedSession,
   SessionModelSelections,
   SessionModelSettings
@@ -34,9 +36,15 @@ export function ModelSettingsDrawer({
   loading,
   error,
   applying,
+  reviewerSettings,
+  approvalMode,
+  approvalModeApplying = false,
+  approvalModeError = "",
   onClose,
   onRetry,
-  onApply
+  onApply,
+  onApplyReviewer,
+  onApprovalModeChange
 }: {
   open: boolean;
   title: string;
@@ -47,10 +55,16 @@ export function ModelSettingsDrawer({
   catalog: CodexModelCatalogResponse | null;
   loading: boolean;
   error: string;
-  applying: CollaborationMode | null;
+  applying: CollaborationMode | "reviewer" | null;
+  reviewerSettings?: ApprovalReviewerSettings | null;
+  approvalMode?: ApprovalMode;
+  approvalModeApplying?: boolean;
+  approvalModeError?: string;
   onClose: () => void;
   onRetry: () => void;
   onApply: (mode: CollaborationMode, model: string, reasoningEffort: string | null) => Promise<void>;
+  onApplyReviewer?: (model: string, reasoningEffort: string | null) => Promise<void>;
+  onApprovalModeChange?: (mode: ApprovalMode) => Promise<void>;
 }) {
   const [draftModel, setDraftModel] = useState("");
   const [draftEffort, setDraftEffort] = useState<string | null>(null);
@@ -72,6 +86,8 @@ export function ModelSettingsDrawer({
 
   const changedNormal = draftModel !== normal.model || draftEffort !== normal.reasoningEffort;
   const changedPlan = draftModel !== plan.model || draftEffort !== plan.reasoningEffort;
+  const changedReviewer = reviewerSettings !== undefined && reviewerSettings !== null
+    && (draftModel !== reviewerSettings.model || draftEffort !== reviewerSettings.reasoningEffort);
   const valid = Boolean(selectedModel) && (
     selectedModel!.supportedReasoningEfforts.length === 0
       ? draftEffort === null
@@ -81,9 +97,12 @@ export function ModelSettingsDrawer({
   const activeSelectionChanged = activeMode === "plan" ? changedPlan : activeMode === "default" ? changedNormal : false;
   const badgeSelections = useMemo(() => ({ normal, plan }), [normal.model, normal.reasoningEffort, plan.model, plan.reasoningEffort]);
 
-  async function apply(mode: CollaborationMode) {
+  const busy = Boolean(applying) || approvalModeApplying;
+
+  async function apply(mode: CollaborationMode | "reviewer") {
     if (!valid || applying) return;
-    await onApply(mode, draftModel, draftEffort);
+    if (mode === "reviewer") await onApplyReviewer?.(draftModel, draftEffort);
+    else await onApply(mode, draftModel, draftEffort);
   }
 
   return (
@@ -95,8 +114,8 @@ export function ModelSettingsDrawer({
       backdropClassName="model-settings-backdrop"
       closeLabel="Close model settings"
       placement="end"
-      dismissible={!applying}
-      loading={loading || Boolean(applying)}
+      dismissible={!busy}
+      loading={loading || busy}
       initialFocusRef={initialFocusRef}
     >
       <div className="model-settings-intro">
@@ -104,6 +123,7 @@ export function ModelSettingsDrawer({
         <div className="model-settings-legend" aria-label="Option badge legend">
           <Badge icon={<MessageSquare />} label="Current Normal selection" legend />
           <Badge icon={<ClipboardList />} label="Current Plan selection" legend />
+          {reviewerSettings ? <Badge icon={<ShieldCheck />} label="Current Auto reviewer selection" legend /> : null}
         </div>
       </div>
       <div className="model-settings-content">
@@ -111,7 +131,7 @@ export function ModelSettingsDrawer({
         {error ? (
           <div className="model-settings-state" role="alert">
             <p>{error}</p>
-            <Button size="small" onClick={onRetry} disabled={Boolean(applying)}>Retry</Button>
+            <Button size="small" onClick={onRetry} disabled={busy}>Retry</Button>
           </div>
         ) : null}
         {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No Codex models are currently available.</p> : null}
@@ -127,7 +147,7 @@ export function ModelSettingsDrawer({
                     name="codex-model"
                     value={model.model}
                     checked={draftModel === model.model}
-                    disabled={Boolean(applying)}
+                    disabled={busy}
                     onChange={() => {
                       setDraftModel(model.model);
                       const preferred = model.model === initial.model ? initial.reasoningEffort : null;
@@ -142,6 +162,7 @@ export function ModelSettingsDrawer({
                   <span className="model-settings-badges">
                     {badgeSelections.normal.model === model.model ? <Badge icon={<MessageSquare />} label="Current Normal model" /> : null}
                     {badgeSelections.plan.model === model.model ? <Badge icon={<ClipboardList />} label="Current Plan model" /> : null}
+                    {reviewerSettings?.model === model.model ? <Badge icon={<ShieldCheck />} label="Current Auto reviewer model" /> : null}
                   </span>
                 </label>
               ))}
@@ -156,7 +177,7 @@ export function ModelSettingsDrawer({
                       name="codex-reasoning-effort"
                       value={option.reasoningEffort}
                       checked={draftEffort === option.reasoningEffort}
-                      disabled={Boolean(applying)}
+                      disabled={busy}
                       onChange={() => setDraftEffort(option.reasoningEffort)}
                     />
                     <span className="model-settings-option-copy">
@@ -170,6 +191,9 @@ export function ModelSettingsDrawer({
                       {badgeSelections.plan.model === selectedModel.model && badgeSelections.plan.reasoningEffort === option.reasoningEffort
                         ? <Badge icon={<ClipboardList />} label="Current Plan reasoning effort" />
                         : null}
+                      {reviewerSettings?.model === selectedModel.model && reviewerSettings.reasoningEffort === option.reasoningEffort
+                        ? <Badge icon={<ShieldCheck />} label="Current Auto reviewer reasoning effort" />
+                        : null}
                     </span>
                   </label>
                 ))}
@@ -178,13 +202,36 @@ export function ModelSettingsDrawer({
             {fastUnavailable && activeMode && activeSelectionChanged ? <p className="model-settings-warning" role="note">Applying this model to the active {activeMode === "plan" ? "Plan" : "Normal"} mode will turn off Fast mode.</p> : null}
           </>
         ) : null}
+        {approvalMode && onApprovalModeChange ? (
+          <fieldset className="model-settings-options model-settings-permissions">
+            <legend>Permissions</legend>
+            <label>
+              <span>
+                <strong>Session approval mode</strong>
+                <small>Controls how runtime permission requests are resolved for this session.</small>
+              </span>
+              <select
+                value={approvalMode}
+                disabled={busy}
+                aria-invalid={Boolean(approvalModeError) || undefined}
+                aria-label="Session permissions"
+                onChange={(event) => void onApprovalModeChange(event.currentTarget.value as ApprovalMode)}
+              >
+                <option value="ask">Ask for approval</option>
+                <option value="auto">Auto approval</option>
+                <option value="full">Full approval</option>
+              </select>
+            </label>
+            {approvalModeError ? <p className="model-settings-warning" role="alert">{approvalModeError}</p> : null}
+          </fieldset>
+        ) : null}
       </div>
       <DialogActions className="model-settings-actions">
-        <Button variant="ghost" onClick={onClose} disabled={Boolean(applying)}>Cancel</Button>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
         <Button
           variant="primary"
           icon={<MessageSquare size={16} />}
-          disabled={!valid || !changedNormal || Boolean(applying)}
+          disabled={!valid || !changedNormal || busy}
           busy={applying === "default"}
           busyLabel="Applying Normal"
           onClick={() => void apply("default")}
@@ -194,13 +241,25 @@ export function ModelSettingsDrawer({
         <Button
           variant="primary"
           icon={<ClipboardList size={16} />}
-          disabled={!valid || !changedPlan || Boolean(applying)}
+          disabled={!valid || !changedPlan || busy}
           busy={applying === "plan"}
           busyLabel="Applying Plan"
           onClick={() => void apply("plan")}
         >
           Apply Plan
         </Button>
+        {reviewerSettings && onApplyReviewer ? (
+          <Button
+            variant="primary"
+            icon={<ShieldCheck size={16} />}
+            disabled={!valid || !changedReviewer || busy}
+            busy={applying === "reviewer"}
+            busyLabel="Applying Reviewer"
+            onClick={() => void apply("reviewer")}
+          >
+            Apply Reviewer
+          </Button>
+        ) : null}
       </DialogActions>
     </Modal>
   );

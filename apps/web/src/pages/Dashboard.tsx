@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Settings2, ShieldCheck, Skull, Zap } from "lucide-react";
+import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Settings2, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -81,15 +81,12 @@ export function Dashboard() {
   const [agentParentId, setAgentParentId] = useState("");
   const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" | "agentParent" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [reviewerSettingsOpen, setReviewerSettingsOpen] = useState(false);
   const [reviewerSettings, setReviewerSettings] = useState<ApprovalReviewerSettings | null>(null);
-  const [reviewerSettingsBusy, setReviewerSettingsBusy] = useState(false);
-  const [reviewerSettingsError, setReviewerSettingsError] = useState("");
   const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
   const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<CodexModelCatalogResponse | null>(null);
   const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false);
-  const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | null>(null);
+  const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | "reviewer" | null>(null);
   const [modelDefaultsError, setModelDefaultsError] = useState("");
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -334,9 +331,14 @@ export function Dashboard() {
     setModelDefaultsLoading(true);
     setModelDefaultsError("");
     try {
-      const [catalog, response] = await Promise.all([api.codexModels(), api.globalModelSettings()]);
+      const [catalog, response, reviewer] = await Promise.all([
+        api.codexModels(),
+        api.globalModelSettings(),
+        api.approvalReviewerSettings()
+      ]);
       setModelDefaultsCatalog(catalog);
       setModelDefaults(response.settings);
+      setReviewerSettings(reviewer.settings);
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not load model defaults.");
     } finally {
@@ -349,34 +351,16 @@ export function Dashboard() {
     void loadModelDefaults();
   }
 
-  async function openReviewerSettings() {
-    setReviewerSettingsOpen(true);
-    setReviewerSettingsBusy(true);
-    setReviewerSettingsError("");
+  async function applyReviewerSettings(model: string, reasoningEffort: string | null): Promise<void> {
+    setModelDefaultsApplying("reviewer");
+    setModelDefaultsError("");
     try {
-      const [catalog, response] = await Promise.all([api.codexModels(), api.approvalReviewerSettings()]);
-      setModelDefaultsCatalog(catalog);
+      const response = await api.updateApprovalReviewerSettings({ model, reasoningEffort });
       setReviewerSettings(response.settings);
     } catch (error) {
-      setReviewerSettingsError(error instanceof Error ? error.message : "Could not load approval reviewer settings.");
+      setModelDefaultsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
     } finally {
-      setReviewerSettingsBusy(false);
-    }
-  }
-
-  async function saveReviewerSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!reviewerSettings) return;
-    setReviewerSettingsBusy(true);
-    setReviewerSettingsError("");
-    try {
-      const response = await api.updateApprovalReviewerSettings(reviewerSettings);
-      setReviewerSettings(response.settings);
-      setReviewerSettingsOpen(false);
-    } catch (error) {
-      setReviewerSettingsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
-    } finally {
-      setReviewerSettingsBusy(false);
+      setModelDefaultsApplying(null);
     }
   }
 
@@ -433,7 +417,6 @@ export function Dashboard() {
         <DashboardPrimaryActions
           showTransfer={accessMode === "local"}
           onOpenModelDefaults={openModelDefaults}
-          onOpenReviewerSettings={() => void openReviewerSettings()}
           onOpenSessionTransfer={openSessionTransfer}
           onNewSession={() => openCreateSession()}
         />
@@ -449,52 +432,12 @@ export function Dashboard() {
         loading={modelDefaultsLoading}
         error={modelDefaultsError}
         applying={modelDefaultsApplying}
+        reviewerSettings={reviewerSettings}
         onClose={() => setModelDefaultsOpen(false)}
         onRetry={() => void loadModelDefaults()}
         onApply={applyModelDefault}
+        onApplyReviewer={applyReviewerSettings}
       />
-
-      <Modal
-        open={reviewerSettingsOpen}
-        onClose={() => setReviewerSettingsOpen(false)}
-        title="Auto approval reviewer"
-        panelClassName="session-name-dialog"
-        as="form"
-        onSubmit={saveReviewerSettings}
-        dismissible={!reviewerSettingsBusy}
-      >
-        <p className="dialog-help">Choose the Codex model used to review requests from sessions in Auto approval mode.</p>
-        <label className="rename-field">
-          <span>Reviewer model</span>
-          <select
-            autoFocus
-            value={reviewerSettings?.model ?? ""}
-            disabled={reviewerSettingsBusy}
-            onChange={(event) => {
-              const model = modelDefaultsCatalog?.models.find((candidate) => candidate.model === event.currentTarget.value);
-              setReviewerSettings({ model: event.currentTarget.value, reasoningEffort: model?.defaultReasoningEffort ?? null });
-            }}
-          >
-            {(modelDefaultsCatalog?.models ?? []).map((model) => <option key={model.id} value={model.model}>{model.displayName}</option>)}
-          </select>
-        </label>
-        <label className="rename-field">
-          <span>Reasoning effort</span>
-          <select
-            value={reviewerSettings?.reasoningEffort ?? ""}
-            disabled={reviewerSettingsBusy}
-            onChange={(event) => setReviewerSettings((current) => current ? { ...current, reasoningEffort: event.currentTarget.value || null } : current)}
-          >
-            {(modelDefaultsCatalog?.models.find((model) => model.model === reviewerSettings?.model)?.supportedReasoningEfforts ?? [])
-              .map((option) => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}
-          </select>
-        </label>
-        {reviewerSettingsError ? <p className="dialog-error" role="alert">{reviewerSettingsError}</p> : null}
-        <DialogActions>
-          <Button variant="ghost" onClick={() => setReviewerSettingsOpen(false)} disabled={reviewerSettingsBusy}>Cancel</Button>
-          <Button variant="primary" type="submit" disabled={!reviewerSettings || reviewerSettingsBusy} busy={reviewerSettingsBusy}>Save</Button>
-        </DialogActions>
-      </Modal>
 
       {actionError && !renameSession && !agentParentSession ? (
         <p className="dashboard-action-error" role="alert">
@@ -734,13 +677,11 @@ export function Dashboard() {
 export function DashboardPrimaryActions({
   showTransfer,
   onOpenModelDefaults,
-  onOpenReviewerSettings,
   onOpenSessionTransfer,
   onNewSession
 }: {
   showTransfer: boolean;
   onOpenModelDefaults: () => void;
-  onOpenReviewerSettings: () => void;
   onOpenSessionTransfer: () => void;
   onNewSession: () => void;
 }) {
@@ -749,10 +690,6 @@ export function DashboardPrimaryActions({
       <button className="dashboard-model-defaults-button" type="button" onClick={onOpenModelDefaults} aria-label="Default model settings" title="Default model settings">
         <Settings2 size={17} />
         <span className="dashboard-model-defaults-button-label">Model defaults</span>
-      </button>
-      <button className="dashboard-model-defaults-button" type="button" onClick={onOpenReviewerSettings} aria-label="Auto approval reviewer settings" title="Auto approval reviewer settings">
-        <ShieldCheck size={17} />
-        <span className="dashboard-model-defaults-button-label">Approval reviewer</span>
       </button>
       {showTransfer ? (
         <button className="dashboard-transfer-button" type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">

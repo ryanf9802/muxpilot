@@ -36,7 +36,7 @@ The session view also provides:
 - A copyable local runtime attachment command
 - Interrupt, fork, new-session, and kill actions
 
-The permissions selector is stored per session and always starts at **Ask for approval**. **Auto approval** uses the app-wide Codex reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure the Auto reviewer model and reasoning effort from the dashboard's approval-reviewer settings.
+The permissions selector in the session model-settings drawer is stored per session and always starts at **Ask for approval**. **Auto approval** uses the app-wide Codex reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure the Auto reviewer model and reasoning effort with the reviewer apply action in the dashboard's model-defaults drawer.
 
 User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.
 

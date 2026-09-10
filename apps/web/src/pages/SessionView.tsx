@@ -2942,12 +2942,6 @@ export function SessionView() {
             catalog={modelCatalog}
             onOpen={() => setModelSettingsOpen(true)}
           />
-          <ApprovalModeSelector
-            mode={readySession.approvalMode}
-            disabled={approvalModeApplying}
-            error={approvalModeError}
-            onChange={(mode) => void applyApprovalMode(mode)}
-          />
           <RuntimeAttachButton
             session={readySession}
             copied={copiedAttachCommand}
@@ -3027,9 +3021,13 @@ export function SessionView() {
         loading={modelCatalogLoading}
         error={modelSettingsError}
         applying={modelSettingsApplying}
+        approvalMode={readySession.approvalMode}
+        approvalModeApplying={approvalModeApplying}
+        approvalModeError={approvalModeError}
         onClose={() => setModelSettingsOpen(false)}
         onRetry={() => void loadModelCatalog()}
         onApply={applyModelSettings}
+        onApprovalModeChange={applyApprovalMode}
       />
 
       <div className="session-actions">
@@ -4672,41 +4670,6 @@ export function ModelSettingsButton({
     >
       {content}
     </button>
-  );
-}
-
-export function ApprovalModeSelector({
-  mode,
-  disabled = false,
-  error = "",
-  onChange
-}: {
-  mode: ApprovalMode;
-  disabled?: boolean;
-  error?: string;
-  onChange: (mode: ApprovalMode) => void;
-}) {
-  const labels: Record<ApprovalMode, string> = {
-    ask: "Ask for approval",
-    auto: "Auto approval",
-    full: "Full approval"
-  };
-  return (
-    <label className="approval-mode-selector" title={error || labels[mode]}>
-      <ShieldCheck size={15} aria-hidden="true" />
-      <span className="sr-only">Session permissions</span>
-      <select
-        value={mode}
-        disabled={disabled}
-        aria-invalid={Boolean(error) || undefined}
-        aria-label="Session permissions"
-        onChange={(event) => onChange(event.currentTarget.value as ApprovalMode)}
-      >
-        <option value="ask">Ask for approval</option>
-        <option value="auto">Auto approval</option>
-        <option value="full">Full approval</option>
-      </select>
-    </label>
   );
 }
 

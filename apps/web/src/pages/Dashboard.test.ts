@@ -60,14 +60,13 @@ describe("DashboardPrimaryActions", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: true,
       onOpenModelDefaults: () => undefined,
-      onOpenReviewerSettings: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
 
     expect(html).toContain('aria-label="Import or export sessions"');
     expect(html).toContain('aria-label="Default model settings"');
-    expect(html).toContain('aria-label="Auto approval reviewer settings"');
+    expect(html).not.toContain('aria-label="Auto approval reviewer settings"');
     expect(html).toContain("Transfer");
     expect(html).toContain('aria-label="New session"');
   });
@@ -76,7 +75,6 @@ describe("DashboardPrimaryActions", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: false,
       onOpenModelDefaults: () => undefined,
-      onOpenReviewerSettings: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
