@@ -5832,13 +5832,55 @@ select:focus-visible {
 .composer-inline-image-pending { opacity: 0.55; }
 .user-mixed-content { white-space: normal; }
 .user-mixed-content > * { margin: 0; }
-.user-mixed-content img {
+.user-message-image {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+.user-message-image:hover,
+.user-message-image:focus-visible {
+  border-color: transparent;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-secondary) 62%, transparent);
+}
+.user-message-image img {
   display: block;
   max-width: min(100%, 680px);
   max-height: 70vh;
-  margin: 8px 0;
-  border-radius: 8px;
   object-fit: contain;
+}
+
+.image-preview-modal {
+  --modal-max-width: calc(100vw - 36px);
+  width: fit-content;
+  max-width: calc(100vw - 36px);
+  max-height: calc(100dvh - 36px);
+}
+.image-preview-modal > img {
+  display: block;
+  max-width: calc(100vw - 70px);
+  max-height: calc(100dvh - 110px);
+  object-fit: contain;
+}
+.message-action-error {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 70;
+  max-width: min(420px, calc(100vw - 36px));
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--color-error);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-error);
+  border-radius: 8px;
+  box-shadow: var(--shadow-elevated);
 }
 
 .vim-editor,

@@ -554,6 +554,84 @@ describe("AppDatabase session prompts", () => {
     await db.close();
   });
 
+  it("reconciles image markup by client identity while preserving structured content", async () => {
+    const db = await tempDb();
+    const session = testSession("session-image-client-echo");
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Describe this", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        content: [
+          { type: "text", text: "Describe this" },
+          { type: "image", id: "image.png", mimeType: "image/png" }
+        ],
+        muxpilotSubmission: { state: "pending", lastAttemptAt: "2026-07-07T00:00:01.000Z" }
+      }
+    };
+    const identity = {
+      threadId: "thread-image",
+      turnId: "turn-image",
+      itemId: "item-image",
+      clientMessageId: submitted.id
+    };
+    const echoed = {
+      ...testMessage(session.id, 2, "user", "Describe this\n<image path=\"/data/image.png\"></image>", "2026-07-07T00:00:02.000Z"),
+      payload: { source: "codex_app_server", codexItemIdentity: identity, appServerIdentity: identity }
+    };
+
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.appendMessage(echoed)).toBe(false);
+    expect(await db.listMessages(session.id, 0)).toEqual([
+      expect.objectContaining({
+        id: submitted.id,
+        text: submitted.text,
+        payload: expect.objectContaining({ content: submitted.payload.content, codexItemIdentity: identity })
+      })
+    ]);
+    await db.close();
+  });
+
+  it("removes a previously persisted image-markup duplicate when the database reopens", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-image-echo-"));
+    const path = join(dir, "test.db");
+    const db = new AppDatabase(path);
+    const session = {
+      ...testSession("session-image-replayed-echo"),
+      codexSessionId: "thread-image",
+      provider: { kind: "codex" as const, threadId: "thread-image", rolloutPath: "/tmp/codex.jsonl" }
+    };
+    await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    const rolloutIdentity = { turnId: "turn-image", itemId: "item-rollout", clientMessageId: null };
+    const echoed = {
+      ...testMessage(session.id, 1, "user", "Describe this\n<image path=\"/data/image.png\"></image>", "2026-07-07T00:00:02.000Z"),
+      payload: { source: "rollout", codexItemIdentity: rolloutIdentity }
+    };
+    const submitted = {
+      ...testMessage(session.id, 2, "user", "Describe this", "2026-07-07T00:00:01.000Z"),
+      payload: {
+        content: [{ type: "image", id: "image.png", mimeType: "image/png" }],
+        muxpilotSubmission: {
+          state: "acknowledged",
+          threadId: "thread-image",
+          turnId: "turn-image",
+          lastAttemptAt: "2026-07-07T00:00:01.000Z"
+        }
+      }
+    };
+
+    expect(await db.appendMessage(echoed)).toBe(true);
+    expect(await db.appendMessage(submitted)).toBe(true);
+    expect(await db.listMessages(session.id, 0)).toHaveLength(2);
+    await db.close();
+
+    const reopened = new AppDatabase(path);
+    expect(await reopened.listMessages(session.id, 0)).toEqual([
+      expect.objectContaining({ id: submitted.id, text: submitted.text, payload: expect.objectContaining({ content: submitted.payload.content }) })
+    ]);
+    expect((await reopened.getSession(session.id))?.unreadCount).toBe(1);
+    await reopened.close();
+  });
+
   it("keeps delayed same-turn text ambiguous when multiple submissions match", async () => {
     const db = await tempDb();
     const session = { ...testSession("session-ambiguous-rollout-echo"), codexSessionId: "thread-app" };

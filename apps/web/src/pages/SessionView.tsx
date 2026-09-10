@@ -131,7 +131,7 @@ import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableCont
 import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
-import { copyText } from "../utils/clipboard.js";
+import { copyImage, copyText } from "../utils/clipboard.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
@@ -176,6 +176,16 @@ interface ReferencedDocumentSource {
   sessionId: string;
   sessionName: string;
   documents: SessionDocumentSummary[];
+}
+
+type ImageContentPart = Extract<MessageContentPart, { type: "image" }>;
+interface SessionImageTarget extends ImageContentPart { sessionId: string }
+interface MessageCopyTarget { label: string; text: string }
+interface MessageActionMenuState {
+  x: number;
+  y: number;
+  copyTarget?: MessageCopyTarget;
+  image?: SessionImageTarget;
 }
 export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
 export type PendingActionRefresh = "approval" | "question" | null;
@@ -742,6 +752,7 @@ export function sentQueuedInputToPendingUserMessage(input: QueuedInput): Pending
     id: `pending-queued-user-${input.id}`,
     sessionId: input.sessionId,
     text: input.text,
+    ...(input.content?.length ? { content: input.content } : {}),
     mode: input.mode,
     timestamp: input.sentAt,
     matchAfter: input.createdAt
@@ -771,11 +782,16 @@ export function retainLatestSentQueuedUserMessage(
 export function transcriptItemsContainPendingUserMessage(items: CoreTranscriptItem[], pending: PendingUserMessage): boolean {
   return transcriptMessages(items).some((message) => {
     if (message.sessionId !== pending.sessionId || message.role !== "user") return false;
+    if (pending.content?.length && messageContentMatches(message, pending.content)) return true;
     const visibleText = displayText(message);
     if (visibleText === pending.text) return true;
     if (visibleText && userTextDisplayParts(visibleText).body === pending.text) return true;
     return isCodexPastedContentPlaceholder(visibleText) && messageCreatedAtOrAfterPending(message, pending);
   });
+}
+
+function messageContentMatches(message: ChatMessage, content: MessageContentPart[]): boolean {
+  return Array.isArray(message.payload.content) && JSON.stringify(message.payload.content) === JSON.stringify(content);
 }
 
 const CODEX_PASTED_CONTENT_PLACEHOLDERS_PATTERN = /^(?:\[Pasted Content \d+ chars\])+$/;
@@ -1342,7 +1358,9 @@ export function SessionView() {
   const [approvalModeApplying, setApprovalModeApplying] = useState(false);
   const [approvalModeError, setApprovalModeError] = useState("");
   const [copiedAttachCommand, setCopiedAttachCommand] = useState(false);
-  const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
+  const [messageMenu, setMessageMenu] = useState<MessageActionMenuState | null>(null);
+  const [imagePreview, setImagePreview] = useState<SessionImageTarget | null>(null);
+  const [messageActionError, setMessageActionError] = useState("");
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
@@ -1651,8 +1669,15 @@ export function SessionView() {
   useDismissableContextMenu(Boolean(messageMenu), messageMenuRef, () => setMessageMenu(null));
 
   function openMessageMenu(message: ChatMessage, x: number, y: number) {
-    if (!copyableMessageText(message).trim()) return;
-    setMessageMenu({ message, x, y });
+    const text = copyableMessageText(message);
+    if (!text.trim()) return;
+    setMessageActionError("");
+    setMessageMenu({ copyTarget: { label: copyMessageActionLabel(message), text }, x, y });
+  }
+
+  function openImageMenu(image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) {
+    setMessageActionError("");
+    setMessageMenu({ image, copyTarget, x, y });
   }
 
   async function toggleExpandedItem(item: CoreTranscriptItem) {
@@ -1739,6 +1764,8 @@ export function SessionView() {
           message={item.message}
           onOpenDocument={openDocumentReference}
           onOpenMenu={openMessageMenu}
+          onOpenImage={setImagePreview}
+          onOpenImageMenu={openImageMenu}
           planAction={
             pendingPlan?.id === item.message.id ? (
               <PlanActionBanner
@@ -1825,6 +1852,9 @@ export function SessionView() {
       setModelSettingsApplying(null);
       modelCatalogRequestSessionRef.current = null;
       setCopiedAttachCommand(false);
+      setMessageMenu(null);
+      setImagePreview(null);
+      setMessageActionError("");
       setGitPanelOpen(false);
       setDocumentsOpen(false);
       setRequestedDocument(null);
@@ -2624,6 +2654,14 @@ export function SessionView() {
         } else {
           setSession(response.session);
           syncSessionStoplight(response.session);
+          setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
+          setTranscriptItems((current) => appendUniqueTranscriptItems(current, [{
+            type: "message",
+            id: response.message.id,
+            message: response.message,
+            firstSequence: response.message.sequence,
+            lastSequence: response.message.sequence
+          }]));
         }
       }
     } catch (error) {
@@ -2800,13 +2838,25 @@ export function SessionView() {
   }
 
   async function copyMessageFromMenu() {
-    if (!messageMenu) return;
-    const text = copyableMessageText(messageMenu.message);
+    if (!messageMenu?.copyTarget) return;
+    const text = messageMenu.copyTarget.text;
     setMessageMenu(null);
     try {
       await copyText(text);
     } catch (error) {
       console.error(error);
+    }
+  }
+
+  async function copyImageFromMenu() {
+    if (!messageMenu?.image) return;
+    const url = api.imageUrl(messageMenu.image.sessionId, messageMenu.image.id);
+    setMessageMenu(null);
+    setMessageActionError("");
+    try {
+      await copyImage(url);
+    } catch (error) {
+      setMessageActionError(error instanceof Error ? error.message : "Could not copy the image");
     }
   }
 
@@ -3137,13 +3187,23 @@ export function SessionView() {
           className="message-action-menu"
           ref={messageMenuRef}
           position={messageMenu}
-          label={`Actions for ${label(messageMenu.message)} message`}
+          label={messageMenu.image ? "Image actions" : "Message actions"}
         >
-          <ContextMenuItem icon={<Copy size={16} />} onClick={() => void copyMessageFromMenu()}>
-            Copy
-          </ContextMenuItem>
+          {messageMenu.image ? (
+            <ContextMenuItem icon={<Copy size={16} />} onClick={() => void copyImageFromMenu()}>
+              Copy image
+            </ContextMenuItem>
+          ) : null}
+          {messageMenu.copyTarget ? (
+            <ContextMenuItem icon={<Copy size={16} />} onClick={() => void copyMessageFromMenu()}>
+              {messageMenu.copyTarget.label}
+            </ContextMenuItem>
+          ) : null}
         </ContextMenu>
       ) : null}
+
+      <ImagePreviewModal image={imagePreview} onClose={() => setImagePreview(null)} />
+      {messageActionError ? <p className="message-action-error" role="alert">{messageActionError}</p> : null}
 
       <div className="transcript-pane">
         {transcriptFindOpen ? (
@@ -3213,7 +3273,15 @@ export function SessionView() {
             </button>
           ) : null}
           {transcriptItems.map((item) => renderTranscriptItem(item))}
-          {pendingUserChatMessage ? <MessageBubble message={pendingUserChatMessage} pending onOpenMenu={openMessageMenu} /> : null}
+          {pendingUserChatMessage ? (
+            <MessageBubble
+              message={pendingUserChatMessage}
+              pending
+              onOpenMenu={openMessageMenu}
+              onOpenImage={setImagePreview}
+              onOpenImageMenu={openImageMenu}
+            />
+          ) : null}
           {showTranscriptSyncIndicator ? <TranscriptSyncIndicator /> : null}
           {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
           {showQueuedIndicator ? <QueuedIndicator /> : null}
@@ -3303,6 +3371,8 @@ export function SessionView() {
               onSkillSearch={() => void refreshCodexSkills()}
               onUpdate={updateQueuedInput}
               onDelete={deleteQueuedInput}
+              onOpenImage={setImagePreview}
+              onOpenImageMenu={openImageMenu}
             />
           ) : null}
           {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
@@ -4836,7 +4906,9 @@ function QueuedInputList({
   vimEnabled,
   onSkillSearch,
   onUpdate,
-  onDelete
+  onDelete,
+  onOpenImage,
+  onOpenImageMenu
 }: {
   sessionId: string;
   inputs: QueuedInput[];
@@ -4845,6 +4917,8 @@ function QueuedInputList({
   onSkillSearch: () => void;
   onUpdate: (inputId: string, text: string, mode: CollaborationMode) => Promise<void>;
   onDelete: (inputId: string) => Promise<void>;
+  onOpenImage: (image: SessionImageTarget) => void;
+  onOpenImageMenu: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -4931,7 +5005,14 @@ function QueuedInputList({
               ) : (
                 <>
                   <div className={`queued-input-read${multiline ? " queued-input-read-multiline" : ""}`}>
-                    <MixedUserContent sessionId={sessionId} text={input.text} content={input.content} />
+                    <MixedUserContent
+                      sessionId={sessionId}
+                      text={input.text}
+                      content={input.content}
+                      copyTarget={input.text.trim() ? { label: "Copy user message", text: input.text } : undefined}
+                      onOpenImage={onOpenImage}
+                      onOpenImageMenu={onOpenImageMenu}
+                    />
                     <div className="queued-input-actions">
                       <button type="button" disabled={!editable || busy} onClick={() => startEdit(input)}>
                         <Pencil size={16} /> Edit
@@ -5373,7 +5454,9 @@ export function MessageBubble({
   approvalAction = null,
   questionAction = null,
   onOpenDocument,
-  onOpenMenu
+  onOpenMenu,
+  onOpenImage,
+  onOpenImageMenu
 }: {
   message: ChatMessage;
   itemId?: string;
@@ -5384,6 +5467,8 @@ export function MessageBubble({
   questionAction?: ReactNode;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
+  onOpenImage?: (image: SessionImageTarget) => void;
+  onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
   const delegated = delegatedSessionId(message);
@@ -5401,13 +5486,34 @@ export function MessageBubble({
         </span>
         <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
       </div>
-      <MessageContent message={message} planAction={planAction} planOutcome={planOutcome} onOpenDocument={onOpenDocument} />
+      <MessageContent
+        message={message}
+        planAction={planAction}
+        planOutcome={planOutcome}
+        onOpenDocument={onOpenDocument}
+        onOpenImage={onOpenImage}
+        onOpenImageMenu={onOpenImageMenu}
+      />
       {approvalAction}
       {questionAction}
       {!approvalAction && !questionAction && message.type !== "assistant" ? (
         <ResolvedInteractionCard message={message} outcome={interactionOutcome(message)} />
       ) : null}
     </article>
+  );
+}
+
+export function ImagePreviewModal({ image, onClose }: { image: SessionImageTarget | null; onClose: () => void }) {
+  return (
+    <Modal
+      open={Boolean(image)}
+      title="Image preview"
+      onClose={onClose}
+      panelClassName="image-preview-modal"
+      backdropClassName="image-preview-backdrop"
+    >
+      {image ? <img src={api.imageUrl(image.sessionId, image.id)} alt="User-provided image preview" /> : null}
+    </Modal>
   );
 }
 
@@ -5597,12 +5703,16 @@ function MessageContent({
   message,
   planAction = null,
   planOutcome = null,
-  onOpenDocument
+  onOpenDocument,
+  onOpenImage,
+  onOpenImageMenu
 }: {
   message: ChatMessage;
   planAction?: ReactNode;
   planOutcome?: TranscriptInteractionOutcome | null;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
+  onOpenImage?: (image: SessionImageTarget) => void;
+  onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
 }) {
   const components = fileAwareMarkdownComponentsValue;
 
@@ -5641,7 +5751,9 @@ function MessageContent({
     );
   }
 
-  if (message.role === "user") return <UserMessageContent message={message} />;
+  if (message.role === "user") {
+    return <UserMessageContent message={message} onOpenImage={onOpenImage} onOpenImageMenu={onOpenImageMenu} />;
+  }
 
   return <PlainText text={message.text} />;
 }
@@ -5674,6 +5786,13 @@ export function copyableMessageText(message: ChatMessage): string {
     return text ? userTextDisplayParts(text).body : "";
   }
   return displayText(message) ?? "";
+}
+
+export function copyMessageActionLabel(message: Pick<ChatMessage, "role">): string {
+  if (message.role === "user") return "Copy user message";
+  if (message.role === "assistant") return "Copy assistant message";
+  if (message.role === "tool") return "Copy tool output";
+  return "Copy system message";
 }
 
 const SESSION_DOCUMENT_SCOPE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -6028,18 +6147,63 @@ export function UserText({ text }: { text: string }) {
   return <MarkdownBlock text={body} components={userMarkdownComponents(skills)} />;
 }
 
-function UserMessageContent({ message }: { message: ChatMessage }) {
+function UserMessageContent({
+  message,
+  onOpenImage,
+  onOpenImageMenu
+}: {
+  message: ChatMessage;
+  onOpenImage?: (image: SessionImageTarget) => void;
+  onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
+}) {
   const content = Array.isArray(message.payload.content) ? message.payload.content as MessageContentPart[] : null;
-  return <MixedUserContent sessionId={message.sessionId} text={message.text} content={content ?? undefined} />;
+  const copyTextValue = copyableMessageText(message);
+  return <MixedUserContent
+    sessionId={message.sessionId}
+    text={message.text}
+    content={content ?? undefined}
+    copyTarget={copyTextValue.trim() ? { label: copyMessageActionLabel(message), text: copyTextValue } : undefined}
+    onOpenImage={onOpenImage}
+    onOpenImageMenu={onOpenImageMenu}
+  />;
 }
 
-function MixedUserContent({ sessionId, text, content }: { sessionId: string; text: string; content?: MessageContentPart[] }) {
+export function MixedUserContent({
+  sessionId,
+  text,
+  content,
+  copyTarget,
+  onOpenImage,
+  onOpenImageMenu
+}: {
+  sessionId: string;
+  text: string;
+  content?: MessageContentPart[];
+  copyTarget?: MessageCopyTarget;
+  onOpenImage?: (image: SessionImageTarget) => void;
+  onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
+}) {
   if (!content?.some((part) => part.type === "image")) return <UserText text={text} />;
   return <div className="user-mixed-content">{content.map((part, index) => part.type === "text"
     ? <UserText key={index} text={part.text} />
-    : <a key={index} href={api.imageUrl(sessionId, part.id)} target="_blank" rel="noreferrer">
+    : <button
+        key={index}
+        type="button"
+        className="user-message-image"
+        aria-label="Preview user-provided image"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onOpenImage?.({ ...part, sessionId });
+        }}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onOpenImageMenu?.({ ...part, sessionId }, copyTarget, event.clientX, event.clientY);
+        }}
+      >
         <img src={api.imageUrl(sessionId, part.id)} alt="User-provided image" />
-      </a>)}</div>;
+      </button>)}</div>;
 }
 
 function userMarkdownComponents(skillNames: string[]): Components {

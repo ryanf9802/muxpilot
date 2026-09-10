@@ -270,6 +270,17 @@ interface CodexItemMessageRow {
   rollout_observed_at: string | null;
 }
 
+interface ImageSubmissionCleanupRow extends MessageRow {
+  mapped_thread_id: string | null;
+  mapped_turn_id: string | null;
+  mapped_item_id: string | null;
+  mapped_message_id: string | null;
+  app_server_message_id: string | null;
+  rollout_message_id: string | null;
+  app_server_observed_at: string | null;
+  rollout_observed_at: string | null;
+}
+
 interface CodexItemMessageIdentity {
   threadId: string;
   turnId: string;
@@ -1797,10 +1808,12 @@ export class SyncAppDatabase {
       ? []
       : (this.db.prepare(
           `SELECT * FROM messages
-           WHERE session_id = ? AND role = 'user' AND text = ?
+           WHERE session_id = ?
+             AND role = 'user'
+             AND json_type(payload_json, '$.muxpilotSubmission') = 'object'
            ORDER BY sequence DESC
            LIMIT 20`
-        ).all(message.sessionId, message.text) as unknown as MessageRow[]).map(hydrateMessage);
+        ).all(message.sessionId) as unknown as MessageRow[]).map(hydrateMessage);
     const identity = this.codexItemMessageIdentity(message);
     const turnIdentityCandidates = identity
       ? candidates.filter((candidate) => {
@@ -1812,13 +1825,14 @@ export class SyncAppDatabase {
     const submitted = exactRow
       ? hydrateMessage(exactRow)
       : turnIdentityMatch ?? candidates.find((candidate) =>
+          candidate.text === message.text &&
           isMuxpilotSubmissionMessage(candidate) &&
           timestampsAreNear(submissionAttemptTimestamp(candidate), message.timestamp)
         );
     if (
       !submitted ||
       !isMuxpilotSubmissionMessage(submitted) ||
-      submitted.text !== message.text ||
+      (!exactRow && !turnIdentityMatch && submitted.text !== message.text) ||
       (!exactRow && !turnIdentityMatch && !timestampsAreNear(submissionAttemptTimestamp(submitted), message.timestamp))
     ) return false;
 
@@ -1839,6 +1853,7 @@ export class SyncAppDatabase {
               }
         }
       : message.payload;
+    this.removeReconciledSubmissionDuplicate(message, submitted);
     const mapped = identity
       ? this.db.prepare(
           `SELECT * FROM codex_item_messages
@@ -1898,6 +1913,21 @@ export class SyncAppDatabase {
       }
     }
     return Number(result.changes) > 0;
+  }
+
+  private removeReconciledSubmissionDuplicate(incoming: ChatMessage, submitted: ChatMessage): void {
+    if (incoming.id === submitted.id) return;
+    this.deletePromptIndexMessage(incoming.id);
+    const removed = this.db.prepare("DELETE FROM messages WHERE id = ? AND session_id = ?")
+      .run(incoming.id, incoming.sessionId);
+    if (Number(removed.changes) === 0) return;
+    this.db.prepare(
+      `UPDATE managed_sessions
+       SET unread_count = MAX(0, unread_count - 1),
+           preview = CASE WHEN preview = ? THEN ? ELSE preview END
+       WHERE id = ?`
+    ).run(incoming.text.slice(0, 280), submitted.text.slice(0, 280), incoming.sessionId);
+    this.recentUserPromptsCache.delete(incoming.sessionId);
   }
 
   private isDuplicateUserEcho(message: ChatMessage): boolean {
@@ -3664,6 +3694,7 @@ export class SyncAppDatabase {
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
     this.removeDuplicateAppServerPlanMessages();
+    this.removeDuplicateImageSubmissionEchoes();
     this.backfillInteractionOutcomes();
     this.backfillPromptIndexIfNeeded();
     this.backfillSessionRepositories();
@@ -3795,6 +3826,99 @@ export class SyncAppDatabase {
       for (const [sessionId, removed] of removedBySession) {
         this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?")
           .run(removed, sessionId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private removeDuplicateImageSubmissionEchoes(): void {
+    const rows = this.db.prepare(
+      `SELECT messages.*,
+              codex_item_messages.thread_id AS mapped_thread_id,
+              codex_item_messages.turn_id AS mapped_turn_id,
+              codex_item_messages.item_id AS mapped_item_id,
+              codex_item_messages.message_id AS mapped_message_id,
+              codex_item_messages.app_server_message_id,
+              codex_item_messages.rollout_message_id,
+              codex_item_messages.app_server_observed_at,
+              codex_item_messages.rollout_observed_at
+       FROM messages
+       LEFT JOIN codex_item_messages ON codex_item_messages.message_id = messages.id
+       WHERE messages.role = 'user'
+       ORDER BY messages.session_id, messages.sequence`
+    ).all() as unknown as ImageSubmissionCleanupRow[];
+    const groups = new Map<string, ImageSubmissionCleanupRow[]>();
+    for (const row of rows) {
+      const message = hydrateMessage(row);
+      const submission = recordValue(message.payload.muxpilotSubmission);
+      const threadId = row.mapped_thread_id ?? nonemptyStringValue(submission?.threadId);
+      const turnId = row.mapped_turn_id ?? nonemptyStringValue(submission?.turnId);
+      if (!threadId || !turnId) continue;
+      const key = JSON.stringify([row.session_id, threadId, turnId]);
+      groups.set(key, [...(groups.get(key) ?? []), row]);
+    }
+    const removedBySession = new Map<string, number>();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const group of groups.values()) {
+        const submissions = group.filter((row) => isStructuredImageSubmission(hydrateMessage(row)));
+        if (submissions.length !== 1) continue;
+        const submissionRow = submissions[0]!;
+        const submission = hydrateMessage(submissionRow);
+        let retainedMapping = submissionRow.mapped_message_id ? submissionRow : null;
+        for (const duplicateRow of group) {
+          if (duplicateRow.id === submissionRow.id) continue;
+          if (!isMatchingRuntimeImageEcho(submission, hydrateMessage(duplicateRow))) continue;
+          if (!duplicateRow.mapped_message_id) continue;
+          if (retainedMapping) {
+            this.db.prepare(
+              `UPDATE codex_item_messages SET
+                 app_server_message_id = COALESCE(app_server_message_id, ?),
+                 rollout_message_id = COALESCE(rollout_message_id, ?),
+                 app_server_observed_at = COALESCE(app_server_observed_at, ?),
+                 rollout_observed_at = COALESCE(rollout_observed_at, ?)
+               WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+            ).run(
+              duplicateRow.app_server_message_id,
+              duplicateRow.rollout_message_id,
+              duplicateRow.app_server_observed_at,
+              duplicateRow.rollout_observed_at,
+              retainedMapping.session_id,
+              retainedMapping.mapped_thread_id,
+              retainedMapping.mapped_turn_id,
+              retainedMapping.mapped_item_id
+            );
+            this.db.prepare(
+              "DELETE FROM codex_item_messages WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?"
+            ).run(duplicateRow.session_id, duplicateRow.mapped_thread_id, duplicateRow.mapped_turn_id, duplicateRow.mapped_item_id);
+          } else {
+            this.db.prepare(
+              `UPDATE codex_item_messages SET message_id = ?
+               WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND item_id = ?`
+            ).run(submissionRow.id, duplicateRow.session_id, duplicateRow.mapped_thread_id, duplicateRow.mapped_turn_id, duplicateRow.mapped_item_id);
+            retainedMapping = { ...duplicateRow, id: submissionRow.id, mapped_message_id: submissionRow.id };
+          }
+          this.deletePromptIndexMessage(duplicateRow.id);
+          const removed = this.db.prepare("DELETE FROM messages WHERE id = ? AND session_id = ?")
+            .run(duplicateRow.id, duplicateRow.session_id);
+          if (Number(removed.changes) > 0) {
+            removedBySession.set(duplicateRow.session_id, (removedBySession.get(duplicateRow.session_id) ?? 0) + 1);
+            this.db.prepare(
+              `UPDATE managed_sessions
+               SET preview = CASE WHEN preview = ? THEN ? ELSE preview END
+               WHERE id = ?`
+            ).run(duplicateRow.text.slice(0, 280), submission.text.slice(0, 280), duplicateRow.session_id);
+          }
+        }
+      }
+      for (const [sessionId, removed] of removedBySession) {
+        this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?")
+          .run(removed, sessionId);
+        this.recentUserPromptsCache.delete(sessionId);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -4592,6 +4716,32 @@ function toolCallId(message: ChatMessage): string | null {
 
 function isMuxpilotSubmissionMessage(message: ChatMessage): boolean {
   return recordValue(message.payload.muxpilotSubmission) !== null;
+}
+
+function structuredImageIds(message: ChatMessage): string[] {
+  if (!Array.isArray(message.payload.content)) return [];
+  return message.payload.content.flatMap((part) => {
+    const value = recordValue(part);
+    return value?.type === "image" && typeof value.id === "string" && value.id.length > 0 ? [value.id] : [];
+  });
+}
+
+function isStructuredImageSubmission(message: ChatMessage): boolean {
+  return isMuxpilotSubmissionMessage(message) && structuredImageIds(message).length > 0;
+}
+
+function isMatchingRuntimeImageEcho(submission: ChatMessage, candidate: ChatMessage): boolean {
+  if (candidate.role !== "user" || isMuxpilotSubmissionMessage(candidate)) return false;
+  if (candidate.payload.source !== "rollout" && candidate.payload.source !== "codex_app_server") return false;
+  const imageIds = structuredImageIds(submission);
+  const markup = [...candidate.text.matchAll(/<image\b[^>]*\bpath=(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>\s*<\/image>/gi)];
+  const imagePaths = markup.map((match) => match[1] ?? match[2] ?? match[3] ?? "");
+  if (imageIds.length === 0 || imagePaths.length !== imageIds.length) return false;
+  if (imageIds.some((id, index) => !imagePaths[index]?.endsWith(`/${id}`) && imagePaths[index] !== id)) return false;
+  const textWithoutImages = candidate.text
+    .replace(/\s*<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>\s*<\/image>/gi, "")
+    .trim();
+  return textWithoutImages === submission.text.trim();
 }
 
 function submissionAttemptTimestamp(message: ChatMessage): string {

@@ -2639,6 +2639,14 @@ describe("pending user messages", () => {
     expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(message("session-a", 3, "Different text"))], pending)).toBe(false);
   });
 
+  it("reconciles image-only optimistic messages by ordered content", () => {
+    const content = [{ type: "image" as const, id: "image.png", mimeType: "image/png" as const }];
+    const pending = createPendingUserMessage("session-a", "", "default", "2026-07-07T00:00:00.000Z", content);
+    const persisted = message("session-a", 3, "", "user", "user", { content });
+
+    expect(transcriptItemsContainPendingUserMessage([transcriptMessageItem(persisted)], pending)).toBe(true);
+  });
+
   it("turns only dispatched queued inputs into optimistic user messages", () => {
     const queued = queuedInput({ status: "queued", sentAt: null });
     const sent = queuedInput({ status: "sent", sentAt: "2026-07-07T00:01:00.000Z" });
