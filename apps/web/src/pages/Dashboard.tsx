@@ -65,7 +65,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { sessions: shellSessions, sessionsLoaded, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode } =
+  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
@@ -460,7 +460,13 @@ export function Dashboard() {
       ) : null}
 
       <div className="repo-session-groups">
-        {!sessionsLoaded ? <DashboardSessionsSkeleton /> : sessionGroups.map((group) => {
+        {sessionsLoadError ? (
+          <div className="dashboard-session-load-error" role="alert">
+            <span>{sessionsLoadError}</span>
+            <Button size="small" onClick={() => void retrySessions()}>Retry</Button>
+          </div>
+        ) : null}
+        {!sessionsLoaded && !sessionsLoadError ? <DashboardSessionsSkeleton /> : sessionGroups.map((group) => {
           const isCollapsed = collapsedRepoKeys.has(group.key);
           const sessionGridId = repoSessionGridId(group.key);
 

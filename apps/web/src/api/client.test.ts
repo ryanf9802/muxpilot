@@ -140,12 +140,13 @@ describe("api client request headers", () => {
 
   it("loads lightweight session summaries with encoded server-side filters", async () => {
     const fetchMock = mockJsonResponse({ sessions: [] });
+    const controller = new AbortController();
 
-    await api.sessionSummaries("api refactor", "working");
+    await api.sessionSummaries("api refactor", "working", controller.signal);
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/session-summaries?q=api%20refactor&status=working",
-      expect.objectContaining({ credentials: "include" })
+      expect.objectContaining({ credentials: "include", signal: controller.signal })
     );
   });
 

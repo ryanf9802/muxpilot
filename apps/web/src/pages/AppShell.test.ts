@@ -27,7 +27,7 @@ import {
   isPromptHistoryShortcut,
   isSessionTransferFileName,
   importTargetBranchValue,
-  isLatestSessionListRequest,
+  replaySessionListMutations,
   isSessionHistoryResultActive,
   mergeSessionDirectorySuggestions,
   nextSessionDirectorySuggestionIndex,
@@ -847,9 +847,28 @@ describe("live session reconciliation", () => {
     expect(sessionStreamMessageRequiresReconcile({ type: "status.changed" })).toBe(false);
   });
 
-  it("rejects a session list response superseded by a live event", () => {
-    expect(isLatestSessionListRequest(4, 5)).toBe(false);
-    expect(isLatestSessionListRequest(5, 5)).toBe(true);
+  it("replays live events that arrive while a session list is loading", () => {
+    const stale = testSession({ id: "a", status: "working" });
+    const added = testSession({ id: "b", status: "waiting" });
+    const mutations = [
+      { sequence: 4, event: { id: "old", type: "status.changed" as const, sessionId: "a", payload: { status: "waiting" }, timestamp: "2026-08-11T00:00:00.000Z" } },
+      { sequence: 6, event: { id: "current", type: "status.changed" as const, sessionId: "a", payload: { status: "waiting" }, timestamp: "2026-08-11T00:00:01.000Z" } },
+      { sequence: 7, event: { id: "added", type: "session.updated" as const, sessionId: "b", payload: added, timestamp: "2026-08-11T00:00:02.000Z" } },
+      { sequence: 8, event: { id: "later", type: "status.changed" as const, sessionId: "b", payload: { status: "working" }, timestamp: "2026-08-11T00:00:03.000Z" } }
+    ];
+
+    expect(replaySessionListMutations([stale], mutations, 5, 7)).toEqual([
+      testSession({ id: "a", status: "waiting" }),
+      added
+    ]);
+  });
+
+  it("allows an empty initial snapshot to complete while preserving a concurrent full update", () => {
+    const added = testSession({ id: "new", status: "working" });
+    expect(replaySessionListMutations([], [{
+      sequence: 1,
+      event: { id: "added", type: "session.updated", sessionId: added.id, payload: added, timestamp: "2026-08-11T00:00:00.000Z" }
+    }], 0)).toEqual([added]);
   });
 
   it("immediately reconciles a status event for a session absent from shell state", () => {

@@ -64,6 +64,8 @@ export type ShellConnectionState = "connecting" | "connected" | "reconnecting" |
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
 export const SHELL_CONNECTION_PROBE_TIMEOUT_MS = 5000;
 export const SHELL_CONNECTION_FAILURE_GRACE_MS = 5000;
+export const SESSION_LIST_REQUEST_TIMEOUT_MS = 10_000;
+export const SESSION_LIST_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 30_000] as const;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
@@ -122,6 +124,7 @@ export function AppShell() {
   const [serverDirectorySuggestions, setServerDirectorySuggestions] = useState<SessionDirectorySuggestion[]>([]);
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  const [sessionsLoadError, setSessionsLoadError] = useState<string | null>(null);
   const [sessionStoplightSeverity, setSessionStoplightSeverity] = useState<SessionStatusSeverity | null>(null);
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
@@ -132,8 +135,16 @@ export function AppShell() {
   const [promptHistoryOpen, setPromptHistoryOpen] = useState(false);
   const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
   const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
-  const sessionRequestIdRef = useRef(0);
   const sessionsRef = useRef<ManagedSession[]>([]);
+  const sessionMutationSequenceRef = useRef(0);
+  const sessionMutationsRef = useRef<SessionListMutation[]>([]);
+  const sessionListRequestRef = useRef<{
+    controller: AbortController;
+    promise: Promise<void>;
+  } | null>(null);
+  const sessionListQueuedRef = useRef(false);
+  const sessionListRetryCountRef = useRef(0);
+  const sessionListRetryTimerRef = useRef<number | null>(null);
   const sessionReconcileTimerRef = useRef<number | null>(null);
   const sessionEventListenersRef = useRef(new Set<(event: SessionEvent) => void>());
   const connectionStateRef = useRef<ShellConnectionState>("connecting");
@@ -295,15 +306,74 @@ export function AppShell() {
     return () => window.removeEventListener(AUTH_EXPIRED_EVENT, handleAuthExpired);
   }, [markUnauthorized]);
 
-  const loadSessions = useCallback(async () => {
-    const requestId = ++sessionRequestIdRef.current;
-    const sessionResponse = await api.sessionSummaries();
-    if (isLatestSessionListRequest(requestId, sessionRequestIdRef.current)) {
-      sessionsRef.current = sessionResponse.sessions;
-      setSessions(sessionResponse.sessions);
-      setSessionsLoaded(true);
-    }
+  const clearSessionListRetry = useCallback(() => {
+    if (sessionListRetryTimerRef.current !== null) window.clearTimeout(sessionListRetryTimerRef.current);
+    sessionListRetryTimerRef.current = null;
   }, []);
+
+  const cancelSessionListRequest = useCallback(() => {
+    clearSessionListRetry();
+    sessionListQueuedRef.current = false;
+    const active = sessionListRequestRef.current;
+    sessionListRequestRef.current = null;
+    active?.controller.abort();
+  }, [clearSessionListRetry]);
+
+  const loadSessions = useCallback((): Promise<void> => {
+    const active = sessionListRequestRef.current;
+    if (active) {
+      sessionListQueuedRef.current = true;
+      return active.promise;
+    }
+
+    clearSessionListRetry();
+    const controller = new AbortController();
+    const mutationSequence = sessionMutationSequenceRef.current;
+    const request: { controller: AbortController; promise: Promise<void> } = {
+      controller,
+      promise: Promise.resolve()
+    };
+    let appliedMutationSequence = mutationSequence;
+    request.promise = requestWithTimeout(
+      (signal) => api.sessionSummaries("", "", signal),
+      SESSION_LIST_REQUEST_TIMEOUT_MS,
+      controller
+    ).then((sessionResponse) => {
+      if (sessionListRequestRef.current !== request) return;
+      appliedMutationSequence = sessionMutationSequenceRef.current;
+      const nextSessions = replaySessionListMutations(
+        sessionResponse.sessions,
+        sessionMutationsRef.current,
+        mutationSequence,
+        appliedMutationSequence
+      );
+      sessionsRef.current = nextSessions;
+      setSessions(nextSessions);
+      setSessionsLoaded(true);
+      setSessionsLoadError(null);
+      sessionListRetryCountRef.current = 0;
+    }).catch((error) => {
+      if (sessionListRequestRef.current !== request) return;
+      setSessionsLoadError("Muxpilot could not load sessions. It will retry automatically.");
+      handleConnectedRequestFailure(error);
+      const retryIndex = Math.min(sessionListRetryCountRef.current, SESSION_LIST_RETRY_DELAYS_MS.length - 1);
+      sessionListRetryCountRef.current += 1;
+      sessionListRetryTimerRef.current = window.setTimeout(() => {
+        sessionListRetryTimerRef.current = null;
+        if (document.visibilityState === "visible") void loadSessions();
+      }, SESSION_LIST_RETRY_DELAYS_MS[retryIndex]);
+    }).finally(() => {
+      if (sessionListRequestRef.current !== request) return;
+      sessionListRequestRef.current = null;
+      sessionMutationsRef.current = sessionMutationsRef.current.filter((mutation) => mutation.sequence > appliedMutationSequence);
+      if (sessionListQueuedRef.current) {
+        sessionListQueuedRef.current = false;
+        void loadSessions();
+      }
+    });
+    sessionListRequestRef.current = request;
+    return request.promise;
+  }, [clearSessionListRetry, handleConnectedRequestFailure]);
 
   const scheduleSessionReconcile = useCallback(() => {
     if (sessionReconcileTimerRef.current !== null) return;
@@ -318,7 +388,10 @@ export function AppShell() {
   }, []);
 
   const syncSessionStoplight = useCallback((session: ManagedSession) => {
-    sessionRequestIdRef.current += 1;
+    sessionMutationsRef.current.push({
+      sequence: ++sessionMutationSequenceRef.current,
+      event: sessionUpdatedEvent(session)
+    });
     setSessions((currentSessions) => {
       const nextSessions = syncSessionIntoStoplightSessions(currentSessions, session);
       sessionsRef.current = nextSessions;
@@ -353,11 +426,12 @@ export function AppShell() {
     const foregroundState = foregroundConnectionDisplayState(connectionStateRef.current);
     if (foregroundState) beginConnectionGrace(foregroundState);
     if (wasConnected) {
+      cancelSessionListRequest();
       setConnectionEpoch((epoch) => epoch + 1);
       setShellSocketEpoch((epoch) => epoch + 1);
     }
     void probeShellConnection(true, FOREGROUND_CONNECTION_AUTO_RELOAD_FAILURE_THRESHOLD);
-  }), [beginConnectionGrace, probeShellConnection]);
+  }), [beginConnectionGrace, cancelSessionListRequest, probeShellConnection]);
 
   useEffect(() => {
     if (connectionState !== "connected") return undefined;
@@ -378,7 +452,10 @@ export function AppShell() {
       if ("sessionId" in event) {
         const sessionEvent = event as SessionEvent;
         if (sessionEventUpdatesShellSessions(sessionEvent)) {
-          sessionRequestIdRef.current += 1;
+          sessionMutationsRef.current.push({
+            sequence: ++sessionMutationSequenceRef.current,
+            event: sessionEvent
+          });
           const reconcile = sessionEventRequiresReconcile(sessionsRef.current, sessionEvent);
           setSessions((currentSessions) => {
             const nextSessions = applySessionEventToSessions(currentSessions, sessionEvent);
@@ -417,9 +494,10 @@ export function AppShell() {
         sessionReconcileTimerRef.current = null;
       }
       clearInterval(interval);
+      cancelSessionListRequest();
       socket.close();
     };
-  }, [connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, scheduleSessionReconcile, shellSocketEpoch]);
+  }, [cancelSessionListRequest, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, scheduleSessionReconcile, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "connected") return;
@@ -1129,6 +1207,8 @@ export function AppShell() {
               syncSessionStoplight,
               sessions,
               sessionsLoaded,
+              sessionsLoadError,
+              retrySessions: loadSessions,
               subscribeSessionEvents,
               sessionStoplightSeverity,
               openCreateSession,
@@ -1444,6 +1524,8 @@ export interface AppShellOutletContext {
   syncSessionStoplight: (session: ManagedSession) => void;
   sessions: ManagedSession[];
   sessionsLoaded: boolean;
+  sessionsLoadError: string | null;
+  retrySessions: () => Promise<void>;
   subscribeSessionEvents: (listener: (event: SessionEvent) => void) => () => void;
   sessionStoplightSeverity: SessionStatusSeverity | null;
   openCreateSession: (cwd?: string) => void;
@@ -1781,8 +1863,33 @@ export function applySessionEventToSessions(currentSessions: ManagedSession[], e
   return syncSessionIntoStoplightSessions(currentSessions, { ...current, status });
 }
 
-export function isLatestSessionListRequest(requestId: number, latestRequestId: number): boolean {
-  return requestId === latestRequestId;
+export interface SessionListMutation {
+  sequence: number;
+  event: SessionEvent;
+}
+
+export function replaySessionListMutations(
+  snapshot: ManagedSession[],
+  mutations: readonly SessionListMutation[],
+  afterSequence: number,
+  throughSequence = Number.POSITIVE_INFINITY
+): ManagedSession[] {
+  return mutations.reduce(
+    (sessions, mutation) => mutation.sequence > afterSequence && mutation.sequence <= throughSequence
+      ? applySessionEventToSessions(sessions, mutation.event)
+      : sessions,
+    snapshot
+  );
+}
+
+function sessionUpdatedEvent(session: ManagedSession): SessionEvent {
+  return {
+    id: `local-${Date.now()}-${session.id}`,
+    type: "session.updated",
+    sessionId: session.id,
+    payload: session,
+    timestamp: new Date().toISOString()
+  };
 }
 
 export function sessionEventRequiresReconcile(currentSessions: ManagedSession[], event: SessionEvent): boolean {

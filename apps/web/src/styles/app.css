@@ -1583,10 +1583,18 @@ select:focus-visible {
 }
 
 .dashboard-action-error,
+.dashboard-session-load-error,
 .dialog-error {
   margin: 0 0 12px;
   color: var(--color-error);
   font-size: 13px;
+}
+
+.dashboard-session-load-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .session-startup-error {
