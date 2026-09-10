@@ -8,11 +8,10 @@ The dashboard groups sessions by repository and makes their attention state visi
 
 - Current status and attention color
 - Repository, branch, working directory, and dirty-worktree state
-- Recent user prompts and optional activity summaries
+- Recent user prompts
 - Transcript size and runtime availability
-- OpenAI usage estimates when configured
 - Codex account and rate-limit information when available
-Search matches session names, repository names, branches, working directories, previews, summaries, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or end it.
+Search matches session names, repository names, branches, working directories, previews, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or end it.
 
 Repository groups can be collapsed and remember that choice in the browser. Pinned sessions sort ahead of other sessions in their repository. The three-color stoplight in the top bar shows the current attention totals; selecting a color filters the dashboard to that severity while preserving any parent rows needed to explain matching agent children.
 
@@ -36,6 +35,8 @@ The session view also provides:
 - Context-window use, managed Git state, documents, BTW side questions, and active heavyweight-command details
 - A copyable local runtime attachment command
 - Interrupt, fork, new-session, and kill actions
+
+The permissions selector is stored per session and always starts at **Ask for approval**. **Auto approval** uses the app-wide Codex reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure the Auto reviewer model and reasoning effort from the dashboard's approval-reviewer settings.
 
 User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.
 

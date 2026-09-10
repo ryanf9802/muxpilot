@@ -70,6 +70,7 @@ import remarkGfm from "remark-gfm";
 import type { AppShellOutletContext, PrimaryInputFocusCommand } from "./AppShell.js";
 import type {
   AccessMode,
+  ApprovalMode,
   ApprovalDecision,
   ApprovalRequest,
   BtwDeltaPayload,
@@ -159,6 +160,9 @@ interface TranscriptInteractionOutcome {
   decision?: PlanActionChoice | ApprovalDecision;
   answers?: QuestionAnswerRequest["answers"];
   error?: string;
+  resolvedBy?: "user" | "auto" | "full";
+  reviewerModel?: string;
+  reviewerExplanation?: string;
 }
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
@@ -1310,6 +1314,8 @@ export function SessionView() {
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelSettingsError, setModelSettingsError] = useState("");
   const [modelSettingsApplying, setModelSettingsApplying] = useState<CollaborationMode | null>(null);
+  const [approvalModeApplying, setApprovalModeApplying] = useState(false);
+  const [approvalModeError, setApprovalModeError] = useState("");
   const [copiedAttachCommand, setCopiedAttachCommand] = useState(false);
   const [messageMenu, setMessageMenu] = useState<{ message: ChatMessage; x: number; y: number } | null>(null);
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
@@ -1723,6 +1729,7 @@ export function SessionView() {
             approval?.messageId === item.message.id ? (
               <ApprovalBanner
                 approval={approval}
+                automationMode={session?.approvalMode ?? "ask"}
                 busy={approvalBusy}
                 disabled={session?.initializing === true}
                 error={approvalError}
@@ -2116,6 +2123,20 @@ export function SessionView() {
       setModelSettingsError(error instanceof Error ? error.message : String(error));
     } finally {
       setModelSettingsApplying(null);
+    }
+  }
+
+  async function applyApprovalMode(mode: ApprovalMode): Promise<void> {
+    setApprovalModeApplying(true);
+    setApprovalModeError("");
+    try {
+      const response = await api.action(id, { type: "setApprovalMode", mode });
+      if (!response.session) throw new Error("The session is no longer available.");
+      setSession(response.session);
+    } catch (error) {
+      setApprovalModeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setApprovalModeApplying(false);
     }
   }
 
@@ -2890,6 +2911,12 @@ export function SessionView() {
             catalog={modelCatalog}
             onOpen={() => setModelSettingsOpen(true)}
           />
+          <ApprovalModeSelector
+            mode={readySession.approvalMode}
+            disabled={approvalModeApplying}
+            error={approvalModeError}
+            onChange={(mode) => void applyApprovalMode(mode)}
+          />
           <RuntimeAttachButton
             session={readySession}
             copied={copiedAttachCommand}
@@ -3223,6 +3250,7 @@ export function SessionView() {
         {approval && !approvalRenderedInline ? (
           <ApprovalBanner
             approval={approval}
+            automationMode={readySession.approvalMode}
             busy={approvalBusy}
             disabled={readySession.initializing === true}
             error={approvalError}
@@ -4629,6 +4657,41 @@ export function ModelSettingsButton({
   );
 }
 
+export function ApprovalModeSelector({
+  mode,
+  disabled = false,
+  error = "",
+  onChange
+}: {
+  mode: ApprovalMode;
+  disabled?: boolean;
+  error?: string;
+  onChange: (mode: ApprovalMode) => void;
+}) {
+  const labels: Record<ApprovalMode, string> = {
+    ask: "Ask for approval",
+    auto: "Auto approval",
+    full: "Full approval"
+  };
+  return (
+    <label className="approval-mode-selector" title={error || labels[mode]}>
+      <ShieldCheck size={15} aria-hidden="true" />
+      <span className="sr-only">Session permissions</span>
+      <select
+        value={mode}
+        disabled={disabled}
+        aria-invalid={Boolean(error) || undefined}
+        aria-label="Session permissions"
+        onChange={(event) => onChange(event.currentTarget.value as ApprovalMode)}
+      >
+        <option value="ask">Ask for approval</option>
+        <option value="auto">Auto approval</option>
+        <option value="full">Full approval</option>
+      </select>
+    </label>
+  );
+}
+
 export function RuntimeAttachButton({
   session,
   copied,
@@ -4707,12 +4770,14 @@ export function shellQuote(value: string): string {
 
 export function ApprovalBanner({
   approval,
+  automationMode = "ask",
   busy,
   disabled = false,
   error,
   onDecision
 }: {
   approval: ApprovalRequest;
+  automationMode?: ApprovalMode;
   busy: ApprovalDecision | null;
   disabled?: boolean;
   error: string;
@@ -4748,6 +4813,15 @@ export function ApprovalBanner({
           </>
         ) : null}
       </dl>
+      {approval.reviewStatus === "escalated" ? (
+        <p className="approval-review-status">
+          Auto review escalated to you{approval.reviewerExplanation ? `: ${approval.reviewerExplanation}` : "."}
+        </p>
+      ) : automationMode !== "ask" ? (
+        <p className="approval-review-status">
+          {automationMode === "auto" ? "Reviewing this request for automatic approval…" : "Granting this request automatically…"}
+        </p>
+      ) : null}
       {error ? <p className="approval-error">{error}</p> : null}
       <div className="approval-actions">
         {approval.options.map((option) => (
@@ -5858,7 +5932,10 @@ function interactionOutcomeLabel(outcome: TranscriptInteractionOutcome): string 
       approve_for_prefix: "Approved for prefix",
       deny: "Denied"
     };
-    return labels[outcome.decision as ApprovalDecision] ?? "Answered";
+    const label = labels[outcome.decision as ApprovalDecision] ?? "Answered";
+    if (outcome.resolvedBy === "auto") return `Auto ${label.toLowerCase()}`;
+    if (outcome.resolvedBy === "full") return `Full approval · ${label.toLowerCase()}`;
+    return label;
   }
   return "Answered";
 }
@@ -5891,6 +5968,8 @@ function ResolvedInteractionCard({ message, outcome }: { message: ChatMessage; o
           {approval.reason ? <div><dt>Reason</dt><dd>{approval.reason}</dd></div> : null}
           {approval.cwd ? <div><dt>Working directory</dt><dd>{approval.cwd}</dd></div> : null}
           {approval.prefixRule?.length ? <div><dt>Approved prefix</dt><dd>{approval.prefixRule.join(" ")}</dd></div> : null}
+          {outcome.reviewerModel ? <div><dt>Reviewer</dt><dd>{outcome.reviewerModel}</dd></div> : null}
+          {outcome.reviewerExplanation ? <div><dt>Review</dt><dd>{outcome.reviewerExplanation}</dd></div> : null}
         </dl>
       ) : <p>{message.text}</p>}
     </details>

@@ -334,9 +334,7 @@ function managedSession(): ManagedSession {
     lastActivityAt: "2026-08-25T00:00:00.000Z",
     preview: "done",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: {
       default: { model: null, reasoningEffort: null },

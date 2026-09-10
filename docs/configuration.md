@@ -5,7 +5,6 @@ muxpilot is a single-operator developer console. The Web UI runs in a browser, a
 ## User Settings
 
 - `MUXPILOT_LAN_ENABLED`: set to `1`, `true`, `yes`, or `on` to expose the backend and Web UI on the local network for phone access. Defaults to loopback-only local access.
-- `OPENAI_API_KEY`: optional. Enables prompt-only activity summaries and OpenAI usage/cost tracking for dashboard cards.
 - `MUXPILOT_SESSION_FILE_KEY`: optional encryption key for exported `.mpsession` archives. It must be at least 16 characters; use the same value on the importing host. Plaintext archives remain importable when a key is configured.
 
 The app lifecycle scripts load `.env` first and `.env.local` second. Local setup helpers such as `pnpm pwa:setup` write machine-specific settings to `.env.local`, which is ignored by git.
@@ -81,10 +80,6 @@ These are available for unusual local setups but are not needed for normal deskt
 
 Per-run overrides can be placed before `--`, for example `muxpilot-git-run.mjs --heavy --runtime-timeout 20m --inactivity-timeout 5m -- make lint`. In managed sessions, a busy scheduler returns `QUEUED_NOT_RUN` without running the command; muxpilot reserves the ticket in FIFO order and sends an exact resume command when its slot is available. The runner emits queue/start/heartbeat/warning/termination lifecycle messages, records live state for the session UI, and retains the latest 20 command logs (up to 50 MiB each) in the session control directory.
 - Plan actions, questions, approvals, and connector permissions use structured app-server requests and responses.
-- `MUXPILOT_SUMMARY_MODEL`: OpenAI model for activity summaries, default `gpt-4.1-mini`.
-- `MUXPILOT_SUMMARY_INTERVAL_MS`: minimum per-session summary refresh interval, default `10000`.
-- `MUXPILOT_SUMMARY_DEBOUNCE_MS`: debounce before refreshing after new messages, default `0`.
-- `MUXPILOT_OPENAI_PRICING_JSON`: optional JSON object overriding OpenAI per-1M-token rates by model.
 
 All agent and Docker pool percentages must be greater than zero and no more than 100. A hard-memory percentage must be at least its corresponding soft percentage. The heavyweight inactivity timeout must be greater than its warning threshold.
 

@@ -27,7 +27,6 @@ import type {
   SessionAction,
   MuxpilotGitSkillStatus,
   UpdateNotificationSettingRequest,
-  UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
 import type { ManagedSession } from "@muxpilot/core";
@@ -55,7 +54,6 @@ import type { AccessControl } from "../auth/auth.js";
 import { buildConnectivity, buildRemoteAccess } from "../services/connectivity.js";
 import { discoverCodexSkills } from "../services/skillDiscovery.js";
 import type { CodexUsageService } from "../services/codexUsage.js";
-import type { ActivitySummarizer } from "../services/activitySummarizer.js";
 import type { NotificationService } from "../services/notifications.js";
 import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
@@ -67,6 +65,10 @@ import { BtwError, type BtwService } from "../services/btwService.js";
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const modelSettingsSchema = z.object({
   mode: collaborationModeSchema,
+  model: z.string().trim().min(1).max(200),
+  reasoningEffort: z.string().trim().min(1).max(100).nullable()
+});
+const approvalReviewerSettingsSchema = z.object({
   model: z.string().trim().min(1).max(200),
   reasoningEffort: z.string().trim().min(1).max(100).nullable()
 });
@@ -123,7 +125,6 @@ const questionAnswerSchema = z.object({
     })
   )
 });
-const activitySummarySettingsSchema = z.object({ enabled: z.boolean() });
 const codexResetCreditSchema = z.object({
   idempotencyKey: z.string().uuid(),
   creditId: z.string().trim().min(1).max(500).nullable().optional()
@@ -166,6 +167,7 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("archiveTranscript") }),
   z.object({ type: z.literal("setInputMode"), mode: collaborationModeSchema }),
   modelSettingsSchema.extend({ type: z.literal("setModelSettings") }),
+  z.object({ type: z.literal("setApprovalMode"), mode: z.enum(["ask", "auto", "full"]) }),
   z.object({ type: z.literal("setFastMode"), enabled: z.boolean() }),
   z.object({ type: z.literal("setAgentParent"), parentSessionId: z.string().min(1).nullable() }),
   z.object({
@@ -197,7 +199,6 @@ export function registerRoutes(
   config: AppConfig,
   access: AccessControl,
   codexUsage?: CodexUsageService,
-  activitySummarizer?: ActivitySummarizer,
   notificationService?: NotificationService,
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
@@ -226,6 +227,20 @@ export function registerRoutes(
     const body = modelSettingsSchema.parse(request.body);
     try {
       return { settings: await manager.updateGlobalModelSettings(body.mode, body.model, body.reasoningEffort) };
+    } catch (error) {
+      if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
+      throw error;
+    }
+  });
+
+  app.get("/api/approval-reviewer/settings", { preHandler: access.requireAccess }, async () => ({
+    settings: await manager.approvalReviewerSettings()
+  }));
+
+  app.patch("/api/approval-reviewer/settings", { preHandler: access.requireAccess }, async (request, reply) => {
+    const body = approvalReviewerSettingsSchema.parse(request.body);
+    try {
+      return { settings: await manager.updateApprovalReviewerSettings(body.model, body.reasoningEffort) };
     } catch (error) {
       if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
@@ -782,22 +797,6 @@ export function registerRoutes(
     }
   });
 
-  app.get("/api/openai-usage/summary", { preHandler: access.requireAccess }, async (request) => {
-    const query = request.query as { days?: string };
-    return {
-      configured: Boolean(config.openaiApiKey),
-      activitySummariesEnabled: await db.getActivitySummariesEnabled(),
-      ...(await db.summarizeOpenAIUsage(Number(query.days ?? 30)))
-    };
-  });
-
-  app.patch("/api/activity-summaries/settings", { preHandler: access.requireAccess }, async (request) => {
-    const body = activitySummarySettingsSchema.parse(request.body) as UpdateActivitySummarySettingsRequest;
-    const enabled = await db.setActivitySummariesEnabled(body.enabled);
-    activitySummarizer?.setEnabled(enabled);
-    return { enabled };
-  });
-
   app.get("/api/codex-usage/summary", { preHandler: access.requireAccess }, async (request) => {
     const { refresh } = z.object({ refresh: z.enum(["0", "1"]).optional() }).parse(request.query);
     if (!codexUsage) {
@@ -882,9 +881,7 @@ export function dashboardSessionSummary(session: ManagedSession): DashboardSessi
     lastActivityAt: session.lastActivityAt,
     preview: "",
     recentUserPrompts,
-    activitySummary: completedChild || !session.activitySummary ? null : boundedDashboardPreview(session.activitySummary),
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: session.approvalMode,
     inputMode: session.inputMode,
     models: {
       default: { model: null, reasoningEffort: null },
@@ -939,7 +936,6 @@ export function sessionMatchesQuery(session: ManagedSession, query: string): boo
     session.repo.name,
     session.repo.branch,
     session.preview,
-    session.activitySummary,
     ...session.recentUserPrompts
   ].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle));
 }

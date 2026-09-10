@@ -2,7 +2,7 @@ import type {
   ApprovalResponse,
   BtwExchangeResponse,
   BtwExchangesResponse,
-  ActivitySummarySettingsResponse,
+  ApprovalReviewerSettingsResponse,
   AppServerCompatibility,
   CodexSkillsResponse,
   CodexModelCatalogResponse,
@@ -24,7 +24,6 @@ import type {
   ManagedSession,
   MeResponse,
   NotificationSettings,
-  OpenAIUsageSummaryResponse,
   PromptHistoryResponse,
   PushKeyResponse,
   PushSubscriptionInput,
@@ -54,7 +53,6 @@ import type {
   TranscriptSearchResponse,
   UpdateNotificationSettingRequest,
   UpdateGlobalModelSettingsRequest,
-  UpdateActivitySummarySettingsRequest,
   UpdateRemoteAccessSettingsRequest
 } from "@muxpilot/core";
 
@@ -177,12 +175,6 @@ export const api = {
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   forkSession: (id: string, request: ForkSessionRequest) =>
     json<ForkSessionResponse>(`/api/sessions/${encodeURIComponent(id)}/fork`, { method: "POST", body: JSON.stringify(request) }),
-  openaiUsageSummary: (days = 30) => json<OpenAIUsageSummaryResponse>(`/api/openai-usage/summary?days=${days}`),
-  updateActivitySummarySettings: (request: UpdateActivitySummarySettingsRequest) =>
-    json<ActivitySummarySettingsResponse>("/api/activity-summaries/settings", {
-      method: "PATCH",
-      body: JSON.stringify(request)
-    }),
   codexUsageSummary: (refresh = false) => json<CodexUsageSummaryResponse>(`/api/codex-usage/summary${refresh ? "?refresh=1" : ""}`),
   codexUsageHistory: (days: 7 | 30, refresh = false) => json<CodexTokenUsageResponse>(`/api/codex-usage/history?days=${days}${refresh ? "&refresh=1" : ""}`),
   consumeCodexResetCredit: (request: ConsumeCodexResetCreditRequest) =>
@@ -191,6 +183,12 @@ export const api = {
   globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
   updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>
     json<GlobalModelSettingsResponse>("/api/model-settings/defaults", {
+      method: "PATCH",
+      body: JSON.stringify(request)
+    }),
+  approvalReviewerSettings: () => json<ApprovalReviewerSettingsResponse>("/api/approval-reviewer/settings"),
+  updateApprovalReviewerSettings: (request: ApprovalReviewerSettingsResponse["settings"]) =>
+    json<ApprovalReviewerSettingsResponse>("/api/approval-reviewer/settings", {
       method: "PATCH",
       body: JSON.stringify(request)
     }),

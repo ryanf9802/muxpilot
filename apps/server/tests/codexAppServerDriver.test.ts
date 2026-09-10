@@ -1074,9 +1074,7 @@ function managedSession(): ManagedSession {
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: {
       default: { model: "gpt-5.6", reasoningEffort: "high" },

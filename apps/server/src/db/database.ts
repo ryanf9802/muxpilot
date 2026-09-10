@@ -2,6 +2,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import type {
   AgentSessionOwnership,
+  ApprovalMode,
+  ApprovalReviewerSettings,
   BtwExchange,
   ChatMessage,
   CollaborationMode,
@@ -12,8 +14,6 @@ import type {
   NotificationRuleScope,
   NotificationRuleType,
   NotificationSettings,
-  OpenAIUsageDailyPoint,
-  OpenAIUsageSummaryResponse,
   PromptHistoryResult,
   PushSubscriptionInput,
   QueuedInput,
@@ -43,14 +43,13 @@ import {
   withSessionWaitEventPayload
 } from "@muxpilot/core";
 
-type StoredOpenAIUsageSummary = Omit<OpenAIUsageSummaryResponse, "configured" | "activitySummariesEnabled">;
-const ACTIVITY_SUMMARIES_ENABLED_SETTING = "activity_summaries_enabled";
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
+const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 
 export interface SessionRecoveryRuntimeState {
@@ -135,13 +134,6 @@ export interface MessagePage {
   messages: ChatMessage[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
-}
-
-interface SessionSummaryRow {
-  summary: string;
-  generated_at: string;
-  source_sequence: number;
-  prompt_version: string;
 }
 
 interface QueuedInputRow {
@@ -373,32 +365,6 @@ export interface StoredPushSubscription extends PushSubscriptionInput {
   deviceId: string;
 }
 
-export interface OpenAIUsageEventInput {
-  id: string;
-  source: "activity_summary";
-  sourceId: string;
-  model: string;
-  responseId: string | null;
-  createdAt: string;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number | null;
-  pricingStatus: "priced" | "unpriced";
-}
-
-interface OpenAIUsageEventRow {
-  created_at: string;
-  model: string;
-  input_tokens: number;
-  cached_input_tokens: number;
-  output_tokens: number;
-  total_tokens: number;
-  estimated_cost_usd: number | null;
-  pricing_status: "priced" | "unpriced";
-}
-
 type DbMethod = keyof SyncAppDatabase;
 
 interface DbWorkerResponse {
@@ -490,6 +456,10 @@ export class AppDatabase {
 
   setSessionFastMode(sessionId: string, fastMode: boolean, updatedAt: string): Promise<ManagedSession | null> {
     return this.call("setSessionFastMode", sessionId, fastMode, updatedAt) as Promise<ManagedSession | null>;
+  }
+
+  setSessionApprovalMode(sessionId: string, mode: ApprovalMode, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("setSessionApprovalMode", sessionId, mode, updatedAt) as Promise<ManagedSession | null>;
   }
 
   setSessionModelSettings(
@@ -716,46 +686,8 @@ export class AppDatabase {
     return this.call("searchMessages", sessionId, query, limit) as Promise<TranscriptSearchResponse>;
   }
 
-  listRecentUserPromptsForSummary(sessionId: string, limit = 12): Promise<ChatMessage[]> {
-    return this.call("listRecentUserPromptsForSummary", sessionId, limit) as Promise<ChatMessage[]>;
-  }
-
-  latestMessageSequence(sessionId: string): Promise<number> {
-    return this.call("latestMessageSequence", sessionId) as Promise<number>;
-  }
-
   clearSessionTranscript(sessionId: string): Promise<void> {
     return this.call("clearSessionTranscript", sessionId) as Promise<void>;
-  }
-
-  getActivitySummary(sessionId: string): Promise<SessionSummaryRow | null> {
-    return this.call("getActivitySummary", sessionId) as Promise<SessionSummaryRow | null>;
-  }
-
-  upsertActivitySummary(
-    sessionId: string,
-    summary: string,
-    generatedAt: string,
-    sourceSequence: number,
-    promptVersion = "manual"
-  ): Promise<void> {
-    return this.call("upsertActivitySummary", sessionId, summary, generatedAt, sourceSequence, promptVersion) as Promise<void>;
-  }
-
-  recordOpenAIUsage(input: OpenAIUsageEventInput): Promise<void> {
-    return this.call("recordOpenAIUsage", input) as Promise<void>;
-  }
-
-  summarizeOpenAIUsage(days = 30, now = new Date()): Promise<StoredOpenAIUsageSummary> {
-    return this.call("summarizeOpenAIUsage", days, now) as Promise<StoredOpenAIUsageSummary>;
-  }
-
-  getActivitySummariesEnabled(): Promise<boolean> {
-    return this.call("getActivitySummariesEnabled") as Promise<boolean>;
-  }
-
-  setActivitySummariesEnabled(enabled: boolean): Promise<boolean> {
-    return this.call("setActivitySummariesEnabled", enabled) as Promise<boolean>;
   }
 
   getGlobalModelSettings(): Promise<SessionModelSelections> {
@@ -769,6 +701,14 @@ export class AppDatabase {
     updatedAt: string
   ): Promise<SessionModelSelections> {
     return this.call("setGlobalModelSettings", mode, model, reasoningEffort, updatedAt) as Promise<SessionModelSelections>;
+  }
+
+  getApprovalReviewerSettings(): Promise<ApprovalReviewerSettings> {
+    return this.call("getApprovalReviewerSettings") as Promise<ApprovalReviewerSettings>;
+  }
+
+  setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): Promise<ApprovalReviewerSettings> {
+    return this.call("setApprovalReviewerSettings", settings, updatedAt) as Promise<ApprovalReviewerSettings>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -1130,7 +1070,6 @@ export class SyncAppDatabase {
     this.recentUserPromptsCache.delete(newSessionId);
     this.db.prepare("UPDATE messages SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE session_prompt_index SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
-    this.db.prepare("UPDATE session_summaries SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE queued_inputs SET actor_session_id = ? WHERE actor_session_id = ?").run(newSessionId, oldSessionId);
     this.db.prepare("UPDATE app_server_requests SET session_id = ? WHERE session_id = ?").run(newSessionId, oldSessionId);
@@ -1246,6 +1185,10 @@ export class SyncAppDatabase {
       .prepare("UPDATE managed_sessions SET data_json = ?, updated_at = ? WHERE id = ?")
       .run(JSON.stringify(next), updatedAt, sessionId);
     return this.getSession(sessionId);
+  }
+
+  setSessionApprovalMode(sessionId: string, approvalMode: ApprovalMode, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { approvalMode }, updatedAt);
   }
 
   setSessionModelSettings(
@@ -2618,36 +2561,10 @@ export class SyncAppDatabase {
     };
   }
 
-  listRecentUserPromptsForSummary(sessionId: string, limit = 12): ChatMessage[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM messages
-         WHERE session_id = ?
-           AND text <> ''
-           AND role = 'user'
-         ORDER BY sequence DESC`
-      )
-      .all(sessionId) as unknown as MessageRow[];
-
-    return rows
-      .filter((row) => !isAgentAuthoredPayload(row.payload_json) && isDisplayableUserPromptText(row.text))
-      .slice(0, limit)
-      .reverse()
-      .map(hydrateMessage);
-  }
-
-  latestMessageSequence(sessionId: string): number {
-    const row = this.db
-      .prepare("SELECT COALESCE(MAX(sequence), 0) AS latest FROM messages WHERE session_id = ?")
-      .get(sessionId) as { latest: number };
-    return row.latest;
-  }
-
   clearSessionTranscript(sessionId: string): void {
     this.recentUserPromptsCache.delete(sessionId);
     this.db.prepare("DELETE FROM messages WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM session_prompt_index WHERE session_id = ?").run(sessionId);
-    this.db.prepare("DELETE FROM session_summaries WHERE session_id = ?").run(sessionId);
     this.db.prepare("DELETE FROM queued_inputs WHERE session_id = ?").run(sessionId);
     this.db
       .prepare(
@@ -2658,116 +2575,6 @@ export class SyncAppDatabase {
          WHERE id = ?`
       )
       .run(sessionId);
-  }
-
-  getActivitySummary(sessionId: string): SessionSummaryRow | null {
-    const row = this.db
-      .prepare("SELECT summary, generated_at, source_sequence, prompt_version FROM session_summaries WHERE session_id = ?")
-      .get(sessionId) as SessionSummaryRow | undefined;
-    return row ?? null;
-  }
-
-  upsertActivitySummary(
-    sessionId: string,
-    summary: string,
-    generatedAt: string,
-    sourceSequence: number,
-    promptVersion = "manual"
-  ): void {
-    this.db
-      .prepare(
-        `INSERT INTO session_summaries (session_id, summary, generated_at, source_sequence, prompt_version)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET
-          summary=excluded.summary,
-          generated_at=excluded.generated_at,
-          source_sequence=excluded.source_sequence,
-          prompt_version=excluded.prompt_version`
-      )
-      .run(sessionId, summary, generatedAt, sourceSequence, promptVersion);
-  }
-
-  recordOpenAIUsage(input: OpenAIUsageEventInput): void {
-    this.db
-      .prepare(
-        `INSERT INTO openai_usage_events
-          (id, source, source_id, model, response_id, created_at, input_tokens, cached_input_tokens,
-           output_tokens, total_tokens, estimated_cost_usd, pricing_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        input.id,
-        input.source,
-        input.sourceId,
-        input.model,
-        input.responseId,
-        input.createdAt,
-        input.inputTokens,
-        input.cachedInputTokens,
-        input.outputTokens,
-        input.totalTokens,
-        input.estimatedCostUsd,
-        input.pricingStatus
-      );
-  }
-
-  summarizeOpenAIUsage(days = 30, now = new Date()): StoredOpenAIUsageSummary {
-    const safeDays = Math.max(1, Math.min(365, Math.floor(days)));
-    const bucketStart = startOfLocalDay(now);
-    bucketStart.setDate(bucketStart.getDate() - (safeDays - 1));
-    const bucketEnd = startOfLocalDay(now);
-    bucketEnd.setDate(bucketEnd.getDate() + 1);
-
-    const points = createDailyBuckets(bucketStart, safeDays);
-    const pointByDate = new Map(points.map((point) => [point.date, point]));
-    const unpricedModels = new Set<string>();
-    const rows = this.db
-      .prepare(
-        `SELECT created_at, model, input_tokens, cached_input_tokens, output_tokens, total_tokens,
-                estimated_cost_usd, pricing_status
-         FROM openai_usage_events
-         WHERE source = 'activity_summary'
-           AND created_at >= ?
-           AND created_at < ?
-         ORDER BY created_at ASC`
-      )
-      .all(bucketStart.toISOString(), bucketEnd.toISOString()) as unknown as OpenAIUsageEventRow[];
-
-    for (const row of rows) {
-      const date = localDateKey(new Date(row.created_at));
-      const point = pointByDate.get(date);
-      if (!point) continue;
-      point.requestCount += 1;
-      point.inputTokens += row.input_tokens;
-      point.cachedInputTokens += row.cached_input_tokens;
-      point.outputTokens += row.output_tokens;
-      point.totalTokens += row.total_tokens;
-      if (row.pricing_status === "unpriced" || row.estimated_cost_usd === null) {
-        point.estimatedCostUsd = null;
-        unpricedModels.add(row.model);
-      } else if (point.estimatedCostUsd !== null) {
-        point.estimatedCostUsd += row.estimated_cost_usd;
-      }
-    }
-
-    return {
-      days: safeDays,
-      points,
-      totals: summarizeDailyPoints(points),
-      unpricedModels: Array.from(unpricedModels).sort()
-    };
-  }
-
-  getActivitySummariesEnabled(): boolean {
-    const row = this.db
-      .prepare("SELECT value FROM app_settings WHERE key = ?")
-      .get(ACTIVITY_SUMMARIES_ENABLED_SETTING) as { value: string } | undefined;
-    return row?.value !== "false";
-  }
-
-  setActivitySummariesEnabled(enabled: boolean): boolean {
-    this.setBooleanSetting(ACTIVITY_SUMMARIES_ENABLED_SETTING, enabled);
-    return enabled;
   }
 
   getGlobalModelSettings(): SessionModelSelections {
@@ -2782,6 +2589,25 @@ export class SyncAppDatabase {
   ): SessionModelSelections {
     const settings = withSessionModelSettings(this.getGlobalModelSettings(), mode, model, reasoningEffort);
     this.setSetting(GLOBAL_MODEL_SETTINGS, JSON.stringify(settings), updatedAt);
+    return settings;
+  }
+
+  getApprovalReviewerSettings(): ApprovalReviewerSettings {
+    const stored = parseStoredJson<unknown>(this.getSetting(APPROVAL_REVIEWER_SETTINGS));
+    if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+      const value = stored as Record<string, unknown>;
+      if (typeof value.model === "string" && value.model.trim()) {
+        return {
+          model: value.model,
+          reasoningEffort: typeof value.reasoningEffort === "string" ? value.reasoningEffort : null
+        };
+      }
+    }
+    return { model: "gpt-5.6-luna", reasoningEffort: "low" };
+  }
+
+  setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): ApprovalReviewerSettings {
+    this.setSetting(APPROVAL_REVIEWER_SETTINGS, JSON.stringify(settings), updatedAt);
     return settings;
   }
 
@@ -3512,7 +3338,6 @@ export class SyncAppDatabase {
     const session = JSON.parse(row.data_json) as ManagedSession;
     const gitWorkspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
     const recentUserPrompts = this.recentUserPrompts(row.id);
-    const activitySummary = this.getActivitySummary(row.id);
     return {
       ...session,
       repo: gitWorkspace ? { ...session.repo, branch: gitWorkspace.targetBranch } : session.repo,
@@ -3522,9 +3347,7 @@ export class SyncAppDatabase {
       lastActivityAt: row.last_activity_at ?? this.latestMessageAt(row.id),
       preview: recentUserPrompts[0] ?? "",
       recentUserPrompts,
-      activitySummary: activitySummary?.summary ?? null,
-      activitySummaryGeneratedAt: activitySummary?.generated_at ?? null,
-      activitySummarySourceSequence: activitySummary?.source_sequence ?? null,
+      approvalMode: approvalMode(session.approvalMode),
       inputMode: collaborationMode(session.inputMode) ?? "default",
       models: sessionModels(session.models),
       fastMode: typeof session.fastMode === "boolean" ? session.fastMode : null,
@@ -3649,30 +3472,6 @@ export class SyncAppDatabase {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS session_summaries (
-        session_id TEXT PRIMARY KEY,
-        summary TEXT NOT NULL,
-        generated_at TEXT NOT NULL,
-        source_sequence INTEGER NOT NULL,
-        prompt_version TEXT NOT NULL DEFAULT 'activity-summary-v1',
-        FOREIGN KEY(session_id) REFERENCES managed_sessions(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS openai_usage_events (
-        id TEXT PRIMARY KEY,
-        source TEXT NOT NULL,
-        source_id TEXT NOT NULL,
-        model TEXT NOT NULL,
-        response_id TEXT,
-        created_at TEXT NOT NULL,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
-        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-        output_tokens INTEGER NOT NULL DEFAULT 0,
-        total_tokens INTEGER NOT NULL DEFAULT 0,
-        estimated_cost_usd REAL,
-        pricing_status TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS queued_inputs (
@@ -3841,7 +3640,6 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_messages_role_timestamp ON messages(role, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_sessions_activity ON managed_sessions(last_activity_at);
       CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, timestamp);
-      CREATE INDEX IF NOT EXISTS idx_openai_usage_created_at ON openai_usage_events(created_at);
       CREATE INDEX IF NOT EXISTS idx_queued_inputs_session_status ON queued_inputs(session_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_app_server_requests_session_state ON app_server_requests(session_id, state, received_at);
       CREATE INDEX IF NOT EXISTS idx_btw_exchanges_session_created ON btw_exchanges(session_id, created_at);
@@ -3852,7 +3650,8 @@ export class SyncAppDatabase {
       CREATE INDEX IF NOT EXISTS idx_session_repositories_activity ON session_repositories(COALESCE(last_activity_at, updated_at));
       CREATE INDEX IF NOT EXISTS idx_git_workspaces_session ON git_workspaces(session_id);
     `);
-    this.addColumnIfMissing("session_summaries", "prompt_version", "TEXT NOT NULL DEFAULT 'activity-summary-v1'");
+    this.db.exec("DROP TABLE IF EXISTS session_summaries; DROP TABLE IF EXISTS openai_usage_events;");
+    this.db.prepare("DELETE FROM app_settings WHERE key = 'activity_summaries_enabled'").run();
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.removePersistedContextGuards();
@@ -4442,6 +4241,10 @@ function collaborationMode(value: unknown): CollaborationMode | null {
   return null;
 }
 
+function approvalMode(value: unknown): ApprovalMode {
+  return value === "auto" || value === "full" ? value : "ask";
+}
+
 function sessionModels(value: unknown): SessionModelSelections {
   if (!value || typeof value !== "object") return emptySessionModels();
   const record = value as Partial<Record<CollaborationMode, unknown>>;
@@ -4798,56 +4601,4 @@ function timestampsAreNear(first: string, second: string): boolean {
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function createDailyBuckets(start: Date, days: number): OpenAIUsageDailyPoint[] {
-  return Array.from({ length: days }, (_, index) => {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    return {
-      date: localDateKey(date),
-      requestCount: 0,
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      estimatedCostUsd: 0
-    };
-  });
-}
-
-function summarizeDailyPoints(points: OpenAIUsageDailyPoint[]): Omit<OpenAIUsageDailyPoint, "date"> {
-  const totals: Omit<OpenAIUsageDailyPoint, "date"> = {
-    requestCount: 0,
-    inputTokens: 0,
-    cachedInputTokens: 0,
-    outputTokens: 0,
-    totalTokens: 0,
-    estimatedCostUsd: 0
-  };
-
-  for (const point of points) {
-    totals.requestCount += point.requestCount;
-    totals.inputTokens += point.inputTokens;
-    totals.cachedInputTokens += point.cachedInputTokens;
-    totals.outputTokens += point.outputTokens;
-    totals.totalTokens += point.totalTokens;
-    if (point.estimatedCostUsd === null) {
-      totals.estimatedCostUsd = null;
-    } else if (totals.estimatedCostUsd !== null) {
-      totals.estimatedCostUsd += point.estimatedCostUsd;
-    }
-  }
-
-  return totals;
-}
-
-function startOfLocalDay(date: Date): Date {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
-function localDateKey(date: Date): string {
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
 }

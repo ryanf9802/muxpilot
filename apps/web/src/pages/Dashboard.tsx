@@ -1,4 +1,4 @@
-import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Settings2, Skull, Zap } from "lucide-react";
+import { ArrowLeftRight, Bell, ChevronDown, ChevronRight, EllipsisVertical, FileText, GitBranch, GitFork, Pencil, Pin, PinOff, Plus, Search, Settings2, ShieldCheck, Skull, Zap } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -14,12 +14,11 @@ import { useLocation, useNavigate, useOutletContext, useSearchParams } from "rea
 import type {
   CodexUsageSummaryResponse,
   CodexModelCatalogResponse,
+  ApprovalReviewerSettings,
   CollaborationMode,
   ManagedSession,
   NotificationRuleType,
   NotificationTriggeredPayload,
-  OpenAIUsageDailyPoint,
-  OpenAIUsageSummaryResponse,
   SessionEvent,
   SessionDisplayStatus,
   SessionModelSelections
@@ -68,9 +67,7 @@ export function Dashboard() {
   const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
-  const [usageSummary, setUsageSummary] = useState<OpenAIUsageSummaryResponse | null>(null);
   const [codexUsageSummary, setCodexUsageSummary] = useState<CodexUsageSummaryResponse | null>(null);
-  const [usageSummaryInitialLoading, setUsageSummaryInitialLoading] = useState(true);
   const [codexUsageSummaryInitialLoading, setCodexUsageSummaryInitialLoading] = useState(true);
   const [q, setQ] = useState("");
   const [serverSearch, setServerSearch] = useState<{ query: string; sessions: ManagedSession[] } | null>(null);
@@ -84,8 +81,10 @@ export function Dashboard() {
   const [agentParentId, setAgentParentId] = useState("");
   const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" | "agentParent" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [activitySummaryToggleBusy, setActivitySummaryToggleBusy] = useState(false);
-  const [activitySummaryToggleError, setActivitySummaryToggleError] = useState<string | null>(null);
+  const [reviewerSettingsOpen, setReviewerSettingsOpen] = useState(false);
+  const [reviewerSettings, setReviewerSettings] = useState<ApprovalReviewerSettings | null>(null);
+  const [reviewerSettingsBusy, setReviewerSettingsBusy] = useState(false);
+  const [reviewerSettingsError, setReviewerSettingsError] = useState("");
   const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
   const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<CodexModelCatalogResponse | null>(null);
   const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
@@ -95,7 +94,6 @@ export function Dashboard() {
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const usageRequestIdRef = useRef(0);
   const codexUsageRequestIdRef = useRef(0);
   const [optimisticallyRemovedSessionIds, setOptimisticallyRemovedSessionIds] = useState<Set<string>>(() => new Set());
   const queryStatusFilter = useMemo(() => dashboardStatusFilterFromSearchParams(searchParams), [searchParams]);
@@ -139,16 +137,6 @@ export function Dashboard() {
       window.clearTimeout(timer);
     };
   }, [normalizedQuery]);
-
-  const loadUsageSummary = useCallback(async () => {
-    const requestId = ++usageRequestIdRef.current;
-    try {
-      const summary = await api.openaiUsageSummary(30);
-      if (requestId === usageRequestIdRef.current) setUsageSummary(summary);
-    } finally {
-      if (requestId === usageRequestIdRef.current) setUsageSummaryInitialLoading(false);
-    }
-  }, []);
 
   const loadCodexUsageSummary = useCallback(async (refresh = false) => {
     const requestId = ++codexUsageRequestIdRef.current;
@@ -194,14 +182,12 @@ export function Dashboard() {
   }, [subscribeSessionEvents]);
 
   useEffect(() => {
-    void loadUsageSummary().catch(() => undefined);
     void loadCodexUsageSummary().catch(() => undefined);
     const interval = setInterval(() => {
-      void loadUsageSummary().catch(() => undefined);
       void loadCodexUsageSummary().catch(() => undefined);
     }, DASHBOARD_USAGE_RECONCILE_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [loadCodexUsageSummary, loadUsageSummary]);
+  }, [loadCodexUsageSummary]);
 
   useDismissableContextMenu(Boolean(menu), menuRef, () => setMenu(null));
 
@@ -344,23 +330,6 @@ export function Dashboard() {
     }
   }
 
-  async function setActivitySummariesEnabled(enabled: boolean) {
-    if (activitySummaryToggleBusy) return;
-    setActivitySummaryToggleBusy(true);
-    setActivitySummaryToggleError(null);
-    const previousSummary = usageSummary;
-    setUsageSummary((summary) => (summary ? { ...summary, activitySummariesEnabled: enabled } : summary));
-    try {
-      await api.updateActivitySummarySettings({ enabled });
-      await Promise.all([loadUsageSummary(), refreshSessionStoplight()]);
-    } catch (error) {
-      setUsageSummary(previousSummary);
-      setActivitySummaryToggleError(error instanceof Error ? error.message : "Could not update activity summary setting.");
-    } finally {
-      setActivitySummaryToggleBusy(false);
-    }
-  }
-
   async function loadModelDefaults() {
     setModelDefaultsLoading(true);
     setModelDefaultsError("");
@@ -378,6 +347,37 @@ export function Dashboard() {
   function openModelDefaults() {
     setModelDefaultsOpen(true);
     void loadModelDefaults();
+  }
+
+  async function openReviewerSettings() {
+    setReviewerSettingsOpen(true);
+    setReviewerSettingsBusy(true);
+    setReviewerSettingsError("");
+    try {
+      const [catalog, response] = await Promise.all([api.codexModels(), api.approvalReviewerSettings()]);
+      setModelDefaultsCatalog(catalog);
+      setReviewerSettings(response.settings);
+    } catch (error) {
+      setReviewerSettingsError(error instanceof Error ? error.message : "Could not load approval reviewer settings.");
+    } finally {
+      setReviewerSettingsBusy(false);
+    }
+  }
+
+  async function saveReviewerSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!reviewerSettings) return;
+    setReviewerSettingsBusy(true);
+    setReviewerSettingsError("");
+    try {
+      const response = await api.updateApprovalReviewerSettings(reviewerSettings);
+      setReviewerSettings(response.settings);
+      setReviewerSettingsOpen(false);
+    } catch (error) {
+      setReviewerSettingsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
+    } finally {
+      setReviewerSettingsBusy(false);
+    }
   }
 
   async function applyModelDefault(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
@@ -433,6 +433,7 @@ export function Dashboard() {
         <DashboardPrimaryActions
           showTransfer={accessMode === "local"}
           onOpenModelDefaults={openModelDefaults}
+          onOpenReviewerSettings={() => void openReviewerSettings()}
           onOpenSessionTransfer={openSessionTransfer}
           onNewSession={() => openCreateSession()}
         />
@@ -452,6 +453,48 @@ export function Dashboard() {
         onRetry={() => void loadModelDefaults()}
         onApply={applyModelDefault}
       />
+
+      <Modal
+        open={reviewerSettingsOpen}
+        onClose={() => setReviewerSettingsOpen(false)}
+        title="Auto approval reviewer"
+        panelClassName="session-name-dialog"
+        as="form"
+        onSubmit={saveReviewerSettings}
+        dismissible={!reviewerSettingsBusy}
+      >
+        <p className="dialog-help">Choose the Codex model used to review requests from sessions in Auto approval mode.</p>
+        <label className="rename-field">
+          <span>Reviewer model</span>
+          <select
+            autoFocus
+            value={reviewerSettings?.model ?? ""}
+            disabled={reviewerSettingsBusy}
+            onChange={(event) => {
+              const model = modelDefaultsCatalog?.models.find((candidate) => candidate.model === event.currentTarget.value);
+              setReviewerSettings({ model: event.currentTarget.value, reasoningEffort: model?.defaultReasoningEffort ?? null });
+            }}
+          >
+            {(modelDefaultsCatalog?.models ?? []).map((model) => <option key={model.id} value={model.model}>{model.displayName}</option>)}
+          </select>
+        </label>
+        <label className="rename-field">
+          <span>Reasoning effort</span>
+          <select
+            value={reviewerSettings?.reasoningEffort ?? ""}
+            disabled={reviewerSettingsBusy}
+            onChange={(event) => setReviewerSettings((current) => current ? { ...current, reasoningEffort: event.currentTarget.value || null } : current)}
+          >
+            {(modelDefaultsCatalog?.models.find((model) => model.model === reviewerSettings?.model)?.supportedReasoningEfforts ?? [])
+              .map((option) => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}
+          </select>
+        </label>
+        {reviewerSettingsError ? <p className="dialog-error" role="alert">{reviewerSettingsError}</p> : null}
+        <DialogActions>
+          <Button variant="ghost" onClick={() => setReviewerSettingsOpen(false)} disabled={reviewerSettingsBusy}>Cancel</Button>
+          <Button variant="primary" type="submit" disabled={!reviewerSettings || reviewerSettingsBusy} busy={reviewerSettingsBusy}>Save</Button>
+        </DialogActions>
+      </Modal>
 
       {actionError && !renameSession && !agentParentSession ? (
         <p className="dashboard-action-error" role="alert">
@@ -482,7 +525,7 @@ export function Dashboard() {
               {isCollapsed ? null : (
                 <div className="session-grid" id={sessionGridId}>
                   {group.sessions.map((session) => {
-                    const previewLines = dashboardPreviewLines(session, usageSummary?.activitySummariesEnabled ?? true);
+                    const previewLines = dashboardPreviewLines(session);
 
                     return (
                       <SessionCard
@@ -684,18 +727,6 @@ export function Dashboard() {
       ) : (
         <UsageUnavailablePanel title="Codex usage" />
       )}
-      {usageSummaryInitialLoading && !usageSummary ? (
-        <UsagePanelSkeleton chart />
-      ) : usageSummary ? (
-        <OpenAIUsagePanel
-          summary={usageSummary}
-          toggleBusy={activitySummaryToggleBusy}
-          toggleError={activitySummaryToggleError}
-          onToggleActivitySummaries={setActivitySummariesEnabled}
-        />
-      ) : (
-        <UsageUnavailablePanel title="OpenAI cost, past 30 days" />
-      )}
     </section>
   );
 }
@@ -703,11 +734,13 @@ export function Dashboard() {
 export function DashboardPrimaryActions({
   showTransfer,
   onOpenModelDefaults,
+  onOpenReviewerSettings,
   onOpenSessionTransfer,
   onNewSession
 }: {
   showTransfer: boolean;
   onOpenModelDefaults: () => void;
+  onOpenReviewerSettings: () => void;
   onOpenSessionTransfer: () => void;
   onNewSession: () => void;
 }) {
@@ -716,6 +749,10 @@ export function DashboardPrimaryActions({
       <button className="dashboard-model-defaults-button" type="button" onClick={onOpenModelDefaults} aria-label="Default model settings" title="Default model settings">
         <Settings2 size={17} />
         <span className="dashboard-model-defaults-button-label">Model defaults</span>
+      </button>
+      <button className="dashboard-model-defaults-button" type="button" onClick={onOpenReviewerSettings} aria-label="Auto approval reviewer settings" title="Auto approval reviewer settings">
+        <ShieldCheck size={17} />
+        <span className="dashboard-model-defaults-button-label">Approval reviewer</span>
       </button>
       {showTransfer ? (
         <button className="dashboard-transfer-button" type="button" onClick={onOpenSessionTransfer} aria-label="Import or export sessions" title="Import or export sessions">
@@ -750,10 +787,9 @@ function UsageUnavailablePanel({ title }: { title: string }) {
 }
 
 export function dashboardPreviewLines(
-  session: Pick<ManagedSession, "activitySummary" | "recentUserPrompts">,
-  activitySummariesEnabled = true
+  session: Pick<ManagedSession, "recentUserPrompts">
 ): string[] {
-  return activitySummariesEnabled && session.activitySummary ? [session.activitySummary] : session.recentUserPrompts.slice(0, 2);
+  return session.recentUserPrompts.slice(0, 2);
 }
 
 export function dashboardStatusFilterFromSearchParams(params: Pick<URLSearchParams, "get">): DashboardStatusFilter {
@@ -777,7 +813,6 @@ export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query
     session.repo.name,
     session.repo.branch,
     session.preview,
-    session.activitySummary,
     ...session.recentUserPrompts
   ].filter(Boolean).some((value) => String(value).toLowerCase().includes(needle)));
 }
@@ -897,7 +932,7 @@ export function SessionCard({
             <p className="preview-line session-startup-error" role="alert">{session.startupError}</p>
           ) : previewLines.length > 0 ? (
             previewLines.map((line, index) => (
-              <p className={`preview-line${session.activitySummary ? " preview-summary" : ""}`} key={`${session.id}-preview-${index}`}>
+              <p className="preview-line" key={`${session.id}-preview-${index}`}>
                 {line}
               </p>
             ))
@@ -1258,209 +1293,4 @@ function notificationSubmenuPosition(x: number, y: number): { x: number; y: numb
 
 function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: NotificationTriggeredPayload } {
   return event.type === "notification.triggered" && Boolean((event as { payload?: unknown }).payload);
-}
-
-export function OpenAIUsagePanel({
-  summary,
-  toggleBusy = false,
-  toggleError = null,
-  onToggleActivitySummaries
-}: {
-  summary: OpenAIUsageSummaryResponse | null;
-  toggleBusy?: boolean;
-  toggleError?: string | null;
-  onToggleActivitySummaries?: (enabled: boolean) => void;
-}) {
-  if (summary && !summary.configured) return null;
-
-  const points = summary?.points ?? [];
-  const totals = summary?.totals;
-  const hasCost = totals?.estimatedCostUsd !== null;
-  const enabled = summary?.activitySummariesEnabled ?? true;
-
-  return (
-    <section className="usage-panel">
-      <div className="usage-panel-head">
-        <div>
-          <h2>OpenAI cost, past 30 days</h2>
-          <p>{enabled ? "Activity summary API calls" : "Activity summaries paused"}</p>
-        </div>
-        <div className="usage-panel-controls">
-          <label className="summary-toggle">
-            <input
-              type="checkbox"
-              checked={enabled}
-              disabled={!summary || toggleBusy}
-              onChange={(event) => onToggleActivitySummaries?.(event.currentTarget.checked)}
-            />
-            <span>Summaries</span>
-          </label>
-          <div className="usage-total">
-            <strong>{summary ? formatUsd(totals?.estimatedCostUsd ?? null) : "..."}</strong>
-            <span>{summary ? `${formatNumber(totals?.totalTokens ?? 0)} tokens` : "loading"}</span>
-          </div>
-        </div>
-      </div>
-
-      <UsageChart points={points} />
-
-      <div className="usage-stats">
-        <span>{formatNumber(totals?.requestCount ?? 0)} requests</span>
-        <span>{formatNumber(totals?.inputTokens ?? 0)} input</span>
-        <span>{formatNumber(totals?.cachedInputTokens ?? 0)} cached</span>
-        <span>{formatNumber(totals?.outputTokens ?? 0)} output</span>
-      </div>
-      {summary && !hasCost && summary.unpricedModels.length > 0 ? (
-        <p className="usage-note">Pricing missing for {summary.unpricedModels.join(", ")}.</p>
-      ) : null}
-      {toggleError ? (
-        <p className="usage-note usage-error" role="alert">
-          {toggleError}
-        </p>
-      ) : null}
-    </section>
-  );
-}
-
-function UsageChart({ points }: { points: OpenAIUsageDailyPoint[] }) {
-  const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const width = 600;
-  const height = 150;
-  const padding = { top: 14, right: 8, bottom: 24, left: 8 };
-  const chartWidth = width - padding.left - padding.right;
-  const chartHeight = height - padding.top - padding.bottom;
-  const maxCost = Math.max(0, ...points.map((point) => point.estimatedCostUsd ?? 0));
-  const barGap = 3;
-  const barWidth = points.length > 0 ? Math.max(3, chartWidth / points.length - barGap) : 0;
-  const activePoint = activeIndex === null ? null : points[activeIndex] ?? null;
-  const activePosition =
-    activeIndex === null
-      ? null
-      : usageChartBarPosition(activeIndex, points[activeIndex] ?? null, {
-          width,
-          height,
-          padding,
-          chartWidth,
-          chartHeight,
-          maxCost,
-          barGap,
-          barWidth,
-          pointCount: points.length
-        });
-
-  return (
-    <div className="usage-chart" aria-label="OpenAI cost over the past 30 days">
-      <svg viewBox={`0 0 ${width} ${height}`} role="img">
-        <line
-          x1={padding.left}
-          x2={width - padding.right}
-          y1={height - padding.bottom}
-          y2={height - padding.bottom}
-          className="usage-axis"
-        />
-        {points.map((point, index) => {
-          const position = usageChartBarPosition(index, point, {
-            width,
-            height,
-            padding,
-            chartWidth,
-            chartHeight,
-            maxCost,
-            barGap,
-            barWidth,
-            pointCount: points.length
-          });
-          return (
-            <rect
-              key={point.date}
-              className={point.estimatedCostUsd === null ? "usage-bar usage-bar-unpriced" : "usage-bar"}
-              x={position.x}
-              y={position.y}
-              width={barWidth}
-              height={position.barHeight}
-              rx={2}
-              tabIndex={0}
-              aria-label={`${formatLongDate(point.date)} cost ${formatUsd(point.estimatedCostUsd)}`}
-              onMouseEnter={() => setActiveIndex(index)}
-              onMouseLeave={() => setActiveIndex((currentIndex) => (currentIndex === index ? null : currentIndex))}
-              onFocus={() => setActiveIndex(index)}
-              onClick={() => setActiveIndex(index)}
-              onBlur={() => setActiveIndex((currentIndex) => (currentIndex === index ? null : currentIndex))}
-            />
-          );
-        })}
-        {points.length > 0 ? (
-          <>
-            <text x={padding.left} y={height - 6} className="usage-chart-label">
-              {formatShortDate(points[0]?.date)}
-            </text>
-            <text x={width - padding.right} y={height - 6} textAnchor="end" className="usage-chart-label">
-              {formatShortDate(points.at(-1)?.date)}
-            </text>
-          </>
-        ) : null}
-      </svg>
-      {activePoint && activePosition ? (
-        <div
-          className={`usage-tooltip usage-tooltip-${activePosition.tooltipAlign}`}
-          style={{
-            left: `${(activePosition.centerX / width) * 100}%`,
-            top: `${(activePosition.tooltipY / height) * 100}%`
-          }}
-          role="status"
-        >
-          <span>{formatLongDate(activePoint.date)}</span>
-          <strong>{formatUsd(activePoint.estimatedCostUsd)}</strong>
-          <span>
-            {formatNumber(activePoint.totalTokens)} tokens · {formatNumber(activePoint.requestCount)} requests
-          </span>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-type UsageChartPositionOptions = {
-  width: number;
-  height: number;
-  padding: { top: number; right: number; bottom: number; left: number };
-  chartWidth: number;
-  chartHeight: number;
-  maxCost: number;
-  barGap: number;
-  barWidth: number;
-  pointCount: number;
-};
-
-function usageChartBarPosition(index: number, point: OpenAIUsageDailyPoint | null, options: UsageChartPositionOptions) {
-  const cost = point?.estimatedCostUsd ?? 0;
-  const barHeight = options.maxCost > 0 ? Math.max(2, (cost / options.maxCost) * options.chartHeight) : 0;
-  const x = options.padding.left + index * (options.chartWidth / Math.max(1, options.pointCount)) + options.barGap / 2;
-  const y = options.height - options.padding.bottom - barHeight;
-  const centerX = x + options.barWidth / 2;
-  const tooltipY = Math.max(options.padding.top + 2, y - 8);
-  const tooltipAlign = centerX < options.width * 0.25 ? "left" : centerX > options.width * 0.75 ? "right" : "center";
-  return { x, y, barHeight, centerX, tooltipY, tooltipAlign };
-}
-
-function formatUsd(value: number | null): string {
-  if (value === null) return "unpriced";
-  if (value === 0) return "$0.00";
-  if (value < 0.01) return "<$0.01";
-  return new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(value);
-}
-
-function formatNumber(value: number): string {
-  return new Intl.NumberFormat().format(value);
-}
-
-function formatShortDate(value: string | undefined): string {
-  if (!value) return "";
-  const date = new Date(`${value}T00:00:00`);
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
-function formatLongDate(value: string): string {
-  const date = new Date(`${value}T00:00:00`);
-  return date.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }

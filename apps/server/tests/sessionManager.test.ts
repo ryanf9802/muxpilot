@@ -4,6 +4,151 @@ import type { StoredGitWorkspace } from "../src/db/database.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("fully approves a pending request once without creating persistent rules", async () => {
+    const session = { ...managedSession(), status: "approval" as const, approvalMode: "full" as const };
+    const approval = pendingApproval(session.id);
+    const resolveApproval = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { getSession: vi.fn(async () => session), addAudit: vi.fn(async () => undefined) },
+      automatedApprovalMessageIds: new Set(),
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval
+    }) as SessionManager;
+
+    await manager.handleAutomatedApproval(session.id, approval.messageId);
+
+    expect(resolveApproval).toHaveBeenCalledWith(
+      session.id,
+      { decision: "approve_once", messageId: approval.messageId },
+      { resolvedBy: "full" }
+    );
+  });
+
+  it("leaves an escalated automatic review for the operator", async () => {
+    const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
+    const approval = pendingApproval(session.id);
+    const resolveApproval = vi.fn(async () => undefined);
+    const addAudit = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => session),
+        getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
+        addAudit
+      },
+      approvalReviewer: { review: vi.fn(async () => ({ decision: "escalate", explanation: "High impact" })) },
+      automatedApprovalMessageIds: new Set(),
+      recordApprovalReview: vi.fn(async () => undefined),
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval
+    }) as SessionManager;
+
+    await manager.handleAutomatedApproval(session.id, approval.messageId);
+
+    expect(resolveApproval).not.toHaveBeenCalled();
+    expect(addAudit).toHaveBeenCalledWith("local", "approval_review_escalated", session.id, expect.stringContaining("High impact"), expect.any(String));
+  });
+
+  it("discards an automatic decision after the session returns to Ask mode", async () => {
+    const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
+    const approval = pendingApproval(session.id);
+    const resolveApproval = vi.fn(async () => undefined);
+    const getSession = vi.fn()
+      .mockResolvedValueOnce(session)
+      .mockResolvedValueOnce({ ...session, approvalMode: "ask" });
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession,
+        getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
+        addAudit: vi.fn(async () => undefined)
+      },
+      approvalReviewer: { review: vi.fn(async () => ({ decision: "approve", explanation: "In scope" })) },
+      automatedApprovalMessageIds: new Set(),
+      recordApprovalReview: vi.fn(async () => undefined),
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval
+    }) as SessionManager;
+
+    await manager.handleAutomatedApproval(session.id, approval.messageId);
+    expect(resolveApproval).not.toHaveBeenCalled();
+  });
+
+  it("submits automatic deny decisions with reviewer provenance", async () => {
+    const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
+    const approval = pendingApproval(session.id);
+    const resolveApproval = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => session),
+        getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
+        addAudit: vi.fn(async () => undefined)
+      },
+      approvalReviewer: { review: vi.fn(async () => ({ decision: "deny", explanation: "Unrelated to the task" })) },
+      automatedApprovalMessageIds: new Set(),
+      recordApprovalReview: vi.fn(async () => undefined),
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval
+    }) as SessionManager;
+
+    await manager.handleAutomatedApproval(session.id, approval.messageId);
+
+    expect(resolveApproval).toHaveBeenCalledWith(
+      session.id,
+      { decision: "deny", messageId: approval.messageId },
+      { resolvedBy: "auto", reviewerModel: "gpt-5.6-luna", reviewerExplanation: "Unrelated to the task" }
+    );
+  });
+
+  it("escalates reviewer failures and suppresses duplicate concurrent reviews", async () => {
+    const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
+    const approval = pendingApproval(session.id);
+    let rejectReview!: (error: Error) => void;
+    const review = vi.fn(() => new Promise<never>((_resolve, reject) => { rejectReview = reject; }));
+    const recordApprovalReview = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => session),
+        getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
+        addAudit: vi.fn(async () => undefined)
+      },
+      approvalReviewer: { review },
+      automatedApprovalMessageIds: new Set(),
+      recordApprovalReview,
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval: vi.fn(async () => undefined)
+    }) as SessionManager;
+
+    const first = manager.handleAutomatedApproval(session.id, approval.messageId);
+    await vi.waitFor(() => expect(review).toHaveBeenCalledOnce());
+    await manager.handleAutomatedApproval(session.id, approval.messageId);
+    rejectReview(new Error("reviewer unavailable"));
+    await first;
+
+    expect(review).toHaveBeenCalledOnce();
+    expect(recordApprovalReview).toHaveBeenLastCalledWith(
+      session.id,
+      approval.messageId,
+      "escalated",
+      "gpt-5.6-luna",
+      "reviewer unavailable"
+    );
+  });
+
+  it("recovers unresolved automatic approvals without touching Ask sessions", async () => {
+    const automatic = { ...managedSession(), id: "auto", status: "approval" as const, approvalMode: "auto" as const };
+    const manual = { ...managedSession(), id: "ask", status: "approval" as const, approvalMode: "ask" as const };
+    const approval = pendingApproval(automatic.id);
+    const handleAutomatedApproval = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { listSessions: vi.fn(async () => [automatic, manual]) },
+      getPendingApproval: vi.fn(async () => approval),
+      handleAutomatedApproval
+    }) as SessionManager;
+
+    await manager.recoverAutomatedApprovals();
+    await vi.waitFor(() => expect(handleAutomatedApproval).toHaveBeenCalledWith(automatic.id, approval.messageId));
+    expect(handleAutomatedApproval).toHaveBeenCalledOnce();
+  });
+
   it("rejects a stale plan action when a newer plan is pending", async () => {
     const session = managedSession();
     const plan = {
@@ -187,14 +332,33 @@ function managedSession(): ManagedSession {
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,
     unreadCount: 0,
     pinned: false,
     archived: false
+  };
+}
+
+function pendingApproval(sessionId: string) {
+  return {
+    id: "approval-1",
+    requestId: 1,
+    sessionId,
+    messageId: "message-1",
+    kind: "command" as const,
+    title: "Run command",
+    command: "git status",
+    toolName: null,
+    cwd: "/repo",
+    reason: "Inspect state",
+    prefixRule: null,
+    options: [
+      { decision: "approve_once" as const, label: "Approve once", description: "" },
+      { decision: "deny" as const, label: "Deny", description: "" }
+    ],
+    createdAt: "2026-09-10T00:00:00.000Z"
   };
 }

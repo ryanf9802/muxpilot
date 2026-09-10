@@ -174,9 +174,7 @@ function session(overrides: Partial<ManagedSession> = {}): ManagedSession {
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: {
       default: { model: null, reasoningEffort: null },

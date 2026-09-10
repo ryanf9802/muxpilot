@@ -9,8 +9,6 @@ import { EventBus } from "./services/eventBus.js";
 import { SessionManager } from "./services/sessionManager.js";
 import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
-import { ActivitySummarizer, OpenAIActivitySummaryClient } from "./services/activitySummarizer.js";
-import { buildOpenAIModelPricingTable } from "./services/openaiPricing.js";
 import { CodexModelsService, CodexUsageService } from "./services/codexUsage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
@@ -33,6 +31,7 @@ import { randomBytes } from "node:crypto";
 import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
 import { CodexGoalStore } from "./codex/codexGoalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
+import { ApprovalReviewer } from "./services/approvalReviewer.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -68,33 +67,7 @@ const gitWorkspaces = new GitWorkspaceManager(db, {
   publishCapability: (workspace) => gitWorkflowBroker.publishCapability(workspace)
 });
 const notifications = new NotificationService(db, events, app.log);
-const summaryClient = config.openaiApiKey
-  ? new OpenAIActivitySummaryClient(config.openaiApiKey, config.summaryModel)
-  : null;
-const openaiPricingTable = buildOpenAIModelPricingTable(config.openaiPricingJson);
-const activitySummariesEnabled = await db.getActivitySummariesEnabled();
-const activitySummarizer = new ActivitySummarizer({
-  db,
-  client: summaryClient,
-  pricingTable: openaiPricingTable,
-  debounceMs: config.summaryDebounceMs,
-  intervalMs: config.summaryIntervalMs,
-  enabled: activitySummariesEnabled,
-  onSummaryUpdated: (sessionId) => {
-    void db.getSession(sessionId).then((session) => {
-      if (!session) return;
-      const event = {
-        id: eventId(),
-        type: "session.updated" as const,
-        sessionId,
-        payload: session,
-        timestamp: nowIso()
-      };
-      events.publish(event);
-    });
-  },
-  logger: app.log
-});
+const approvalReviewer = new ApprovalReviewer(config.codexHome, app.log);
 let dockerProxy: DockerResourceProxy | null = null;
 const userSystemd = await detectSessionScopeCapability(true);
 const sessionScopes = config.resourceGovernor === "off"
@@ -167,7 +140,7 @@ const manager = new SessionManager(
   config.discoveryIntervalMs,
   config.parserIntervalMs,
   sessionDocuments,
-  activitySummarizer,
+  approvalReviewer,
   gitWorkspaces,
   config.codexHome,
   config.gitWorktreeRoot,
@@ -261,7 +234,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, activitySummarizer, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility);
+registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility);
 
 app.get("/healthz", async () => ({
   ok: true,
@@ -275,8 +248,17 @@ let closing = false;
 
 await manager.prepareStartupRecovery();
 await btw.start();
+approvalReviewer.start();
+events.subscribe((event) => {
+  if (event.type !== "message.appended") return;
+  const message = event.payload && typeof event.payload === "object" ? event.payload as { id?: unknown; type?: unknown } : null;
+  if (message?.type === "approval_request" && typeof message.id === "string") {
+    void manager.handleAutomatedApproval(event.sessionId, message.id);
+  }
+});
 await manager.discoverNow();
 await manager.finishStartupRecovery();
+await manager.recoverAutomatedApprovals();
 manager.start({ runInitialTick: false });
 resourceGovernor.start();
 pwaTrustServer.start();

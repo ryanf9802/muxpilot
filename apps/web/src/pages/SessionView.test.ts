@@ -18,6 +18,7 @@ import {
   applyPlanActionResponse,
   AgentGuardBanner,
   ApprovalBanner,
+  ApprovalModeSelector,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
   blurActiveElementForVimSubmit,
@@ -370,6 +371,19 @@ describe("SessionHeaderMeta", () => {
   });
 });
 
+describe("ApprovalModeSelector", () => {
+  it("shows all per-session approval modes with Ask selected by default", () => {
+    const html = renderToStaticMarkup(createElement(ApprovalModeSelector, {
+      mode: "ask",
+      onChange: () => undefined
+    }));
+    expect(html).toContain('aria-label="Session permissions"');
+    expect(html).toContain("Ask for approval");
+    expect(html).toContain("Auto approval");
+    expect(html).toContain("Full approval");
+  });
+});
+
 describe("SessionContextUsage", () => {
   it("renders compact context usage with exact token detail", () => {
     const html = renderToStaticMarkup(createElement(SessionContextUsage, {
@@ -595,6 +609,32 @@ describe("ApprovalBanner", () => {
     );
 
     expect(html.match(/disabled=""/g)).toHaveLength(2);
+  });
+
+  it("shows why an automatic review was escalated", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-escalated",
+      sessionId: "session-a",
+      messageId: "message-escalated",
+      kind: "permissions",
+      title: "Grant network access?",
+      command: null,
+      toolName: null,
+      cwd: "/repo",
+      reason: null,
+      prefixRule: null,
+      options: [{ decision: "approve_once", label: "Approve once", description: "" }],
+      createdAt: "2026-09-10T00:00:00.000Z",
+      reviewStatus: "escalated",
+      reviewerModel: "gpt-5.6-luna",
+      reviewerExplanation: "The requested host is unrelated to the task."
+    };
+
+    const html = renderToStaticMarkup(
+      createElement(ApprovalBanner, { approval, automationMode: "auto", busy: null, error: "", onDecision: () => undefined })
+    );
+    expect(html).toContain("Auto review escalated to you");
+    expect(html).toContain("requested host is unrelated");
   });
 });
 
@@ -1139,11 +1179,10 @@ describe("canSteerComposerInput", () => {
 });
 
 describe("SessionHeaderMeta", () => {
-  it("shows the repo without repeating the branch or activity summary", () => {
+  it("shows the repo without repeating the branch", () => {
     const session = {
-      repo: repo("muxpilot", "feature/activity-summary"),
-      activitySummary: "Header summary display"
-    } satisfies Pick<ManagedSession, "repo" | "activitySummary">;
+      repo: repo("muxpilot", "feature/permissions")
+    } satisfies Pick<ManagedSession, "repo">;
 
     const html = renderToStaticMarkup(
       createElement(SessionHeaderMeta, {
@@ -1153,13 +1192,12 @@ describe("SessionHeaderMeta", () => {
 
     expect(html).toContain("muxpilot");
     expect(html).toContain('class="session-header-repo"');
-    expect(html).not.toContain("feature/activity-summary");
+    expect(html).not.toContain("feature/permissions");
     expect(html).not.toContain("session-header-branch");
-    expect(html).not.toContain("Header summary display");
     expect(html).not.toContain("session-header-summary");
   });
 
-  it("omits blank activity summaries", () => {
+  it("omits branch metadata", () => {
     const html = renderToStaticMarkup(
       createElement(SessionHeaderMeta, {
         session: {
@@ -3350,9 +3388,7 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,

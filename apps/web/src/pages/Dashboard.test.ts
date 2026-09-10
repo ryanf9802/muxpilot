@@ -14,7 +14,6 @@ import {
   filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
   groupSessionsByRepo,
-  OpenAIUsagePanel,
   orderSessionsWithinRepo,
   parseStoredCollapsedRepoKeys,
   RepoSessionGroupHeader,
@@ -61,12 +60,14 @@ describe("DashboardPrimaryActions", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: true,
       onOpenModelDefaults: () => undefined,
+      onOpenReviewerSettings: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
 
     expect(html).toContain('aria-label="Import or export sessions"');
     expect(html).toContain('aria-label="Default model settings"');
+    expect(html).toContain('aria-label="Auto approval reviewer settings"');
     expect(html).toContain("Transfer");
     expect(html).toContain('aria-label="New session"');
   });
@@ -75,6 +76,7 @@ describe("DashboardPrimaryActions", () => {
     const html = renderToStaticMarkup(createElement(DashboardPrimaryActions, {
       showTransfer: false,
       onOpenModelDefaults: () => undefined,
+      onOpenReviewerSettings: () => undefined,
       onOpenSessionTransfer: () => undefined,
       onNewSession: () => undefined
     }));
@@ -155,7 +157,6 @@ describe("SessionCard", () => {
       paneId: "%113",
       windowName: "summarized",
       recentUserPrompts: ["latest prompt", "second latest prompt"],
-      activitySummary: "OpenAI summary"
     });
 
     expect(renderSessionCard(twoPrompts)).toContain('class="preview"');
@@ -515,42 +516,15 @@ function cssRule(selector: string): string {
 }
 
 describe("dashboardPreviewLines", () => {
-  it("falls back to recent prompts when activity summaries are disabled", () => {
+  it("shows recent prompts", () => {
     const session = testSession({
       id: "a",
       paneId: "%111",
       windowName: "summarized",
-      recentUserPrompts: ["latest prompt", "second latest prompt"],
-      activitySummary: "OpenAI summary"
+      recentUserPrompts: ["latest prompt", "second latest prompt"]
     });
 
-    expect(dashboardPreviewLines(session)).toEqual(["OpenAI summary"]);
-    expect(dashboardPreviewLines(session, false)).toEqual(["latest prompt", "second latest prompt"]);
-  });
-});
-
-describe("OpenAIUsagePanel", () => {
-  it("renders the activity summary toggle as enabled by default", () => {
-    const html = renderToStaticMarkup(createElement(OpenAIUsagePanel, { summary: openAIUsageSummary(true) }));
-
-    expect(html).toContain("OpenAI cost, past 30 days");
-    expect(html).toContain("Summaries");
-    expect(html).toContain('type="checkbox"');
-    expect(html).toContain("checked");
-    expect(html).toContain("Activity summary API calls");
-  });
-
-  it("renders the activity summary toggle as paused when disabled", () => {
-    const html = renderToStaticMarkup(createElement(OpenAIUsagePanel, { summary: openAIUsageSummary(false) }));
-
-    expect(html).toContain("Activity summaries paused");
-    expect(html).not.toContain("checked");
-  });
-
-  it("hides the OpenAI usage panel when OpenAI is not configured", () => {
-    const html = renderToStaticMarkup(createElement(OpenAIUsagePanel, { summary: { ...openAIUsageSummary(true), configured: false } }));
-
-    expect(html).toBe("");
+    expect(dashboardPreviewLines(session)).toEqual(["latest prompt", "second latest prompt"]);
   });
 });
 
@@ -875,24 +849,6 @@ function renderSessionCard(
   );
 }
 
-function openAIUsageSummary(activitySummariesEnabled: boolean) {
-  return {
-    configured: true,
-    activitySummariesEnabled,
-    days: 30,
-    points: [],
-    totals: {
-      requestCount: 2,
-      inputTokens: 100,
-      cachedInputTokens: 20,
-      outputTokens: 10,
-      totalTokens: 110,
-      estimatedCostUsd: 0.001
-    },
-    unpricedModels: []
-  };
-}
-
 function sessionBaseTestName(session: ManagedSession): string {
   return session.name;
 }
@@ -904,7 +860,7 @@ function testSession(
     windowName: string;
     repoRoot?: string;
     repoName?: string;
-  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "activitySummary" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode" | "agentOwnership">>
+  } & Partial<Pick<ManagedSession, "recentUserPrompts" | "status" | "initializing" | "startupError" | "pinned" | "gitWorkspace" | "resourceUsage" | "fastMode" | "agentOwnership">>
 ): ManagedSession {
   return {
     id: input.id,
@@ -921,9 +877,7 @@ function testSession(
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: input.recentUserPrompts ?? [],
-    activitySummary: input.activitySummary ?? null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     fastMode: input.fastMode ?? null,

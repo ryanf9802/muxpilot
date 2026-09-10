@@ -2,8 +2,10 @@ import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:f
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
   AgentSessionOwnership,
+  ApprovalMode,
   ApprovalDecision,
   ApprovalRequest,
+  ApprovalReviewerSettings,
   ChatMessage,
   CodexModel,
   CodexModelCatalogResponse,
@@ -61,8 +63,10 @@ import {
   type BtwDocumentChanges,
   type SessionDocumentSnapshot
 } from "./sessionDocuments.js";
-interface ActivitySummaryScheduler {
-  schedule(sessionId: string): void;
+import type { ApprovalReviewResult } from "./approvalReviewer.js";
+
+interface ApprovalReviewProvider {
+  review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult>;
   stop(): void;
 }
 
@@ -73,6 +77,9 @@ interface TranscriptInteractionOutcome {
   decision?: PlanActionChoice | ApprovalDecision;
   answers?: QuestionAnswerRequest["answers"];
   error?: string;
+  resolvedBy?: "user" | "auto" | "full";
+  reviewerModel?: string;
+  reviewerExplanation?: string;
 }
 
 interface CodexMetadataLookup {
@@ -161,6 +168,7 @@ export class SessionManager {
   private appServerRecoveryRunning = false;
   private appServerHibernationRunning = false;
   private readonly runtimeOperationTails = new Map<string, Promise<void>>();
+  private readonly automatedApprovalMessageIds = new Set<string>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -169,7 +177,7 @@ export class SessionManager {
     private readonly discoveryIntervalMs: number,
     private readonly parserIntervalMs: number,
     private readonly documents: SessionDocumentService,
-    private readonly activitySummarizer: ActivitySummaryScheduler | null = null,
+    private readonly approvalReviewer: ApprovalReviewProvider | null = null,
     private readonly gitWorkspaces: GitWorkspaceManager | null = null,
     private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
     private readonly gitWorktreeRoot: string | null = null,
@@ -397,7 +405,7 @@ export class SessionManager {
   private async prepareOrchestratedLaunch(options: AgentSessionLaunchOptions): Promise<{ options: AgentSessionLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
-    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Security approvals remain operator-only.";
+    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Muxpilot resolves runtime approvals according to the operator-selected per-session mode; agents cannot change that mode.";
     return {
       capabilityId: capability.capabilityId,
       options: {
@@ -633,13 +641,29 @@ export class SessionManager {
     return effectiveModelSelections(settings, catalog.defaults);
   }
 
+  async approvalReviewerSettings(): Promise<ApprovalReviewerSettings> {
+    return this.db.getApprovalReviewerSettings();
+  }
+
+  async updateApprovalReviewerSettings(
+    requestedModel: string,
+    reasoningEffort: string | null
+  ): Promise<ApprovalReviewerSettings> {
+    const catalog = await this.codexModelCatalog();
+    const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
+    const updatedAt = nowIso();
+    const settings = await this.db.setApprovalReviewerSettings({ model: model.model, reasoningEffort }, updatedAt);
+    await this.db.addAudit("local", "set_approval_reviewer_settings", "global", JSON.stringify(settings), updatedAt);
+    return settings;
+  }
+
   stop(): void {
     if (this.discoveryTimer) clearInterval(this.discoveryTimer);
     if (this.parserTimer) clearInterval(this.parserTimer);
     if (this.appServerHibernateTimer) clearInterval(this.appServerHibernateTimer);
     this.appServerHibernateTimer = null;
     this.codexStore.stop();
-    this.activitySummarizer?.stop();
+    this.approvalReviewer?.stop();
   }
 
   async discover(): Promise<void> {
@@ -815,7 +839,6 @@ export class SessionManager {
         if (isTurnCompletionMessage(message)) this.pendingPlanActionStatuses.delete(session.id);
         if (appended) {
           this.publish("message.appended", session.id, message);
-          if (message.role === "user") this.activitySummarizer?.schedule(session.id);
           if (!session.transcriptSyncing && message.type === "approval_request") {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "approval", now);
@@ -1072,9 +1095,7 @@ export class SessionManager {
       lastActivityAt: portable.lastActivityAt,
       preview: "",
       recentUserPrompts: [],
-      activitySummary: null,
-      activitySummaryGeneratedAt: null,
-      activitySummarySourceSequence: null,
+      approvalMode: "ask",
       inputMode: portable.inputMode,
       models: portable.models,
       fastMode: portable.fastMode ?? null,
@@ -1900,7 +1921,11 @@ export class SessionManager {
     }
   }
 
-  async resolveApproval(sessionId: string, request: ResolveApprovalRequest): Promise<void> {
+  async resolveApproval(
+    sessionId: string,
+    request: ResolveApprovalRequest,
+    automation: Pick<TranscriptInteractionOutcome, "resolvedBy" | "reviewerModel" | "reviewerExplanation"> = { resolvedBy: "user" }
+  ): Promise<void> {
     const session = requireSession(await this.db.getSession(sessionId));
     const approval = await this.getPendingApproval(sessionId);
     if (!approval) throw new ApprovalResolutionError("No pending approval for this session");
@@ -1917,7 +1942,7 @@ export class SessionManager {
     }
     const now = nowIso();
     await this.recordInteractionOutcome(approval.messageId, sessionId, {
-      kind: "approval", status: "answered", decision: request.decision, submittedAt: now
+      kind: "approval", status: "answered", decision: request.decision, submittedAt: now, ...automation
     });
     if (request.decision === "approve_for_prefix" && approval.prefixRule?.length && workspace) {
       await this.db.addRepositoryApprovalRule(workspace.commonGitDir, normalizeRepositoryApprovalPrefix(approval.prefixRule, workspace), now);
@@ -1926,6 +1951,83 @@ export class SessionManager {
     await this.db.addAudit("local", "approval:" + request.decision, sessionId, "ok", now);
     this.publish("status.changed", sessionId, { status: "waiting" });
     this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+  }
+
+  async handleAutomatedApproval(sessionId: string, messageId: string): Promise<void> {
+    const session = await this.db.getSession(sessionId);
+    if (!session || session.approvalMode === "ask" || this.automatedApprovalMessageIds.has(messageId)) return;
+    const approval = await this.getPendingApproval(sessionId);
+    if (!approval || approval.messageId !== messageId) return;
+    this.automatedApprovalMessageIds.add(messageId);
+    try {
+      if (session.approvalMode === "full") {
+        const current = await this.db.getSession(sessionId);
+        const pending = await this.getPendingApproval(sessionId);
+        if (!current || current.approvalMode !== "full" || pending?.messageId !== messageId) return;
+        await this.resolveApproval(sessionId, { decision: "approve_once", messageId }, { resolvedBy: "full" });
+        return;
+      }
+      if (!this.approvalReviewer) return;
+      const settings = await this.db.getApprovalReviewerSettings();
+      await this.recordApprovalReview(sessionId, messageId, "reviewing", settings.model);
+      let review: ApprovalReviewResult;
+      try {
+        review = await this.approvalReviewer.review(session, approval, settings);
+      } catch (error) {
+        const explanation = error instanceof Error ? error.message : String(error);
+        await this.recordApprovalReview(sessionId, messageId, "escalated", settings.model, explanation);
+        await this.db.addAudit("local", "approval_review_escalated", sessionId, JSON.stringify({
+          messageId,
+          model: settings.model,
+          reason: explanation
+        }), nowIso());
+        return;
+      }
+      if (review.decision === "escalate") {
+        await this.recordApprovalReview(sessionId, messageId, "escalated", settings.model, review.explanation);
+        await this.db.addAudit("local", "approval_review_escalated", sessionId, JSON.stringify({
+          messageId, model: settings.model, explanation: review.explanation
+        }), nowIso());
+        return;
+      }
+      const current = await this.db.getSession(sessionId);
+      const pending = await this.getPendingApproval(sessionId);
+      if (!current || current.approvalMode !== "auto" || pending?.messageId !== messageId) return;
+      await this.resolveApproval(
+        sessionId,
+        { decision: review.decision === "approve" ? "approve_once" : "deny", messageId },
+        { resolvedBy: "auto", reviewerModel: settings.model, reviewerExplanation: review.explanation }
+      );
+    } catch (error) {
+      await this.db.addAudit("local", "automated_approval_failed", sessionId, error instanceof Error ? error.message : String(error), nowIso());
+    } finally {
+      this.automatedApprovalMessageIds.delete(messageId);
+    }
+  }
+
+  async recoverAutomatedApprovals(): Promise<void> {
+    for (const session of await this.db.listSessions(true)) {
+      if (session.status !== "approval" || session.approvalMode === "ask") continue;
+      const approval = await this.getPendingApproval(session.id);
+      if (approval) void this.handleAutomatedApproval(session.id, approval.messageId);
+    }
+  }
+
+  private async recordApprovalReview(
+    sessionId: string,
+    messageId: string,
+    reviewStatus: "reviewing" | "escalated",
+    reviewerModel: string,
+    reviewerExplanation?: string
+  ): Promise<void> {
+    const message = await this.db.getMessage(sessionId, messageId);
+    const approval = message ? recordValue(message.payload.approval) : null;
+    if (!message || !approval) return;
+    const updated = await this.db.updateMessagePayload(message, {
+      ...message.payload,
+      approval: { ...approval, reviewStatus, reviewerModel, reviewerExplanation }
+    });
+    if (updated) this.publish("message.appended", sessionId, updated);
   }
 
   async answerQuestion(sessionId: string, request: QuestionAnswerRequest): Promise<void> {
@@ -2617,9 +2719,7 @@ export class SessionManager {
       lastActivityAt: null,
       preview: "",
       recentUserPrompts: [],
-      activitySummary: null,
-      activitySummaryGeneratedAt: null,
-      activitySummarySourceSequence: null,
+      approvalMode: "ask",
       inputMode: preferences?.inputMode ?? "default",
       models: preferences?.models ?? emptySessionModels(),
       fastMode: preferences?.fastMode ?? null,
@@ -2741,6 +2841,10 @@ export class SessionManager {
       await this.db.addAudit("local", "set_input_mode", sessionId, JSON.stringify({ previousMode: session.inputMode, requestedMode: action.mode, switchMethod: "structured_settings", resultingMode: updated?.inputMode ?? null }), updatedAt);
     }
     if (action.type === "setModelSettings") await this.setModelSettings(session, action.mode, action.model, action.reasoningEffort);
+    if (action.type === "setApprovalMode") {
+      await this.db.setSessionApprovalMode(sessionId, action.mode, nowIso());
+      await this.db.addAudit("local", "set_approval_mode", sessionId, JSON.stringify({ mode: action.mode }), nowIso());
+    }
     if (action.type === "setFastMode") await this.setFastMode(session, action.enabled);
     if (action.type === "setAgentParent") await this.operatorSetAgentParent(sessionId, action.parentSessionId);
     if (action.type === "retryInputDelivery") await this.retryInputDelivery(session);
@@ -2749,6 +2853,10 @@ export class SessionManager {
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
+    if (action.type === "setApprovalMode" && action.mode !== "ask") {
+      const pending = await this.getPendingApproval(sessionId);
+      if (pending) void this.handleAutomatedApproval(sessionId, pending.messageId);
+    }
     return updatedSession;
   }
 
@@ -4163,7 +4271,10 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
     reason: stringValue(approval.reason),
     prefixRule,
     options: approvalOptions(approval.options, prefixRule),
-    createdAt: stringValue(approval.createdAt) ?? message.timestamp
+    createdAt: stringValue(approval.createdAt) ?? message.timestamp,
+    reviewStatus: approval.reviewStatus === "reviewing" || approval.reviewStatus === "escalated" ? approval.reviewStatus : undefined,
+    reviewerModel: stringValue(approval.reviewerModel) ?? undefined,
+    reviewerExplanation: stringValue(approval.reviewerExplanation) ?? undefined
   };
 }
 

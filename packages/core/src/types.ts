@@ -30,6 +30,17 @@ export function canToggleFastMode(status: SessionStatus): boolean {
 
 export type CollaborationMode = "default" | "plan";
 
+export type ApprovalMode = "ask" | "auto" | "full";
+
+export interface ApprovalReviewerSettings {
+  model: string;
+  reasoningEffort: string | null;
+}
+
+export interface ApprovalReviewerSettingsResponse {
+  settings: ApprovalReviewerSettings;
+}
+
 export interface SessionModelSettings {
   model: string | null;
   reasoningEffort: string | null;
@@ -349,9 +360,7 @@ export interface ManagedSession {
   lastActivityAt: string | null;
   preview: string;
   recentUserPrompts: string[];
-  activitySummary: string | null;
-  activitySummaryGeneratedAt: string | null;
-  activitySummarySourceSequence: number | null;
+  approvalMode: ApprovalMode;
   inputMode: CollaborationMode;
   models: SessionModelSelections;
   fastMode?: boolean | null;
@@ -430,6 +439,9 @@ export interface ApprovalRequest {
   prefixRule: string[] | null;
   options: ApprovalOption[];
   createdAt: string;
+  reviewStatus?: "reviewing" | "escalated";
+  reviewerModel?: string;
+  reviewerExplanation?: string;
 }
 
 export interface ResolveApprovalRequest {
@@ -903,6 +915,9 @@ export interface TranscriptInteractionOutcome {
   decision?: PlanActionChoice | ApprovalDecision;
   answers?: Record<string, QuestionAnswer>;
   error?: string;
+  resolvedBy?: "user" | "auto" | "full";
+  reviewerModel?: string;
+  reviewerExplanation?: string;
 }
 
 export type SessionAction =
@@ -910,6 +925,7 @@ export type SessionAction =
   | { type: "archiveTranscript" }
   | { type: "setInputMode"; mode: CollaborationMode }
   | { type: "setModelSettings"; mode: CollaborationMode; model: string; reasoningEffort: string | null }
+  | { type: "setApprovalMode"; mode: ApprovalMode }
   | { type: "setFastMode"; enabled: boolean }
   | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice; messageId: string }
@@ -1030,33 +1046,6 @@ export interface TranscriptSearchResponse {
   query: string;
   matches: TranscriptSearchMatch[];
   total: number;
-}
-
-export interface OpenAIUsageDailyPoint {
-  date: string;
-  requestCount: number;
-  inputTokens: number;
-  cachedInputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  estimatedCostUsd: number | null;
-}
-
-export interface OpenAIUsageSummaryResponse {
-  configured: boolean;
-  activitySummariesEnabled: boolean;
-  days: number;
-  points: OpenAIUsageDailyPoint[];
-  totals: Omit<OpenAIUsageDailyPoint, "date">;
-  unpricedModels: string[];
-}
-
-export interface ActivitySummarySettingsResponse {
-  enabled: boolean;
-}
-
-export interface UpdateActivitySummarySettingsRequest {
-  enabled: boolean;
 }
 
 export type CodexAccountKind = "chatgpt" | "apiKey" | "amazonBedrock" | "unknown";

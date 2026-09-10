@@ -6,6 +6,26 @@ import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type 
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
+  it("defaults legacy sessions to Ask and persists per-session approval mode", async () => {
+    const db = await tempDb();
+    const current = testSession("approval-mode");
+    const { approvalMode: _approvalMode, ...legacy } = current;
+    await db.upsertSession(legacy as ManagedSession, "2026-09-10T00:00:00.000Z");
+
+    expect((await db.getSession(current.id))?.approvalMode).toBe("ask");
+    await db.setSessionApprovalMode(current.id, "auto", "2026-09-10T00:00:01.000Z");
+    expect((await db.getSession(current.id))?.approvalMode).toBe("auto");
+    await db.close();
+  });
+
+  it("stores the app-wide approval reviewer settings", async () => {
+    const db = await tempDb();
+    expect(await db.getApprovalReviewerSettings()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "low" });
+    await db.setApprovalReviewerSettings({ model: "gpt-5.6-sol", reasoningEffort: "medium" }, "2026-09-10T00:00:00.000Z");
+    expect(await db.getApprovalReviewerSettings()).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "medium" });
+    await db.close();
+  });
+
   it("reopens canonical session data without changing runtime fields", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-reopen-"));
     const path = join(dir, "test.db");
@@ -209,40 +229,7 @@ describe("AppDatabase session visibility", () => {
   });
 });
 
-describe("AppDatabase activity summaries", () => {
-  it("hydrates persisted activity summary metadata onto sessions", async () => {
-    const db = await tempDb();
-    const session = testSession("session-1");
-    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
-    db.upsertActivitySummary(
-      session.id,
-      "Implementing dashboard activity summaries with a debounced model refresh.",
-      "2026-07-07T00:00:02.000Z",
-      4
-    );
-
-    const hydrated = db.getSession(session.id);
-
-    expect(hydrated?.activitySummary).toBe("Implementing dashboard activity summaries with a debounced model refresh.");
-    expect(hydrated?.activitySummaryGeneratedAt).toBe("2026-07-07T00:00:02.000Z");
-    expect(hydrated?.activitySummarySourceSequence).toBe(4);
-    db.close();
-  });
-
-  it("keeps recent prompt fallback when no activity summary exists", async () => {
-    const db = await tempDb();
-    const session = testSession("session-2");
-    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
-    db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
-    db.appendMessage(testMessage(session.id, 2, "user", "Second prompt"));
-
-    const hydrated = db.getSession(session.id);
-
-    expect(hydrated?.activitySummary).toBeNull();
-    expect(hydrated?.recentUserPrompts).toEqual(["Second prompt", "First prompt"]);
-    db.close();
-  });
-
+describe("AppDatabase session prompts", () => {
   it("invalidates cached recent prompts when a user message is appended", async () => {
     const db = await tempDb();
     const session = testSession("session-prompt-cache");
@@ -862,7 +849,6 @@ describe("AppDatabase activity summaries", () => {
     db.upsertSession({ ...oldSession, status: "missing", archived: true }, "2026-07-07T00:00:00.000Z");
     db.appendMessage(testMessage(oldSession.id, 1, "user", "Rekey searchable prompt", "2026-07-07T00:00:01.000Z"));
     db.appendMessage(testMessage(oldSession.id, 2, "assistant", "Rekey answer", "2026-07-07T00:00:02.000Z"));
-    db.upsertActivitySummary(oldSession.id, "Existing summary", "2026-07-07T00:00:03.000Z", 2);
     db.setNotificationRule("device-rekey", "session", oldSession.id, "done_task", true, "2026-07-07T00:00:04.000Z");
     db.setParserOffset("old-offset", 1234, "parser-test", "2026-07-07T00:00:05.000Z");
     db.upsertGitWorkspace(testGitWorkspace(oldSession.id), "2026-07-07T00:00:05.000Z");
@@ -874,7 +860,6 @@ describe("AppDatabase activity summaries", () => {
     expect(db.listMessages(newSession.id, 0).map((message) => message.text)).toEqual(["Rekey searchable prompt", "Rekey answer"]);
     expect(db.listMessages(oldSession.id, 0)).toEqual([]);
     expect(db.listPromptHistory("rekey", 10).map((result) => result.sessionId)).toEqual([newSession.id]);
-    expect(db.getActivitySummary(newSession.id)?.summary).toBe("Existing summary");
     expect(db.getNotificationSettings("device-rekey").sessionRules[newSession.id]).toEqual(["done_task"]);
     expect(db.getParserOffset("old-offset")).toBe(0);
     expect(db.getParserOffset("new-offset")).toBe(1234);
@@ -1598,7 +1583,6 @@ describe("AppDatabase activity summaries", () => {
     db.appendMessage(testMessage(realPrompt.id, 2, "user", initialInstructionContext(), "2026-07-07T00:00:05.000Z"));
 
     const sessions = db.listSessions();
-    const summaryPrompts = db.listRecentUserPromptsForSummary(realPrompt.id);
 
     const realPromptSession = sessions.find((session) => session.id === realPrompt.id);
     const contextOnlySession = sessions.find((session) => session.id === contextOnly.id);
@@ -1606,94 +1590,6 @@ describe("AppDatabase activity summaries", () => {
     expect(realPromptSession?.recentUserPrompts).toEqual(["Actual prompt"]);
     expect(contextOnlySession?.lastActivityAt).toBe("2026-07-07T00:00:04.000Z");
     expect(contextOnlySession?.recentUserPrompts).toEqual([]);
-    expect(summaryPrompts.map((message) => message.text)).toEqual(["Actual prompt"]);
-    db.close();
-  });
-});
-
-describe("AppDatabase OpenAI usage summaries", () => {
-  it("aggregates usage into zero-filled daily buckets", async () => {
-    const db = await tempDb();
-    db.recordOpenAIUsage({
-      id: "usage-1",
-      source: "activity_summary",
-      sourceId: "session-1",
-      model: "gpt-4.1-mini",
-      responseId: "resp_1",
-      createdAt: "2026-07-06T12:00:00.000Z",
-      inputTokens: 100,
-      cachedInputTokens: 20,
-      outputTokens: 10,
-      totalTokens: 110,
-      estimatedCostUsd: 0.001,
-      pricingStatus: "priced"
-    });
-    db.recordOpenAIUsage({
-      id: "usage-2",
-      source: "activity_summary",
-      sourceId: "session-2",
-      model: "gpt-4.1-mini",
-      responseId: "resp_2",
-      createdAt: "2026-07-07T16:00:00.000Z",
-      inputTokens: 300,
-      cachedInputTokens: 0,
-      outputTokens: 40,
-      totalTokens: 340,
-      estimatedCostUsd: 0.002,
-      pricingStatus: "priced"
-    });
-
-    const summary = db.summarizeOpenAIUsage(3, new Date("2026-07-07T20:00:00.000Z"));
-
-    expect(summary.points.map((point) => point.date)).toEqual(["2026-07-05", "2026-07-06", "2026-07-07"]);
-    expect(summary.points.map((point) => point.requestCount)).toEqual([0, 1, 1]);
-    expect(summary.totals.requestCount).toBe(2);
-    expect(summary.totals.totalTokens).toBe(450);
-    expect(summary.totals.estimatedCostUsd).toBeCloseTo(0.003);
-    db.close();
-  });
-
-  it("keeps unpriced usage out of cost totals and reports the model", async () => {
-    const db = await tempDb();
-    db.recordOpenAIUsage({
-      id: "usage-unpriced",
-      source: "activity_summary",
-      sourceId: "session-1",
-      model: "custom-model",
-      responseId: null,
-      createdAt: "2026-07-07T12:00:00.000Z",
-      inputTokens: 100,
-      cachedInputTokens: 0,
-      outputTokens: 10,
-      totalTokens: 110,
-      estimatedCostUsd: null,
-      pricingStatus: "unpriced"
-    });
-
-    const summary = db.summarizeOpenAIUsage(1, new Date("2026-07-07T20:00:00.000Z"));
-
-    expect(summary.totals.requestCount).toBe(1);
-    expect(summary.totals.estimatedCostUsd).toBeNull();
-    expect(summary.unpricedModels).toEqual(["custom-model"]);
-    db.close();
-  });
-});
-
-describe("AppDatabase activity summary settings", () => {
-  it("defaults activity summaries to enabled", async () => {
-    const db = await tempDb();
-
-    expect(await db.getActivitySummariesEnabled()).toBe(true);
-    db.close();
-  });
-
-  it("persists activity summary enablement", async () => {
-    const db = await tempDb();
-
-    await db.setActivitySummariesEnabled(false);
-    expect(await db.getActivitySummariesEnabled()).toBe(false);
-    await db.setActivitySummariesEnabled(true);
-    expect(await db.getActivitySummariesEnabled()).toBe(true);
     db.close();
   });
 });
@@ -2060,9 +1956,7 @@ function testSession(id: string): ManagedSession {
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,

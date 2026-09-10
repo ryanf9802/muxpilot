@@ -27,7 +27,7 @@ Provider/thread identity, reconciled app-server protocol state, and the muxpilot
 
 Codex JSONL files under `~/.codex/sessions` are the durable transcript source because they contain structured user, assistant, and tool events.
 
-SQLite stores application state: managed-session metadata, parsed messages, parser offsets, prompt search, queued inputs and delivery state, BTW exchanges, orchestration waits and ownership, dashboard settings, notifications, summaries and usage estimates, recovery incidents, Git workspace bindings, and audit records. WebSocket events are published live and are not retained as the source of truth.
+SQLite stores application state: managed-session metadata, parsed messages, parser offsets, prompt search, queued inputs and delivery state, BTW exchanges, orchestration waits and ownership, dashboard settings, notifications, recovery incidents, Git workspace bindings, and audit records. WebSocket events are published live and are not retained as the source of truth.
 
 Session documents, Git worktrees, runtime logs, heavyweight-command logs, and transfer staging are filesystem state with their own bounded roots. They are not stored in SQLite or the web bundle.
 
@@ -38,10 +38,10 @@ Managed Git sessions store the repository entry point, current existing local ta
 - React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, transfer/recovery dialogs, and LAN connection details.
 - Fastify Backend/API server: operator access gate, REST API, WebSocket event stream.
 - Session manager: structured reconciliation, verified input, queues, hibernation/recovery, create/fork/restore, agent ownership, and event publishing.
+- Approval reviewer: evaluates Auto-mode runtime requests in an isolated, read-only Codex thread and returns structured decisions or escalations.
 - Session driver registry and Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
 - Codex parser: maps JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
 - Database adapter: local SQLite via `node:sqlite`, isolated so libSQL/Turso can be added later.
-- Activity summarizer: optional OpenAI-backed, prompt-only session summaries and usage/cost recording.
 - Codex usage service: optional dashboard data from `codex app-server --stdio`.
 - Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
 - Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
@@ -60,11 +60,11 @@ The access key is submitted in the request body to `/api/access`. After success,
 
 Cookie signing uses an in-memory random secret by default. Restarting the backend invalidates existing browser access sessions, which is acceptable for this single-operator LAN tool. `MUXPILOT_SESSION_SECRET` is optional for operators who want cookies to survive restarts.
 
-The browser access boundary is separate from session capabilities. A browser action is authorized as the operator; a managed Codex process receives only the Git/orchestration brokers and writable roots injected for that session. Security approvals cannot be delegated through the orchestration broker.
+The browser access boundary is separate from session capabilities. A browser action is authorized as the operator; a managed Codex process receives only the Git/orchestration brokers and writable roots injected for that session. Runtime approval automation is selected by the operator per session and cannot be elevated through the orchestration broker.
 
 ## Persistence
 
-SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, usage, cost estimates, summaries, and audit events must live outside `dist/`.
+SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, session settings, Codex usage snapshots, and audit events must live outside `dist/`.
 
 Development uses `./data/dev/muxpilot.db` through `pnpm app start dev`. Production uses `./data/prod/muxpilot.db` through `pnpm app start`.
 

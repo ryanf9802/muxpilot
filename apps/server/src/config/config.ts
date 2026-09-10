@@ -66,14 +66,6 @@ const schema = z.object({
   heavyValidationRuntimeTimeoutMs: z.coerce.number().int().positive().default(1_800_000),
   heavyValidationTerminationGraceMs: z.coerce.number().int().positive().default(30_000),
   heavyValidationResumeTimeoutMs: z.coerce.number().int().positive().default(120_000),
-  openaiApiKey: z.preprocess(
-    (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
-    z.string().optional()
-  ),
-  summaryModel: z.string().default("gpt-4.1-mini"),
-  summaryIntervalMs: z.coerce.number().int().positive().default(10_000),
-  summaryDebounceMs: z.coerce.number().int().nonnegative().default(0),
-  openaiPricingJson: z.string().optional(),
   sessionFileKey: z.preprocess(
     (value) => (typeof value === "string" && value.trim() ? value : undefined),
     z.string().min(16).optional()
@@ -145,11 +137,6 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     heavyValidationRuntimeTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_RUNTIME_TIMEOUT_MS,
     heavyValidationTerminationGraceMs: env.MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS,
     heavyValidationResumeTimeoutMs: env.MUXPILOT_HEAVY_VALIDATION_RESUME_TIMEOUT_MS,
-    openaiApiKey: env.OPENAI_API_KEY,
-    summaryModel: env.MUXPILOT_SUMMARY_MODEL,
-    summaryIntervalMs: env.MUXPILOT_SUMMARY_INTERVAL_MS,
-    summaryDebounceMs: env.MUXPILOT_SUMMARY_DEBOUNCE_MS,
-    openaiPricingJson: env.MUXPILOT_OPENAI_PRICING_JSON,
     sessionFileKey: env.MUXPILOT_SESSION_FILE_KEY
   });
 

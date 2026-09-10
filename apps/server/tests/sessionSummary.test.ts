@@ -6,7 +6,6 @@ describe("dashboard session summaries", () => {
   it("bounds dashboard-only text and omits dependency-link detail", () => {
     const session = testSession();
     session.recentUserPrompts = ["first", "x".repeat(600), "third"];
-    session.activitySummary = "y".repeat(600);
     session.preview = "duplicate transcript preview";
     session.gitWorkspace = {
       id: "workspace-1",
@@ -28,7 +27,6 @@ describe("dashboard session summaries", () => {
 
     expect(summary.preview).toBe("");
     expect(summary.recentUserPrompts).toEqual(["first", "x".repeat(512)]);
-    expect(summary.activitySummary).toBe("y".repeat(512));
     expect(summary.gitWorkspace?.dependencyLinks).toEqual([]);
     expect(session.gitWorkspace.dependencyLinks).toHaveLength(1);
     expect(summary.provider).toEqual(session.provider);
@@ -53,12 +51,10 @@ describe("dashboard session summaries", () => {
       completedAt: "2026-09-08T01:00:00.000Z"
     };
     session.recentUserPrompts = ["large history"];
-    session.activitySummary = "large summary";
 
     expect(dashboardSessionSummary(session)).toMatchObject({
       id: session.id,
       recentUserPrompts: [],
-      activitySummary: null,
       agentOwnership: expect.objectContaining({
         parentSessionId: "parent",
         rootSessionId: "parent",
@@ -94,9 +90,7 @@ function testSession(): ManagedSession {
     lastActivityAt: null,
     preview: "",
     recentUserPrompts: [],
-    activitySummary: null,
-    activitySummaryGeneratedAt: null,
-    activitySummarySourceSequence: null,
+    approvalMode: "ask",
     inputMode: "default",
     models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0,

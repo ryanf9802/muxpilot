@@ -285,11 +285,8 @@ function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     logLevel: "silent",
     discoveryIntervalMs: 3000,
     parserIntervalMs: 1000,
-    openaiApiKey: undefined,
-    summaryModel: "gpt-4.1-mini",
     summaryIntervalMs: 10_000,
     summaryDebounceMs: 0,
-    openaiPricingJson: undefined,
     inputSubmitKeys: ["Enter"],
     inputModeCycleKeys: ["BTab"],
     approvalKeys: {

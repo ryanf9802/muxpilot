@@ -4217,6 +4217,29 @@ select:focus-visible {
   overflow: hidden;
 }
 
+.approval-mode-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-text-muted);
+}
+
+.approval-mode-selector select {
+  max-width: 148px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 6px 24px 6px 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.approval-mode-selector select[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
 .model-settings-button:not(.model-settings-display):hover:not(:disabled),
 .model-settings-button:not(.model-settings-display):focus-visible {
   border-color: color-mix(in srgb, var(--color-secondary) 52%, var(--color-border));
@@ -4615,6 +4638,12 @@ select:focus-visible {
 .approval-title p,
 .approval-error {
   margin: 0;
+}
+
+.approval-review-status {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
 }
 
 .approval-title p {
