@@ -169,6 +169,7 @@ export class SessionManager {
   private appServerHibernationRunning = false;
   private readonly runtimeOperationTails = new Map<string, Promise<void>>();
   private readonly automatedApprovalMessageIds = new Set<string>();
+  private approvalAutomationGenerations = new Map<string, number>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -1648,7 +1649,7 @@ export class SessionManager {
         await this.db.setSessionAgentOwnership(descendant.id, { ...descendant.agentOwnership, rootSessionId }, nowIso());
       }
       await this.db.addAudit(`session:${actor.id}`, "claim_session", child.id, "ok", nowIso());
-      this.publish("session.updated", child.id, updated);
+      await this.publishAgentApprovalTree(child.id);
       return updated;
     });
   }
@@ -1660,7 +1661,7 @@ export class SessionManager {
       if (descendants.some(isLiveAgentSession)) {
         throw new AgentSessionError("Release live descendants before releasing their parent session");
       }
-      const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, null, nowIso()));
+      const updated = requireSession(await this.db.detachSessionAgentOwnership(child.id, nowIso()));
       for (const descendant of descendants) {
         if (!descendant.agentOwnership) continue;
         await this.db.setSessionAgentOwnership(descendant.id, {
@@ -1669,7 +1670,7 @@ export class SessionManager {
         }, nowIso());
       }
       await this.db.addAudit(`session:${actorSessionId}`, "release_session", child.id, "ok", nowIso());
-      this.publish("session.updated", child.id, updated);
+      await this.publishAgentApprovalTree(child.id);
       return updated;
     });
   }
@@ -1680,7 +1681,7 @@ export class SessionManager {
       const all = await this.db.listSessions(true);
       const subtreeIds = new Set([child.id, ...agentDescendants(all, child.id).map((session) => session.id)]);
       if (parentSessionId === null) {
-        const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, null, nowIso()));
+        const updated = requireSession(await this.db.detachSessionAgentOwnership(child.id, nowIso()));
         for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
           if (!descendant.agentOwnership) continue;
           await this.db.setSessionAgentOwnership(descendant.id, {
@@ -1689,7 +1690,7 @@ export class SessionManager {
           }, nowIso());
         }
         await this.db.addAudit("local", "detach_agent_session", child.id, "ok", nowIso());
-        this.publish("session.updated", child.id, updated);
+        await this.publishAgentApprovalTree(child.id);
         return updated;
       }
 
@@ -1732,9 +1733,22 @@ export class SessionManager {
         }, nowIso());
       }
       await this.db.addAudit("local", "reparent_agent_session", child.id, parent.id, nowIso());
-      this.publish("session.updated", child.id, updated);
+      await this.publishAgentApprovalTree(child.id);
       return updated;
     });
+  }
+
+  private async publishAgentApprovalTree(sessionId: string): Promise<void> {
+    const sessions = await this.db.listSessions(true);
+    const root = sessions.find((session) => session.id === sessionId);
+    if (!root) return;
+    for (const session of [root, ...agentDescendants(sessions, sessionId)]) {
+      this.bumpApprovalAutomationGeneration(session.id);
+      this.publish("session.updated", session.id, session);
+      if (session.approvalMode === "ask") continue;
+      const pending = await this.getPendingApproval(session.id);
+      if (pending) void this.handleAutomatedApproval(session.id, pending.messageId);
+    }
   }
 
   async agentExtendBudget(actorSessionId: string, childSessionId: string, additionalTokens: number, reason: string): Promise<ManagedSession> {
@@ -1974,6 +1988,7 @@ export class SessionManager {
   async handleAutomatedApproval(sessionId: string, messageId: string): Promise<void> {
     const session = await this.db.getSession(sessionId);
     if (!session || session.approvalMode === "ask" || this.automatedApprovalMessageIds.has(messageId)) return;
+    const automationGeneration = this.approvalAutomationGeneration(sessionId);
     const approval = await this.getPendingApproval(sessionId);
     if (!approval || approval.messageId !== messageId) return;
     this.automatedApprovalMessageIds.add(messageId);
@@ -1981,7 +1996,8 @@ export class SessionManager {
       if (session.approvalMode === "full") {
         const current = await this.db.getSession(sessionId);
         const pending = await this.getPendingApproval(sessionId);
-        if (!current || current.approvalMode !== "full" || pending?.messageId !== messageId) return;
+        if (!current || current.approvalMode !== "full" || pending?.messageId !== messageId
+          || this.approvalAutomationGeneration(sessionId) !== automationGeneration) return;
         await this.resolveApproval(sessionId, { decision: "approve_once", messageId }, { resolvedBy: "full" });
         return;
       }
@@ -2010,7 +2026,8 @@ export class SessionManager {
       }
       const current = await this.db.getSession(sessionId);
       const pending = await this.getPendingApproval(sessionId);
-      if (!current || current.approvalMode !== "auto" || pending?.messageId !== messageId) return;
+      if (!current || current.approvalMode !== "auto" || pending?.messageId !== messageId
+        || this.approvalAutomationGeneration(sessionId) !== automationGeneration) return;
       await this.resolveApproval(
         sessionId,
         { decision: review.decision === "approve" ? "approve_once" : "deny", messageId },
@@ -2020,7 +2037,24 @@ export class SessionManager {
       await this.db.addAudit("local", "automated_approval_failed", sessionId, error instanceof Error ? error.message : String(error), nowIso());
     } finally {
       this.automatedApprovalMessageIds.delete(messageId);
+      if (this.approvalAutomationGeneration(sessionId) !== automationGeneration) {
+        const current = await this.db.getSession(sessionId);
+        const pending = await this.getPendingApproval(sessionId);
+        if (current && current.approvalMode !== "ask" && pending?.messageId === messageId) {
+          void this.handleAutomatedApproval(sessionId, messageId);
+        }
+      }
     }
+  }
+
+  private approvalAutomationGeneration(sessionId: string): number {
+    this.approvalAutomationGenerations ??= new Map<string, number>();
+    return this.approvalAutomationGenerations.get(sessionId) ?? 0;
+  }
+
+  private bumpApprovalAutomationGeneration(sessionId: string): void {
+    this.approvalAutomationGenerations ??= new Map<string, number>();
+    this.approvalAutomationGenerations.set(sessionId, this.approvalAutomationGeneration(sessionId) + 1);
   }
 
   async recoverAutomatedApprovals(): Promise<void> {
@@ -2860,6 +2894,7 @@ export class SessionManager {
     }
     if (action.type === "setModelSettings") await this.setModelSettings(session, action.mode, action.model, action.reasoningEffort);
     if (action.type === "setApprovalMode") {
+      if (session.agentOwnership) throw new AgentSessionError("Child session approval mode is inherited from its parent");
       await this.db.setSessionApprovalMode(sessionId, action.mode, nowIso());
       await this.db.addAudit("local", "set_approval_mode", sessionId, JSON.stringify({ mode: action.mode }), nowIso());
     }
@@ -2871,9 +2906,14 @@ export class SessionManager {
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
-    if (action.type === "setApprovalMode" && action.mode !== "ask") {
-      const pending = await this.getPendingApproval(sessionId);
-      if (pending) void this.handleAutomatedApproval(sessionId, pending.messageId);
+    if (action.type === "setApprovalMode") {
+      for (const affected of [requireSession(updatedSession), ...agentDescendants(await this.db.listSessions(true), sessionId)]) {
+        this.bumpApprovalAutomationGeneration(affected.id);
+        if (affected.id !== sessionId) this.publish("session.updated", affected.id, affected);
+        if (affected.approvalMode === "ask") continue;
+        const pending = await this.getPendingApproval(affected.id);
+        if (pending) void this.handleAutomatedApproval(affected.id, pending.messageId);
+      }
     }
     return updatedSession;
   }

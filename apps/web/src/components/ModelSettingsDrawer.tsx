@@ -38,6 +38,7 @@ export function ModelSettingsDrawer({
   applying,
   reviewerSettings,
   approvalMode,
+  approvalModeInheritedFrom,
   approvalModeApplying = false,
   approvalModeError = "",
   onClose,
@@ -58,6 +59,7 @@ export function ModelSettingsDrawer({
   applying: CollaborationMode | "reviewer" | null;
   reviewerSettings?: ApprovalReviewerSettings | null;
   approvalMode?: ApprovalMode;
+  approvalModeInheritedFrom?: { id: string; name: string } | null;
   approvalModeApplying?: boolean;
   approvalModeError?: string;
   onClose: () => void;
@@ -208,11 +210,13 @@ export function ModelSettingsDrawer({
             <label>
               <span>
                 <strong>Session approval mode</strong>
-                <small>Controls how runtime permission requests are resolved for this session.</small>
+                <small>{approvalModeInheritedFrom
+                  ? <>Inherited from <a href={`/sessions/${approvalModeInheritedFrom.id}`}>{approvalModeInheritedFrom.name}</a>.</>
+                  : "Controls how runtime permission requests are resolved for this session."}</small>
               </span>
               <select
                 value={approvalMode}
-                disabled={busy}
+                disabled={busy || Boolean(approvalModeInheritedFrom)}
                 aria-invalid={Boolean(approvalModeError) || undefined}
                 aria-label="Session permissions"
                 onChange={(event) => void onApprovalModeChange(event.currentTarget.value as ApprovalMode)}

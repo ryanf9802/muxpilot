@@ -2,6 +2,8 @@
 
 muxpilot can expose managed Codex sessions to one another through a constrained `muxpilot_sessions` tool server. This supports durable delegated work in independently visible sessions without turning muxpilot into a general remote shell.
 
+Agent-managed sessions continuously inherit their direct parent's approval mode. Changes at a root flow through every descendant. A child cannot override the inherited mode; detaching it resets its independent mode to Ask while its descendants continue to inherit from it.
+
 ## Choosing a Delegation Mechanism
 
 Use Codex's built-in subagents for routine bounded delegation, especially standard code-review passes. They run inside the current Codex session and do not create more muxpilot sessions.

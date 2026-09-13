@@ -24,6 +24,30 @@ describe("SessionManager app-server helpers", () => {
     );
   });
 
+  it("rejects approval mode overrides on agent-managed children", async () => {
+    const session = {
+      ...managedSession(),
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created" as const,
+        createdAt: "2026-09-13T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1_000_000,
+        completedAt: null,
+        budgetExhaustedAt: null
+      }
+    };
+    const setSessionApprovalMode = vi.fn(async () => session);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { getSession: vi.fn(async () => session), setSessionApprovalMode },
+      sessionDrivers: { has: () => true, require: () => ({}) }
+    }) as SessionManager;
+
+    await expect(manager.act(session.id, { type: "setApprovalMode", mode: "full" })).rejects.toThrow("inherited from its parent");
+    expect(setSessionApprovalMode).not.toHaveBeenCalled();
+  });
+
   it("leaves an escalated automatic review for the operator", async () => {
     const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
     const approval = pendingApproval(session.id);
@@ -70,6 +94,43 @@ describe("SessionManager app-server helpers", () => {
 
     await manager.handleAutomatedApproval(session.id, approval.messageId);
     expect(resolveApproval).not.toHaveBeenCalled();
+  });
+
+  it("restarts a pending approval when inherited policy changes during review", async () => {
+    const automatic = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
+    const full = { ...automatic, approvalMode: "full" as const };
+    const approval = pendingApproval(automatic.id);
+    let finishReview!: () => void;
+    const review = vi.fn(() => new Promise<{ decision: "approve"; explanation: string }>((resolve) => {
+      finishReview = () => resolve({ decision: "approve", explanation: "In scope" });
+    }));
+    const resolveApproval = vi.fn(async () => undefined);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => full),
+        getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
+        addAudit: vi.fn(async () => undefined)
+      },
+      approvalReviewer: { review },
+      automatedApprovalMessageIds: new Set<string>(),
+      approvalAutomationGenerations: new Map<string, number>(),
+      recordApprovalReview: vi.fn(async () => undefined),
+      getPendingApproval: vi.fn(async () => approval),
+      resolveApproval
+    }) as SessionManager;
+    (manager as unknown as { db: { getSession: ReturnType<typeof vi.fn> } }).db.getSession.mockResolvedValueOnce(automatic);
+
+    const running = manager.handleAutomatedApproval(automatic.id, approval.messageId);
+    await vi.waitFor(() => expect(review).toHaveBeenCalledOnce());
+    (manager as unknown as { bumpApprovalAutomationGeneration: (id: string) => void }).bumpApprovalAutomationGeneration(automatic.id);
+    finishReview();
+    await running;
+    await vi.waitFor(() => expect(resolveApproval).toHaveBeenCalledWith(
+      automatic.id,
+      { decision: "approve_once", messageId: approval.messageId },
+      { resolvedBy: "full" }
+    ));
+    expect(review).toHaveBeenCalledOnce();
   });
 
   it("submits automatic deny decisions with reviewer provenance", async () => {

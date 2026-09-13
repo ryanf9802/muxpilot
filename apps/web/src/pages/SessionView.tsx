@@ -2961,6 +2961,9 @@ export function SessionView() {
   }
   const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
   const completed = Boolean(readySession.agentOwnership?.completedAt);
+  const approvalModeParent = readySession.agentOwnership
+    ? shellSessions.find((candidate) => candidate.id === readySession.agentOwnership?.parentSessionId)
+    : null;
   const statusPresentation = sessionStatusPresentation(readySession, shellSessions.some((candidate) => candidate.id === readySession.id) ? shellSessions : [readySession, ...shellSessions]);
   const statusSource = shellSessions.find((candidate) => candidate.id === statusPresentation.sourceSessionId);
   const statusDetail = statusPresentation.inherited && statusSource ? `from ${sessionDisplayName(statusSource, shellSessions)}` : null;
@@ -3072,6 +3075,10 @@ export function SessionView() {
         error={modelSettingsError}
         applying={modelSettingsApplying}
         approvalMode={readySession.approvalMode}
+        approvalModeInheritedFrom={readySession.agentOwnership ? {
+          id: readySession.agentOwnership.parentSessionId,
+          name: approvalModeParent ? sessionDisplayName(approvalModeParent, shellSessions) : "Parent session"
+        } : null}
         approvalModeApplying={approvalModeApplying}
         approvalModeError={approvalModeError}
         onClose={() => setModelSettingsOpen(false)}

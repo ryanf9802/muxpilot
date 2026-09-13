@@ -18,6 +18,39 @@ describe("AppDatabase session visibility", () => {
     await db.close();
   });
 
+  it("resolves child approval modes through the parent tree and resets detached roots to Ask", async () => {
+    const db = await tempDb();
+    const ownership = (parentSessionId: string, rootSessionId = parentSessionId) => ({
+      parentSessionId,
+      rootSessionId,
+      origin: "claimed" as const,
+      createdAt: "2026-09-13T00:00:00.000Z",
+      workTokenBaseline: 0,
+      workTokenBudget: 1_000_000,
+      completedAt: null,
+      budgetExhaustedAt: null
+    });
+    await db.upsertSession({ ...testSession("root"), approvalMode: "auto" }, "2026-09-13T00:00:00.000Z");
+    await db.upsertSession({ ...testSession("child"), approvalMode: "full", agentOwnership: ownership("root") }, "2026-09-13T00:00:00.000Z");
+    await db.upsertSession({ ...testSession("grandchild"), agentOwnership: ownership("child", "root") }, "2026-09-13T00:00:00.000Z");
+
+    expect((await db.getSession("child"))?.approvalMode).toBe("auto");
+    expect((await db.getSession("grandchild"))?.approvalMode).toBe("auto");
+    await db.setSessionApprovalMode("root", "full", "2026-09-13T00:00:01.000Z");
+    expect((await db.getSession("grandchild"))?.approvalMode).toBe("full");
+
+    await db.detachSessionAgentOwnership("child", "2026-09-13T00:00:02.000Z");
+    expect(await db.getSession("child")).toMatchObject({ agentOwnership: null, approvalMode: "ask" });
+    expect((await db.getSession("grandchild"))?.approvalMode).toBe("ask");
+
+    await db.upsertSession({ ...testSession("orphan"), approvalMode: "full", agentOwnership: ownership("missing") }, "2026-09-13T00:00:03.000Z");
+    expect((await db.getSession("orphan"))?.approvalMode).toBe("ask");
+    await db.upsertSession({ ...testSession("cycle-a"), approvalMode: "full", agentOwnership: ownership("cycle-b") }, "2026-09-13T00:00:04.000Z");
+    await db.upsertSession({ ...testSession("cycle-b"), approvalMode: "auto", agentOwnership: ownership("cycle-a") }, "2026-09-13T00:00:04.000Z");
+    expect((await db.getSession("cycle-a"))?.approvalMode).toBe("ask");
+    await db.close();
+  });
+
   it("stores the app-wide approval reviewer settings", async () => {
     const db = await tempDb();
     expect(await db.getApprovalReviewerSettings()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "low" });

@@ -494,6 +494,10 @@ export class AppDatabase {
     return this.call("setSessionAgentOwnership", sessionId, ownership, updatedAt) as Promise<ManagedSession | null>;
   }
 
+  detachSessionAgentOwnership(sessionId: string, updatedAt: string): Promise<ManagedSession | null> {
+    return this.call("detachSessionAgentOwnership", sessionId, updatedAt) as Promise<ManagedSession | null>;
+  }
+
   completeAgentSession(sessionId: string, completedAt: string): Promise<ManagedSession | null> {
     return this.call("completeAgentSession", sessionId, completedAt) as Promise<ManagedSession | null>;
   }
@@ -1232,6 +1236,10 @@ export class SyncAppDatabase {
 
   setSessionAgentOwnership(sessionId: string, agentOwnership: AgentSessionOwnership | null, updatedAt: string): ManagedSession | null {
     return this.updateSessionData(sessionId, { agentOwnership }, updatedAt);
+  }
+
+  detachSessionAgentOwnership(sessionId: string, updatedAt: string): ManagedSession | null {
+    return this.updateSessionData(sessionId, { agentOwnership: null, approvalMode: "ask" }, updatedAt);
   }
 
   completeAgentSession(sessionId: string, completedAt: string): ManagedSession | null {
@@ -3381,7 +3389,7 @@ export class SyncAppDatabase {
       lastActivityAt: row.last_activity_at ?? this.latestMessageAt(row.id),
       preview: recentUserPrompts[0] ?? "",
       recentUserPrompts,
-      approvalMode: approvalMode(session.approvalMode),
+      approvalMode: this.effectiveApprovalMode(session),
       inputMode: collaborationMode(session.inputMode) ?? "default",
       models: sessionModels(session.models),
       fastMode: typeof session.fastMode === "boolean" ? session.fastMode : null,
@@ -3393,6 +3401,24 @@ export class SyncAppDatabase {
       archived: row.archived === 1,
       gitWorkspace
     };
+  }
+
+  private effectiveApprovalMode(session: ManagedSession): ApprovalMode {
+    let current = session;
+    const visited = new Set([session.id]);
+    while (current.agentOwnership) {
+      const parentId = current.agentOwnership.parentSessionId;
+      if (visited.has(parentId)) return "ask";
+      visited.add(parentId);
+      const row = this.db.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(parentId) as Pick<SessionRow, "data_json"> | undefined;
+      if (!row) return "ask";
+      try {
+        current = JSON.parse(row.data_json) as ManagedSession;
+      } catch {
+        return "ask";
+      }
+    }
+    return approvalMode(current.approvalMode);
   }
 
   private recentUserPrompts(sessionId: string): string[] {

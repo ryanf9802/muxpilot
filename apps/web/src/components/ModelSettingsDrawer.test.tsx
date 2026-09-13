@@ -171,6 +171,41 @@ describe("ModelSettingsDrawer", () => {
     expect(changeApprovalMode).toHaveBeenCalledWith("auto");
     act(() => root.unmount());
   });
+
+  it("shows an inherited child approval mode without allowing an override", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const changeApprovalMode = vi.fn(async () => undefined);
+    await act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open
+          title="Settings"
+          description="Choose settings"
+          selections={session().models}
+          activeMode="default"
+          catalog={catalog}
+          loading={false}
+          error=""
+          applying={null}
+          approvalMode="full"
+          approvalModeInheritedFrom={{ id: "parent", name: "Parent work" }}
+          onClose={() => undefined}
+          onRetry={() => undefined}
+          onApply={async () => undefined}
+          onApprovalModeChange={changeApprovalMode}
+        />
+      );
+    });
+
+    const permissions = container.querySelector<HTMLSelectElement>('select[aria-label="Session permissions"]')!;
+    expect(permissions.value).toBe("full");
+    expect(permissions.disabled).toBe(true);
+    expect(container.querySelector<HTMLAnchorElement>('a[href="/sessions/parent"]')?.textContent).toBe("Parent work");
+    expect(changeApprovalMode).not.toHaveBeenCalled();
+    act(() => root.unmount());
+  });
 });
 
 function button(container: HTMLElement, label: string): HTMLButtonElement {
