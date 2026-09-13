@@ -846,11 +846,6 @@ export class SessionManager {
             await this.db.setSessionStatus(session.id, "approval", now);
             this.publish("status.changed", session.id, { status: "approval" });
           }
-          if (!session.transcriptSyncing && message.type === "question_request") {
-            const now = nowIso();
-            await this.db.setSessionStatus(session.id, "question", now);
-            this.publish("status.changed", session.id, { status: "question" });
-          }
           if (!session.transcriptSyncing && isPlanReadyMessage(message)) {
             const now = nowIso();
             await this.db.setSessionStatus(session.id, "plan_ready", now);
@@ -880,7 +875,7 @@ export class SessionManager {
         await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
       }
       if (result.complete && currentSession.transcriptSyncing) {
-        const latestQuestionMessage = await this.db.latestQuestionMessage(session.id);
+        const latestQuestionMessage = await this.db.latestQuestionMessage(session.id, true);
         const latestUserMessage = await this.db.latestUserMessage(session.id);
         const status = resolveSessionStatus(
           currentSession.status,
@@ -3699,6 +3694,7 @@ function preservePendingStatus(
     return "question";
   }
   if (latestPlanReadyMessage && !answeredPlanMessageIds.has(latestPlanReadyMessage.id)) return "plan_ready";
+  if (inferredStatus === "question") return "waiting";
   return inferredStatus;
 }
 

@@ -1,9 +1,79 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { StoredGitWorkspace } from "../src/db/database.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("does not promote a rejected transcript-only question to actionable status", async () => {
+    const path = await rejectedQuestionRollout();
+    const session = { ...managedSession(), codexJsonlPath: path, provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path } };
+    const setSessionStatus = vi.fn(async () => undefined);
+    const publish = vi.fn();
+    const manager = ingestManager(session, { setSessionStatus }, publish);
+
+    await manager.ingest();
+
+    expect(setSessionStatus).not.toHaveBeenCalled();
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: "message.appended",
+      sessionId: session.id,
+      payload: expect.objectContaining({ type: "question_request", text: expect.stringContaining("Runbook form") })
+    }));
+  });
+
+  it("restores question status only from app-server-backed transcript messages", async () => {
+    const path = await rejectedQuestionRollout();
+    const session = {
+      ...managedSession(),
+      status: "question" as const,
+      codexJsonlPath: path,
+      provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path },
+      transcriptSyncing: true
+    };
+    const latestQuestionMessage = vi.fn(async () => null);
+    const upsertSession = vi.fn(async () => undefined);
+    const manager = ingestManager(session, { latestQuestionMessage, upsertSession }, vi.fn());
+
+    await manager.ingest();
+
+    expect(latestQuestionMessage).toHaveBeenCalledWith(session.id, true);
+    expect(upsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, status: "waiting", transcriptSyncing: false }),
+      expect.any(String)
+    );
+
+    const authoritativeQuestion = {
+      id: "app-server-question",
+      sessionId: session.id,
+      sequence: 3,
+      type: "question_request" as const,
+      role: "system" as const,
+      timestamp: "2026-09-13T16:51:31.576Z",
+      text: "Codex needs your input",
+      payload: {
+        source: "codex_app_server",
+        method: "item/tool/requestUserInput",
+        question: { id: "12", questions: [] }
+      }
+    };
+    const activeUpsertSession = vi.fn(async () => undefined);
+    const activeManager = ingestManager(
+      { ...session, status: "waiting" },
+      { latestQuestionMessage: vi.fn(async () => authoritativeQuestion), upsertSession: activeUpsertSession },
+      vi.fn()
+    );
+
+    await activeManager.ingest();
+
+    expect(activeUpsertSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, status: "question", transcriptSyncing: false }),
+      expect.any(String)
+    );
+  });
+
   it("fully approves a pending request once without creating persistent rules", async () => {
     const session = { ...managedSession(), status: "approval" as const, approvalMode: "full" as const };
     const approval = pendingApproval(session.id);
@@ -401,6 +471,77 @@ function managedSession(): ManagedSession {
     pinned: false,
     archived: false
   };
+}
+
+function ingestManager(
+  session: ManagedSession,
+  overrides: Record<string, unknown>,
+  publish: ReturnType<typeof vi.fn>
+): SessionManager {
+  let sequence = 0;
+  const db = {
+    listSessions: vi.fn(async () => [session]),
+    listParserOffsets: vi.fn(async () => ({})),
+    hasParserOffset: vi.fn(async () => false),
+    getParserOffset: vi.fn(async () => 0),
+    nextSequence: vi.fn(async () => ++sequence),
+    appendMessage: vi.fn(async () => true),
+    deleteEchoedSentQueuedInputs: vi.fn(async () => 0),
+    listQueuedInputs: vi.fn(async () => []),
+    getSession: vi.fn(async () => session),
+    setParserOffset: vi.fn(async () => undefined),
+    latestQuestionMessage: vi.fn(async () => null),
+    latestQuestionAnswerMessage: vi.fn(async () => null),
+    latestUserMessage: vi.fn(async () => null),
+    latestPlanReadyMessage: vi.fn(async () => null),
+    latestTurnLifecycleMessage: vi.fn(async () => null),
+    upsertSession: vi.fn(async () => undefined),
+    ...overrides
+  };
+  return new SessionManager(
+    db as never,
+    { listRecent: vi.fn(async () => []), stop: vi.fn() } as never,
+    { publish } as never,
+    1_000,
+    1_000,
+    {} as never
+  );
+}
+
+async function rejectedQuestionRollout(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "muxpilot-rejected-question-"));
+  const path = join(dir, "rollout.jsonl");
+  await writeFile(path, [
+    JSON.stringify({
+      timestamp: "2026-09-13T16:51:31.576Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "request_user_input",
+        arguments: JSON.stringify({ questions: [{
+          header: "Runbook form",
+          id: "runbook_execution",
+          question: "Should each runbook include commands plus evidence-capture templates?",
+          options: [
+            { label: "Commands + evidence (Recommended)", description: "Make every gate executable." },
+            { label: "Procedural only", description: "Describe actions without commands." }
+          ]
+        }] }),
+        call_id: "call-rejected-question"
+      }
+    }),
+    JSON.stringify({
+      timestamp: "2026-09-13T16:51:31.702Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "call-rejected-question",
+        output: "request_user_input is unavailable in Default mode"
+      }
+    }),
+    ""
+  ].join("\n"));
+  return path;
 }
 
 function pendingApproval(sessionId: string) {
