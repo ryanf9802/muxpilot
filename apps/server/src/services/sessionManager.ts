@@ -948,6 +948,24 @@ export class SessionManager {
     return Boolean(session?.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id));
   }
 
+  async notificationPendingWorkReasons(sessionId: string): Promise<string[]> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) return [];
+    const reasons: string[] = [];
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) {
+      reasons.push("input_delivery");
+    }
+    if ((await this.db.listQueuedInputs(sessionId)).length > 0) reasons.push("queued_input");
+    if (await this.db.activeBtwExchange(sessionId)) reasons.push("btw_handoff");
+    if ((await this.db.listAgentWaits()).some((wait) => wait.actorSessionId === sessionId)) {
+      reasons.push("orchestration_continuation");
+    }
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) {
+      reasons.push("heavy_command");
+    }
+    return reasons;
+  }
+
   private withResourceUsage(session: ManagedSession): ManagedSession {
     if (!this.resourceUsageLookup) return session;
     return { ...session, resourceUsage: this.resourceUsageLookup.usageForSession(session.id) };

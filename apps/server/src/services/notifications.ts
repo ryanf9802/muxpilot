@@ -23,6 +23,12 @@ const DEFAULT_DUPLICATE_WINDOW_MS = 60_000;
 interface NotificationServiceOptions {
   duplicateWindowMs?: number;
   nowMs?: () => number;
+  pendingAutomaticWork?: (sessionId: string) => Promise<readonly string[]>;
+}
+
+interface NotificationSourceEvent {
+  id: string;
+  type: SessionEvent["type"];
 }
 
 export class NotificationService {
@@ -38,7 +44,7 @@ export class NotificationService {
   constructor(
     private readonly db: AppDatabase,
     private readonly events: EventBus,
-    private readonly logger: Pick<Logger, "warn" | "error">,
+    private readonly logger: Pick<Logger, "info" | "warn" | "error">,
     private readonly options: NotificationServiceOptions = {}
   ) {}
 
@@ -92,7 +98,7 @@ export class NotificationService {
           await this.reseedNotificationBaselines(sessions);
           return;
         }
-        await this.handleStatusTransition(session.id, session.status, sessions);
+        await this.handleStatusTransition(session.id, session.status, sessions, event);
       }
       return;
     }
@@ -106,10 +112,15 @@ export class NotificationService {
       return;
     }
 
-    await this.handleStatusTransition(event.sessionId, nextStatus);
+    await this.handleStatusTransition(event.sessionId, nextStatus, undefined, event);
   }
 
-  private async handleStatusTransition(sessionId: string, nextStatus: SessionStatus, providedSessions?: ManagedSession[]): Promise<void> {
+  private async handleStatusTransition(
+    sessionId: string,
+    nextStatus: SessionStatus,
+    providedSessions?: ManagedSession[],
+    sourceEvent?: NotificationSourceEvent
+  ): Promise<void> {
     const sessions = providedSessions ?? await this.notificationSessions(sessionId, nextStatus);
     const source = sessions.find((session) => session.id === sessionId);
     if (!source) return;
@@ -118,16 +129,75 @@ export class NotificationService {
     if (presentation.status === "completed") return;
     const previousStatus = this.knownTreeStatuses.get(root.id);
     this.recordHierarchy(sessions);
-    this.knownTreeStatuses.set(root.id, presentation.status);
     const nextTreeStatus = presentation.status;
-    if (!previousStatus || previousStatus === nextTreeStatus) return;
-    if (source.id !== root.id && source.status !== "approval") return;
+    if (!previousStatus || previousStatus === nextTreeStatus) {
+      this.knownTreeStatuses.set(root.id, nextTreeStatus);
+      return;
+    }
+    if (source.id !== root.id && source.status !== "approval") {
+      this.knownTreeStatuses.set(root.id, nextTreeStatus);
+      return;
+    }
 
     const settingsByDevice = await this.db.listNotificationSettings();
+    const candidates = Object.entries(settingsByDevice).flatMap(([deviceId, settings]) => {
+      const rules = matchingNotificationRules(settings, root.id, previousStatus, nextTreeStatus, { inputMode: source.inputMode });
+      return rules.length > 0 ? [{ deviceId, settings, rules }] : [];
+    });
+    if (candidates.length > 0 && isInputReadyStatus(nextTreeStatus) && this.options.pendingAutomaticWork) {
+      let suppressionReasons: readonly string[];
+      try {
+        suppressionReasons = await this.options.pendingAutomaticWork(root.id);
+      } catch (error) {
+        suppressionReasons = ["pending_work_lookup_failed"];
+        this.logger.warn({ err: error, sessionId: root.id, sourceEvent }, "notification pending-work lookup failed");
+      }
+      if (suppressionReasons.length > 0) {
+        const decisionId = sourceEvent?.id ?? eventId();
+        for (const candidate of candidates) {
+          this.logger.info?.({
+            notification: {
+              decision: "suppressed",
+              decisionId,
+              sessionId: root.id,
+              sourceSessionId: source.id,
+              deviceId: candidate.deviceId,
+              previousStatus,
+              status: nextTreeStatus,
+              rules: candidate.rules,
+              reasons: suppressionReasons,
+              sourceEvent
+            }
+          }, "notification suppressed for pending automatic work");
+        }
+        return;
+      }
+    }
+
+    this.knownTreeStatuses.set(root.id, nextTreeStatus);
     await Promise.all(
-      Object.entries(settingsByDevice).map(async ([deviceId, settings]) => {
-        const matchedRules = matchingNotificationRules(settings, root.id, previousStatus, nextTreeStatus, { inputMode: source.inputMode });
-        const rules = matchedRules.filter((rule) => this.shouldTrigger(deviceId, root.id, rule, nextTreeStatus));
+      candidates.map(async ({ deviceId, settings, rules: matchedRules }) => {
+        const rules: NotificationRuleType[] = [];
+        for (const rule of matchedRules) {
+          if (this.shouldTrigger(deviceId, root.id, rule, nextTreeStatus)) {
+            rules.push(rule);
+          } else {
+            this.logger.info?.({
+              notification: {
+                decision: "suppressed",
+                decisionId: sourceEvent?.id ?? eventId(),
+                sessionId: root.id,
+                sourceSessionId: source.id,
+                deviceId,
+                previousStatus,
+                status: nextTreeStatus,
+                rules: [rule],
+                reasons: ["duplicate_window"],
+                sourceEvent
+              }
+            }, "duplicate notification suppressed");
+          }
+        }
         if (rules.length === 0) return;
 
         const payload = notificationPayload(deviceId, root, source, previousStatus, nextTreeStatus, rules);
@@ -138,8 +208,23 @@ export class NotificationService {
           payload,
           timestamp: nowIso()
         };
+        this.logger.info?.({
+          notification: {
+            decision: "triggered",
+            notificationId: triggeredEvent.id,
+            sessionId: root.id,
+            sourceSessionId: source.id,
+            deviceId,
+            previousStatus,
+            status: nextTreeStatus,
+            rules,
+            sourceEvent,
+            pushEnabled: settings.delivery.pushEnabled
+          }
+        }, "notification triggered");
         this.events.publish(triggeredEvent);
-        if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload);
+        this.logger.info?.({ notificationId: triggeredEvent.id, sessionId: root.id, deviceId }, "notification event published");
+        if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload, triggeredEvent.id);
       })
     );
   }
@@ -205,21 +290,33 @@ export class NotificationService {
     return true;
   }
 
-  private async sendPushNotifications(deviceId: string, payload: NotificationTriggeredPayload): Promise<void> {
+  private async sendPushNotifications(deviceId: string, payload: NotificationTriggeredPayload, notificationId: string): Promise<void> {
     const subscriptions = await this.db.listPushSubscriptions(deviceId);
-    await Promise.all(
+    const outcomes = await Promise.all(
       subscriptions.map(async (subscription) => {
         try {
           await webPush.sendNotification(toWebPushSubscription(subscription), JSON.stringify(payload));
+          return "sent" as const;
         } catch (error) {
           if (isExpiredPushSubscriptionError(error)) {
             await this.db.deletePushSubscription(subscription.deviceId, subscription.endpoint);
+            return "expired" as const;
           } else {
-            this.logger.warn({ err: error }, "push notification send failed");
+            this.logger.warn({ err: error, notificationId, sessionId: payload.sessionId, deviceId }, "push notification send failed");
+            return "failed" as const;
           }
         }
       })
     );
+    this.logger.info?.({
+      notificationId,
+      sessionId: payload.sessionId,
+      deviceId,
+      subscriptionCount: subscriptions.length,
+      sentCount: outcomes.filter((outcome) => outcome === "sent").length,
+      expiredCount: outcomes.filter((outcome) => outcome === "expired").length,
+      failedCount: outcomes.filter((outcome) => outcome === "failed").length
+    }, "push notification delivery completed");
   }
 }
 

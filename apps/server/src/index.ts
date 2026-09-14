@@ -68,7 +68,6 @@ const gitWorkspaces = new GitWorkspaceManager(db, {
   sessionRoot: config.gitSessionRoot,
   publishCapability: (workspace) => gitWorkflowBroker.publishCapability(workspace)
 });
-const notifications = new NotificationService(db, events, app.log);
 const approvalReviewer = new ApprovalReviewer(config.codexHome, app.log);
 let dockerProxy: DockerResourceProxy | null = null;
 const userSystemd = await detectSessionScopeCapability(true);
@@ -185,6 +184,9 @@ const heavyCommands = new HeavyCommandService(
 );
 manager.setHeavyCommandQueue(heavyCommands);
 await heavyCommands.start(manager);
+const notifications = new NotificationService(db, events, app.log, {
+  pendingAutomaticWork: (sessionId) => manager.notificationPendingWorkReasons(sessionId)
+});
 const resourceGovernor = new ResourceGovernor({
   configured: sessionScopes.configured,
   enabled: sessionScopes.available,

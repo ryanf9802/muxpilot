@@ -7,6 +7,29 @@ import type { StoredGitWorkspace } from "../src/db/database.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("reports every source of automatic work that can resume an idle session", async () => {
+    const session = { ...managedSession(), gitWorkspace: { id: "workspace-1" } } as ManagedSession;
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async () => session),
+        listQueuedInputs: vi.fn(async () => [{ id: "queued-1" }]),
+        activeBtwExchange: vi.fn(async () => ({ id: "btw-1" })),
+        listAgentWaits: vi.fn(async () => [{ actorSessionId: session.id }])
+      },
+      deliveringInputSessionIds: new Set([session.id]),
+      processingQueuedSessionIds: new Set<string>(),
+      heavyCommandQueue: { hasActive: vi.fn(async () => true) }
+    }) as SessionManager;
+
+    await expect(manager.notificationPendingWorkReasons(session.id)).resolves.toEqual([
+      "input_delivery",
+      "queued_input",
+      "btw_handoff",
+      "orchestration_continuation",
+      "heavy_command"
+    ]);
+  });
+
   it("does not promote a rejected transcript-only question to actionable status", async () => {
     const path = await rejectedQuestionRollout();
     const session = { ...managedSession(), codexJsonlPath: path, provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path } };

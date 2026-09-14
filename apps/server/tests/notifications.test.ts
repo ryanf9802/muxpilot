@@ -122,6 +122,73 @@ describe("matchingNotificationRules", () => {
     });
   });
 
+  it("suppresses completion while automatic work is pending and alerts after the resumed task finishes", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    const info = vi.fn();
+    let pendingReasons: readonly string[] = ["heavy_command"];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({
+          "device-test": testNotificationSettings(["done_task", "status_change"])
+        }),
+        getSession: async () => testSession({ status: "waiting" }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { info, warn: () => undefined, error: () => undefined } as never,
+      { pendingAutomaticWork: async () => pendingReasons }
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    expect(triggeredEvents).toEqual([]);
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({
+      notification: expect.objectContaining({ decision: "suppressed", reasons: ["heavy_command"] })
+    }), "notification suppressed for pending automatic work");
+
+    pendingReasons = [];
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    expect(triggeredEvents).toHaveLength(1);
+    expect(triggeredEvents[0]?.payload).toMatchObject({ rules: ["done_task", "status_change"] });
+  });
+
+  it("suppresses completion when pending-work evidence cannot be read", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
+        getSession: async () => testSession({ status: "waiting" }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+      { pendingAutomaticWork: async () => { throw new Error("unavailable"); } }
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "waiting");
+    expect(triggeredEvents).toEqual([]);
+  });
+
   it("matches rules per device and sends push only when enabled", async () => {
     const events = new EventBus();
     const appendedEvents: SessionEvent[] = [];
