@@ -19,7 +19,13 @@ describe("DockerResourceProxy", () => {
     const daemonSocket = join(root, "daemon.sock");
     const proxySocket = join(root, "proxy.sock");
     const received: Array<{ url: string; payload: Record<string, any> }> = [];
+    let managedCreated = false;
     const daemon = createServer((request, response) => {
+      if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(managedCreated ? [{ Id: "managed-container", State: "created" }] : []));
+        return;
+      }
       if (request.url === "/events") {
         response.writeHead(200, { "content-type": "application/json" });
         response.write('{"status":"one"}\n');
@@ -34,6 +40,7 @@ describe("DockerResourceProxy", () => {
           payload: JSON.parse(Buffer.concat(chunks).toString("utf8"))
         });
         response.writeHead(request.url?.includes("/create") ? 201 : 200, { "content-type": "application/json" });
+        if (request.url?.includes("/create")) managedCreated = true;
         response.end(JSON.stringify(request.url?.includes("/create") ? { Id: "managed-container" } : {}));
       });
     });
@@ -122,6 +129,11 @@ describe("DockerResourceProxy", () => {
 
     const received: Array<Record<string, any>> = [];
     const daemon = createServer((request, response) => {
+      if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("[]");
+        return;
+      }
       const chunks: Buffer[] = [];
       request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       request.on("end", () => {
@@ -173,6 +185,11 @@ describe("DockerResourceProxy", () => {
     await writeFile(join(gitDir, "commondir"), "../..\n");
     let received: Record<string, any> = {};
     const daemon = createServer((request, response) => {
+      if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("[]");
+        return;
+      }
       const chunks: Buffer[] = [];
       request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
       request.on("end", () => {
@@ -202,6 +219,11 @@ describe("DockerResourceProxy", () => {
     const daemonSocket = join(root, "daemon.sock");
     const proxySocket = join(root, "proxy.sock");
     const daemon = createServer((request, response) => {
+      if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end("[]");
+        return;
+      }
       if (request.url?.endsWith("/start")) {
         response.writeHead(204);
         response.end();
@@ -292,6 +314,145 @@ describe("DockerResourceProxy", () => {
     await new Promise<void>((resolve) => daemon.close(() => resolve()));
   });
 
+  it("reconciles removals and natural exits while serializing concurrent starts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
+    roots.push(root);
+    const daemonSocket = join(root, "daemon.sock");
+    const proxySocket = join(root, "proxy.sock");
+    const containers = new Map<string, {
+      name: string;
+      state: string;
+      autoRemove: boolean;
+      limits: Record<string, any>;
+    }>();
+    const createdLimits: number[] = [];
+    let sequence = 0;
+    let listStatus = 200;
+    let rejectedUpdates = false;
+    let startCalls = 0;
+    const resolveContainer = (target: string) => [...containers.entries()].find(
+      ([id, container]) => id === target || id.startsWith(target) || container.name === target
+    );
+    const daemon = createServer((incoming, outgoing) => {
+      const path = incoming.url ?? "";
+      if (incoming.method === "GET" && path.startsWith("/containers/json")) {
+        outgoing.writeHead(listStatus, { "content-type": "application/json" });
+        outgoing.end(listStatus < 300 ? JSON.stringify([...containers].map(([Id, container]) => ({
+          Id, Names: [`/${container.name}`], State: container.state
+        }))) : JSON.stringify({ message: "daemon unavailable" }));
+        return;
+      }
+      const inspected = incoming.method === "GET" ? path.match(/\/containers\/([^/]+)\/json$/) : null;
+      if (inspected) {
+        const found = resolveContainer(decodeURIComponent(inspected[1]!));
+        outgoing.writeHead(found ? 200 : 404, { "content-type": "application/json" });
+        outgoing.end(found ? JSON.stringify({
+          HostConfig: found[1].limits,
+          State: { Status: found[1].state }
+        }) : JSON.stringify({ message: "missing" }));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      incoming.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      incoming.on("end", () => {
+        const payload = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+        if (incoming.method === "POST" && path.includes("/containers/create")) {
+          const id = `container-${++sequence}`;
+          const name = new URL(path, "http://docker").searchParams.get("name") ?? id;
+          const limits = payload.HostConfig as Record<string, any>;
+          containers.set(id, { name, state: "created", autoRemove: Boolean(limits.AutoRemove), limits });
+          createdLimits.push(limits.Memory);
+          outgoing.writeHead(201, { "content-type": "application/json" });
+          outgoing.end(JSON.stringify({ Id: id }));
+          return;
+        }
+        const update = incoming.method === "POST" ? path.match(/\/containers\/([^/]+)\/update$/) : null;
+        if (update) {
+          const found = resolveContainer(decodeURIComponent(update[1]!));
+          if (rejectedUpdates) {
+            outgoing.writeHead(500); outgoing.end("update rejected"); return;
+          }
+          if (!found) { outgoing.writeHead(404); outgoing.end(); return; }
+          found[1].limits = { ...found[1].limits, ...payload };
+          outgoing.writeHead(200); outgoing.end("{}"); return;
+        }
+        const start = incoming.method === "POST" ? path.match(/\/containers\/([^/]+)\/start$/) : null;
+        if (start) {
+          const found = resolveContainer(decodeURIComponent(start[1]!));
+          if (!found) { outgoing.writeHead(404); outgoing.end(); return; }
+          startCalls += 1;
+          found[1].state = "running";
+          if (found[1].autoRemove) containers.delete(found[0]);
+          outgoing.writeHead(204); outgoing.end(); return;
+        }
+        const remove = incoming.method === "DELETE" ? path.match(/\/containers\/([^/?]+)/) : null;
+        if (remove) {
+          const found = resolveContainer(decodeURIComponent(remove[1]!));
+          if (found) containers.delete(found[0]);
+          outgoing.writeHead(found ? 204 : 404); outgoing.end(); return;
+        }
+        outgoing.writeHead(404); outgoing.end();
+      });
+    });
+    await new Promise<void>((resolve) => daemon.listen(daemonSocket, resolve));
+    const proxy = new DockerResourceProxy({
+      socketPath: proxySocket, daemonSocketPath: daemonSocket,
+      memorySoftPercent: 15, memoryHardPercent: 20, cpuPercent: 25,
+      reconciliationIntervalMs: 20
+    }, { info: vi.fn(), warn: vi.fn() });
+    await proxy.start();
+
+    for (const name of ["ephemeral-one", "ephemeral-two"]) {
+      expect((await request(proxySocket, "POST", `/v1.47/containers/create?name=${name}`, {
+        Image: "example", HostConfig: { AutoRemove: true }
+      })).status).toBe(201);
+      expect((await request(proxySocket, "POST", `/v1.47/containers/${name}/start`)).status).toBe(204);
+    }
+    expect(createdLimits[1]).toBe(createdLimits[0]);
+
+    await Promise.all(["worker-one", "worker-two"].map((name) => request(
+      proxySocket, "POST", `/v1.47/containers/create?name=${name}`, { Image: "example" }
+    )));
+    await Promise.all(["worker-one", "worker-two"].map((name) => request(
+      proxySocket, "POST", `/v1.47/containers/${name}/start`
+    )));
+    expect(startCalls).toBe(4);
+    const running = [...containers.values()].filter((container) => container.state === "running");
+    expect(running).toHaveLength(2);
+    expect(running[0]?.limits.Memory).toBe(Math.floor(createdLimits[0]! / 2));
+    expect(running[1]?.limits.Memory).toBe(Math.floor(createdLimits[0]! / 2));
+
+    running[0]!.state = "exited";
+    await waitFor(() => running[1]?.limits.Memory === createdLimits[0]);
+    running[1]!.state = "exited";
+    expect((await request(proxySocket, "POST", "/v1.47/containers/create?name=after-exits", {
+      Image: "example"
+    })).status).toBe(201);
+    expect(createdLimits.at(-1)).toBe(createdLimits[0]);
+    expect((await request(proxySocket, "POST", "/v1.47/containers/after-exits/start")).status).toBe(204);
+
+    const vanished = resolveContainer("after-exits");
+    expect(vanished).toBeDefined();
+    containers.delete(vanished![0]);
+    expect((await request(proxySocket, "DELETE", "/v1.47/containers/after-exits?force=true")).status).toBe(404);
+    expect((await request(proxySocket, "POST", "/v1.47/containers/create?name=after-404", {
+      Image: "example"
+    })).status).toBe(201);
+    expect(createdLimits.at(-1)).toBe(createdLimits[0]);
+
+    listStatus = 500;
+    expect((await request(proxySocket, "POST", "/v1.47/containers/create?name=blocked", { Image: "example" })).status).toBe(502);
+    listStatus = 200;
+    rejectedUpdates = true;
+    const startCountBeforeFailure = startCalls;
+    expect((await request(proxySocket, "POST", "/v1.47/containers/create?name=update-fails", { Image: "example" })).status).toBe(201);
+    expect((await request(proxySocket, "POST", "/v1.47/containers/update-fails/start")).status).toBe(502);
+    expect(startCalls).toBe(startCountBeforeFailure);
+
+    await proxy.close();
+    await new Promise<void>((resolve) => daemon.close(() => resolve()));
+  });
+
   it("reaps containers whose heavyweight owner disappeared", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-docker-proxy-"));
     roots.push(root);
@@ -304,12 +465,16 @@ describe("DockerResourceProxy", () => {
       state: "running", heartbeatAt: new Date().toISOString()
     }));
     const deleted: string[] = [];
+    let orphanPresent = true;
     const daemon = createServer((request, response) => {
       if (request.method === "GET" && request.url?.startsWith("/containers/json")) {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ Id: "orphan", State: "created", Labels: { "com.muxpilot.managed": "true", "com.muxpilot.heavy-run": runId } }]));
+        response.end(JSON.stringify(orphanPresent
+          ? [{ Id: "orphan", State: "created", Labels: { "com.muxpilot.managed": "true", "com.muxpilot.heavy-run": runId } }]
+          : []));
       } else if (request.method === "DELETE") {
         deleted.push(request.url ?? "");
+        orphanPresent = false;
         response.writeHead(204); response.end();
       } else { response.writeHead(200); response.end("{}"); }
     });
@@ -372,4 +537,12 @@ function responseHeaders(socketPath: string, path: string): Promise<number> {
     next.once("error", reject);
     next.end();
   });
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition was not met before timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }

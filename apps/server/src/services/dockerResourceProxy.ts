@@ -22,6 +22,7 @@ export interface DockerResourceProxyConfig {
   cpuPercent: number;
   pidsLimit?: number;
   lifecycleStartTimeoutMs?: number;
+  reconciliationIntervalMs?: number;
   heavyValidationDir?: string;
   orphanReapIntervalMs?: number;
   orphanGraceMs?: number;
@@ -31,6 +32,7 @@ interface ManagedContainer {
   id: string;
   running: boolean;
   requested: DockerLimits;
+  aliases: Set<string>;
 }
 
 interface DockerLimits {
@@ -63,6 +65,8 @@ export class DockerResourceProxy {
   private readonly daemonSocketPath: string;
   private readonly containers = new Map<string, ManagedContainer>();
   private readonly orphanFirstSeen = new Map<string, number>();
+  private accountingQueue: Promise<void> = Promise.resolve();
+  private reconciliationTimer: NodeJS.Timeout | null = null;
   private orphanTimer: NodeJS.Timeout | null = null;
   private server = createServer((request, response) => void this.handle(request, response));
 
@@ -83,18 +87,29 @@ export class DockerResourceProxy {
       });
     });
     await chmod(this.config.socketPath, 0o600);
+    this.reconciliationTimer = setInterval(
+      () => void this.serializeAccounting(() => this.reconcileAndRebalance()).catch((error) => {
+        this.logger.warn({ err: error }, "Docker container accounting reconciliation failed");
+      }),
+      this.config.reconciliationIntervalMs ?? 15_000
+    );
     if (this.config.heavyValidationDir) {
-      this.orphanTimer = setInterval(() => void this.reapOrphans(), this.config.orphanReapIntervalMs ?? 15_000);
-      void this.reapOrphans();
+      const reap = () => void this.serializeAccounting(() => this.reapOrphans()).catch((error) => {
+        this.logger.warn({ err: error }, "Docker heavyweight orphan reaper failed");
+      });
+      this.orphanTimer = setInterval(reap, this.config.orphanReapIntervalMs ?? 15_000);
+      reap();
     }
     this.logger.info({ socketPath: this.config.socketPath }, "Docker resource proxy started");
   }
 
   async close(): Promise<void> {
+    if (this.reconciliationTimer) clearInterval(this.reconciliationTimer);
     if (this.orphanTimer) clearInterval(this.orphanTimer);
     const closed = new Promise<void>((resolve) => this.server.close(() => resolve()));
     this.server.closeAllConnections();
     await closed;
+    await this.accountingQueue.catch(() => undefined);
     await rm(this.config.socketPath, { force: true });
   }
 
@@ -105,23 +120,17 @@ export class DockerResourceProxy {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       if (request.method === "POST" && CREATE_PATH.test(request.url ?? "")) {
-        await this.handleCreate(request, response);
+        await this.serializeAccounting(() => this.handleCreate(request, response));
         return;
       }
       if (request.method === "POST" && UPDATE_PATH.test(request.url ?? "")) {
-        await this.handleUpdate(request, response);
+        await this.serializeAccounting(() => this.handleUpdate(request, response));
         return;
       }
-      const start = request.method === "POST" && (request.url ?? "").match(ACTION_PATH)?.[2] === "start";
-      if (start) {
-        const timeoutMs = this.config.lifecycleStartTimeoutMs ?? 60_000;
-        const startedAt = Date.now();
-        const forwarded = await forwardRequest(this.daemonSocketPath, request, undefined, timeoutMs);
-        const id = (request.url ?? "").match(ACTION_PATH)?.[1];
-        if (forwarded.statusCode < 300 && id) await this.waitForStarted(id, Math.max(1, timeoutMs - (Date.now() - startedAt)));
-        response.writeHead(forwarded.statusCode, forwarded.headers);
-        response.end(forwarded.body);
-        if (forwarded.statusCode < 300) this.observeLifecycle(request);
+      const lifecycle = request.method === "POST" ? (request.url ?? "").match(ACTION_PATH) : null;
+      const deleted = request.method === "DELETE" ? (request.url ?? "").match(DELETE_PATH) : null;
+      if (lifecycle || deleted) {
+        await this.serializeAccounting(() => this.handleLifecycle(request, response, lifecycle, deleted));
       } else {
         const attachTimeoutMs = ATTACH_PATH.test(request.url ?? "")
           ? this.config.lifecycleStartTimeoutMs ?? 60_000
@@ -130,7 +139,7 @@ export class DockerResourceProxy {
           this.daemonSocketPath,
           request,
           response,
-          () => this.observeLifecycle(request),
+          () => undefined,
           attachTimeoutMs
         );
       }
@@ -145,6 +154,7 @@ export class DockerResourceProxy {
   }
 
   private async handleCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    await this.reconcile();
     const body = await readBody(request);
     const payload = JSON.parse(body.toString("utf8")) as DockerCreatePayload;
     const heavyRun = headerValue(request, "x-muxpilot-heavy-run");
@@ -171,58 +181,151 @@ export class DockerResourceProxy {
     response.end(forwarded.body);
     if (forwarded.statusCode >= 200 && forwarded.statusCode < 300) {
       const result = JSON.parse(forwarded.body.toString("utf8")) as { Id?: string };
-      if (result.Id) this.containers.set(result.Id, { id: result.Id, running: false, requested });
+      if (result.Id) this.containers.set(result.Id, {
+        id: result.Id, running: false, requested, aliases: new Set([result.Id])
+      });
     }
   }
 
-  private observeLifecycle(request: IncomingMessage): void {
-    const url = request.url ?? "";
-    const action = url.match(ACTION_PATH);
-    if (action) {
-      const container = this.containers.get(action[1]!);
-      if (container) {
-        container.running = action[2] === "start" || action[2] === "restart";
-        void this.rebalance();
+  private async handleLifecycle(
+    request: IncomingMessage,
+    response: ServerResponse,
+    action: RegExpMatchArray | null,
+    deleted: RegExpMatchArray | null
+  ): Promise<void> {
+    await this.reconcile();
+    const target = action?.[1] ?? deleted?.[1];
+    const managed = target ? this.findContainer(target) : undefined;
+    const operation = action?.[2];
+    if (managed && (operation === "start" || operation === "restart") && !managed.running) {
+      await this.rebalance(managed.id);
+    }
+    const timeoutMs = operation === "start" ? this.config.lifecycleStartTimeoutMs ?? 60_000 : undefined;
+    const startedAt = Date.now();
+    const forwarded = await forwardRequest(this.daemonSocketPath, request, undefined, timeoutMs);
+    try {
+      if (forwarded.statusCode < 300 && operation === "start" && target) {
+        await this.waitForStarted(target, Math.max(1, (timeoutMs ?? 60_000) - (Date.now() - startedAt)));
       }
-      return;
+    } catch (error) {
+      await this.reconcileAndRebalance();
+      throw error;
     }
-    if (request.method === "DELETE") {
-      const deleted = url.match(DELETE_PATH);
-      if (deleted && this.containers.delete(deleted[1]!)) void this.rebalance();
+    if ((forwarded.statusCode < 300 || (deleted && forwarded.statusCode === 404)) && managed && deleted) {
+      this.containers.delete(managed.id);
     }
+    if (forwarded.statusCode < 300 || forwarded.statusCode === 404) await this.reconcileAndRebalance();
+    else if (managed && (operation === "start" || operation === "restart")) await this.rebalance();
+    response.writeHead(forwarded.statusCode, forwarded.headers);
+    response.end(forwarded.body);
   }
 
   private async handleUpdate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    await this.reconcile();
     const id = (request.url ?? "").match(UPDATE_PATH)?.[1];
-    const managed = id ? this.containers.get(id) : null;
+    const managed = id ? this.findContainer(id) : null;
     if (!managed) {
       await forwardStreaming(this.daemonSocketPath, request, response, () => undefined);
       return;
     }
     const body = await readBody(request);
     const payload = JSON.parse(body.toString("utf8")) as DockerLimits & Record<string, unknown>;
-    managed.requested = { ...managed.requested, ...pickLimits(payload) };
+    const requested = { ...managed.requested, ...pickLimits(payload) };
     const running = Math.max(1, this.runningCount());
     const guarded = {
       ...payload,
-      ...effectiveLimits(managed.requested, this.poolLimits(running))
+      ...effectiveLimits(requested, this.poolLimits(running))
     };
     const forwarded = await forwardRequest(this.daemonSocketPath, request, Buffer.from(JSON.stringify(guarded)));
     response.writeHead(forwarded.statusCode, forwarded.headers);
     response.end(forwarded.body);
+    if (forwarded.statusCode < 300) managed.requested = requested;
   }
 
-  private async rebalance(): Promise<void> {
-    const running = [...this.containers.values()].filter((container) => container.running);
+  private async rebalance(includeId?: string, allowMissingRetry = true): Promise<void> {
+    const running = [...this.containers.values()].filter((container) => container.running || container.id === includeId);
     const pool = this.poolLimits(Math.max(1, running.length));
-    await Promise.all(running.map((container) => this.updateContainer(
-      container.id,
-      effectiveLimits(container.requested, pool)
-    ).catch((error) => this.logger.warn({ err: error, containerId: container.id }, "Docker container rebalance failed"))));
+    for (const container of running) {
+      const result = await this.updateContainer(container.id, effectiveLimits(container.requested, pool));
+      if (result === "missing") {
+        if (!allowMissingRetry) throw new Error(`Docker container ${container.id} remained missing during resource rebalance`);
+        await this.reconcile();
+        return this.rebalance(includeId && this.containers.has(includeId) ? includeId : undefined, false);
+      }
+    }
   }
 
-  private async updateContainer(id: string, limits: DockerLimits): Promise<void> {
-    await rawDockerRequest(this.daemonSocketPath, "POST", `/containers/${encodeURIComponent(id)}/update`, Buffer.from(JSON.stringify(limits)));
+  private async updateContainer(id: string, limits: DockerLimits): Promise<"updated" | "missing"> {
+    const response = await rawDockerRequest(
+      this.daemonSocketPath, "POST", `/containers/${encodeURIComponent(id)}/update`, Buffer.from(JSON.stringify(limits)), {}, 5_000
+    );
+    if (response.statusCode === 404) return "missing";
+    if (response.statusCode >= 300) throw new Error(`Docker rejected resource rebalance for ${id} with HTTP ${response.statusCode}`);
+    return "updated";
+  }
+
+  private serializeAccounting<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.accountingQueue.then(operation, operation);
+    this.accountingQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private findContainer(target: string): ManagedContainer | undefined {
+    const exact = [...this.containers.values()].find((container) => container.aliases.has(target));
+    if (exact) return exact;
+    const partial = [...this.containers.values()].filter((container) => container.id.startsWith(target));
+    return partial.length === 1 ? partial[0] : undefined;
+  }
+
+  private async reconcileAndRebalance(): Promise<void> {
+    const changed = await this.reconcile();
+    if (changed) await this.rebalance();
+  }
+
+  private async reconcile(): Promise<boolean> {
+    const filters = encodeURIComponent(JSON.stringify({ label: ["com.muxpilot.managed=true"] }));
+    const response = await rawDockerRequest(
+      this.daemonSocketPath, "GET", `/containers/json?all=1&filters=${filters}`, Buffer.alloc(0), {}, 5_000
+    );
+    if (response.statusCode >= 300) throw new Error(`Docker container reconciliation failed with HTTP ${response.statusCode}`);
+    const listed: unknown = JSON.parse(response.body.toString("utf8"));
+    if (!Array.isArray(listed)) throw new Error("Docker container reconciliation returned a malformed listing");
+    const next = new Map<string, ManagedContainer>();
+    for (const value of listed) {
+      if (!value || typeof value !== "object") throw new Error("Docker container reconciliation returned a malformed entry");
+      const item = value as { Id?: unknown; Names?: unknown; State?: unknown };
+      if (typeof item.Id !== "string" || typeof item.State !== "string") {
+        throw new Error("Docker container reconciliation returned a malformed entry");
+      }
+      const existing = this.containers.get(item.Id);
+      let requested = existing?.requested;
+      if (!requested) {
+        const inspected = await rawDockerRequest(
+          this.daemonSocketPath, "GET", `/containers/${encodeURIComponent(item.Id)}/json`, Buffer.alloc(0), {}, 5_000
+        );
+        if (inspected.statusCode >= 300) throw new Error(`Docker container inspection failed for ${item.Id} with HTTP ${inspected.statusCode}`);
+        const detail = JSON.parse(inspected.body.toString("utf8")) as { HostConfig?: DockerLimits };
+        if (!detail || typeof detail !== "object" || !detail.HostConfig || typeof detail.HostConfig !== "object") {
+          throw new Error(`Docker container inspection returned malformed limits for ${item.Id}`);
+        }
+        requested = pickLimits(detail.HostConfig);
+      }
+      const aliases = new Set<string>([item.Id]);
+      if (Array.isArray(item.Names)) {
+        for (const name of item.Names) if (typeof name === "string") aliases.add(name.replace(/^\//, ""));
+      }
+      next.set(item.Id, {
+        id: item.Id,
+        running: ["running", "paused", "restarting"].includes(item.State),
+        requested,
+        aliases
+      });
+    }
+    const before = [...this.containers.values()].map(({ id, running }) => `${id}:${running}`).sort().join("|");
+    const after = [...next.values()].map(({ id, running }) => `${id}:${running}`).sort().join("|");
+    this.containers.clear();
+    for (const [id, container] of next) this.containers.set(id, container);
+    return before !== after;
   }
 
   private runningCount(): number {
@@ -243,33 +346,32 @@ export class DockerResourceProxy {
   }
 
   private async reapOrphans(): Promise<void> {
-    try {
-      const filters = encodeURIComponent(JSON.stringify({ label: ["com.muxpilot.managed=true", "com.muxpilot.heavy-run"] }));
-      const response = await rawDockerRequest(this.daemonSocketPath, "GET", `/containers/json?all=1&filters=${filters}`, Buffer.alloc(0), {}, 5_000);
-      if (response.statusCode >= 300) return;
-      const containers = JSON.parse(response.body.toString("utf8")) as Array<{ Id?: string; Labels?: Record<string, string>; State?: string }>;
-      const present = new Set<string>();
-      for (const container of containers) {
-        const id = container.Id;
-        const runId = container.Labels?.["com.muxpilot.heavy-run"];
-        if (!id || !runId || !HEAVY_RUN_ID.test(runId)) continue;
-        present.add(id);
-        const abnormal = await this.abnormallyEnded(runId);
-        if (!abnormal) { this.orphanFirstSeen.delete(id); continue; }
-        const firstSeen = this.orphanFirstSeen.get(id) ?? Date.now();
-        this.orphanFirstSeen.set(id, firstSeen);
-        if (Date.now() - firstSeen < (this.config.orphanGraceMs ?? 60_000)) continue;
-        const removed = await rawDockerRequest(this.daemonSocketPath, "DELETE", `/containers/${encodeURIComponent(id)}?force=true`, Buffer.alloc(0), {}, 5_000);
-        if (removed.statusCode < 300 || removed.statusCode === 404) {
-          this.orphanFirstSeen.delete(id);
-          this.containers.delete(id);
-          this.logger.info({ containerId: id, runId }, "Removed orphaned heavyweight container");
-        }
+    const filters = encodeURIComponent(JSON.stringify({ label: ["com.muxpilot.managed=true", "com.muxpilot.heavy-run"] }));
+    const response = await rawDockerRequest(this.daemonSocketPath, "GET", `/containers/json?all=1&filters=${filters}`, Buffer.alloc(0), {}, 5_000);
+    if (response.statusCode >= 300) throw new Error(`Docker orphan listing failed with HTTP ${response.statusCode}`);
+    const containers = JSON.parse(response.body.toString("utf8")) as Array<{ Id?: string; Labels?: Record<string, string>; State?: string }>;
+    const present = new Set<string>();
+    let removedContainer = false;
+    for (const container of containers) {
+      const id = container.Id;
+      const runId = container.Labels?.["com.muxpilot.heavy-run"];
+      if (!id || !runId || !HEAVY_RUN_ID.test(runId)) continue;
+      present.add(id);
+      const abnormal = await this.abnormallyEnded(runId);
+      if (!abnormal) { this.orphanFirstSeen.delete(id); continue; }
+      const firstSeen = this.orphanFirstSeen.get(id) ?? Date.now();
+      this.orphanFirstSeen.set(id, firstSeen);
+      if (Date.now() - firstSeen < (this.config.orphanGraceMs ?? 60_000)) continue;
+      const removed = await rawDockerRequest(this.daemonSocketPath, "DELETE", `/containers/${encodeURIComponent(id)}?force=true`, Buffer.alloc(0), {}, 5_000);
+      if (removed.statusCode < 300 || removed.statusCode === 404) {
+        this.orphanFirstSeen.delete(id);
+        this.containers.delete(id);
+        removedContainer = true;
+        this.logger.info({ containerId: id, runId }, "Removed orphaned heavyweight container");
       }
-      for (const id of this.orphanFirstSeen.keys()) if (!present.has(id)) this.orphanFirstSeen.delete(id);
-    } catch (error) {
-      this.logger.warn({ err: error }, "Docker heavyweight orphan reaper failed");
     }
+    for (const id of this.orphanFirstSeen.keys()) if (!present.has(id)) this.orphanFirstSeen.delete(id);
+    if (removedContainer) await this.reconcileAndRebalance();
   }
 
   private async abnormallyEnded(runId: string): Promise<boolean> {
