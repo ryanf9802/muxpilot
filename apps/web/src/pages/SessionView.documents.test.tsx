@@ -252,6 +252,35 @@ describe("DocumentsModal", () => {
     });
     expect(target?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
     expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>(".documents-sidebar-toggle button"))
+        .find((button) => button.textContent === "Outline")?.click();
+    });
+    const outline = container.querySelector(".documents-outline");
+    const outlineButtons = Array.from(outline?.querySelectorAll<HTMLButtonElement>("button") ?? []);
+    expect(outline?.getAttribute("aria-label")).toBe("Outline for brief.md");
+    expect(outlineButtons.map((button) => [button.textContent, button.dataset.level])).toEqual([
+      ["SMS legal review brief", "1"],
+      ["2.1 Included use", "2"],
+      ["Repeated heading", "2"],
+      ["Repeated heading", "2"]
+    ]);
+
+    const headings = Array.from(container.querySelectorAll<HTMLElement>(".documents-viewer-content h1, .documents-viewer-content h2"));
+    headings.forEach((heading, index) => Object.defineProperty(heading, "offsetTop", { configurable: true, value: index * 120 }));
+    const viewer = container.querySelector<HTMLElement>(".documents-viewer");
+    if (viewer) viewer.scrollTop = 140;
+    await act(async () => {
+      viewer?.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(outline?.querySelector("button[aria-current='location']")?.textContent).toBe("2.1 Included use");
+
+    await act(async () => {
+      outlineButtons.at(-1)?.click();
+    });
+    expect(headings.at(-1)?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    expect(outlineButtons.at(-1)?.getAttribute("aria-current")).toBe("location");
     act(() => root.unmount());
   });
 

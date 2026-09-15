@@ -170,6 +170,7 @@ interface TranscriptInteractionOutcome {
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
 export interface SessionDocumentReference { scopeId: string; name: string; path: string; fragment?: string }
+interface DocumentOutlineItem { id: string; label: string; level: number }
 export type MarkdownLinkTarget =
   | { kind: "link" }
   | { kind: "file"; path: string; document: SessionDocumentReference | null };
@@ -986,7 +987,11 @@ export function DocumentsModal({
   const [contentError, setContentError] = useState("");
   const [navigationError, setNavigationError] = useState("");
   const [pendingFragment, setPendingFragment] = useState<{ name: string; fragment: string } | null>(null);
+  const [sidebarView, setSidebarView] = useState<"documents" | "outline">("documents");
+  const [outline, setOutline] = useState<DocumentOutlineItem[]>([]);
+  const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const viewerRef = useRef<HTMLElement>(null);
+  const outlineRef = useRef<HTMLElement>(null);
   const displayedDocumentRef = useRef<string | null>(null);
   const appliedRequestedDocumentRef = useRef<string | null>(null);
 
@@ -1047,6 +1052,43 @@ export function DocumentsModal({
   const contentReady = selectedContentKey !== null && loadedContentKey === selectedContentKey;
   const viewerBusy = Boolean(selected && !contentError && (contentLoading || !contentReady));
 
+  function syncActiveOutline(items = outline) {
+    const viewer = viewerRef.current;
+    if (!viewer || items.length === 0) {
+      setActiveOutlineId(null);
+      return;
+    }
+    const threshold = viewer.scrollTop + 32;
+    let active = items[0]!.id;
+    for (const item of items) {
+      const heading = document.getElementById(item.id);
+      if (!heading || !viewer.contains(heading)) continue;
+      if (heading.offsetTop <= threshold) active = item.id;
+      else break;
+    }
+    setActiveOutlineId(active);
+  }
+
+  useLayoutEffect(() => {
+    if (!contentReady || !viewerRef.current) return;
+    const items = Array.from(
+      viewerRef.current.querySelectorAll<HTMLElement>(".documents-viewer-content h1[id], .documents-viewer-content h2[id], .documents-viewer-content h3[id], .documents-viewer-content h4[id], .documents-viewer-content h5[id], .documents-viewer-content h6[id]")
+    ).map((heading) => ({
+      id: heading.id,
+      label: heading.textContent?.trim() || heading.id,
+      level: Number(heading.tagName.slice(1))
+    }));
+    setOutline(items);
+    syncActiveOutline(items);
+  }, [contentReady, loadedContentKey, selectedDocumentKey]);
+
+  useEffect(() => {
+    if (sidebarView !== "outline" || !activeOutlineId || !outlineRef.current) return;
+    const activeButton = Array.from(outlineRef.current.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.dataset.outlineId === activeOutlineId);
+    activeButton?.scrollIntoView({ block: "nearest" });
+  }, [activeOutlineId, sidebarView]);
+
   useLayoutEffect(() => {
     if (!contentReady || !selectedDocumentKey || !viewerRef.current) return;
     if (pendingFragment?.name === selected) {
@@ -1068,6 +1110,10 @@ export function DocumentsModal({
   function selectDocument(name: string, fragment?: string) {
     setNavigationError("");
     setPendingFragment(fragment ? { name, fragment } : null);
+    if (name !== selected) {
+      setOutline([]);
+      setActiveOutlineId(null);
+    }
     setSelected(name);
   }
 
@@ -1080,6 +1126,7 @@ export function DocumentsModal({
       .find((candidate) => candidate.id === fragment);
     if (heading) {
       heading.scrollIntoView({ block: "start" });
+      setActiveOutlineId(fragment);
       setNavigationError("");
     } else {
       setNavigationError(`Section #${fragment} was not found in ${selected}.`);
@@ -1097,15 +1144,39 @@ export function DocumentsModal({
       {listError ? <p className="error-text" role="alert">{listError}</p> : null}
       {listLoading && documents.length === 0 ? <p className="muted">Loading documents…</p> : documents.length === 0 && !listError ? <p className="muted">This session has no documents yet.</p> : (
         <div className="documents-layout">
-          <nav className="documents-list" aria-label="Session documents">
-            {documents.map((document) => (
-              <button key={document.name} type="button" data-active={selected === document.name || undefined} aria-current={selected === document.name ? "page" : undefined} onClick={() => selectDocument(document.name)}>
-                <FileText size={15} aria-hidden="true" />
-                <span><strong>{document.name}</strong><small>{formatDocumentBytes(document.sizeBytes)}</small></span>
-              </button>
-            ))}
-          </nav>
-          <article ref={viewerRef} className="documents-viewer" aria-label={selected ?? "Document viewer"} aria-busy={viewerBusy || undefined}>
+          <aside className="documents-sidebar">
+            <div className="documents-sidebar-toggle" aria-label="Document navigation">
+              <button type="button" aria-pressed={sidebarView === "documents"} onClick={() => setSidebarView("documents")}>Documents</button>
+              <button type="button" aria-pressed={sidebarView === "outline"} onClick={() => setSidebarView("outline")}>Outline</button>
+            </div>
+            {sidebarView === "documents" ? (
+              <nav className="documents-list" aria-label="Session documents">
+                {documents.map((document) => (
+                  <button key={document.name} type="button" data-active={selected === document.name || undefined} aria-current={selected === document.name ? "page" : undefined} onClick={() => selectDocument(document.name)}>
+                    <FileText size={15} aria-hidden="true" />
+                    <span><strong>{document.name}</strong><small>{formatDocumentBytes(document.sizeBytes)}</small></span>
+                  </button>
+                ))}
+              </nav>
+            ) : (
+              <nav ref={outlineRef} className="documents-outline" aria-label={`Outline for ${selected ?? "document"}`}>
+                {outline.length > 0 ? outline.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    data-outline-id={item.id}
+                    data-level={item.level}
+                    data-active={activeOutlineId === item.id || undefined}
+                    aria-current={activeOutlineId === item.id ? "location" : undefined}
+                    onClick={() => navigateToFragment(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                )) : <p>{viewerBusy ? "Loading outline…" : "This document has no headings."}</p>}
+              </nav>
+            )}
+          </aside>
+          <article ref={viewerRef} className="documents-viewer" aria-label={selected ?? "Document viewer"} aria-busy={viewerBusy || undefined} onScroll={() => syncActiveOutline()}>
             {viewerBusy ? (
               <div className="documents-loading-indicator" role="status" aria-live="polite">
                 <span><LoaderCircle className="spin" size={16} aria-hidden="true" /></span>
