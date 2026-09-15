@@ -11,10 +11,12 @@ vi.mock("../utils/clipboard.js", () => ({ copyText: copyTextMock }));
 
 beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  HTMLElement.prototype.scrollIntoView = vi.fn();
 });
 
 afterEach(() => {
   copyTextMock.mockClear();
+  vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
   vi.restoreAllMocks();
   vi.useRealTimers();
   document.body.innerHTML = "";
@@ -203,16 +205,86 @@ describe("DocumentsModal", () => {
 
     expect(container.querySelector(".documents-viewer")?.hasAttribute("aria-busy")).toBe(false);
     expect(container.querySelector(".documents-loading-indicator")).toBeNull();
-    expect(viewer?.scrollTop).toBe(0);
-    expect(container.querySelector(".documents-viewer h2")?.textContent).toBe("Current plan");
+    const currentPlanHeading = container.querySelector<HTMLElement>(".documents-viewer h2");
+    expect(currentPlanHeading?.textContent).toBe("Current plan");
+    expect(currentPlanHeading?.id).toBe("current-plan");
+    expect(currentPlanHeading?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
     expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
+    act(() => root.unmount());
+  });
+
+  it("navigates a numbered table of contents within the current document", async () => {
+    const documentSummary = { name: "brief.md", sizeBytes: 100, updatedAt: "2026-09-15T00:00:00.000Z" };
+    vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: {
+        ...documentSummary,
+        content: [
+          "# SMS legal review brief",
+          "",
+          "[Included use](#21-included-use)",
+          "",
+          "## 2.1 Included use",
+          "",
+          "## Repeated heading",
+          "",
+          "## Repeated heading"
+        ].join("\n")
+      }
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[documentSummary]} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(Array.from(container.querySelectorAll(".documents-viewer-content h2"), (heading) => heading.id)).toEqual([
+      "21-included-use",
+      "repeated-heading",
+      "repeated-heading-1"
+    ]);
+    const target = document.getElementById("21-included-use");
+    await act(async () => {
+      container.querySelector<HTMLAnchorElement>('a[href="#21-included-use"]')?.click();
+    });
+    expect(target?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it("reports a missing section without leaving the document viewer", async () => {
+    const documentSummary = { name: "brief.md", sizeBytes: 50, updatedAt: "2026-09-15T00:00:00.000Z" };
+    vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: { ...documentSummary, content: "[Missing](#missing-section) [Missing doc](missing.md)\n\n## Present section" }
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[documentSummary]} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container.querySelector<HTMLAnchorElement>('a[href="#missing-section"]')?.click();
+    });
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Section #missing-section was not found in brief.md.");
+    await act(async () => {
+      container.querySelector<HTMLAnchorElement>('a[href="missing.md"]')?.click();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Document missing.md was not found.");
     act(() => root.unmount());
   });
 
   it("shows cross-session context in the same modal and returns to current documents", async () => {
     const documents = [{ name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-01T00:00:00.000Z" }];
     vi.spyOn(api, "sessionDocument").mockResolvedValue({
-      document: { ...documents[0]!, content: "# Remote plan" }
+      document: { ...documents[0]!, content: "# Remote plan\n\n## Review items" }
     });
     const onReturnToCurrent = vi.fn();
     const container = document.createElement("div");
@@ -228,6 +300,8 @@ describe("DocumentsModal", () => {
           currentSession={false}
           documents={documents}
           requestedDocument="plan.md"
+          requestedFragment="review-items"
+          requestedNavigation={1}
           listLoading={false}
           listError=""
           onReturnToCurrent={onReturnToCurrent}
@@ -242,6 +316,29 @@ describe("DocumentsModal", () => {
     act(() => container.querySelector<HTMLButtonElement>(".documents-source-context button")?.click());
     expect(onReturnToCurrent).toHaveBeenCalledOnce();
     expect(container.querySelector(".documents-viewer h1")?.textContent).toBe("Remote plan");
+    const reviewItems = document.getElementById("review-items");
+    expect(reviewItems?.scrollIntoView).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.render(
+        <DocumentsModal
+          open
+          sessionId="remote-session"
+          sourceSessionName="performance"
+          currentSession={false}
+          documents={documents}
+          requestedDocument="plan.md"
+          requestedFragment="review-items"
+          requestedNavigation={2}
+          listLoading={false}
+          listError=""
+          onReturnToCurrent={onReturnToCurrent}
+          onClose={() => undefined}
+        />
+      );
+      await Promise.resolve();
+    });
+    expect(reviewItems?.scrollIntoView).toHaveBeenCalledTimes(2);
     act(() => root.unmount());
   });
 

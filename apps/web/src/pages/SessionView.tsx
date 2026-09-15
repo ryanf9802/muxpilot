@@ -54,6 +54,7 @@ import {
   KeyboardEvent,
   cloneElement,
   createContext,
+  createElement,
   isValidElement,
   type ReactNode,
   useCallback,
@@ -168,7 +169,7 @@ interface TranscriptInteractionOutcome {
 }
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
-export interface SessionDocumentReference { scopeId: string; name: string; path: string }
+export interface SessionDocumentReference { scopeId: string; name: string; path: string; fragment?: string }
 export type MarkdownLinkTarget =
   | { kind: "link" }
   | { kind: "file"; path: string; document: SessionDocumentReference | null };
@@ -956,6 +957,8 @@ export function DocumentsModal({
   currentSession = true,
   documents,
   requestedDocument,
+  requestedFragment,
+  requestedNavigation = 0,
   listLoading,
   listError,
   onOpenDocument,
@@ -968,6 +971,8 @@ export function DocumentsModal({
   currentSession?: boolean;
   documents: SessionDocumentSummary[];
   requestedDocument?: string | null;
+  requestedFragment?: string | null;
+  requestedNavigation?: number;
   listLoading: boolean;
   listError: string;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
@@ -979,6 +984,8 @@ export function DocumentsModal({
   const [loadedContentKey, setLoadedContentKey] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState("");
+  const [navigationError, setNavigationError] = useState("");
+  const [pendingFragment, setPendingFragment] = useState<{ name: string; fragment: string } | null>(null);
   const viewerRef = useRef<HTMLElement>(null);
   const displayedDocumentRef = useRef<string | null>(null);
   const appliedRequestedDocumentRef = useRef<string | null>(null);
@@ -989,15 +996,19 @@ export function DocumentsModal({
       return;
     }
     const requestedMatch = documents.find((document) => document.name === requestedDocument)?.name ?? null;
-    const requestKey = requestedMatch ? `${sessionId}\u0000${requestedMatch}` : null;
+    const requestKey = requestedMatch ? `${sessionId}\u0000${requestedMatch}\u0000${requestedFragment ?? ""}\u0000${requestedNavigation}` : null;
     const applyRequestedDocument = requestKey !== null && appliedRequestedDocumentRef.current !== requestKey;
     if (applyRequestedDocument) appliedRequestedDocumentRef.current = requestKey;
+    if (applyRequestedDocument && requestedMatch) {
+      setPendingFragment(requestedFragment ? { name: requestedMatch, fragment: requestedFragment } : null);
+      setNavigationError("");
+    }
     setSelected((current) => (applyRequestedDocument ? requestedMatch : null)
       ?? (documents.some((document) => document.name === current) ? current : null)
       ?? documents.find((document) => document.name.toLowerCase() === "index.md")?.name
       ?? documents[0]?.name
       ?? null);
-  }, [documents, open, requestedDocument, sessionId]);
+  }, [documents, open, requestedDocument, requestedFragment, requestedNavigation, sessionId]);
 
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
   const selectedDocumentKey = selected ? `${sessionId}\u0000${selected}` : null;
@@ -1038,9 +1049,42 @@ export function DocumentsModal({
 
   useLayoutEffect(() => {
     if (!contentReady || !selectedDocumentKey || !viewerRef.current) return;
-    if (selectedDocumentKey !== displayedDocumentRef.current) viewerRef.current.scrollTop = 0;
+    if (pendingFragment?.name === selected) {
+      const heading = Array.from(viewerRef.current.querySelectorAll<HTMLElement>("[id]"))
+        .find((candidate) => candidate.id === pendingFragment.fragment);
+      if (heading) {
+        heading.scrollIntoView({ block: "start" });
+        setNavigationError("");
+      } else {
+        setNavigationError(`Section #${pendingFragment.fragment} was not found in ${selected}.`);
+      }
+      setPendingFragment(null);
+    } else if (selectedDocumentKey !== displayedDocumentRef.current) {
+      viewerRef.current.scrollTop = 0;
+    }
     displayedDocumentRef.current = selectedDocumentKey;
-  }, [contentReady, loadedContentKey, selectedDocumentKey]);
+  }, [contentReady, loadedContentKey, pendingFragment, selected, selectedDocumentKey]);
+
+  function selectDocument(name: string, fragment?: string) {
+    setNavigationError("");
+    setPendingFragment(fragment ? { name, fragment } : null);
+    setSelected(name);
+  }
+
+  function navigateToFragment(fragment: string) {
+    if (!selected || !contentReady || !viewerRef.current) {
+      if (selected) setPendingFragment({ name: selected, fragment });
+      return;
+    }
+    const heading = Array.from(viewerRef.current.querySelectorAll<HTMLElement>("[id]"))
+      .find((candidate) => candidate.id === fragment);
+    if (heading) {
+      heading.scrollIntoView({ block: "start" });
+      setNavigationError("");
+    } else {
+      setNavigationError(`Section #${fragment} was not found in ${selected}.`);
+    }
+  }
 
   return (
     <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
@@ -1055,7 +1099,7 @@ export function DocumentsModal({
         <div className="documents-layout">
           <nav className="documents-list" aria-label="Session documents">
             {documents.map((document) => (
-              <button key={document.name} type="button" data-active={selected === document.name || undefined} aria-current={selected === document.name ? "page" : undefined} onClick={() => setSelected(document.name)}>
+              <button key={document.name} type="button" data-active={selected === document.name || undefined} aria-current={selected === document.name ? "page" : undefined} onClick={() => selectDocument(document.name)}>
                 <FileText size={15} aria-hidden="true" />
                 <span><strong>{document.name}</strong><small>{formatDocumentBytes(document.sizeBytes)}</small></span>
               </button>
@@ -1070,9 +1114,10 @@ export function DocumentsModal({
             ) : null}
             {contentError ? <p className="error-text" role="alert">{contentError}</p> : loadedContentKey ? (
               <div key={selectedDocumentKey} className="documents-viewer-content" data-loading={viewerBusy || undefined} aria-hidden={viewerBusy || undefined}>
-                <MarkdownLinkBehaviorProvider documents={documents} onOpenDocument={onOpenDocument} onSelectDocument={setSelected}>
-                  <MarkdownBlock text={content} components={documentMarkdownComponents} />
+                <MarkdownLinkBehaviorProvider documents={documents} onOpenDocument={onOpenDocument} onSelectDocument={selectDocument} onNavigateFragment={navigateToFragment} onNavigationError={setNavigationError}>
+                  <MarkdownBlock text={content} components={documentMarkdownComponents} headingAnchors />
                 </MarkdownLinkBehaviorProvider>
+                {navigationError ? <p className="error-text" role="alert">{navigationError}</p> : null}
               </div>
             ) : viewerBusy ? (
               <div className="documents-viewer-skeleton" aria-hidden="true">
@@ -1333,6 +1378,8 @@ export function SessionView() {
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const [requestedDocument, setRequestedDocument] = useState<string | null>(null);
+  const [requestedDocumentFragment, setRequestedDocumentFragment] = useState<string | null>(null);
+  const [requestedDocumentNavigation, setRequestedDocumentNavigation] = useState(0);
   const [documents, setDocuments] = useState<SessionDocumentSummary[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(true);
   const [documentsError, setDocumentsError] = useState("");
@@ -1733,6 +1780,8 @@ export function SessionView() {
         });
       }
       setRequestedDocument(reference.name);
+      setRequestedDocumentFragment(reference.fragment ?? null);
+      setRequestedDocumentNavigation((current) => current + 1);
       setDocumentsOpen(true);
       return true;
     } catch (error) {
@@ -1745,6 +1794,7 @@ export function SessionView() {
     documentReferenceRequestRef.current += 1;
     setDocumentsOpen(false);
     setRequestedDocument(null);
+    setRequestedDocumentFragment(null);
     setReferencedDocumentSource(null);
   }
 
@@ -1752,6 +1802,7 @@ export function SessionView() {
     documentReferenceRequestRef.current += 1;
     setReferencedDocumentSource(null);
     setRequestedDocument(requested);
+    setRequestedDocumentFragment(null);
     setDocumentsOpen(true);
   }
 
@@ -1858,6 +1909,7 @@ export function SessionView() {
       setGitPanelOpen(false);
       setDocumentsOpen(false);
       setRequestedDocument(null);
+      setRequestedDocumentFragment(null);
       setDocuments([]);
       setDocumentsLoading(true);
       setDocumentsError("");
@@ -3043,6 +3095,8 @@ export function SessionView() {
         currentSession={!referencedDocumentSource}
         documents={referencedDocumentSource?.documents ?? documents}
         requestedDocument={requestedDocument}
+        requestedFragment={requestedDocumentFragment}
+        requestedNavigation={requestedDocumentNavigation}
         listLoading={referencedDocumentSource ? false : documentsLoading}
         listError={referencedDocumentSource ? "" : documentsError}
         onOpenDocument={openDocumentReference}
@@ -5820,9 +5874,10 @@ export function markdownLinkTarget(href: string | null | undefined): MarkdownLin
   const documentIndex = segments.length - 2;
   const scopeId = documentIndex > 0 ? segments[documentIndex - 1] : null;
   const name = segments.at(-1) ?? null;
+  const fragment = fragmentFromHref(value);
   const document = segments[documentIndex] === "documents" && scopeId && name
     && SESSION_DOCUMENT_SCOPE.test(scopeId) && SESSION_DOCUMENT_NAME.test(name)
-    ? { scopeId, name, path }
+    ? { scopeId, name, path, ...(fragment ? { fragment } : {}) }
     : null;
   return { kind: "file", path, document };
 }
@@ -5855,7 +5910,9 @@ type FileAwareMarkdownLinkProps = ComponentPropsWithoutRef<"a"> & {
 interface MarkdownLinkBehavior {
   documents?: SessionDocumentSummary[];
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
-  onSelectDocument?: (name: string) => void;
+  onSelectDocument?: (name: string, fragment?: string) => void;
+  onNavigateFragment?: (fragment: string) => void;
+  onNavigationError?: (message: string) => void;
 }
 
 const MarkdownLinkBehaviorContext = createContext<MarkdownLinkBehavior>({});
@@ -5864,9 +5921,14 @@ function MarkdownLinkBehaviorProvider({
   documents,
   onOpenDocument,
   onSelectDocument,
+  onNavigateFragment,
+  onNavigationError,
   children
 }: MarkdownLinkBehavior & { children: ReactNode }) {
-  const value = useMemo(() => ({ documents, onOpenDocument, onSelectDocument }), [documents, onOpenDocument, onSelectDocument]);
+  const value = useMemo(
+    () => ({ documents, onOpenDocument, onSelectDocument, onNavigateFragment, onNavigationError }),
+    [documents, onNavigateFragment, onNavigationError, onOpenDocument, onSelectDocument]
+  );
   return <MarkdownLinkBehaviorContext.Provider value={value}>{children}</MarkdownLinkBehaviorContext.Provider>;
 }
 
@@ -5921,13 +5983,38 @@ function FileAwareMarkdownLink({ href, children, onOpenDocument, ...props }: Fil
 }
 
 function FileAwareMarkdownAnchor({ href, children, ...props }: ComponentPropsWithoutRef<"a">) {
-  const { documents, onOpenDocument, onSelectDocument } = useContext(MarkdownLinkBehaviorContext);
+  const { documents, onOpenDocument, onSelectDocument, onNavigateFragment, onNavigationError } = useContext(MarkdownLinkBehaviorContext);
+  const fragment = fragmentFromHref(href);
+  if (href?.startsWith("#") && fragment && onNavigateFragment) {
+    return (
+      <a {...props} href={href} onClick={(event) => {
+        event.preventDefault();
+        event.currentTarget.blur();
+        onNavigateFragment(fragment);
+      }}>{children}</a>
+    );
+  }
   const relativeHref = href && !href.startsWith("/") && !href.startsWith("//") && !/^[a-z][a-z\d+.-]*:/i.test(href)
     ? href
     : null;
   const pathname = relativeHref?.split("#", 1)[0]?.split("?", 1)[0];
-  const candidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
+  const rawCandidate = pathname?.startsWith("./") ? pathname.slice(2) : pathname;
+  let candidate = rawCandidate;
+  try {
+    if (candidate) candidate = decodeURIComponent(candidate);
+  } catch {
+    // Match the authored name when percent decoding is malformed.
+  }
   const linkedDocument = documents?.find((document) => document.name === candidate);
+  if (!linkedDocument && candidate?.toLowerCase().endsWith(".md") && onNavigationError) {
+    return (
+      <a {...props} href={href} onClick={(event) => {
+        event.preventDefault();
+        event.currentTarget.blur();
+        onNavigationError(`Document ${candidate} was not found.`);
+      }}>{children}</a>
+    );
+  }
   if (!linkedDocument || !onSelectDocument) {
     return <FileAwareMarkdownLink {...props} href={href} onOpenDocument={onOpenDocument}>{children}</FileAwareMarkdownLink>;
   }
@@ -5938,7 +6025,7 @@ function FileAwareMarkdownAnchor({ href, children, ...props }: ComponentPropsWit
       onClick={(event) => {
         event.preventDefault();
         event.currentTarget.blur();
-        onSelectDocument(linkedDocument.name);
+        onSelectDocument(linkedDocument.name, fragment ?? undefined);
       }}
     >
       {children}
@@ -5970,11 +6057,65 @@ const fileAwareMarkdownComponentsValue: Components = {
   }
 };
 
-export function MarkdownBlock({ text, components = markdownComponents }: { text: string; components?: Components }) {
+function fragmentFromHref(href: string | null | undefined): string | null {
+  const hash = href?.indexOf("#") ?? -1;
+  if (hash < 0 || !href || hash === href.length - 1) return null;
+  const fragment = href.slice(hash + 1);
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return fragment;
+  }
+}
+
+function markdownHeadingText(value: ReactNode): string {
+  if (typeof value === "string" || typeof value === "number") return String(value);
+  if (Array.isArray(value)) return value.map(markdownHeadingText).join("");
+  if (isValidElement<{ children?: ReactNode }>(value)) return markdownHeadingText(value.props.children);
+  return "";
+}
+
+export function markdownHeadingSlug(value: string): string {
+  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+}
+
+type MarkdownHeadingProps = ComponentPropsWithoutRef<"h1"> & { node?: unknown };
+
+function markdownComponentsWithHeadingAnchors(components: Components): Components {
+  const occurrences = new Map<string, number>();
+  const heading = (tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6") => (
+    { node: _node, children, ...props }: MarkdownHeadingProps
+  ) => {
+    const slug = markdownHeadingSlug(markdownHeadingText(children));
+    const occurrence = occurrences.get(slug) ?? 0;
+    occurrences.set(slug, occurrence + 1);
+    return createElement(tag, { ...props, id: occurrence === 0 ? slug : `${slug}-${occurrence}` }, children);
+  };
+  return {
+    ...components,
+    h1: heading("h1"),
+    h2: heading("h2"),
+    h3: heading("h3"),
+    h4: heading("h4"),
+    h5: heading("h5"),
+    h6: heading("h6")
+  };
+}
+
+export function MarkdownBlock({
+  text,
+  components = markdownComponents,
+  headingAnchors = false
+}: {
+  text: string;
+  components?: Components;
+  headingAnchors?: boolean;
+}) {
   if (!text) return null;
+  const renderedComponents = headingAnchors ? markdownComponentsWithHeadingAnchors(components) : components;
   return (
     <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={renderedComponents}>
         {text}
       </ReactMarkdown>
     </div>

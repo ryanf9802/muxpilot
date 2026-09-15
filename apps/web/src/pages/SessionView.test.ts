@@ -3148,6 +3148,19 @@ describe("MarkdownBlock", () => {
     });
   });
 
+  it("preserves a section fragment on a muxpilot document link", () => {
+    expect(markdownLinkTarget("/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/brief.md#21-included-use")).toEqual({
+      kind: "file",
+      path: "/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/brief.md",
+      document: {
+        scopeId: "cgZiXQrkbVYonDQ5",
+        name: "brief.md",
+        path: "/home/ryanf/.muxpilot/sessions/cgZiXQrkbVYonDQ5/documents/brief.md",
+        fragment: "21-included-use"
+      }
+    });
+  });
+
   it("keeps web and muxpilot app routes as links while decoding file paths", () => {
     expect(markdownLinkTarget("https://example.com/file.ts")).toEqual({ kind: "link" });
     expect(markdownLinkTarget("/sessions/session-1")).toEqual({ kind: "link" });
