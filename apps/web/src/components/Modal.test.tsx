@@ -110,6 +110,15 @@ describe("Modal", () => {
     expect(document.activeElement).toBe(opener);
     expect(document.body.style.overflow).toBe("");
   });
+
+  it("skips hidden header actions when choosing initial focus", () => {
+    const { container, unmount } = renderModal({
+      headerActions: <button type="button" style={{ display: "none" }}>Hidden action</button>
+    });
+
+    expect(document.activeElement).toBe(container.querySelector("[aria-label='Close']"));
+    unmount();
+  });
 });
 
 function renderModal(overrides: Partial<ModalProps> = {}): { container: HTMLDivElement; root: Root; unmount: () => void } {

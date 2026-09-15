@@ -22,6 +22,7 @@ export interface ModalProps {
   onClose: () => void | Promise<void>;
   onEscape?: () => void | Promise<void>;
   title: ReactNode;
+  headerActions?: ReactNode;
   children: ReactNode;
   dismissible?: boolean;
   panelClassName?: string;
@@ -39,6 +40,7 @@ export function Modal({
   onClose,
   onEscape,
   title,
+  headerActions,
   children,
   dismissible = true,
   panelClassName = "",
@@ -116,9 +118,12 @@ export function Modal({
     <>
       <div className="dialog-head">
         <h2 id={titleId}>{title}</h2>
-        <button type="button" className="icon-button" onClick={() => void onClose()} aria-label={closeLabel} disabled={!dismissible}>
-          <X size={18} />
-        </button>
+        <div className="dialog-head-actions">
+          {headerActions}
+          <button type="button" className="icon-button" onClick={() => void onClose()} aria-label={closeLabel} disabled={!dismissible}>
+            <X size={18} />
+          </button>
+        </div>
       </div>
       {children}
     </>
@@ -165,6 +170,10 @@ export function Modal({
 
 function focusableElements(panel: HTMLElement): HTMLElement[] {
   return Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => {
-    return element.getAttribute("aria-hidden") !== "true" && !element.closest("[hidden]");
+    const style = window.getComputedStyle(element);
+    return element.getAttribute("aria-hidden") !== "true"
+      && !element.closest("[hidden]")
+      && style.display !== "none"
+      && style.visibility !== "hidden";
   });
 }

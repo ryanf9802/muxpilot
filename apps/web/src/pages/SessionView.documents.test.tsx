@@ -147,6 +147,48 @@ describe("DocumentsModal", () => {
     act(() => root.unmount());
   });
 
+  it("opens narrow-screen navigation temporarily from the modal header", async () => {
+    const documentSummary = { name: "plan.md", sizeBytes: 12, updatedAt: "2026-09-15T00:00:00.000Z" };
+    vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: { ...documentSummary, content: "# Plan\n\n## Next step" }
+    });
+    const close = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[documentSummary]} listLoading={false} listError="" onClose={close} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const navigationButton = container.querySelector<HTMLButtonElement>(".documents-mobile-nav-toggle");
+    expect(navigationButton?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => navigationButton?.click());
+    expect(navigationButton?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector(".documents-sidebar")?.getAttribute("data-mobile-open")).toBe("true");
+    expect(container.querySelector(".documents-sidebar-backdrop")).not.toBeNull();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>(".documents-sidebar-toggle button"))
+        .find((button) => button.textContent === "Outline")?.click();
+    });
+    expect(navigationButton?.getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(navigationButton?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(".documents-modal")).not.toBeNull();
+    expect(close).not.toHaveBeenCalled();
+
+    await act(async () => navigationButton?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>(".documents-sidebar-backdrop")?.click());
+    expect(navigationButton?.getAttribute("aria-expanded")).toBe("false");
+    act(() => root.unmount());
+  });
+
   it("opens linked session documents in the viewer and leaves external links safe", async () => {
     const documents = [
       { name: "INDEX.md", sizeBytes: 80, updatedAt: "2026-08-25T00:00:00.000Z" },

@@ -988,6 +988,7 @@ export function DocumentsModal({
   const [navigationError, setNavigationError] = useState("");
   const [pendingFragment, setPendingFragment] = useState<{ name: string; fragment: string } | null>(null);
   const [sidebarView, setSidebarView] = useState<"documents" | "outline">("documents");
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [outline, setOutline] = useState<DocumentOutlineItem[]>([]);
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
   const viewerRef = useRef<HTMLElement>(null);
@@ -998,6 +999,7 @@ export function DocumentsModal({
   useEffect(() => {
     if (!open) {
       appliedRequestedDocumentRef.current = null;
+      setMobileNavigationOpen(false);
       return;
     }
     const requestedMatch = documents.find((document) => document.name === requestedDocument)?.name ?? null;
@@ -1108,6 +1110,7 @@ export function DocumentsModal({
   }, [contentReady, loadedContentKey, pendingFragment, selected, selectedDocumentKey]);
 
   function selectDocument(name: string, fragment?: string) {
+    setMobileNavigationOpen(false);
     setNavigationError("");
     setPendingFragment(fragment ? { name, fragment } : null);
     if (name !== selected) {
@@ -1118,6 +1121,7 @@ export function DocumentsModal({
   }
 
   function navigateToFragment(fragment: string) {
+    setMobileNavigationOpen(false);
     if (!selected || !contentReady || !viewerRef.current) {
       if (selected) setPendingFragment({ name: selected, fragment });
       return;
@@ -1134,7 +1138,24 @@ export function DocumentsModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Documents" panelClassName="documents-modal">
+    <Modal
+      open={open}
+      onClose={onClose}
+      onEscape={mobileNavigationOpen ? () => setMobileNavigationOpen(false) : undefined}
+      title="Documents"
+      panelClassName="documents-modal"
+      headerActions={(
+        <button
+          type="button"
+          className="documents-mobile-nav-toggle"
+          aria-controls="documents-navigation-panel"
+          aria-expanded={mobileNavigationOpen}
+          onClick={() => setMobileNavigationOpen((current) => !current)}
+        >
+          Browse
+        </button>
+      )}
+    >
       {!currentSession ? (
         <div className="documents-source-context">
           <span>Viewing documents from <strong>{sourceSessionName ?? "another session"}</strong></span>
@@ -1144,7 +1165,10 @@ export function DocumentsModal({
       {listError ? <p className="error-text" role="alert">{listError}</p> : null}
       {listLoading && documents.length === 0 ? <p className="muted">Loading documents…</p> : documents.length === 0 && !listError ? <p className="muted">This session has no documents yet.</p> : (
         <div className="documents-layout">
-          <aside className="documents-sidebar">
+          {mobileNavigationOpen ? (
+            <button type="button" className="documents-sidebar-backdrop" aria-label="Close document navigation" onClick={() => setMobileNavigationOpen(false)} />
+          ) : null}
+          <aside id="documents-navigation-panel" className="documents-sidebar" data-mobile-open={mobileNavigationOpen || undefined}>
             <div className="documents-sidebar-toggle" aria-label="Document navigation">
               <button type="button" aria-pressed={sidebarView === "documents"} onClick={() => setSidebarView("documents")}>Documents</button>
               <button type="button" aria-pressed={sidebarView === "outline"} onClick={() => setSidebarView("outline")}>Outline</button>
