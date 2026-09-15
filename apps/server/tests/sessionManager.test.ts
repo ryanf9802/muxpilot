@@ -4,9 +4,45 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { StoredGitWorkspace } from "../src/db/database.js";
+import { EventBus } from "../src/services/eventBus.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("processes queued input when app-server reconciliation makes a session idle", async () => {
+    const events = new EventBus();
+    const codexStore = { stop: vi.fn() };
+    const manager = new SessionManager(
+      {} as never,
+      codexStore as never,
+      events,
+      1_000,
+      1_000,
+      {} as never
+    );
+    const processQueuedInputs = vi.fn(async () => undefined);
+    (manager as unknown as { processQueuedInputs: typeof processQueuedInputs }).processQueuedInputs = processQueuedInputs;
+
+    events.publish({
+      id: "event-1",
+      type: "status.changed",
+      sessionId: "session-1",
+      payload: { status: "idle" },
+      timestamp: "2026-09-15T05:04:30.822Z"
+    });
+
+    await vi.waitFor(() => expect(processQueuedInputs).toHaveBeenCalledWith("session-1"));
+    manager.stop();
+    expect(codexStore.stop).toHaveBeenCalledOnce();
+    events.publish({
+      id: "event-2",
+      type: "status.changed",
+      sessionId: "session-1",
+      payload: { status: "waiting" },
+      timestamp: "2026-09-15T05:04:31.822Z"
+    });
+    expect(processQueuedInputs).toHaveBeenCalledOnce();
+  });
+
   it("reports every source of automatic work that can resume an idle session", async () => {
     const session = { ...managedSession(), gitWorkspace: { id: "workspace-1" } } as ManagedSession;
     const manager = Object.assign(Object.create(SessionManager.prototype), {
@@ -524,7 +560,7 @@ function ingestManager(
   return new SessionManager(
     db as never,
     { listRecent: vi.fn(async () => []), stop: vi.fn() } as never,
-    { publish } as never,
+    { publish, subscribe: vi.fn(() => () => undefined) } as never,
     1_000,
     1_000,
     {} as never

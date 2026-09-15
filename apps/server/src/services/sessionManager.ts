@@ -170,6 +170,7 @@ export class SessionManager {
   private readonly runtimeOperationTails = new Map<string, Promise<void>>();
   private readonly automatedApprovalMessageIds = new Set<string>();
   private approvalAutomationGenerations = new Map<string, number>();
+  private readonly unsubscribeQueueReadiness: () => void;
 
   constructor(
     private readonly db: AppDatabase,
@@ -187,7 +188,14 @@ export class SessionManager {
     private readonly sessionDrivers: SessionDriverRegistry | null = null,
     private readonly appServerHibernateMs = 900_000,
     private readonly imagePath: ((sessionId: string, imageId: string) => string) | null = null
-  ) {}
+  ) {
+    this.unsubscribeQueueReadiness = this.events.subscribe((event) => {
+      if (event.type !== "status.changed") return;
+      const status = recordValue(event.payload)?.status;
+      if (status !== "waiting" && status !== "idle") return;
+      this.runBackgroundTask("queued input", () => this.processQueuedInputs(event.sessionId));
+    });
+  }
 
   start(options: SessionManagerStartOptions = {}): void {
     this.runBackgroundTask("app-server recovery", () => this.recoverAppServerSessions());
@@ -664,6 +672,7 @@ export class SessionManager {
     if (this.parserTimer) clearInterval(this.parserTimer);
     if (this.appServerHibernateTimer) clearInterval(this.appServerHibernateTimer);
     this.appServerHibernateTimer = null;
+    this.unsubscribeQueueReadiness();
     this.codexStore.stop();
     this.approvalReviewer?.stop();
   }
@@ -747,7 +756,7 @@ export class SessionManager {
     }
   }
 
-  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation", task: () => Promise<void>): void {
+  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation" | "queued input", task: () => Promise<void>): void {
     void task().catch((error) => {
       console.error(`Muxpilot ${name} background task failed`, error);
     });
