@@ -128,11 +128,29 @@ import {
 } from "@muxpilot/core";
 import { api, ApiError } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
-import { ContextMenu, ContextMenuItem, useContextMenuTrigger, useDismissableContextMenu } from "../components/ContextMenu.js";
+import {
+  ContextMenu,
+  ContextMenuItem,
+  clampContextMenuPosition,
+  dropdownMenuPosition,
+  useContextMenuTrigger,
+  useDismissableContextMenu
+} from "../components/ContextMenu.js";
 import { LoadingStatusPill, StatusPill } from "../components/StatusPill.js";
 import { SessionLoadingSkeleton } from "../components/LoadingSkeleton.js";
 import { Modal } from "../components/Modal.js";
 import { copyImage, copyText } from "../utils/clipboard.js";
+import {
+  markdownDocumentHeadings,
+  markdownHeadingSlug,
+  obsidianDocumentMarkdown,
+  portableDocumentMarkdown,
+  referencedDocumentNames,
+  remarkObsidianSyntax,
+  renderableDocumentMarkdown,
+  resolveDocumentHeading,
+  type DocumentHeadingEntry
+} from "../utils/documentMarkdown.js";
 import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
@@ -170,7 +188,7 @@ interface TranscriptInteractionOutcome {
 export type ScrollAnchorSnapshot = { itemId: string | null; offsetTop: number; scrollTop: number; scrollHeight: number };
 export type MessageListAutoPageAction = "older" | "newer" | null;
 export interface SessionDocumentReference { scopeId: string; name: string; path: string; fragment?: string }
-interface DocumentOutlineItem { id: string; label: string; level: number }
+type DocumentOutlineItem = DocumentHeadingEntry;
 export type MarkdownLinkTarget =
   | { kind: "link" }
   | { kind: "file"; path: string; document: SessionDocumentReference | null };
@@ -991,8 +1009,14 @@ export function DocumentsModal({
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [outline, setOutline] = useState<DocumentOutlineItem[]>([]);
   const [activeOutlineId, setActiveOutlineId] = useState<string | null>(null);
+  const [documentMenu, setDocumentMenu] = useState<{ x: number; y: number } | null>(null);
+  const [copyingDocument, setCopyingDocument] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
   const viewerRef = useRef<HTMLElement>(null);
   const outlineRef = useRef<HTMLElement>(null);
+  const documentMenuRef = useRef<HTMLDivElement>(null);
+  const copyMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const copyStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const displayedDocumentRef = useRef<string | null>(null);
   const appliedRequestedDocumentRef = useRef<string | null>(null);
 
@@ -1053,6 +1077,21 @@ export function DocumentsModal({
 
   const contentReady = selectedContentKey !== null && loadedContentKey === selectedContentKey;
   const viewerBusy = Boolean(selected && !contentError && (contentLoading || !contentReady));
+  const documentMenuTrigger = useContextMenuTrigger(
+    selectedContentKey,
+    (_key, x, y) => setDocumentMenu(clampContextMenuPosition(x, y, { width: 224, height: 96 })),
+    { disabled: !contentReady || viewerBusy || copyingDocument }
+  );
+  useDismissableContextMenu(Boolean(documentMenu), documentMenuRef, () => setDocumentMenu(null));
+
+  useEffect(() => () => {
+    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    setDocumentMenu(null);
+    setCopyStatus("");
+  }, [selectedDocumentKey]);
 
   function syncActiveOutline(items = outline) {
     const viewer = viewerRef.current;
@@ -1073,13 +1112,16 @@ export function DocumentsModal({
 
   useLayoutEffect(() => {
     if (!contentReady || !viewerRef.current) return;
+    const headingPath: string[] = [];
     const items = Array.from(
       viewerRef.current.querySelectorAll<HTMLElement>(".documents-viewer-content h1[id], .documents-viewer-content h2[id], .documents-viewer-content h3[id], .documents-viewer-content h4[id], .documents-viewer-content h5[id], .documents-viewer-content h6[id]")
-    ).map((heading) => ({
-      id: heading.id,
-      label: heading.textContent?.trim() || heading.id,
-      level: Number(heading.tagName.slice(1))
-    }));
+    ).map((heading) => {
+      const level = Number(heading.tagName.slice(1));
+      const label = heading.textContent?.trim() || heading.id;
+      headingPath[level - 1] = label;
+      headingPath.length = level;
+      return { id: heading.id, label, level, path: headingPath.filter(Boolean).join("#") };
+    });
     setOutline(items);
     syncActiveOutline(items);
   }, [contentReady, loadedContentKey, selectedDocumentKey]);
@@ -1094,10 +1136,12 @@ export function DocumentsModal({
   useLayoutEffect(() => {
     if (!contentReady || !selectedDocumentKey || !viewerRef.current) return;
     if (pendingFragment?.name === selected) {
+      const resolvedFragment = resolveDocumentHeading(outline, pendingFragment.fragment) ?? pendingFragment.fragment;
       const heading = Array.from(viewerRef.current.querySelectorAll<HTMLElement>("[id]"))
-        .find((candidate) => candidate.id === pendingFragment.fragment);
+        .find((candidate) => candidate.id === resolvedFragment);
       if (heading) {
         heading.scrollIntoView({ block: "start" });
+        setActiveOutlineId(resolvedFragment);
         setNavigationError("");
       } else {
         setNavigationError(`Section #${pendingFragment.fragment} was not found in ${selected}.`);
@@ -1107,7 +1151,7 @@ export function DocumentsModal({
       viewerRef.current.scrollTop = 0;
     }
     displayedDocumentRef.current = selectedDocumentKey;
-  }, [contentReady, loadedContentKey, pendingFragment, selected, selectedDocumentKey]);
+  }, [contentReady, loadedContentKey, outline, pendingFragment, selected, selectedDocumentKey]);
 
   function selectDocument(name: string, fragment?: string) {
     setMobileNavigationOpen(false);
@@ -1126,34 +1170,103 @@ export function DocumentsModal({
       if (selected) setPendingFragment({ name: selected, fragment });
       return;
     }
+    const resolvedFragment = resolveDocumentHeading(outline, fragment) ?? fragment;
     const heading = Array.from(viewerRef.current.querySelectorAll<HTMLElement>("[id]"))
-      .find((candidate) => candidate.id === fragment);
+      .find((candidate) => candidate.id === resolvedFragment);
     if (heading) {
       heading.scrollIntoView({ block: "start" });
-      setActiveOutlineId(fragment);
+      setActiveOutlineId(resolvedFragment);
       setNavigationError("");
     } else {
       setNavigationError(`Section #${fragment} was not found in ${selected}.`);
     }
   }
 
+  function showCopyStatus(message: string) {
+    setCopyStatus(message);
+    if (copyStatusTimerRef.current) clearTimeout(copyStatusTimerRef.current);
+    copyStatusTimerRef.current = setTimeout(() => {
+      copyStatusTimerRef.current = null;
+      setCopyStatus("");
+    }, COPIED_PATH_FEEDBACK_MS);
+  }
+
+  async function copyDocument(format: "markdown" | "obsidian") {
+    if (!selected || !contentReady || copyingDocument) return;
+    const source = content;
+    const sourceDocument = selected;
+    setDocumentMenu(null);
+    setCopyingDocument(true);
+    try {
+      let copied = portableDocumentMarkdown(source);
+      if (format === "obsidian") {
+        const names = documents.map((document) => document.name);
+        const headingsByDocument = new Map<string, DocumentHeadingEntry[]>([
+          [sourceDocument, markdownDocumentHeadings(renderableDocumentMarkdown(source))]
+        ]);
+        const referenced = referencedDocumentNames(source, names).filter((name) => name !== sourceDocument);
+        const responses = await Promise.all(referenced.map((name) => api.sessionDocument(sessionId, name)));
+        for (const response of responses) {
+          headingsByDocument.set(
+            response.document.name,
+            markdownDocumentHeadings(renderableDocumentMarkdown(response.document.content))
+          );
+        }
+        copied = obsidianDocumentMarkdown(source, {
+          currentDocument: sourceDocument,
+          documentNames: names,
+          headingsByDocument
+        });
+      }
+      await copyText(copied);
+      showCopyStatus(format === "markdown" ? "Copied Markdown" : "Copied Obsidian Markdown");
+    } catch (error) {
+      console.error("Unable to copy document", error);
+      showCopyStatus("Unable to copy document");
+    } finally {
+      setCopyingDocument(false);
+    }
+  }
+
+  function openCopyMenuFromButton() {
+    const rect = copyMenuButtonRef.current?.getBoundingClientRect();
+    if (!rect || !contentReady || viewerBusy || copyingDocument) return;
+    setDocumentMenu(dropdownMenuPosition(rect, { width: 224, height: 96, align: "end" }));
+  }
+
   return (
     <Modal
       open={open}
       onClose={onClose}
-      onEscape={mobileNavigationOpen ? () => setMobileNavigationOpen(false) : undefined}
+      onEscape={documentMenu
+        ? () => setDocumentMenu(null)
+        : mobileNavigationOpen ? () => setMobileNavigationOpen(false) : undefined}
       title="Documents"
       panelClassName="documents-modal"
       headerActions={(
-        <button
-          type="button"
-          className="documents-mobile-nav-toggle"
-          aria-controls="documents-navigation-panel"
-          aria-expanded={mobileNavigationOpen}
-          onClick={() => setMobileNavigationOpen((current) => !current)}
-        >
-          Browse
-        </button>
+        <>
+          <button
+            type="button"
+            className="documents-mobile-nav-toggle"
+            aria-controls="documents-navigation-panel"
+            aria-expanded={mobileNavigationOpen}
+            onClick={() => setMobileNavigationOpen((current) => !current)}
+          >
+            Browse
+          </button>
+          <button
+            ref={copyMenuButtonRef}
+            type="button"
+            className="documents-copy-toggle"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(documentMenu)}
+            disabled={!contentReady || viewerBusy || copyingDocument}
+            onClick={openCopyMenuFromButton}
+          >
+            <Copy size={15} aria-hidden="true" />
+            Copy
+          </button>
+        </>
       )}
     >
       {!currentSession ? (
@@ -1163,6 +1276,11 @@ export function DocumentsModal({
         </div>
       ) : null}
       {listError ? <p className="error-text" role="alert">{listError}</p> : null}
+      {copyStatus ? (
+        <p className="documents-copy-status" data-error={copyStatus.startsWith("Unable") || undefined} role="status" aria-live="polite">
+          {copyStatus}
+        </p>
+      ) : null}
       {listLoading && documents.length === 0 ? <p className="muted">Loading documents…</p> : documents.length === 0 && !listError ? <p className="muted">This session has no documents yet.</p> : (
         <div className="documents-layout">
           {mobileNavigationOpen ? (
@@ -1208,9 +1326,15 @@ export function DocumentsModal({
               </div>
             ) : null}
             {contentError ? <p className="error-text" role="alert">{contentError}</p> : loadedContentKey ? (
-              <div key={selectedDocumentKey} className="documents-viewer-content" data-loading={viewerBusy || undefined} aria-hidden={viewerBusy || undefined}>
+              <div
+                key={selectedDocumentKey}
+                className="documents-viewer-content"
+                data-loading={viewerBusy || undefined}
+                aria-hidden={viewerBusy || undefined}
+                {...documentMenuTrigger.triggerProps}
+              >
                 <MarkdownLinkBehaviorProvider documents={documents} onOpenDocument={onOpenDocument} onSelectDocument={selectDocument} onNavigateFragment={navigateToFragment} onNavigationError={setNavigationError}>
-                  <MarkdownBlock text={content} components={documentMarkdownComponents} headingAnchors />
+                  <MarkdownBlock text={content} components={documentMarkdownComponents} headingAnchors obsidianSyntax />
                 </MarkdownLinkBehaviorProvider>
                 {navigationError ? <p className="error-text" role="alert">{navigationError}</p> : null}
               </div>
@@ -1222,6 +1346,16 @@ export function DocumentsModal({
           </article>
         </div>
       )}
+      {documentMenu ? (
+        <ContextMenu ref={documentMenuRef} position={documentMenu} width={224} label="Copy document" className="document-copy-menu">
+          <ContextMenuItem icon={<Copy size={16} />} disabled={copyingDocument} onClick={() => void copyDocument("markdown")}>
+            Copy Markdown
+          </ContextMenuItem>
+          <ContextMenuItem icon={<Copy size={16} />} disabled={copyingDocument} onClick={() => void copyDocument("obsidian")}>
+            Copy Obsidian Markdown
+          </ContextMenuItem>
+        </ContextMenu>
+      ) : null}
     </Modal>
   );
 }
@@ -6100,7 +6234,9 @@ function FileAwareMarkdownAnchor({ href, children, ...props }: ComponentPropsWit
   } catch {
     // Match the authored name when percent decoding is malformed.
   }
-  const linkedDocument = documents?.find((document) => document.name === candidate);
+  const linkedDocument = candidate
+    ? documents?.find((document) => document.name.toLocaleLowerCase() === candidate.toLocaleLowerCase())
+    : undefined;
   if (!linkedDocument && candidate?.toLowerCase().endsWith(".md") && onNavigationError) {
     return (
       <a {...props} href={href} onClick={(event) => {
@@ -6170,10 +6306,6 @@ function markdownHeadingText(value: ReactNode): string {
   return "";
 }
 
-export function markdownHeadingSlug(value: string): string {
-  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
-}
-
 type MarkdownHeadingProps = ComponentPropsWithoutRef<"h1"> & { node?: unknown };
 
 function markdownComponentsWithHeadingAnchors(components: Components): Components {
@@ -6200,18 +6332,20 @@ function markdownComponentsWithHeadingAnchors(components: Components): Component
 export function MarkdownBlock({
   text,
   components = markdownComponents,
-  headingAnchors = false
+  headingAnchors = false,
+  obsidianSyntax = false
 }: {
   text: string;
   components?: Components;
   headingAnchors?: boolean;
+  obsidianSyntax?: boolean;
 }) {
   if (!text) return null;
   const renderedComponents = headingAnchors ? markdownComponentsWithHeadingAnchors(components) : components;
   return (
     <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={renderedComponents}>
-        {text}
+      <ReactMarkdown remarkPlugins={obsidianSyntax ? [remarkGfm, remarkObsidianSyntax] : [remarkGfm]} components={renderedComponents}>
+        {obsidianSyntax ? renderableDocumentMarkdown(text) : text}
       </ReactMarkdown>
     </div>
   );

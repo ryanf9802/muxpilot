@@ -136,6 +136,122 @@ describe("DocumentsModal", () => {
     act(() => root.unmount());
   });
 
+  it("renders Obsidian links, highlights, comments, and collapsible callouts", async () => {
+    const documents = [
+      { name: "INDEX.md", sizeBytes: 90, updatedAt: "2026-09-15T00:00:00.000Z" },
+      { name: "plan.md", sizeBytes: 30, updatedAt: "2026-09-15T00:00:00.000Z" }
+    ];
+    vi.spyOn(api, "sessionDocument").mockImplementation(async (_sessionId, name) => ({
+      document: name === "INDEX.md"
+        ? {
+            ...documents[0]!,
+            content: "[[#Details|Jump]] [[Plan#Next step|Plan note]] ==important== %%secret%% \\[[literal]] \\==plain==\n\n> [!warning]+ Read first\n> Callout body\n\n## Details"
+          }
+        : { ...documents[1]!, content: "# Plan\n\n## Next step" }
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector("mark")?.textContent).toBe("important");
+    expect(container.querySelector(".documents-viewer-content")?.textContent).not.toContain("secret");
+    expect(container.querySelector(".documents-viewer-content")?.textContent).toContain("[[literal]] ==plain==");
+    expect(container.querySelectorAll(".documents-viewer-content a")).toHaveLength(2);
+    const callout = container.querySelector<HTMLDetailsElement>("details.obsidian-callout");
+    expect(callout?.open).toBe(true);
+    expect(callout?.dataset.callout).toBe("warning");
+    expect(callout?.querySelector("summary")?.textContent).toBe("Read first");
+
+    const detailHeading = container.querySelector<HTMLElement>("#details");
+    await act(async () => container.querySelector<HTMLAnchorElement>('a[href="#Details"]')?.click());
+    expect(detailHeading?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+
+    await act(async () => {
+      container.querySelector<HTMLAnchorElement>('a[href="./Plan.md#Next%20step"]')?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector("button[data-active='true'] strong")?.textContent).toBe("plan.md");
+    expect(container.querySelector<HTMLElement>("#next-step")?.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    act(() => root.unmount());
+  });
+
+  it("copies the loaded document as portable or Obsidian Markdown", async () => {
+    const documents = [
+      { name: "INDEX.md", sizeBytes: 90, updatedAt: "2026-09-15T00:00:00.000Z" },
+      { name: "plan.md", sizeBytes: 30, updatedAt: "2026-09-15T00:00:00.000Z" }
+    ];
+    const source = "> [!note] Context\n> [[plan#Next step|Continue]] and ==important==.\n\n[Plan](./plan.md#next-step) %%private%%";
+    const read = vi.spyOn(api, "sessionDocument").mockImplementation(async (_sessionId, name) => ({
+      document: name === "INDEX.md"
+        ? { ...documents[0]!, content: source }
+        : { ...documents[1]!, content: "# Plan\n\n## Next step" }
+    }));
+    const close = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={documents} listLoading={false} listError="" onClose={close} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      container.querySelector(".documents-viewer-content")?.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 40,
+        clientY: 60
+      }));
+    });
+    expect(container.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("Copy document");
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(close).not.toHaveBeenCalled();
+
+    await act(async () => {
+      container.querySelector(".documents-viewer-content")?.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 40,
+        clientY: 60
+      }));
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+        .find((button) => button.textContent === "Copy Markdown")?.click();
+      await Promise.resolve();
+    });
+    expect(copyTextMock).toHaveBeenLastCalledWith(
+      "> **Context**\n> [Continue](./plan.md#next-step) and **important**.\n\n[Plan](./plan.md#next-step)\n"
+    );
+    expect(container.textContent).toContain("Copied Markdown");
+
+    await act(async () => container.querySelector<HTMLButtonElement>(".documents-copy-toggle")?.click());
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+        .find((button) => button.textContent === "Copy Obsidian Markdown")?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(read).toHaveBeenCalledWith("session-1", "plan.md");
+    expect(copyTextMock).toHaveBeenLastCalledWith(
+      "> [!note] Context\n> [[plan#Next step|Continue]] and ==important==.\n\n[[plan#Next step|Plan]] %%private%%"
+    );
+    expect(container.textContent).toContain("Copied Obsidian Markdown");
+    act(() => root.unmount());
+  });
+
   it("shows an empty state", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -238,6 +354,7 @@ describe("DocumentsModal", () => {
     expect(container.querySelector(".documents-viewer-content")?.getAttribute("aria-hidden")).toBe("true");
     expect(container.querySelector(".documents-viewer")?.textContent).not.toContain("Loading plan.md…");
     expect(container.querySelector("button[data-active='true']")?.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector<HTMLButtonElement>(".documents-copy-toggle")?.disabled).toBe(true);
 
     await act(async () => {
       resolvePlan({ document: { name: "plan.md", content: "## Current plan", sizeBytes: 15, updatedAt: documents[1]!.updatedAt } });
@@ -247,6 +364,7 @@ describe("DocumentsModal", () => {
 
     expect(container.querySelector(".documents-viewer")?.hasAttribute("aria-busy")).toBe(false);
     expect(container.querySelector(".documents-loading-indicator")).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>(".documents-copy-toggle")?.disabled).toBe(false);
     const currentPlanHeading = container.querySelector<HTMLElement>(".documents-viewer h2");
     expect(currentPlanHeading?.textContent).toBe("Current plan");
     expect(currentPlanHeading?.id).toBe("current-plan");

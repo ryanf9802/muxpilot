@@ -3105,6 +3105,31 @@ select:focus-visible {
 .documents-mobile-nav-toggle,
 .documents-sidebar-backdrop { display: none; }
 
+.documents-copy-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.documents-copy-status {
+  margin: 0;
+  color: var(--color-success);
+  font-size: 12px;
+  text-align: right;
+}
+
+.documents-copy-status[data-error="true"] { color: var(--color-error); }
+
+.document-copy-menu { z-index: 80; }
+
 .documents-sidebar-toggle {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3224,6 +3249,46 @@ select:focus-visible {
 }
 
 .documents-viewer-content[data-loading="true"] { opacity: 0.58; }
+
+.documents-viewer-content .markdown mark {
+  padding: 0 2px;
+  color: inherit;
+  background: color-mix(in srgb, var(--color-warning) 42%, transparent);
+  border-radius: 3px;
+}
+
+.documents-viewer-content .markdown .obsidian-callout {
+  --callout-color: var(--color-secondary);
+  margin: 12px 0;
+  padding: 10px 12px;
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--callout-color) 8%, var(--color-surface-raised));
+  border: 1px solid color-mix(in srgb, var(--callout-color) 40%, var(--color-border));
+  border-left: 3px solid var(--callout-color);
+  border-radius: 7px;
+}
+
+.documents-viewer-content .markdown .obsidian-callout[data-callout="warning"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="caution"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="attention"] { --callout-color: var(--color-warning); }
+.documents-viewer-content .markdown .obsidian-callout[data-callout="error"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="danger"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="failure"] { --callout-color: var(--color-error); }
+.documents-viewer-content .markdown .obsidian-callout[data-callout="success"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="check"],
+.documents-viewer-content .markdown .obsidian-callout[data-callout="done"] { --callout-color: var(--color-success); }
+
+.documents-viewer-content .markdown .obsidian-callout-title {
+  margin: 0 0 6px;
+  color: var(--callout-color);
+  font-weight: 750;
+}
+
+.documents-viewer-content .markdown summary.obsidian-callout-title {
+  cursor: pointer;
+}
+
+.documents-viewer-content .markdown .obsidian-callout > :last-child { margin-bottom: 0; }
 
 .documents-viewer-skeleton {
   display: grid;
