@@ -369,6 +369,9 @@ describe("DockerResourceProxy", () => {
         const update = incoming.method === "POST" ? path.match(/\/containers\/([^/]+)\/update$/) : null;
         if (update) {
           const found = resolveContainer(decodeURIComponent(update[1]!));
+          if (incoming.headers["content-type"] !== "application/json") {
+            outgoing.writeHead(400); outgoing.end("malformed Content-Type header"); return;
+          }
           if (rejectedUpdates) {
             outgoing.writeHead(500); outgoing.end("update rejected"); return;
           }

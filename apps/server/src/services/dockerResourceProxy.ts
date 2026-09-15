@@ -258,7 +258,12 @@ export class DockerResourceProxy {
 
   private async updateContainer(id: string, limits: DockerLimits): Promise<"updated" | "missing"> {
     const response = await rawDockerRequest(
-      this.daemonSocketPath, "POST", `/containers/${encodeURIComponent(id)}/update`, Buffer.from(JSON.stringify(limits)), {}, 5_000
+      this.daemonSocketPath,
+      "POST",
+      `/containers/${encodeURIComponent(id)}/update`,
+      Buffer.from(JSON.stringify(limits)),
+      { "content-type": "application/json" },
+      5_000
     );
     if (response.statusCode === 404) return "missing";
     if (response.statusCode >= 300) {
