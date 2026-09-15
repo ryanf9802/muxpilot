@@ -373,6 +373,9 @@ describe("DockerResourceProxy", () => {
             outgoing.writeHead(500); outgoing.end("update rejected"); return;
           }
           if (!found) { outgoing.writeHead(404); outgoing.end(); return; }
+          if (found[1].state !== "running") {
+            outgoing.writeHead(400); outgoing.end("container is not running"); return;
+          }
           found[1].limits = { ...found[1].limits, ...payload };
           outgoing.writeHead(200); outgoing.end("{}"); return;
         }
@@ -439,6 +442,7 @@ describe("DockerResourceProxy", () => {
       Image: "example"
     })).status).toBe(201);
     expect(createdLimits.at(-1)).toBe(createdLimits[0]);
+    expect((await request(proxySocket, "POST", "/v1.47/containers/after-404/start")).status).toBe(204);
 
     listStatus = 500;
     expect((await request(proxySocket, "POST", "/v1.47/containers/create?name=blocked", { Image: "example" })).status).toBe(502);

@@ -243,8 +243,9 @@ export class DockerResourceProxy {
   }
 
   private async rebalance(includeId?: string, allowMissingRetry = true): Promise<void> {
-    const running = [...this.containers.values()].filter((container) => container.running || container.id === includeId);
-    const pool = this.poolLimits(Math.max(1, running.length));
+    const running = [...this.containers.values()].filter((container) => container.running);
+    const includesStoppedContainer = Boolean(includeId && this.containers.get(includeId)?.running === false);
+    const pool = this.poolLimits(Math.max(1, running.length + (includesStoppedContainer ? 1 : 0)));
     for (const container of running) {
       const result = await this.updateContainer(container.id, effectiveLimits(container.requested, pool));
       if (result === "missing") {
@@ -260,7 +261,10 @@ export class DockerResourceProxy {
       this.daemonSocketPath, "POST", `/containers/${encodeURIComponent(id)}/update`, Buffer.from(JSON.stringify(limits)), {}, 5_000
     );
     if (response.statusCode === 404) return "missing";
-    if (response.statusCode >= 300) throw new Error(`Docker rejected resource rebalance for ${id} with HTTP ${response.statusCode}`);
+    if (response.statusCode >= 300) {
+      const detail = response.body.toString("utf8").trim().slice(0, 512);
+      throw new Error(`Docker rejected resource rebalance for ${id} with HTTP ${response.statusCode}${detail ? `: ${detail}` : ""}`);
+    }
     return "updated";
   }
 
