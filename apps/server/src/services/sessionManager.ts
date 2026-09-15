@@ -39,7 +39,7 @@ import type {
   TranscriptSearchResponse
 } from "@muxpilot/core";
 import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
-import type { AppDatabase, StoredGitWorkspace } from "../db/database.js";
+import type { AppDatabase, AppServerReconciliationState, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
 import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "./sessionDrivers/types.js";
@@ -171,6 +171,7 @@ export class SessionManager {
   private readonly automatedApprovalMessageIds = new Set<string>();
   private approvalAutomationGenerations = new Map<string, number>();
   private readonly unsubscribeQueueReadiness: () => void;
+  private readonly unsubscribeNotLoadedRecovery: () => void;
 
   constructor(
     private readonly db: AppDatabase,
@@ -194,6 +195,13 @@ export class SessionManager {
       const status = recordValue(event.payload)?.status;
       if (status !== "waiting" && status !== "idle") return;
       this.runBackgroundTask("queued input", () => this.processQueuedInputs(event.sessionId));
+    });
+    this.unsubscribeNotLoadedRecovery = this.events.subscribe((event) => {
+      if (event.type !== "status.changed" || recordValue(event.payload)?.status !== "unknown") return;
+      this.runBackgroundTask(
+        "app-server recovery",
+        () => this.recoverNotLoadedAppServerSession(event.sessionId, event.timestamp)
+      );
     });
   }
 
@@ -247,6 +255,24 @@ export class SessionManager {
     } finally {
       this.appServerRecoveryRunning = false;
     }
+  }
+
+  private async recoverNotLoadedAppServerSession(sessionId: string, observedAt: string): Promise<void> {
+    if (!notLoadedProjectionAt(await this.db.getAppServerReconciliationState(sessionId), observedAt)) return;
+    await this.serializeRuntimeOperation(sessionId, async () => {
+      const session = await this.db.getSession(sessionId);
+      if (
+        !session ||
+        session.archived ||
+        session.initializing ||
+        session.status !== "unknown" ||
+        session.runtime?.kind !== "systemd_service" ||
+        session.runtime.state !== "connected" ||
+        !notLoadedProjectionAt(await this.db.getAppServerReconciliationState(sessionId), observedAt)
+      ) return;
+      await this.resumeAppServerSession(session);
+      await this.db.addAudit("muxpilot", "runtime:recover_not_loaded", session.id, "ok", nowIso());
+    });
   }
 
   setResourceUsageLookup(lookup: SessionResourceUsageLookup | null): void {
@@ -673,6 +699,7 @@ export class SessionManager {
     if (this.appServerHibernateTimer) clearInterval(this.appServerHibernateTimer);
     this.appServerHibernateTimer = null;
     this.unsubscribeQueueReadiness();
+    this.unsubscribeNotLoadedRecovery();
     this.codexStore.stop();
     this.approvalReviewer?.stop();
   }
@@ -4477,6 +4504,16 @@ function approvalKind(value: unknown): ApprovalRequest["kind"] {
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function notLoadedProjectionAt(state: AppServerReconciliationState | null, observedAt: string): boolean {
+  if (
+    !state ||
+    state.method !== "thread/status/changed" ||
+    state.status !== "unknown" ||
+    state.observedAt !== observedAt
+  ) return false;
+  return recordValue(recordValue(state.evidence)?.status)?.type === "notLoaded";
 }
 
 function stringValue(value: unknown): string | null {

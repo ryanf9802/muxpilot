@@ -43,6 +43,157 @@ describe("SessionManager app-server helpers", () => {
     expect(processQueuedInputs).toHaveBeenCalledOnce();
   });
 
+  it("resumes a connected session when Codex unloads its thread", async () => {
+    const observedAt = "2026-09-15T14:59:52.794Z";
+    const session = { ...managedSession(), status: "unknown" as const };
+    const reconciliation = {
+      sessionId: session.id,
+      threadId: session.provider?.threadId ?? "thread-1",
+      turnId: null,
+      itemId: null,
+      clientMessageId: null,
+      method: "thread/status/changed",
+      status: "unknown" as const,
+      evidence: { threadId: "thread-1", status: { type: "notLoaded" } },
+      observedAt
+    };
+    const db = {
+      getAppServerReconciliationState: vi.fn(async () => reconciliation),
+      getSession: vi.fn(async () => session),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const codexStore = { stop: vi.fn() };
+    const events = new EventBus();
+    const manager = new SessionManager(
+      db as never,
+      codexStore as never,
+      events,
+      1_000,
+      1_000,
+      {} as never
+    );
+    const resumeAppServerSession = vi.fn(async () => ({ ...session, status: "idle" as const }));
+    (manager as unknown as { resumeAppServerSession: typeof resumeAppServerSession }).resumeAppServerSession = resumeAppServerSession;
+
+    events.publish({
+      id: "event-not-loaded",
+      type: "status.changed",
+      sessionId: session.id,
+      payload: { status: "unknown" },
+      timestamp: observedAt
+    });
+
+    await vi.waitFor(() => expect(resumeAppServerSession).toHaveBeenCalledWith(session));
+    expect(db.getAppServerReconciliationState).toHaveBeenCalledTimes(2);
+    expect(db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:recover_not_loaded",
+      session.id,
+      "ok",
+      expect.any(String)
+    );
+    manager.stop();
+  });
+
+  it.each([
+    ["a system error", { type: "systemError" }, "2026-09-15T14:59:52.794Z"],
+    ["stale not-loaded evidence", { type: "notLoaded" }, "2026-09-15T14:59:51.000Z"]
+  ])("does not auto-resume from %s", async (_label, status, eventTimestamp) => {
+    const observedAt = "2026-09-15T14:59:52.794Z";
+    const session = { ...managedSession(), status: "unknown" as const };
+    const db = {
+      getAppServerReconciliationState: vi.fn(async () => ({
+        sessionId: session.id,
+        threadId: "thread-1",
+        turnId: null,
+        itemId: null,
+        clientMessageId: null,
+        method: "thread/status/changed",
+        status: "unknown",
+        evidence: { threadId: "thread-1", status },
+        observedAt
+      })),
+      getSession: vi.fn(async () => session)
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      resumeAppServerSession: vi.fn()
+    }) as SessionManager;
+
+    await (manager as unknown as {
+      recoverNotLoadedAppServerSession(sessionId: string, timestamp: string): Promise<void>;
+    }).recoverNotLoadedAppServerSession(session.id, eventTimestamp);
+
+    expect((manager as unknown as { resumeAppServerSession: ReturnType<typeof vi.fn> }).resumeAppServerSession).not.toHaveBeenCalled();
+    expect(db.getSession).not.toHaveBeenCalled();
+  });
+
+  it("abandons not-loaded recovery when newer reconciliation evidence wins the runtime lock", async () => {
+    const observedAt = "2026-09-15T14:59:52.794Z";
+    const session = { ...managedSession(), status: "unknown" as const };
+    const notLoaded = {
+      sessionId: session.id,
+      threadId: "thread-1",
+      turnId: null,
+      itemId: null,
+      clientMessageId: null,
+      method: "thread/status/changed",
+      status: "unknown" as const,
+      evidence: { threadId: "thread-1", status: { type: "notLoaded" } },
+      observedAt
+    };
+    const db = {
+      getAppServerReconciliationState: vi.fn()
+        .mockResolvedValueOnce(notLoaded)
+        .mockResolvedValueOnce({ ...notLoaded, status: "idle", observedAt: "2026-09-15T15:00:00.000Z" }),
+      getSession: vi.fn(async () => session)
+    };
+    const resumeAppServerSession = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      resumeAppServerSession
+    }) as SessionManager;
+
+    await (manager as unknown as {
+      recoverNotLoadedAppServerSession(sessionId: string, timestamp: string): Promise<void>;
+    }).recoverNotLoadedAppServerSession(session.id, observedAt);
+
+    expect(resumeAppServerSession).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed not-loaded resume without recording recovery success", async () => {
+    const observedAt = "2026-09-15T14:59:52.794Z";
+    const session = { ...managedSession(), status: "unknown" as const };
+    const db = {
+      getAppServerReconciliationState: vi.fn(async () => ({
+        sessionId: session.id,
+        threadId: "thread-1",
+        turnId: null,
+        itemId: null,
+        clientMessageId: null,
+        method: "thread/status/changed",
+        status: "unknown",
+        evidence: { threadId: "thread-1", status: { type: "notLoaded" } },
+        observedAt
+      })),
+      getSession: vi.fn(async () => session),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const failure = new Error("resume failed");
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      resumeAppServerSession: vi.fn(async () => { throw failure; })
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      recoverNotLoadedAppServerSession(sessionId: string, timestamp: string): Promise<void>;
+    }).recoverNotLoadedAppServerSession(session.id, observedAt)).rejects.toBe(failure);
+    expect(db.addAudit).not.toHaveBeenCalled();
+  });
+
   it("reports every source of automatic work that can resume an idle session", async () => {
     const session = { ...managedSession(), gitWorkspace: { id: "workspace-1" } } as ManagedSession;
     const manager = Object.assign(Object.create(SessionManager.prototype), {
