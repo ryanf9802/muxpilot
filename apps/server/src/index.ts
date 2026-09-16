@@ -282,9 +282,10 @@ events.subscribe((event) => {
 });
 await manager.discoverNow();
 await manager.finishStartupRecovery();
+await manager.recoverAppServerSessions();
 await codexAuth.reconcileAfterStartup();
 await manager.recoverAutomatedApprovals();
-manager.start({ runInitialTick: false });
+manager.start({ runInitialTick: false, recoverAppServerSessions: false });
 resourceGovernor.start();
 pwaTrustServer.start();
 void startNotificationsAfterStartupCatchup();

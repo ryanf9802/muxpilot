@@ -15,7 +15,9 @@ const runtime: SystemdSessionRuntimeRef = {
 
 describe("CodexAppServerConnectionManager", () => {
   it("initializes, resumes, reads, and only then exposes a connection", async () => {
-    const proxy = new FakeProtocolProxy();
+    const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" }
+    });
     const manager = createManager([proxy]);
     expect(manager.get("session-1")).toBeNull();
 
@@ -89,8 +91,36 @@ describe("CodexAppServerConnectionManager", () => {
     expect(connected.threadId).toBe("thread-1");
   });
 
+  it("attaches without resuming when the durable service owns an active thread without background terminals", async () => {
+    const proxy = new FakeProtocolProxy([], "thread-1", false, { threadStatus: "active" });
+    const manager = createManager([proxy]);
+
+    const connected = await manager.reconnect({
+      sessionId: "session-1",
+      runtime,
+      threadId: "thread-1",
+      settings: { cwd: "/repo" }
+    });
+
+    expect(proxy.methods).toEqual([
+      "initialize",
+      "thread/backgroundTerminals/list",
+      "thread/read",
+      "thread/turns/list",
+      "thread/settings/update",
+      "thread/read",
+      "thread/turns/list"
+    ]);
+    expect(proxy.methods).not.toContain("thread/resume");
+    expect(connected.reconciliation.current.thread).toMatchObject({
+      id: "thread-1",
+      status: { type: "active" }
+    });
+  });
+
   it("attaches to a live idle thread when its unused rollout was never materialized", async () => {
     const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" },
       resumeError: { code: -32600, message: "no rollout found for thread id thread-1" }
     });
     const manager = createManager([proxy]);
@@ -118,9 +148,11 @@ describe("CodexAppServerConnectionManager", () => {
 
   it("rejects missing-rollout attachment unless the live thread matches and is idle", async () => {
     const mismatched = new FakeProtocolProxy([], "other-thread", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" },
       resumeError: { code: -32600, message: "no rollout found for thread id thread-1" }
     });
     const active = new FakeProtocolProxy([], "thread-1", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" },
       resumeError: { code: -32600, message: "no rollout found for thread id thread-1" },
       threadStatus: "active"
     });
@@ -134,6 +166,7 @@ describe("CodexAppServerConnectionManager", () => {
 
   it("rejects missing-rollout attachment when the live thread cannot be read", async () => {
     const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" },
       resumeError: { code: -32600, message: "no rollout found for thread id thread-1" },
       readError: { code: -32600, message: "thread not loaded" }
     });
@@ -146,6 +179,7 @@ describe("CodexAppServerConnectionManager", () => {
 
   it("does not attach after a different resume failure", async () => {
     const proxy = new FakeProtocolProxy([], "thread-1", false, {
+      backgroundTerminalsError: { code: -32600, message: "thread not found" },
       resumeError: { code: -32600, message: "thread storage unavailable" }
     });
     const manager = createManager([proxy]);
@@ -215,6 +249,7 @@ describe("CodexAppServerConnectionManager", () => {
       sessionId: "session-1",
       runtime,
       threadId: "thread-1",
+      expectedPendingRequestIds: ["approval-7"],
       handlers: { serverRequest: ({ id }) => { delivered.push(String(id)); } }
     });
     const reconnected = await manager.reconnect({
@@ -226,6 +261,7 @@ describe("CodexAppServerConnectionManager", () => {
     });
 
     expect(delivered).toEqual(["approval-7", "approval-7"]);
+    expect(second.methods).toContain("thread/resume");
     expect(reconnected.reconciliation.replayedRequestIds).toEqual(["approval-7"]);
     expect(first.close).toHaveBeenCalledOnce();
   });
@@ -301,6 +337,7 @@ class FakeProtocolProxy {
     private readonly backgroundTerminal = false,
     private readonly options: {
       resumeError?: { code: number; message: string };
+      backgroundTerminalsError?: { code: number; message: string };
       readError?: { code: number; message: string };
       threadStatus?: string;
     } = {}
@@ -327,7 +364,8 @@ class FakeProtocolProxy {
         } else if (frame.method === "thread/start" || frame.method === "thread/fork") {
           this.emit({ id: frame.id, result: { thread: { id: this.responseThreadId } } });
         } else if (frame.method === "thread/backgroundTerminals/list") {
-          this.emit({ id: frame.id, result: { data: this.backgroundTerminal ? [{ processId: "process-1" }] : [] } });
+          if (this.options.backgroundTerminalsError) this.emit({ id: frame.id, error: this.options.backgroundTerminalsError });
+          else this.emit({ id: frame.id, result: { data: this.backgroundTerminal ? [{ processId: "process-1" }] : [] } });
         } else if (frame.method === "thread/settings/update") {
           this.emit({ id: frame.id, result: {} });
         } else if (frame.method === "thread/read") {

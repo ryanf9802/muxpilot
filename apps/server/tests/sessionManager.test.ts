@@ -8,6 +8,26 @@ import { EventBus } from "../src/services/eventBus.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 describe("SessionManager app-server helpers", () => {
+  it("can start periodic management without scheduling duplicate app-server recovery", () => {
+    const events = new EventBus();
+    const codexStore = { stop: vi.fn() };
+    const manager = new SessionManager(
+      {} as never,
+      codexStore as never,
+      events,
+      60_000,
+      60_000,
+      {} as never
+    );
+    const recoverAppServerSessions = vi.fn(async () => undefined);
+    manager.recoverAppServerSessions = recoverAppServerSessions;
+
+    manager.start({ runInitialTick: false, recoverAppServerSessions: false });
+
+    expect(recoverAppServerSessions).not.toHaveBeenCalled();
+    manager.stop();
+  });
+
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
@@ -726,6 +746,153 @@ describe("SessionManager app-server helpers", () => {
   });
 });
 
+describe("SessionManager Codex authentication runtime safety", () => {
+  it.each([
+    "executing",
+    "planning",
+    "question",
+    "approval",
+    "startup_failed",
+    "unknown"
+  ] as const)("defers runtime replacement while a session is %s", async (status) => {
+    const harness = authenticationManager({ ...managedSession(), status });
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.hibernationBlockers).not.toHaveBeenCalled();
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: [`status_${status}`] }),
+      expect.any(String)
+    );
+  });
+
+  it("defers runtime replacement while recovery is initializing", async () => {
+    const session = managedSession();
+    const harness = authenticationManager({
+      ...session,
+      status: "unknown",
+      initializing: true,
+      runtime: { ...session.runtime!, state: "starting" }
+    });
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["runtime_starting", "initializing", "status_unknown"] }),
+      expect.any(String)
+    );
+  });
+
+  it("keeps authentication admission held after failed recovery", async () => {
+    const session = managedSession();
+    const harness = authenticationManager({
+      ...session,
+      status: "startup_failed",
+      runtime: { ...session.runtime!, state: "failed" }
+    });
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["runtime_failed", "status_startup_failed"] }),
+      expect.any(String)
+    );
+  });
+
+  it.each(["active_turn", "interactive_request", "background_terminal"])(
+    "defers runtime replacement when live runtime evidence reports %s",
+    async (runtimeBlocker) => {
+      const harness = authenticationManager(managedSession(), [runtimeBlocker]);
+
+      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+      expect(harness.driver.kill).not.toHaveBeenCalled();
+      expect(harness.db.addAudit).toHaveBeenCalledWith(
+        "muxpilot",
+        "runtime:auth_restart_deferred",
+        "session-1",
+        JSON.stringify({ blockers: [runtimeBlocker] }),
+        expect.any(String)
+      );
+    }
+  );
+
+  it("fails closed when live runtime evidence is unavailable", async () => {
+    const harness = authenticationManager(managedSession());
+    harness.driver.hibernationBlockers.mockRejectedValueOnce(new Error("connection unavailable"));
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["runtime_evidence_unavailable"] }),
+      expect.any(String)
+    );
+  });
+
+  it.each(["idle", "waiting", "plan_ready"] as const)(
+    "restarts a %s runtime only after positive idle evidence",
+    async (status) => {
+      const harness = authenticationManager({ ...managedSession(), status });
+
+      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual([]);
+
+      expect(harness.driver.hibernationBlockers).toHaveBeenCalledWith(expect.objectContaining({ status }));
+      expect(harness.driver.kill).toHaveBeenCalledOnce();
+      expect(harness.resumeAppServerSession).toHaveBeenCalledWith(expect.objectContaining({
+        runtime: expect.objectContaining({ state: "stopped" })
+      }));
+      expect(harness.db.addAudit).toHaveBeenCalledWith(
+        "muxpilot",
+        "runtime:auth_restarted",
+        "session-1",
+        JSON.stringify({ blockers: [] }),
+        expect.any(String)
+      );
+    }
+  );
+
+  it("rechecks eligibility inside the runtime lock", async () => {
+    const observed = { ...managedSession(), status: "idle" as const };
+    const locked = { ...observed, status: "executing" as const };
+    const harness = authenticationManager(observed, [], locked);
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("does not stop an unsafe runtime during sign-out", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "question" });
+
+    await expect(harness.manager.suspendForCodexSignOut()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_signout_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["status_question"] }),
+      expect.any(String)
+    );
+  });
+});
+
 function gitWorkspace(targetBranch: string, id: string): NonNullable<ManagedSession["gitWorkspace"]> {
   return {
     workflowVersion: 1,
@@ -766,6 +933,36 @@ function managedSession(): ManagedSession {
     pinned: false,
     archived: false
   };
+}
+
+function authenticationManager(
+  observed: ManagedSession,
+  runtimeBlockers: string[] = [],
+  locked: ManagedSession = observed
+) {
+  let current = locked;
+  const driver = {
+    hibernationBlockers: vi.fn(async () => runtimeBlockers),
+    kill: vi.fn(async () => undefined)
+  };
+  const db = {
+    listSessions: vi.fn(async () => [observed]),
+    getSession: vi.fn(async () => current),
+    upsertSession: vi.fn(async (session: ManagedSession) => { current = session; }),
+    addAudit: vi.fn(async () => undefined)
+  };
+  const resumeAppServerSession = vi.fn(async (session: ManagedSession) => session);
+  const manager = Object.assign(Object.create(SessionManager.prototype), {
+    db,
+    sessionDrivers: {
+      has: vi.fn(() => true),
+      require: vi.fn(() => driver)
+    },
+    runtimeOperationTails: new Map<string, Promise<void>>(),
+    resumeAppServerSession,
+    publish: vi.fn()
+  }) as SessionManager;
+  return { manager, db, driver, resumeAppServerSession };
 }
 
 function managedChild(

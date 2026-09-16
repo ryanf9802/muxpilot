@@ -106,7 +106,7 @@ export class CodexAppServerConnectionManager {
       true,
       async (protocol) => {
         const backgroundTerminals = await protocol.listBackgroundTerminals(spec.threadId).catch(() => null);
-        if (hasBackgroundTerminals(backgroundTerminals)) {
+        if (backgroundTerminals !== null && (spec.expectedPendingRequestIds?.length ?? 0) === 0) {
           const attached = await protocol.readThread(spec.threadId, true);
           requireMatchingThread(spec.threadId, attached, "attach");
           return { response: attached, readCurrentTurns: true };
@@ -306,8 +306,4 @@ function workspaceWriteSandboxPolicy(settings: Partial<ThreadLaunchSettings>): R
     writableRoots: [...new Set((settings.runtimeWorkspaceRoots ?? []).filter((root) => root !== settings.cwd))],
     networkAccess: true
   };
-}
-
-function hasBackgroundTerminals(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && "data" in value && Array.isArray(value.data) && value.data.length > 0);
 }

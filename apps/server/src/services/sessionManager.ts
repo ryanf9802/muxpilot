@@ -90,6 +90,7 @@ interface CodexMetadataLookup {
 
 interface SessionManagerStartOptions {
   runInitialTick?: boolean;
+  recoverAppServerSessions?: boolean;
 }
 
 interface SessionResourceUsageLookup {
@@ -134,6 +135,11 @@ const STEERABLE_SESSION_STATUSES = new Set<SessionStatus>([
   "executing",
   "running",
   "planning"
+]);
+const AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES = new Set<SessionStatus>([
+  "idle",
+  "waiting",
+  "plan_ready"
 ]);
 type InputDeliveryIntent = "auto" | "steer";
 type InputDeliveryFailureCode =
@@ -207,7 +213,9 @@ export class SessionManager {
   }
 
   start(options: SessionManagerStartOptions = {}): void {
-    this.runBackgroundTask("app-server recovery", () => this.recoverAppServerSessions());
+    if (options.recoverAppServerSessions ?? true) {
+      this.runBackgroundTask("app-server recovery", () => this.recoverAppServerSessions());
+    }
     if (options.runInitialTick ?? true) {
       this.runBackgroundTask("discovery", () => this.runDiscoverTick());
       this.runBackgroundTask("ingest", () => this.runIngestTick());
@@ -294,23 +302,29 @@ export class SessionManager {
 
   async codexAuthenticationBlockers(): Promise<string[]> {
     const sessions = await this.db.listSessions(false, false);
-    return sessions
-      .filter((session) => session.runtime?.kind === "systemd_service")
-      .filter((session) => ["working", "generating", "executing", "running", "planning", "approval", "question"].includes(session.status))
-      .map((session) => session.id);
+    const blockers: string[] = [];
+    for (const session of sessions) {
+      if (session.runtime?.kind !== "systemd_service") continue;
+      if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") continue;
+      if ((await this.codexAuthenticationRuntimeRestartBlockers(session)).length > 0) blockers.push(session.id);
+    }
+    return blockers;
   }
 
   async reconcileCodexAuthentication(): Promise<string[]> {
-    const blockers = new Set(await this.codexAuthenticationBlockers());
+    const blockers = new Set<string>();
     const sessions = await this.db.listSessions(false, false);
     for (const candidate of sessions) {
-      if (blockers.has(candidate.id) || candidate.runtime?.kind !== "systemd_service") continue;
+      if (candidate.runtime?.kind !== "systemd_service") continue;
       if (candidate.runtime.state === "hibernated" || candidate.runtime.state === "stopped") continue;
       await this.serializeRuntimeOperation(candidate.id, async () => {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
-        if (["working", "generating", "executing", "running", "planning", "approval", "question"].includes(session.status)) {
+        if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
+        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(session);
+        if (restartBlockers.length > 0) {
           blockers.add(session.id);
+          await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restart_deferred", session.id, restartBlockers);
           return;
         }
         const driver = this.requireAppServerDriver();
@@ -318,6 +332,7 @@ export class SessionManager {
         const cleared = { ...session, runtime: { ...session.runtime, state: "stopped" as const }, authenticationError: null };
         await this.db.upsertSession(cleared, nowIso());
         await this.resumeAppServerSession(cleared);
+        await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restarted", session.id, []);
       }).catch(async (error) => {
         const current = await this.db.getSession(candidate.id);
         if (!current) return;
@@ -334,12 +349,20 @@ export class SessionManager {
   }
 
   async suspendForCodexSignOut(): Promise<string[]> {
-    const blockers = new Set(await this.codexAuthenticationBlockers());
+    const blockers = new Set<string>();
     for (const candidate of await this.db.listSessions(false, false)) {
-      if (blockers.has(candidate.id) || candidate.runtime?.kind !== "systemd_service" || candidate.runtime.state === "hibernated") continue;
+      if (candidate.runtime?.kind !== "systemd_service") continue;
+      if (candidate.runtime.state === "hibernated" || candidate.runtime.state === "stopped") continue;
       await this.serializeRuntimeOperation(candidate.id, async () => {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
+        if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
+        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(session);
+        if (restartBlockers.length > 0) {
+          blockers.add(session.id);
+          await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_deferred", session.id, restartBlockers);
+          return;
+        }
         await this.requireAppServerDriver().kill(session);
         const updated = {
           ...session,
@@ -349,10 +372,42 @@ export class SessionManager {
           authenticationResumeRequired: true
         };
         await this.db.upsertSession(updated, nowIso());
+        await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_stopped", session.id, []);
         this.publish("session.updated", session.id, updated);
       });
     }
     return [...blockers];
+  }
+
+  private async codexAuthenticationRuntimeRestartBlockers(session: ManagedSession): Promise<string[]> {
+    const blockers: string[] = [];
+    if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") {
+      blockers.push(`runtime_${session.runtime?.state ?? "unavailable"}`);
+    }
+    if (session.initializing) blockers.push("initializing");
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status)) {
+      blockers.push(`status_${session.status}`);
+    }
+    if (blockers.length === 0) {
+      try {
+        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session));
+      } catch {
+        blockers.push("runtime_evidence_unavailable");
+      }
+    }
+    return [...new Set(blockers)];
+  }
+
+  private async auditCodexAuthenticationRuntimeDecision(
+    action: string,
+    sessionId: string,
+    blockers: string[]
+  ): Promise<void> {
+    try {
+      await this.db.addAudit("muxpilot", action, sessionId, JSON.stringify({ blockers }), nowIso());
+    } catch (error) {
+      console.error(`Muxpilot failed to record ${action} for ${sessionId}`, error);
+    }
   }
 
   resumeQueuedInputsAfterAuthentication(): void {
