@@ -118,6 +118,116 @@ describe("SessionManager app-server helpers", () => {
     manager.stop();
   });
 
+  it("recovers a session interrupted after its runtime was stopped", async () => {
+    const interrupted = {
+      ...managedSession(),
+      status: "unknown" as const,
+      initializing: true,
+      runtime: { ...managedSession().runtime!, state: "stopped" as const }
+    };
+    const resumeAppServerSession = vi.fn(async () => ({ ...interrupted, status: "idle" as const }));
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { listSessions: vi.fn(async () => [interrupted]) },
+      sessionDrivers: { has: vi.fn(() => true) },
+      appServerRecoveryRunning: false,
+      resumeAppServerSession
+    }) as SessionManager;
+
+    await manager.recoverAppServerSessions();
+
+    expect(resumeAppServerSession).toHaveBeenCalledOnce();
+    expect(resumeAppServerSession).toHaveBeenCalledWith(interrupted);
+  });
+
+  it("ends initialization with an actionable failure when interrupted recovery cannot resume", async () => {
+    const interrupted = {
+      ...managedSession(),
+      status: "unknown" as const,
+      initializing: true,
+      runtime: { ...managedSession().runtime!, state: "stopped" as const }
+    };
+    let current: ManagedSession = interrupted;
+    const db = {
+      getSession: vi.fn(async () => current),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session; }),
+      setSessionInitializationResult: vi.fn(async (_id: string, status: ManagedSession["status"], startupError: string | null) => {
+        current = { ...current, status, initializing: false, startupError };
+        return current;
+      })
+    };
+    const failure = new Error("resume failed");
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      performAppServerResume: vi.fn(async () => { throw failure; }),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      resumeAppServerSession(session: ManagedSession): Promise<ManagedSession>;
+    }).resumeAppServerSession(interrupted)).rejects.toBe(failure);
+
+    expect(db.setSessionInitializationResult).toHaveBeenCalledWith(
+      interrupted.id,
+      "startup_failed",
+      "resume failed",
+      expect.any(String)
+    );
+    expect(current).toMatchObject({ status: "startup_failed", initializing: false, startupError: "resume failed" });
+  });
+
+  it.each([
+    ["ordinary stopped", { runtimeState: "stopped", initializing: false, status: "waiting", archived: false }],
+    ["missing", { runtimeState: "stopped", initializing: true, status: "missing", archived: false }],
+    ["archived", { runtimeState: "stopped", initializing: true, status: "unknown", archived: true }],
+    ["hibernated", { runtimeState: "hibernated", initializing: true, status: "unknown", archived: false }]
+  ] as const)("does not recover a %s session", async (_label, state) => {
+    const session = {
+      ...managedSession(),
+      status: state.status,
+      initializing: state.initializing,
+      archived: state.archived,
+      runtime: { ...managedSession().runtime!, state: state.runtimeState }
+    };
+    const resumeAppServerSession = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { listSessions: vi.fn(async () => [session]) },
+      sessionDrivers: { has: vi.fn(() => true) },
+      appServerRecoveryRunning: false,
+      resumeAppServerSession
+    }) as SessionManager;
+
+    await manager.recoverAppServerSessions();
+
+    expect(resumeAppServerSession).not.toHaveBeenCalled();
+  });
+
+  it("archives a missing transcript without requiring a live runtime", async () => {
+    let current = {
+      ...managedSession(),
+      status: "missing" as const,
+      runtime: { ...managedSession().runtime!, state: "stopped" as const }
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      markSessionArchived: vi.fn(async (_id: string, archived: boolean) => {
+        current = { ...current, archived };
+      }),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const publish = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      readySessionDiscoveryGeneration: new Map([[current.id, 1]]),
+      publish
+    }) as SessionManager;
+
+    await expect(manager.act(current.id, { type: "archiveTranscript" })).resolves.toMatchObject({ archived: true });
+
+    expect(db.markSessionArchived).toHaveBeenCalledWith(current.id, true, expect.any(String));
+    expect(db.addAudit).toHaveBeenCalledWith("local", "archiveTranscript", current.id, "ok", expect.any(String));
+    expect(publish).toHaveBeenCalledWith("session.updated", current.id, expect.objectContaining({ archived: true }));
+  });
+
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };

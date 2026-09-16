@@ -3048,6 +3048,16 @@ export class SessionManager {
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const storedSession = await this.db.getSession(sessionId);
     if (action.type === "kill") return this.killSessionTree(sessionId);
+    if (action.type === "archiveTranscript") {
+      const session = requireStoredSession(storedSession);
+      this.readySessionDiscoveryGeneration.delete(sessionId);
+      const updatedAt = nowIso();
+      await this.db.markSessionArchived(sessionId, true, updatedAt);
+      await this.db.addAudit("local", action.type, sessionId, "ok", updatedAt);
+      const updatedSession = await this.db.getSession(sessionId);
+      this.publish("session.updated", sessionId, updatedSession);
+      return updatedSession;
+    }
     const session = requireSession(storedSession);
     const driver = this.requireAppServerDriver();
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
@@ -3089,10 +3099,6 @@ export class SessionManager {
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
-    if (action.type === "archiveTranscript") {
-      this.readySessionDiscoveryGeneration.delete(sessionId);
-      await this.db.markSessionArchived(sessionId, true, nowIso());
-    }
     if (action.type === "setInputMode") {
       await driver.setPreferences(session, { mode: action.mode });
       const updatedAt = nowIso();
@@ -4478,8 +4484,13 @@ function appServerLaunchSession(launch: AgentSessionLaunchResult, name: string, 
 
 function isRecoverableAppServerSession(session: ManagedSession): boolean {
   return !session.archived
+    && session.status !== "missing"
     && session.runtime?.kind === "systemd_service"
-    && (session.runtime.state === "connected" || session.runtime.state === "starting")
+    && (
+      session.runtime.state === "connected"
+      || session.runtime.state === "starting"
+      || (session.runtime.state === "stopped" && session.initializing === true)
+    )
     && Boolean(session.provider?.threadId ?? session.codexSessionId);
 }
 
