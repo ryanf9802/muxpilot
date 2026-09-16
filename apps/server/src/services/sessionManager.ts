@@ -1614,7 +1614,10 @@ export class SessionManager {
 
   async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
     return this.withAgentMutation(async () => {
-      const actor = requireSession(await this.db.getSession(actorSessionId));
+      const actor = requireStoredSession(await this.db.getSession(actorSessionId));
+      if (actor.status === "missing" || actor.archived) {
+        throw new AgentSessionError("Only live sessions can create child sessions");
+      }
       if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
         throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
       }
@@ -1658,7 +1661,10 @@ export class SessionManager {
 
   async agentClaim(actorSessionId: string, childSessionId: string): Promise<ManagedSession> {
     return this.withAgentMutation(async () => {
-      const actor = requireSession(await this.db.getSession(actorSessionId));
+      const actor = requireStoredSession(await this.db.getSession(actorSessionId));
+      if (actor.status === "missing" || actor.archived) {
+        throw new AgentSessionError("Only live sessions can claim child sessions");
+      }
       if (this.managedEnvironment.MUXPILOT_SESSION_SCOPES_AVAILABLE !== "1") {
         throw new AgentSessionError(AGENT_SCOPE_UNAVAILABLE_MESSAGE);
       }
@@ -2881,14 +2887,7 @@ export class SessionManager {
 
   async act(sessionId: string, action: SessionAction): Promise<ManagedSession | null> {
     const storedSession = await this.db.getSession(sessionId);
-    if (action.type === "kill" && storedSession?.status === "missing") {
-      const timestamp = nowIso();
-      if (storedSession.agentOwnership?.completedAt && !storedSession.archived) await this.db.markSessionArchived(sessionId, true, timestamp);
-      const updated = await this.db.getSession(sessionId) ?? storedSession;
-      await this.db.addAudit("local", action.type, sessionId, "already_missing", timestamp);
-      this.publish("session.updated", sessionId, updated);
-      return updated;
-    }
+    if (action.type === "kill") return this.killSessionTree(sessionId);
     const session = requireSession(storedSession);
     const driver = this.requireAppServerDriver();
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
@@ -2924,13 +2923,6 @@ export class SessionManager {
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());
-    if (action.type === "kill") {
-      this.readySessionDiscoveryGeneration.delete(sessionId);
-      if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "owning session was killed");
-      await driver.kill(session);
-      const current = requireSession(await this.db.getSession(sessionId));
-      await this.db.upsertSession({ ...current, status: "missing", runtime: current.runtime ? { ...current.runtime, state: "stopped" } : undefined }, nowIso());
-    }
     if (action.type === "archiveTranscript") {
       this.readySessionDiscoveryGeneration.delete(sessionId);
       await this.db.markSessionArchived(sessionId, true, nowIso());
@@ -2951,7 +2943,6 @@ export class SessionManager {
     if (action.type === "setAgentParent") await this.operatorSetAgentParent(sessionId, action.parentSessionId);
     if (action.type === "retryInputDelivery") await this.retryInputDelivery(session);
     if (action.type === "dismissInputDeliveryFailure") await this.dismissInputDeliveryFailure(session);
-    if (action.type === "kill" && session.agentOwnership?.completedAt) await this.db.markSessionArchived(sessionId, true, nowIso());
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
@@ -2965,6 +2956,56 @@ export class SessionManager {
       }
     }
     return updatedSession;
+  }
+
+  private killSessionTree(sessionId: string): Promise<ManagedSession> {
+    return this.withAgentMutation(async () => {
+      const sessions = await this.db.listSessions(true);
+      const root = requireStoredSession(sessions.find((session) => session.id === sessionId) ?? await this.db.getSession(sessionId));
+      const killOrder = [...agentDescendants(sessions, sessionId).reverse(), root];
+
+      for (const candidate of killOrder) {
+        const current = await this.db.getSession(candidate.id);
+        if (!current) continue;
+        this.readySessionDiscoveryGeneration.delete(current.id);
+        if (current.gitWorkspace) {
+          await this.heavyCommandQueue?.cancelWorkspace(current.gitWorkspace.id, "owning session was killed");
+        }
+
+        const alreadyStopped = current.status === "missing" || current.runtime?.state === "stopped";
+        if (!alreadyStopped) {
+          await this.serializeRuntimeOperation(current.id, async () => {
+            const locked = await this.db.getSession(current.id);
+            if (!locked || locked.status === "missing" || locked.runtime?.state === "stopped") return;
+            await this.requireAppServerDriver().kill(locked);
+            const latest = requireStoredSession(await this.db.getSession(locked.id));
+            await this.db.upsertSession({
+              ...latest,
+              status: "missing",
+              runtime: latest.runtime ? { ...latest.runtime, state: "stopped" } : undefined
+            }, nowIso());
+          });
+        }
+
+        const timestamp = nowIso();
+        const stopped = requireStoredSession(await this.db.getSession(current.id));
+        if (stopped.status !== "missing") {
+          await this.db.upsertSession({
+            ...stopped,
+            status: "missing",
+            runtime: stopped.runtime ? { ...stopped.runtime, state: "stopped" } : undefined
+          }, timestamp);
+        }
+        if (stopped.agentOwnership?.completedAt && !stopped.archived) {
+          await this.db.markSessionArchived(stopped.id, true, timestamp);
+        }
+        const updated = requireStoredSession(await this.db.getSession(stopped.id));
+        await this.db.addAudit("local", "kill", stopped.id, current.status === "missing" ? "already_missing" : "ok", timestamp);
+        this.publish("session.updated", stopped.id, updated);
+      }
+
+      return requireStoredSession(await this.db.getSession(root.id));
+    });
   }
 
   async getPendingPlanMessage(sessionId: string): Promise<ChatMessage | null> {
@@ -4282,10 +4323,15 @@ class AppServerRuntimeStoppedError extends Error {
   }
 }
 
-function requireSession(session: ManagedSession | null): ManagedSession {
+function requireStoredSession(session: ManagedSession | null): ManagedSession {
   if (!session) throw new Error("Session not found");
-  if (session.status === "missing") throw new Error("Session runtime is no longer available");
   return session;
+}
+
+function requireSession(session: ManagedSession | null): ManagedSession {
+  const stored = requireStoredSession(session);
+  if (stored.status === "missing") throw new Error("Session runtime is no longer available");
+  return stored;
 }
 
 function requireLiveAgentSession(session: ManagedSession | null): ManagedSession {

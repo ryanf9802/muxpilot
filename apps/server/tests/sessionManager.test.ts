@@ -328,6 +328,91 @@ describe("SessionManager app-server helpers", () => {
     expect(setSessionApprovalMode).not.toHaveBeenCalled();
   });
 
+  it("kills attached descendants deepest-first and leaves detached sessions alone", async () => {
+    const root = { ...managedSession(), id: "root" };
+    const child = {
+      ...managedChild("child", "root", "root", "hibernated"),
+      gitWorkspace: gitWorkspace("main", "child-workspace")
+    };
+    const grandchild = managedChild("grandchild", "child", "root");
+    const detached = { ...managedSession(), id: "detached" };
+    const harness = killTreeManager([root, child, grandchild, detached]);
+
+    const result = await harness.manager.act(root.id, { type: "kill" });
+
+    expect(harness.kill).toHaveBeenCalledTimes(3);
+    expect(harness.kill.mock.calls.map(([session]) => session.id)).toEqual(["grandchild", "child", "root"]);
+    expect(result?.status).toBe("missing");
+    expect(harness.sessions.get("detached")?.status).toBe("waiting");
+    expect(harness.sessions.get("child")?.agentOwnership).toEqual(child.agentOwnership);
+    expect(harness.sessions.get("child")?.gitWorkspace).toEqual(child.gitWorkspace);
+    expect(harness.sessions.get("grandchild")?.agentOwnership?.completedAt).toBeNull();
+    expect(harness.cancelWorkspace).toHaveBeenCalledWith("child-workspace", "owning session was killed");
+    expect(harness.publish.mock.calls.map(([, id]) => id)).toEqual(["grandchild", "child", "root"]);
+  });
+
+  it("kills live descendants when the selected parent is already missing", async () => {
+    const root = {
+      ...managedSession(),
+      id: "root",
+      status: "missing" as const,
+      runtime: { ...managedSession().runtime!, state: "stopped" as const }
+    };
+    const child = managedChild("child", "root", "root");
+    const stopped = managedChild("stopped", "root", "root", "stopped");
+    const completed = {
+      ...managedChild("completed", "root", "root", "stopped"),
+      status: "missing" as const,
+      agentOwnership: {
+        ...managedChild("completed", "root", "root").agentOwnership!,
+        completedAt: "2026-09-15T01:00:00.000Z"
+      }
+    };
+    const harness = killTreeManager([root, child, stopped, completed]);
+
+    await harness.manager.act(root.id, { type: "kill" });
+
+    expect(harness.kill.mock.calls.map(([session]) => session.id)).toEqual(["child"]);
+    expect(harness.sessions.get("child")?.status).toBe("missing");
+    expect(harness.sessions.get("stopped")?.status).toBe("missing");
+    expect(harness.sessions.get("completed")?.archived).toBe(true);
+    expect(harness.addAudit).toHaveBeenCalledWith("local", "kill", "root", "already_missing", expect.any(String));
+  });
+
+  it("leaves ancestors running after a descendant kill fails and resumes safely on retry", async () => {
+    const root = { ...managedSession(), id: "root" };
+    const child = managedChild("child", "root", "root");
+    const grandchild = managedChild("grandchild", "child", "root");
+    const harness = killTreeManager([root, child, grandchild]);
+    harness.kill.mockImplementationOnce(async () => undefined).mockRejectedValueOnce(new Error("stop failed"));
+
+    await expect(harness.manager.act(root.id, { type: "kill" })).rejects.toThrow("stop failed");
+    expect(harness.sessions.get("grandchild")?.status).toBe("missing");
+    expect(harness.sessions.get("child")?.status).toBe("waiting");
+    expect(harness.sessions.get("root")?.status).toBe("waiting");
+
+    harness.kill.mockResolvedValue(undefined);
+    await harness.manager.act(root.id, { type: "kill" });
+    expect(harness.kill.mock.calls.map(([session]) => session.id)).toEqual(["grandchild", "child", "child", "root"]);
+    expect(harness.sessions.get("root")?.status).toBe("missing");
+  });
+
+  it.each(["agentCreateChild", "agentClaim"] as const)("rejects %s after the parent becomes missing", async (operation) => {
+    const parent = { ...managedSession(), id: "parent", status: "missing" as const };
+    const child = { ...managedSession(), id: "child" };
+    const sessions = new Map([[parent.id, parent], [child.id, child]]);
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: { getSession: vi.fn(async (id: string) => sessions.get(id) ?? null) },
+      agentMutationQueue: Promise.resolve(),
+      managedEnvironment: { MUXPILOT_SESSION_SCOPES_AVAILABLE: "1" }
+    }) as SessionManager;
+
+    const action = operation === "agentCreateChild"
+      ? manager.agentCreateChild(parent.id, "child", "task")
+      : manager.agentClaim(parent.id, child.id);
+    await expect(action).rejects.toThrow("Only live sessions can");
+  });
+
   it("leaves an escalated automatic review for the operator", async () => {
     const session = { ...managedSession(), status: "approval" as const, approvalMode: "auto" as const };
     const approval = pendingApproval(session.id);
@@ -681,6 +766,57 @@ function managedSession(): ManagedSession {
     pinned: false,
     archived: false
   };
+}
+
+function managedChild(
+  id: string,
+  parentSessionId: string,
+  rootSessionId: string,
+  runtimeState: NonNullable<ManagedSession["runtime"]>["state"] = "connected"
+): ManagedSession {
+  return {
+    ...managedSession(),
+    id,
+    runtime: { ...managedSession().runtime!, state: runtimeState },
+    agentOwnership: {
+      parentSessionId,
+      rootSessionId,
+      origin: "created",
+      createdAt: "2026-09-15T00:00:00.000Z",
+      workTokenBaseline: 0,
+      workTokenBudget: 1_000_000,
+      completedAt: null,
+      budgetExhaustedAt: null
+    }
+  };
+}
+
+function killTreeManager(initialSessions: ManagedSession[]) {
+  const sessions = new Map(initialSessions.map((session) => [session.id, session]));
+  const kill = vi.fn(async (_session: ManagedSession) => undefined);
+  const addAudit = vi.fn(async () => undefined);
+  const publish = vi.fn();
+  const cancelWorkspace = vi.fn(async () => undefined);
+  const db = {
+    getSession: vi.fn(async (id: string) => sessions.get(id) ?? null),
+    listSessions: vi.fn(async () => [...sessions.values()]),
+    upsertSession: vi.fn(async (session: ManagedSession) => { sessions.set(session.id, session); }),
+    markSessionArchived: vi.fn(async (id: string) => {
+      const session = sessions.get(id);
+      if (session) sessions.set(id, { ...session, archived: true });
+    }),
+    addAudit
+  };
+  const manager = Object.assign(Object.create(SessionManager.prototype), {
+    db,
+    agentMutationQueue: Promise.resolve(),
+    runtimeOperationTails: new Map<string, Promise<void>>(),
+    readySessionDiscoveryGeneration: new Map<string, number>(),
+    heavyCommandQueue: { cancelWorkspace },
+    requireAppServerDriver: () => ({ kill }),
+    publish
+  }) as SessionManager;
+  return { manager, sessions, kill, addAudit, publish, cancelWorkspace };
 }
 
 function ingestManager(
