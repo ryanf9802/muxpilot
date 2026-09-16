@@ -161,7 +161,7 @@ manager.setAuthenticationAvailabilityGuard(() => codexAuth.assertAvailable());
 btw.setAuthenticationGuard(() => codexAuth.assertReady());
 codexAuth.setRuntimeHooks({
   blockers: async () => [...new Set([...await manager.codexAuthenticationBlockers(), ...btw.authenticationBlockers()])],
-  reconcile: () => manager.reconcileCodexAuthentication(),
+  reconcile: (sessionIds) => manager.reconcileCodexAuthentication(sessionIds),
   suspend: () => manager.suspendForCodexSignOut(),
   invalidateConsumers: () => {
     codexUsage.invalidateAuthentication();

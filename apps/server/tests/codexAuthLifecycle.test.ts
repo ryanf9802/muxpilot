@@ -169,6 +169,8 @@ describe("CodexAuthLifecycle", () => {
     const state = await fixture.lifecycle.refresh();
 
     expect(fixture.hooks.reconcile).toHaveBeenCalledTimes(2);
+    expect(fixture.hooks.reconcile).toHaveBeenNthCalledWith(1, null);
+    expect(fixture.hooks.reconcile).toHaveBeenNthCalledWith(2, ["busy-session"]);
     expect(fixture.hooks.admissionReleased).toHaveBeenCalledOnce();
     expect(state).toMatchObject({ status: "ready", admissionHeld: false, pendingSessionIds: [] });
     await fixture.lifecycle.stop();

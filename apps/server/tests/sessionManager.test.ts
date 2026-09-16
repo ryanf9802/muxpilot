@@ -967,6 +967,25 @@ describe("SessionManager Codex authentication runtime safety", () => {
     expect(harness.driver.kill).not.toHaveBeenCalled();
   });
 
+  it("retries only the sessions captured by the authentication reconciliation cohort", async () => {
+    const captured = managedSession();
+    const admitted = {
+      ...managedSession(),
+      id: "session-admitted-during-reconciliation",
+      provider: { kind: "codex" as const, threadId: "thread-new", rolloutPath: null },
+      codexSessionId: "thread-new",
+      codexJsonlPath: null
+    };
+    const harness = authenticationManager(captured);
+    harness.db.listSessions.mockResolvedValue([captured, admitted]);
+
+    await expect(harness.manager.reconcileCodexAuthentication([captured.id])).resolves.toEqual([]);
+
+    expect(harness.driver.kill).toHaveBeenCalledOnce();
+    expect(harness.driver.kill).toHaveBeenCalledWith(expect.objectContaining({ id: captured.id }));
+    expect(harness.driver.kill).not.toHaveBeenCalledWith(expect.objectContaining({ id: admitted.id }));
+  });
+
   it("does not stop an unsafe runtime during sign-out", async () => {
     const harness = authenticationManager({ ...managedSession(), status: "question" });
 

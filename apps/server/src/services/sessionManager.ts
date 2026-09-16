@@ -320,10 +320,17 @@ export class SessionManager {
     return blockers;
   }
 
-  async reconcileCodexAuthentication(): Promise<string[]> {
+  async reconcileCodexAuthentication(sessionIds: readonly string[] | null = null): Promise<string[]> {
     const blockers = new Set<string>();
     const sessions = await this.db.listSessions(false, false);
-    for (const candidate of sessions) {
+    const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+    const candidates = sessionIds === null
+      ? sessions
+      : sessionIds.flatMap((sessionId) => {
+        const session = sessionsById.get(sessionId);
+        return session ? [session] : [];
+      });
+    for (const candidate of candidates) {
       if (candidate.runtime?.kind !== "systemd_service") continue;
       if (candidate.runtime.state === "hibernated" || candidate.runtime.state === "stopped") continue;
       await this.serializeRuntimeOperation(candidate.id, async () => {

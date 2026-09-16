@@ -17,7 +17,7 @@ type AuthClient = Pick<CodexAppServerClient, "request" | "stop">;
 
 export interface CodexAuthRuntimeHooks {
   blockers(): Promise<string[]>;
-  reconcile(): Promise<string[]>;
+  reconcile(sessionIds: readonly string[] | null): Promise<string[]>;
   suspend(): Promise<string[]>;
   invalidateConsumers(): void;
   admissionReleased(): void;
@@ -48,6 +48,8 @@ export class CodexAuthLifecycle {
   private hooks: CodexAuthRuntimeHooks | null = null;
   private operation: Promise<void> = Promise.resolve();
   private reconciliationPending = false;
+  private reconciliationSessionIds: string[] | null = null;
+  private reconciliationObservedGeneration: number | null = null;
   private changeGeneration = 0;
   private lastObservedGeneration = 0;
   private lastAuthDigest: string | null = null;
@@ -209,8 +211,13 @@ export class CodexAuthLifecycle {
     }
     if (!this.reconciliationPending) {
       this.reconciliationPending = true;
+      this.reconciliationSessionIds = null;
+      this.reconciliationObservedGeneration = observedGeneration;
       this.update({ status: "checking", admissionHeld: true, error: null });
       this.hooks?.invalidateConsumers();
+    } else if (changed && this.reconciliationObservedGeneration !== observedGeneration) {
+      this.reconciliationSessionIds = null;
+      this.reconciliationObservedGeneration = observedGeneration;
     }
     this.update({ status, account, admissionHeld: true, error });
     if (deferReconciliation) return;
@@ -219,7 +226,12 @@ export class CodexAuthLifecycle {
 
   private async reconcileObservedState(observedGeneration = this.changeGeneration): Promise<void> {
     if (this.stateValue.status === "ready") {
-      const pending = await this.hooks?.reconcile() ?? [];
+      if (this.reconciliationObservedGeneration !== observedGeneration) {
+        this.reconciliationSessionIds = null;
+        this.reconciliationObservedGeneration = observedGeneration;
+      }
+      const pending = await this.hooks?.reconcile(this.reconciliationSessionIds) ?? [];
+      this.reconciliationSessionIds = pending;
       const newerChangePending = observedGeneration !== this.changeGeneration;
       this.reconciliationPending = pending.length > 0 || newerChangePending;
       this.update({
