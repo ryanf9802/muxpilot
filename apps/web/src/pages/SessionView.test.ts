@@ -255,9 +255,10 @@ describe("pendingActionRefreshForStatus", () => {
     expect(pendingActionRefreshForStatus("approval")).toBe("approval");
   });
 
-  it("refreshes only statuses backed by pending action payloads", () => {
+  it("refreshes questions and clears stale interactions after an interrupt", () => {
     expect(pendingActionRefreshForStatus("question")).toBe("question");
-    expect(pendingActionRefreshForStatus("working")).toBeNull();
+    expect(pendingActionRefreshForStatus("waiting")).toBe("clear");
+    expect(pendingActionRefreshForStatus("working")).toBe("clear");
     expect(pendingActionRefreshForStatus(undefined)).toBeNull();
   });
 });
@@ -275,6 +276,10 @@ describe("pendingActionRefreshForEvent", () => {
       type: "status.changed",
       payload: { status: "question" }
     })).toBe("question");
+    expect(pendingActionRefreshForEvent({
+      type: "status.changed",
+      payload: { status: "waiting" }
+    })).toBe("clear");
     expect(pendingActionRefreshForEvent({
       type: "queue.updated",
       payload: { status: "approval" }

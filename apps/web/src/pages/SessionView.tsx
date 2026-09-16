@@ -208,7 +208,7 @@ interface MessageActionMenuState {
   image?: SessionImageTarget;
 }
 export type TranscriptVimNavigationCommand = "jumpTop" | "jumpBottom" | "halfUp" | "halfDown" | "pageUp" | "pageDown" | "find";
-export type PendingActionRefresh = "approval" | "question" | null;
+export type PendingActionRefresh = "approval" | "question" | "clear" | null;
 export interface PendingUserMessage {
   id: string;
   sessionId: string;
@@ -2379,6 +2379,15 @@ export function SessionView() {
         const pendingAction = pendingActionRefreshForEvent(sessionEvent);
         if (pendingAction === "approval") void loadApproval(id, token);
         if (pendingAction === "question") void loadQuestion(id, token);
+        if (pendingAction === "clear") {
+          setApproval(null);
+          setApprovalError("");
+          setQuestion((current) => {
+            if (current) clearQuestionAnswerDraft(current);
+            return null;
+          });
+          setQuestionError("");
+        }
       }
     });
   }, [id, subscribeSessionEvents]);
@@ -3910,7 +3919,7 @@ export function AgentGuardBanner({
 
 export function pendingActionRefreshForStatus(status: ManagedSession["status"] | undefined): PendingActionRefresh {
   if (status === "approval" || status === "question") return status;
-  return null;
+  return status ? "clear" : null;
 }
 
 export function pendingActionRefreshForEvent(event: Pick<SessionEvent, "type" | "payload">): PendingActionRefresh {
