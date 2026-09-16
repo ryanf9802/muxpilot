@@ -163,6 +163,8 @@ describe("CodexAuthLifecycle", () => {
     await fixture.lifecycle.start();
     await fixture.lifecycle.reconcileAfterStartup();
     expect(fixture.lifecycle.state()).toMatchObject({ admissionHeld: true, pendingSessionIds: ["busy-session"] });
+    expect(() => fixture.lifecycle.assertAvailable()).not.toThrow();
+    expect(() => fixture.lifecycle.assertReady()).toThrow("Waiting for active sessions to reach a safe boundary.");
 
     const state = await fixture.lifecycle.refresh();
 
@@ -177,6 +179,8 @@ describe("CodexAuthLifecycle", () => {
     await fixture.lifecycle.start();
     await fixture.lifecycle.reconcileAfterStartup();
     expect(fixture.lifecycle.state()).toMatchObject({ status: "temporarily_unavailable", admissionHeld: true });
+    expect(() => fixture.lifecycle.assertAvailable()).toThrow("network unavailable");
+    expect(() => fixture.lifecycle.assertReady()).toThrow("network unavailable");
     expect(fixture.hooks.blockers).toHaveBeenCalledOnce();
 
     const state = await fixture.lifecycle.refresh();

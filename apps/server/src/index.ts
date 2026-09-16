@@ -157,6 +157,7 @@ const manager = new SessionManager(
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 manager.setAuthenticationGuard(() => codexAuth.assertReady());
+manager.setAuthenticationAvailabilityGuard(() => codexAuth.assertAvailable());
 btw.setAuthenticationGuard(() => codexAuth.assertReady());
 codexAuth.setRuntimeHooks({
   blockers: async () => [...new Set([...await manager.codexAuthenticationBlockers(), ...btw.authenticationBlockers()])],

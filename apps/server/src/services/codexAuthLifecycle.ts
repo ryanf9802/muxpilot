@@ -108,8 +108,15 @@ export class CodexAuthLifecycle {
     return { ...this.stateValue, account: this.stateValue.account ? { ...this.stateValue.account } : null };
   }
 
+  assertAvailable(): void {
+    if (this.stateValue.status !== "ready") {
+      throw new CodexAuthUnavailableError(this.stateValue.error ?? "Codex authentication is being reconciled. Try again when the account is ready.");
+    }
+  }
+
   assertReady(): void {
-    if (this.stateValue.status !== "ready" || this.stateValue.admissionHeld) {
+    this.assertAvailable();
+    if (this.stateValue.admissionHeld) {
       throw new CodexAuthUnavailableError(this.stateValue.error ?? "Codex authentication is being reconciled. Try again when the account is ready.");
     }
   }

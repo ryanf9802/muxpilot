@@ -177,6 +177,7 @@ export class SessionManager {
   private readonly automatedApprovalMessageIds = new Set<string>();
   private approvalAutomationGenerations = new Map<string, number>();
   private authenticationGuard: (() => void) | null = null;
+  private authenticationAvailabilityGuard: (() => void) | null = null;
   private readonly unsubscribeQueueReadiness: () => void;
   private readonly unsubscribeNotLoadedRecovery: () => void;
 
@@ -298,6 +299,14 @@ export class SessionManager {
 
   setAuthenticationGuard(guard: (() => void) | null): void {
     this.authenticationGuard = guard;
+  }
+
+  setAuthenticationAvailabilityGuard(guard: (() => void) | null): void {
+    this.authenticationAvailabilityGuard = guard;
+  }
+
+  private requireAuthenticationAvailable(): void {
+    (this.authenticationAvailabilityGuard ?? this.authenticationGuard)?.();
   }
 
   async codexAuthenticationBlockers(): Promise<string[]> {
@@ -775,7 +784,7 @@ export class SessionManager {
   }
 
   async codexModelCatalog(): Promise<CodexModelCatalogResponse> {
-    this.authenticationGuard?.();
+    this.requireAuthenticationAvailable();
     return await this.codexMetadata?.catalog() ?? {
       models: [],
       defaults: emptySessionModels()
@@ -1206,6 +1215,7 @@ export class SessionManager {
 
     const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
+      this.authenticationGuard?.();
       const session = await this.resumeAppServerSession(live);
       if (session.archived) await this.db.markSessionArchived(session.id, false, nowIso());
       const updated = requireSession(await this.db.getSession(session.id));
@@ -1216,6 +1226,7 @@ export class SessionManager {
     if (!this.sessionDrivers?.has()) {
       throw new SessionRestoreError("Codex app-server is unavailable; muxpilot is running in read-only history mode");
     }
+    this.requireAuthenticationAvailable();
     const restored = await this.resumeAppServerSession(source);
     await this.db.markSessionArchived(restored.id, false, nowIso());
     await this.db.addAudit("local", "restore_session:codex_app_server", source.id, "ok", nowIso());
@@ -2345,7 +2356,7 @@ export class SessionManager {
     name: string,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
   ): Promise<ManagedSession> {
-    this.authenticationGuard?.();
+    this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
     this.requireAppServerDriver();
@@ -2362,6 +2373,7 @@ export class SessionManager {
       ...resolvedLaunchSettings
     }, documentScopeId);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
       operation: "start",
       directory,
@@ -2381,7 +2393,7 @@ export class SessionManager {
     request: CreateSessionRequest,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
   ): Promise<ManagedSession> {
-    this.authenticationGuard?.();
+    this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
     this.requireAppServerDriver();
@@ -2414,6 +2426,7 @@ export class SessionManager {
       fastMode: resolvedLaunchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
       operation: "start",
       directory: controlPath,
@@ -2432,7 +2445,7 @@ export class SessionManager {
   }
 
   async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
-    this.authenticationGuard?.();
+    this.requireAuthenticationAvailable();
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
     if (source.authenticationResumeRequired) throw new AgentSessionError("Resume this session after its authentication failure before forking it.");
@@ -2496,6 +2509,7 @@ export class SessionManager {
     }
 
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
+    this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
       operation: "fork",
       directory,
@@ -3395,6 +3409,7 @@ export class SessionManager {
     requestedModel: string,
     reasoningEffort: string | null
   ): Promise<void> {
+    this.authenticationGuard?.();
     const driver = this.appServerDriver(session);
     if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
     const catalog = await this.codexModelCatalog();

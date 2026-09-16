@@ -1,13 +1,103 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import type { StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
+const temporaryRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
 describe("SessionManager app-server helpers", () => {
+  it("uses available authentication for fresh sessions while existing-session input stays reconciled", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-auth-admission-"));
+    temporaryRoots.push(directory);
+    const available = vi.fn();
+    const reconciled = vi.fn(() => { throw new Error("reconciliation pending"); });
+    const launch = vi.fn(async () => managedSession());
+    const addAudit = vi.fn(async () => undefined);
+    const codexStore = { stop: vi.fn() };
+    const manager = new SessionManager(
+      { addAudit } as never,
+      codexStore as never,
+      new EventBus(),
+      60_000,
+      60_000,
+      { newScopeId: vi.fn(() => "scope-1") } as never,
+      null,
+      null,
+      null,
+      null,
+      {},
+      null,
+      { has: vi.fn(() => true), require: vi.fn(() => ({})) } as never
+    );
+    manager.setAuthenticationGuard(reconciled);
+    manager.setAuthenticationAvailabilityGuard(available);
+    Object.assign(manager as object, {
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      launchAppServerSession: launch,
+      publish: vi.fn()
+    });
+
+    await expect(manager.createSessionInDirectory(directory, "fresh-session", {
+      model: null,
+      reasoningEffort: null
+    })).resolves.toEqual(managedSession());
+    expect(available).toHaveBeenCalledTimes(2);
+    expect(reconciled).not.toHaveBeenCalled();
+    expect(launch).toHaveBeenCalledOnce();
+
+    await expect(manager.sendInput("session-1", "more work")).rejects.toThrow("reconciliation pending");
+    expect(reconciled).toHaveBeenCalledOnce();
+    manager.stop();
+  });
+
+  it("rechecks authentication availability immediately before a fresh session launch", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-auth-launch-race-"));
+    temporaryRoots.push(directory);
+    const available = vi.fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => { throw new Error("authentication changed"); });
+    const launch = vi.fn(async () => managedSession());
+    const codexStore = { stop: vi.fn() };
+    const manager = new SessionManager(
+      { addAudit: vi.fn(async () => undefined) } as never,
+      codexStore as never,
+      new EventBus(),
+      60_000,
+      60_000,
+      { newScopeId: vi.fn(() => "scope-1") } as never,
+      null,
+      null,
+      null,
+      null,
+      {},
+      null,
+      { has: vi.fn(() => true), require: vi.fn(() => ({})) } as never
+    );
+    manager.setAuthenticationAvailabilityGuard(available);
+    Object.assign(manager as object, {
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      launchAppServerSession: launch
+    });
+
+    await expect(manager.createSessionInDirectory(directory, "fresh-session", {
+      model: null,
+      reasoningEffort: null
+    })).rejects.toThrow("authentication changed");
+    expect(available).toHaveBeenCalledTimes(2);
+    expect(launch).not.toHaveBeenCalled();
+    manager.stop();
+  });
+
   it("can start periodic management without scheduling duplicate app-server recovery", () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
