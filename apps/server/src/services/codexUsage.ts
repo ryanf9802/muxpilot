@@ -253,6 +253,14 @@ export class CodexUsageService {
   stop(): void {
     this.client.stop();
   }
+
+  invalidateAuthentication(): void {
+    this.summaryGeneration += 1;
+    this.tokenUsageGeneration += 1;
+    this.cache = null;
+    this.tokenUsageCache = null;
+    this.client.stop();
+  }
 }
 
 export class CodexModelsService {
@@ -305,6 +313,11 @@ export class CodexModelsService {
   }
 
   stop(): void {
+    this.client.stop();
+  }
+
+  invalidateAuthentication(): void {
+    this.cache = null;
     this.client.stop();
   }
 }

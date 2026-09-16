@@ -176,7 +176,8 @@ export function protocolJournalPath(root: string, capabilityId: string): string 
 }
 
 function boundedEntryLine(entry: ProtocolJournalEntry, maxBytes: number): string {
-  const line = `${JSON.stringify(entry)}\n`;
+  const safeEntry = redactJournalEntry(entry);
+  const line = `${JSON.stringify(safeEntry)}\n`;
   const originalBytes = Buffer.byteLength(line);
   if (originalBytes <= maxBytes) return line;
   const bounded: StoredProtocolJournalEntry = {
@@ -186,7 +187,7 @@ function boundedEntryLine(entry: ProtocolJournalEntry, maxBytes: number): string
     connectionId: entry.connectionId,
     id: entry.id,
     method: entry.method,
-    error: truncateUtf8(entry.error ?? null, Math.max(0, maxBytes - 512)),
+    error: truncateUtf8(safeEntry.error ?? null, Math.max(0, maxBytes - 512)),
     payload: { omitted: true },
     truncated: true,
     originalBytes
@@ -197,6 +198,30 @@ function boundedEntryLine(entry: ProtocolJournalEntry, maxBytes: number): string
   result = `${JSON.stringify(bounded)}\n`;
   if (Buffer.byteLength(result) <= maxBytes) return result;
   throw new Error("Protocol journal entry limit is too small for metadata");
+}
+
+function redactJournalEntry(entry: ProtocolJournalEntry): ProtocolJournalEntry {
+  return {
+    ...entry,
+    error: entry.error ? redactString(entry.error) : entry.error,
+    payload: redactValue(entry.payload)
+  };
+}
+
+function redactValue(value: unknown, key = ""): unknown {
+  if (/^(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|password|client[_-]?secret|user[_-]?code)$/i.test(key)) {
+    return "[credential redacted]";
+  }
+  if (typeof value === "string") return redactString(value);
+  if (Array.isArray(value)) return value.map((item) => redactValue(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([childKey, child]) => [childKey, redactValue(child, childKey)]));
+}
+
+function redactString(value: string): string {
+  return value
+    .replace(/((?:access|refresh|id)[_-]?token|api[_-]?key|authorization)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[credential redacted]")
+    .replace(/(?:sk-|sess-|Bearer\s+)[A-Za-z0-9._-]+/gi, "[credential redacted]");
 }
 
 function truncateUtf8(value: string | null, maxBytes: number): string | null {

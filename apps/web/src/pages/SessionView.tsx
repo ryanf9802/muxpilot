@@ -3298,6 +3298,21 @@ export function SessionView() {
         <p className="session-startup-error-banner" role="alert">{readySession.runtimeUnavailableReason}</p>
       ) : null}
 
+      {readySession.authenticationError || readySession.authenticationResumeRequired ? (
+        <div className="session-startup-error-banner" role="alert">
+          <span>{readySession.authenticationError ?? "Codex authentication recovered. Resume explicitly before continuing."}</span>
+          {readySession.authenticationResumeRequired ? (
+            <button
+              className="secondary-button"
+              disabled={Boolean(actionBusy)}
+              onClick={() => void runAction({ type: "resumeAfterAuthentication" })}
+            >
+              {actionBusy === "resumeAfterAuthentication" ? "Resuming…" : "Resume"}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       {readySession.status === "input_failed" ? (
         <InputDeliveryFailureBanner
           busyAction={actionBusy}

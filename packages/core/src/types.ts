@@ -356,6 +356,8 @@ export interface ManagedSession {
   status: SessionStatus;
   initializing?: boolean;
   startupError?: string | null;
+  authenticationError?: string | null;
+  authenticationResumeRequired?: boolean;
   runtimeUnavailableReason?: string | null;
   lastActivityAt: string | null;
   preview: string;
@@ -594,7 +596,8 @@ export interface SessionEvent {
     | "btw.delta"
     | "btw.updated"
     | "btw.finished"
-    | "documents.updated";
+    | "documents.updated"
+    | "codex.auth.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;
@@ -940,6 +943,7 @@ export type SessionAction =
   | { type: "extendAgentBudget"; additionalTokens: number; reason: string }
   | { type: "retryInputDelivery" }
   | { type: "dismissInputDeliveryFailure" }
+  | { type: "resumeAfterAuthentication" }
   | { type: "rename"; name: string }
   | { type: "pin" }
   | { type: "unpin" }
@@ -1098,6 +1102,61 @@ export interface CodexUsageSummaryResponse {
     weekly: CodexUsageLimit | null;
   };
   resetCredits: CodexRateLimitResetCredits | null;
+}
+
+export type CodexAuthLifecycleStatus =
+  | "checking"
+  | "ready"
+  | "signed_out"
+  | "signing_in"
+  | "switching"
+  | "authentication_required"
+  | "temporarily_unavailable";
+
+export interface CodexAuthAccount {
+  type: string;
+  email: string | null;
+  planType: string | null;
+}
+
+export interface CodexAuthProfile {
+  id: string;
+  label: string;
+  account: CodexAuthAccount;
+  createdAt: string;
+  updatedAt: string;
+  requiresReauthentication: boolean;
+}
+
+export interface CodexAuthState {
+  status: CodexAuthLifecycleStatus;
+  account: CodexAuthAccount | null;
+  activeProfileId: string | null;
+  profiles: CodexAuthProfile[];
+  revision: number;
+  observedAt: string;
+  error: string | null;
+  admissionHeld: boolean;
+  pendingSessionIds: string[];
+  credentialStorage: "file" | "unsupported";
+}
+
+export interface CodexAuthLogin {
+  id: string;
+  status: "pending" | "completed" | "failed" | "cancelled";
+  verificationUrl: string | null;
+  userCode: string | null;
+  profile: CodexAuthProfile | null;
+  error: string | null;
+}
+
+export interface StartCodexAuthLoginRequest {
+  label: string;
+  replaceProfileId?: string | null;
+}
+
+export interface UpdateCodexAuthProfileRequest {
+  label: string;
 }
 
 export interface CodexTokenUsageDailyPoint {

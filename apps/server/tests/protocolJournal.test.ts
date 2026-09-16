@@ -54,6 +54,19 @@ describe("ProtocolJournal", () => {
     expect(await stat(path).then((metadata) => metadata.size)).toBeLessThanOrEqual(300);
   });
 
+  it("redacts credential-bearing protocol fields", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-protocol-redaction-"));
+    const path = protocolJournalPath(root, capabilityId);
+    const journal = new ProtocolJournal(path);
+    await journal.append(entry(8, { accessToken: "secret-token", nested: { authorization: "Bearer abc.def" }, text: "sk-sensitive" }));
+
+    const stored = await readFile(path, "utf8");
+    expect(stored).not.toContain("secret-token");
+    expect(stored).not.toContain("abc.def");
+    expect(stored).not.toContain("sk-sensitive");
+    expect(stored).toContain("[credential redacted]");
+  });
+
   it("rebuilds exact active command ownership and ignores malformed journal lines", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-protocol-processes-"));
     const path = protocolJournalPath(root, capabilityId);

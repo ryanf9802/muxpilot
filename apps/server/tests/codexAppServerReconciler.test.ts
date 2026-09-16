@@ -309,10 +309,67 @@ describe("CodexAppServerReconciler", () => {
 
     expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "planning" }));
   });
+
+  it("persists an authentication incident and reports it before generic turn completion handling", async () => {
+    const store = projectionStore([]);
+    const publish = vi.fn();
+    const onAuthenticationFailure = vi.fn();
+    const reconciler = new CodexAppServerReconciler(
+      store as unknown as AppServerProjectionStore,
+      { publish },
+      onAuthenticationFailure
+    );
+
+    await reconciler.handle("session-1", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: { id: "turn-1", status: "failed", error: { message: "Access token unauthorized after signing in to another account" } }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.upsertSession).toHaveBeenCalledWith(expect.objectContaining({
+      status: "waiting",
+      authenticationResumeRequired: true,
+      authenticationError: expect.stringContaining("Access token unauthorized")
+    }), "2026-09-01T12:00:00.000Z");
+    expect(onAuthenticationFailure).toHaveBeenCalledWith("session-1", expect.stringContaining("Access token unauthorized"));
+    expect(publish).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session.updated",
+      payload: expect.objectContaining({ authenticationResumeRequired: true })
+    }));
+  });
+
+  it("forwards account updates before thread-scoped projection filtering", async () => {
+    const store = projectionStore([]);
+    const onAccountUpdated = vi.fn();
+    const reconciler = new CodexAppServerReconciler(
+      store as unknown as AppServerProjectionStore,
+      { publish: vi.fn() },
+      undefined,
+      onAccountUpdated
+    );
+
+    await reconciler.handle("session-1", {
+      method: "account/updated",
+      params: { authMode: "chatgpt" },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(onAccountUpdated).toHaveBeenCalledOnce();
+    expect(store.applyAppServerProjection).not.toHaveBeenCalled();
+  });
 });
 
 function projectionStore(order: string[], inputMode: "default" | "plan" = "default") {
   let status: SessionStatus = "generating";
+  let storedSession: Record<string, unknown> = {
+    id: "session-1",
+    status,
+    inputMode,
+    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
+  };
   let state: AppServerReconciliationState | null = null;
   return {
     applyAppServerProjection: vi.fn(async (projection) => {
@@ -331,13 +388,9 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
     latestPlanReadyMessage: vi.fn(async () => null),
     getSession: vi.fn(async () => {
       order.push("session");
-      return {
-        id: "session-1",
-        status,
-        inputMode,
-        provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
-      };
+      return { ...storedSession, status };
     }),
+    upsertSession: vi.fn(async (session) => { storedSession = { ...session }; status = session.status; }),
     repairAppServerProjectionThread: vi.fn(async () => ({
       messagesRemoved: 0,
       processesRemoved: 0,

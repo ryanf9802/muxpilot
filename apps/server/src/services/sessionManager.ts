@@ -170,6 +170,7 @@ export class SessionManager {
   private readonly runtimeOperationTails = new Map<string, Promise<void>>();
   private readonly automatedApprovalMessageIds = new Set<string>();
   private approvalAutomationGenerations = new Map<string, number>();
+  private authenticationGuard: (() => void) | null = null;
   private readonly unsubscribeQueueReadiness: () => void;
   private readonly unsubscribeNotLoadedRecovery: () => void;
 
@@ -285,6 +286,79 @@ export class SessionManager {
 
   setOrchestrationProvider(provider: SessionOrchestrationProvider | null): void {
     this.orchestrationProvider = provider;
+  }
+
+  setAuthenticationGuard(guard: (() => void) | null): void {
+    this.authenticationGuard = guard;
+  }
+
+  async codexAuthenticationBlockers(): Promise<string[]> {
+    const sessions = await this.db.listSessions(false, false);
+    return sessions
+      .filter((session) => session.runtime?.kind === "systemd_service")
+      .filter((session) => ["working", "generating", "executing", "running", "planning", "approval", "question"].includes(session.status))
+      .map((session) => session.id);
+  }
+
+  async reconcileCodexAuthentication(): Promise<string[]> {
+    const blockers = new Set(await this.codexAuthenticationBlockers());
+    const sessions = await this.db.listSessions(false, false);
+    for (const candidate of sessions) {
+      if (blockers.has(candidate.id) || candidate.runtime?.kind !== "systemd_service") continue;
+      if (candidate.runtime.state === "hibernated" || candidate.runtime.state === "stopped") continue;
+      await this.serializeRuntimeOperation(candidate.id, async () => {
+        const session = await this.db.getSession(candidate.id);
+        if (!session || session.runtime?.kind !== "systemd_service") return;
+        if (["working", "generating", "executing", "running", "planning", "approval", "question"].includes(session.status)) {
+          blockers.add(session.id);
+          return;
+        }
+        const driver = this.requireAppServerDriver();
+        await driver.kill(session);
+        const cleared = { ...session, runtime: { ...session.runtime, state: "stopped" as const }, authenticationError: null };
+        await this.db.upsertSession(cleared, nowIso());
+        await this.resumeAppServerSession(cleared);
+      }).catch(async (error) => {
+        const current = await this.db.getSession(candidate.id);
+        if (!current) return;
+        await this.db.upsertSession({
+          ...current,
+          status: "waiting",
+          authenticationError: error instanceof Error ? error.message : String(error),
+          authenticationResumeRequired: true
+        }, nowIso());
+        blockers.add(candidate.id);
+      });
+    }
+    return [...blockers];
+  }
+
+  async suspendForCodexSignOut(): Promise<string[]> {
+    const blockers = new Set(await this.codexAuthenticationBlockers());
+    for (const candidate of await this.db.listSessions(false, false)) {
+      if (blockers.has(candidate.id) || candidate.runtime?.kind !== "systemd_service" || candidate.runtime.state === "hibernated") continue;
+      await this.serializeRuntimeOperation(candidate.id, async () => {
+        const session = await this.db.getSession(candidate.id);
+        if (!session || session.runtime?.kind !== "systemd_service") return;
+        await this.requireAppServerDriver().kill(session);
+        const updated = {
+          ...session,
+          status: "waiting" as const,
+          runtime: { ...session.runtime, state: "stopped" as const },
+          authenticationError: "Codex account authentication required.",
+          authenticationResumeRequired: true
+        };
+        await this.db.upsertSession(updated, nowIso());
+        this.publish("session.updated", session.id, updated);
+      });
+    }
+    return [...blockers];
+  }
+
+  resumeQueuedInputsAfterAuthentication(): void {
+    void this.db.listSessions(false, false).then((sessions) => {
+      for (const session of sessions) this.runBackgroundTask("queued input", () => this.processQueuedInputs(session.id));
+    });
   }
 
   async listDocuments(sessionId: string): Promise<SessionDocumentsResponse> {
@@ -646,6 +720,7 @@ export class SessionManager {
   }
 
   async codexModelCatalog(): Promise<CodexModelCatalogResponse> {
+    this.authenticationGuard?.();
     return await this.codexMetadata?.catalog() ?? {
       models: [],
       defaults: emptySessionModels()
@@ -1211,8 +1286,10 @@ export class SessionManager {
     actorSessionId: string | null = null,
     content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<QueuedInput> {
+    this.authenticationGuard?.();
     const storedSession = await this.db.getSession(sessionId);
     const session = requireSession(storedSession);
+    if (session.authenticationResumeRequired) throw new QueuedInputError("Resume this session after its authentication failure before queuing more work.");
     if (session.status === "input_failed") {
       throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
     }
@@ -1350,7 +1427,9 @@ export class SessionManager {
     delivery: InputDeliveryIntent = "auto",
     content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
-    requireSession(await this.db.getSession(sessionId));
+    this.authenticationGuard?.();
+    const session = requireSession(await this.db.getSession(sessionId));
+    if (session.authenticationResumeRequired) throw new InputDeliveryError("Resume this session after its authentication failure before sending more work.");
     return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery, content));
   }
 
@@ -2211,6 +2290,7 @@ export class SessionManager {
     name: string,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
   ): Promise<ManagedSession> {
+    this.authenticationGuard?.();
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
     this.requireAppServerDriver();
@@ -2246,6 +2326,7 @@ export class SessionManager {
     request: CreateSessionRequest,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
   ): Promise<ManagedSession> {
+    this.authenticationGuard?.();
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
     this.requireAppServerDriver();
@@ -2296,8 +2377,10 @@ export class SessionManager {
   }
 
   async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
+    this.authenticationGuard?.();
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
+    if (source.authenticationResumeRequired) throw new AgentSessionError("Resume this session after its authentication failure before forking it.");
     const sourceThreadId = source.provider?.threadId ?? source.codexSessionId;
     if (!sourceThreadId) throw new CreateSessionError("Session does not have a Codex session id to fork");
     const sessionNameValue = requireSessionName(name);
@@ -2751,7 +2834,8 @@ export class SessionManager {
         codexSessionId: launch.provider.threadId,
         codexJsonlPath: rolloutPath,
         resourceUnit: launch.runtime.unit,
-        startupError: null
+        startupError: null,
+        authenticationError: null
       };
       await driver.setPreferences(resumedSession, {
         mode: current.inputMode,
@@ -2891,6 +2975,11 @@ export class SessionManager {
     const session = requireSession(storedSession);
     const driver = this.requireAppServerDriver();
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
+    if (action.type === "resumeAfterAuthentication") {
+      this.authenticationGuard?.();
+      await this.db.upsertSession({ ...session, authenticationError: null, authenticationResumeRequired: false }, nowIso());
+      this.runBackgroundTask("queued input", () => this.processQueuedInputs(sessionId));
+    }
     if (action.type === "interrupt") {
       if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
       await driver.interrupt(session, null);
@@ -2900,6 +2989,7 @@ export class SessionManager {
     if (action.type === "hibernate") await this.hibernateAppServerSession(session, false);
     if (action.type === "wake") await this.wakeAppServerSession(session, false);
     if (action.type === "choosePlanAction") {
+      if (session.authenticationResumeRequired) throw new InputModeSwitchError("Resume this session after its authentication failure before continuing its plan.");
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
       if (!latestPlanMessage) throw new InputModeSwitchError("No pending proposed plan for this session");
       const selectedPlanMessageId = (action as SessionAction & { messageId?: string }).messageId;
@@ -3150,12 +3240,19 @@ export class SessionManager {
 
   private async processQueuedInputs(sessionId: string): Promise<void> {
     if (this.processingQueuedSessionIds.has(sessionId) || this.deliveringInputSessionIds.has(sessionId)) return;
+    try {
+      this.authenticationGuard?.();
+    } catch {
+      return;
+    }
     this.processingQueuedSessionIds.add(sessionId);
     try {
       if ((await this.db.deleteEchoedSentQueuedInputs(sessionId)) > 0) {
         this.publish("queue.updated", sessionId, { queuedInputs: await this.db.listQueuedInputs(sessionId) });
       }
       const inputs = await this.db.listQueuedInputs(sessionId);
+      const currentSession = await this.db.getSession(sessionId);
+      if (currentSession?.authenticationResumeRequired) return;
       if (inputs.some((input) => input.status === "sending" || input.status === "sent")) return;
       const input = inputs.find((candidate) => candidate.status === "queued" || candidate.status === "failed");
       if (!input) return;

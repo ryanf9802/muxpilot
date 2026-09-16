@@ -33,6 +33,7 @@ import { CodexGoalStore } from "./codex/codexGoalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
 import { ApprovalReviewer } from "./services/approvalReviewer.js";
 import { SessionImageService } from "./services/sessionImages.js";
+import { CodexAuthLifecycle } from "./services/codexAuthLifecycle.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -57,6 +58,7 @@ const db = new AppDatabase(config.dbPath);
 const sessionImages = new SessionImageService(config.dataDir, db);
 const codex = new CodexSessionStore(config.codexHome);
 const events = new EventBus();
+const codexAuth = new CodexAuthLifecycle(db, events, config.codexHome, config.dataDir, app.log);
 const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
 const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
@@ -132,7 +134,9 @@ const sessionDrivers = createSessionDriverRegistry({
   codexHome: config.codexHome,
   environment: managedEnvironment,
   db,
-  events
+  events,
+  onAuthenticationFailure: (_sessionId, error) => codexAuth.reportAuthenticationFailure(error),
+  onAccountUpdated: () => codexAuth.reportAccountUpdated()
 });
 const manager = new SessionManager(
   db,
@@ -152,6 +156,21 @@ const manager = new SessionManager(
   (sessionId, imageId) => sessionImages.path(sessionId, imageId)
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
+manager.setAuthenticationGuard(() => codexAuth.assertReady());
+btw.setAuthenticationGuard(() => codexAuth.assertReady());
+codexAuth.setRuntimeHooks({
+  blockers: async () => [...new Set([...await manager.codexAuthenticationBlockers(), ...btw.authenticationBlockers()])],
+  reconcile: () => manager.reconcileCodexAuthentication(),
+  suspend: () => manager.suspendForCodexSignOut(),
+  invalidateConsumers: () => {
+    codexUsage.invalidateAuthentication();
+    codexModels.invalidateAuthentication();
+    approvalReviewer.invalidateAuthentication();
+    btw.invalidateAuthentication();
+  },
+  admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication()
+});
+await codexAuth.start();
 const rawSessionEvidence = new RawSessionEvidenceReader(
   config.codexHome,
   undefined,
@@ -239,7 +258,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages);
+registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages, codexAuth);
 
 app.get("/healthz", async () => ({
   ok: true,
@@ -263,6 +282,7 @@ events.subscribe((event) => {
 });
 await manager.discoverNow();
 await manager.finishStartupRecovery();
+await codexAuth.reconcileAfterStartup();
 await manager.recoverAutomatedApprovals();
 manager.start({ runInitialTick: false });
 resourceGovernor.start();
@@ -290,6 +310,7 @@ const close = async () => {
   await resourceGovernor.stop();
   notifications.stop();
   await btw.stop();
+  await codexAuth.stop();
   codexUsage.stop();
   codexModels.stop();
   await pwaTrustServer.close();

@@ -48,6 +48,11 @@ export class ApprovalReviewer {
     this.client.stop();
   }
 
+  invalidateAuthentication(): void {
+    this.failAll(new Error("Codex account changed while approval review was active."));
+    this.client.stop();
+  }
+
   async review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult> {
     const sourceThreadId = session.provider?.kind === "codex" ? session.provider.threadId : session.codexSessionId;
     if (!sourceThreadId) throw new Error("Session has no Codex thread to review");

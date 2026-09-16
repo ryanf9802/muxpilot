@@ -18,6 +18,8 @@ export interface AppServerRuntimeCompositionOptions {
   environment: Record<string, string>;
   db: AppDatabase;
   events: EventBus;
+  onAuthenticationFailure?: (sessionId: string, error: string) => void;
+  onAccountUpdated?: () => void;
   clientVersion?: string;
 }
 
@@ -48,7 +50,7 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
     },
     options.clientVersion ?? "muxpilot/0.1.0"
   );
-  const reconciler = new CodexAppServerReconciler(options.db, options.events);
+  const reconciler = new CodexAppServerReconciler(options.db, options.events, options.onAuthenticationFailure, options.onAccountUpdated);
   registry.register(new CodexAppServerDriver(supervisor, connections, {
     requestStore: options.db,
     processStore: options.db,

@@ -15,6 +15,7 @@ export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
   getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null>;
   getSession(sessionId: string): Promise<ManagedSession | null>;
+  upsertSession(session: ManagedSession, updatedAt: string): Promise<void>;
   latestPlanReadyMessage(sessionId: string): Promise<ChatMessage | null>;
   repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult>;
 }
@@ -22,10 +23,29 @@ export interface AppServerProjectionStore {
 export class CodexAppServerReconciler implements AppServerDriverEventSink {
   constructor(
     private readonly store: AppServerProjectionStore,
-    private readonly events: Pick<EventBus, "publish">
+    private readonly events: Pick<EventBus, "publish">,
+    private readonly onAuthenticationFailure?: (sessionId: string, error: string) => void,
+    private readonly onAccountUpdated?: () => void
   ) {}
 
   async handle(sessionId: string, event: DriverEvent): Promise<void> {
+    if (event.method === "account/updated") {
+      this.onAccountUpdated?.();
+      return;
+    }
+    const authenticationError = authenticationFailure(event.method, event.params);
+    if (authenticationError) {
+      const existing = await this.requireSession(sessionId);
+      const updated: ManagedSession = {
+        ...existing,
+        status: "waiting",
+        authenticationError,
+        authenticationResumeRequired: true
+      };
+      await this.store.upsertSession(updated, event.receivedAt);
+      this.publish("session.updated", sessionId, updated, event.receivedAt);
+      this.onAuthenticationFailure?.(sessionId, authenticationError);
+    }
     const projection = projectAppServerEvent({ method: event.method, params: event.params }, event.receivedAt);
     if (!projection || projection.transient) return;
     const existingSession = await this.requireSession(sessionId);
@@ -69,6 +89,26 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
   private publish(type: "message.appended" | "status.changed" | "session.updated", sessionId: string, payload: unknown, timestamp: string): void {
     this.events.publish({ id: eventId(), type, sessionId, payload, timestamp });
   }
+}
+
+function authenticationFailure(method: string, value: unknown): string | null {
+  const root = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const turn = root?.turn && typeof root.turn === "object" && !Array.isArray(root.turn) ? root.turn as Record<string, unknown> : null;
+  if (method !== "connection/error" && !(method === "turn/completed" && turn?.status === "failed")) return null;
+  const text = collectErrorText(value).join(" ");
+  if (!/unauthori[sz]ed|access token|refresh token|logged out|signed in to another account|authentication required/i.test(text)) return null;
+  return text
+    .replace(/((?:access|refresh|id)[_-]?token|api[_-]?key|authorization)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[credential redacted]")
+    .replace(/(?:sk-|sess-|Bearer\s+)[A-Za-z0-9._-]+/gi, "[credential redacted]")
+    .slice(0, 1_000) || "Codex account authentication required.";
+}
+
+function collectErrorText(value: unknown, depth = 0): string[] {
+  if (depth > 5) return [];
+  if (typeof value === "string") return [value];
+  if (!value || typeof value !== "object") return [];
+  if (Array.isArray(value)) return value.flatMap((item) => collectErrorText(item, depth + 1));
+  return Object.values(value as Record<string, unknown>).flatMap((item) => collectErrorText(item, depth + 1));
 }
 
 function isInteractiveServerRequest(event: DriverEvent): boolean {

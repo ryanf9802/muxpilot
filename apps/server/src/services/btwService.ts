@@ -100,6 +100,7 @@ export class BtwService {
   private readonly startingSessions = new Set<string>();
   private readonly unsubscribeMessage: () => void;
   private readonly unsubscribeClose: () => void;
+  private authenticationGuard: (() => void) | null = null;
 
   constructor(options: BtwServiceOptions) {
     this.db = options.db;
@@ -142,6 +143,18 @@ export class BtwService {
     });
   }
 
+  authenticationBlockers(): string[] {
+    return [...new Set([...this.startingSessions, ...this.activeBySession.keys()])];
+  }
+
+  setAuthenticationGuard(guard: (() => void) | null): void {
+    this.authenticationGuard = guard;
+  }
+
+  invalidateAuthentication(): void {
+    if (this.startingSessions.size === 0 && this.activeBySession.size === 0) this.client.stop();
+  }
+
   async stop(): Promise<void> {
     const runs = [...this.activeBySession.values()];
     await Promise.all(runs.map(async (run) => {
@@ -169,6 +182,7 @@ export class BtwService {
   }
 
   async ask(sessionId: string, question: string): Promise<BtwExchange> {
+    this.authenticationGuard?.();
     const text = question.trim();
     if (!text) throw new BtwError("BTW question is empty");
     if (this.startingSessions.has(sessionId) || this.activeBySession.has(sessionId)) {

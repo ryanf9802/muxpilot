@@ -7,6 +7,7 @@ import type {
   BtwExchange,
   ChatMessage,
   CollaborationMode,
+  CodexAuthProfile,
   GitWorkspaceSummary,
   NotificationDeliveryChannel,
   NotificationDeliverySettings,
@@ -50,6 +51,7 @@ const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
 const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
+const CODEX_AUTH_PROFILES = "codex_auth_profiles_v1";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 
 export interface SessionRecoveryRuntimeState {
@@ -725,6 +727,14 @@ export class AppDatabase {
 
   setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): Promise<ApprovalReviewerSettings> {
     return this.call("setApprovalReviewerSettings", settings, updatedAt) as Promise<ApprovalReviewerSettings>;
+  }
+
+  getCodexAuthProfiles(): Promise<CodexAuthProfile[]> {
+    return this.call("getCodexAuthProfiles") as Promise<CodexAuthProfile[]>;
+  }
+
+  setCodexAuthProfiles(profiles: CodexAuthProfile[], updatedAt: string): Promise<void> {
+    return this.call("setCodexAuthProfiles", profiles, updatedAt) as Promise<void>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -2648,6 +2658,15 @@ export class SyncAppDatabase {
   setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): ApprovalReviewerSettings {
     this.setSetting(APPROVAL_REVIEWER_SETTINGS, JSON.stringify(settings), updatedAt);
     return settings;
+  }
+
+  getCodexAuthProfiles(): CodexAuthProfile[] {
+    const profiles = parseStoredJson<unknown>(this.getSetting(CODEX_AUTH_PROFILES));
+    return Array.isArray(profiles) ? profiles.filter(isCodexAuthProfile) : [];
+  }
+
+  setCodexAuthProfiles(profiles: CodexAuthProfile[], updatedAt: string): void {
+    this.setSetting(CODEX_AUTH_PROFILES, JSON.stringify(profiles), updatedAt);
   }
 
   getUnrestrictedRemoteAccessEnabled(): boolean {
@@ -4784,4 +4803,17 @@ function timestampsAreNear(first: string, second: string): boolean {
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function isCodexAuthProfile(value: unknown): value is CodexAuthProfile {
+  const profile = recordValue(value);
+  const account = recordValue(profile?.account);
+  return typeof profile?.id === "string"
+    && typeof profile.label === "string"
+    && typeof profile.createdAt === "string"
+    && typeof profile.updatedAt === "string"
+    && typeof profile.requiresReauthentication === "boolean"
+    && typeof account?.type === "string"
+    && (account.email === null || typeof account.email === "string")
+    && (account.planType === null || typeof account.planType === "string");
 }
