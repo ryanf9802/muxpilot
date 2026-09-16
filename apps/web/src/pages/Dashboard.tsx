@@ -34,7 +34,6 @@ import { Modal } from "../components/Modal.js";
 import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
 import { CodexUsagePanel } from "../components/CodexUsagePanel.js";
-import { CodexAccountManager } from "../components/CodexAccountManager.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -660,7 +659,6 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      <CodexAccountManager />
       {codexUsageSummaryInitialLoading && !codexUsageSummary ? (
         <UsagePanelSkeleton />
       ) : codexUsageSummary ? (

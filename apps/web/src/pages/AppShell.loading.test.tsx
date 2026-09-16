@@ -24,6 +24,37 @@ afterEach(() => {
 });
 
 describe("AppShell session loading", () => {
+  it("opens profile management from an account button before app logout", async () => {
+    mockShellApi(fakeSocket(), async () => ({ sessions: [] }));
+    vi.spyOn(client.api, "codexAuth").mockResolvedValue({
+      status: "ready",
+      account: { type: "chatgpt", email: "operator@example.com", planType: "pro" },
+      activeProfileId: null,
+      profiles: [],
+      revision: 1,
+      observedAt: "2026-09-16T03:00:00.000Z",
+      error: null,
+      admissionHeld: false,
+      pendingSessionIds: [],
+      credentialStorage: "file"
+    });
+
+    await renderShell(() => undefined);
+    const accountButton = container?.querySelector<HTMLButtonElement>('[aria-label="Manage Codex accounts"]');
+    const logoutButton = container?.querySelector<HTMLButtonElement>('[aria-label="Clear access"]');
+    expect(accountButton).not.toBeNull();
+    expect(logoutButton).not.toBeNull();
+    expect(accountButton!.compareDocumentPosition(logoutButton!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    await act(async () => {
+      accountButton?.click();
+      await flushPromises();
+    });
+    expect(container?.querySelector('[role="dialog"]')?.textContent).toContain("Codex accounts");
+    expect(container?.querySelector('[role="dialog"]')?.textContent).toContain("operator@example.com");
+    expect(container?.querySelector('[role="dialog"]')?.textContent).not.toContain("Sign out");
+  });
+
   it("finishes initial loading without overwriting a live session update", async () => {
     const snapshot = deferred<{ sessions: DashboardSessionSummary[] }>();
     const socket = fakeSocket();

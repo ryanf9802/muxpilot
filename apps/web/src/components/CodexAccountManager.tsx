@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CodexAuthLogin, CodexAuthState } from "@muxpilot/core";
 import { api } from "../api/client.js";
 
@@ -8,6 +8,8 @@ export function CodexAccountManager() {
   const [label, setLabel] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const loginRef = useRef<CodexAuthLogin | null>(null);
+  loginRef.current = login;
   const load = useCallback(async () => {
     try { setState(await api.codexAuth()); } catch (cause) { setError(message(cause)); }
   }, []);
@@ -27,6 +29,11 @@ export function CodexAccountManager() {
     return () => window.clearInterval(timer);
   }, [load, login]);
 
+  useEffect(() => () => {
+    const active = loginRef.current;
+    if (active?.status === "pending") void api.cancelCodexAuthLogin(active.id);
+  }, []);
+
   async function mutate(operation: () => Promise<CodexAuthState>) {
     setBusy(true); setError("");
     try { setState(await operation()); } catch (cause) { setError(message(cause)); } finally { setBusy(false); }
@@ -40,17 +47,15 @@ export function CodexAccountManager() {
     catch (cause) { setError(message(cause)); } finally { setBusy(false); }
   }
 
-  if (!state) return <section className="usage-panel codex-account-panel"><p>Checking Codex account…</p></section>;
+  if (!state) return <div className="codex-account-manager"><p>Checking Codex accounts…</p></div>;
   return (
-    <section className="usage-panel codex-account-panel" aria-labelledby="codex-account-title">
+    <div className="codex-account-manager">
       <div className="usage-panel-head">
         <div>
-          <h2 id="codex-account-title">Codex account</h2>
-          <p>{state.account?.email ?? state.account?.type ?? "Not signed in"} · {state.status.replaceAll("_", " ")}</p>
+          <p><strong>Active account:</strong> {state.account?.email ?? state.account?.type ?? "None"} · {state.status.replaceAll("_", " ")}</p>
         </div>
         <div className="usage-panel-controls">
           <button className="secondary-button" disabled={busy} onClick={() => void mutate(api.refreshCodexAuth)}>Refresh</button>
-          {state.account ? <button className="secondary-button" disabled={busy} onClick={() => void mutate(api.logoutCodexAuth)}>Sign out</button> : null}
         </div>
       </div>
       {state.error ? <p className="dialog-error" role="alert">{state.error}</p> : null}
@@ -79,7 +84,7 @@ export function CodexAccountManager() {
         <button onClick={() => { if (login.status === "pending") void api.cancelCodexAuthLogin(login.id); setLogin(null); }}>{login.status === "pending" ? "Cancel" : "Close"}</button>
       </div> : null}
       {error ? <p className="dialog-error" role="alert">{error}</p> : null}
-    </section>
+    </div>
   );
 }
 

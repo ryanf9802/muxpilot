@@ -1,5 +1,5 @@
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AlertTriangle, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, GitFork, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload } from "lucide-react";
+import { AlertTriangle, Bell, Check, ChevronRight, Copy, Download, Eye, EyeOff, GitFork, History, Info, LoaderCircle, LogOut, Play, RotateCcw, Search, Settings, Smartphone, Trash2, Upload, UserRound } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import { ToastContainer, toast } from "react-toastify";
 import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, notificationDeviceId } from "../api/client.js";
@@ -59,6 +59,7 @@ import {
   playNotificationBell
 } from "../utils/notifications.js";
 import { installVisibleViewportVariables } from "../utils/visualViewport.js";
+import { CodexAccountManager } from "../components/CodexAccountManager.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -87,6 +88,7 @@ export function AppShell() {
   const navigate = useNavigate();
   const [connectionState, setConnectionState] = useState<ShellConnectionState>("connecting");
   const [logoutBusy, setLogoutBusy] = useState(false);
+  const [codexAccountsOpen, setCodexAccountsOpen] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
   const [showConnectButton, setShowConnectButton] = useState(false);
@@ -1135,6 +1137,9 @@ export function AppShell() {
               <Smartphone size={18} />
             </button>
           ) : null}
+          <button className="icon-button" onClick={() => setCodexAccountsOpen(true)} aria-label="Manage Codex accounts">
+            <UserRound size={18} />
+          </button>
           {showLogoutButton ? (
             <button
               className="icon-button"
@@ -1149,6 +1154,14 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
+      <Modal
+        open={codexAccountsOpen}
+        onClose={() => setCodexAccountsOpen(false)}
+        title="Codex accounts"
+        panelClassName="codex-account-modal"
+      >
+        <CodexAccountManager />
+      </Modal>
       {sessionTransferOpen ? <SessionTransferDialog compatibility={appServerCompatibility} onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
