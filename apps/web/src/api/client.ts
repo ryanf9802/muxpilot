@@ -9,8 +9,6 @@ import type {
   GlobalModelSettingsResponse,
   CodexUsageSummaryResponse,
   CodexAuthState,
-  CodexAuthLogin,
-  StartCodexAuthLoginRequest,
   CodexTokenUsageResponse,
   ConsumeCodexResetCreditRequest,
   ConsumeCodexResetCreditResponse,
@@ -185,16 +183,6 @@ export const api = {
   codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
   codexAuth: () => json<CodexAuthState>("/api/codex-auth"),
   refreshCodexAuth: () => json<CodexAuthState>("/api/codex-auth/refresh", { method: "POST" }),
-  startCodexAuthLogin: (request: StartCodexAuthLoginRequest) =>
-    json<CodexAuthLogin>("/api/codex-auth/logins", { method: "POST", body: JSON.stringify(request) }),
-  codexAuthLogin: (id: string) => json<CodexAuthLogin>(`/api/codex-auth/logins/${encodeURIComponent(id)}`),
-  cancelCodexAuthLogin: (id: string) => json<{ ok: true }>(`/api/codex-auth/logins/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  renameCodexAuthProfile: (id: string, label: string) =>
-    json<CodexAuthState>(`/api/codex-auth/profiles/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ label }) }),
-  activateCodexAuthProfile: (id: string) =>
-    json<CodexAuthState>(`/api/codex-auth/profiles/${encodeURIComponent(id)}/activate`, { method: "POST" }),
-  forgetCodexAuthProfile: (id: string) => json<CodexAuthState>(`/api/codex-auth/profiles/${encodeURIComponent(id)}`, { method: "DELETE" }),
-  logoutCodexAuth: () => json<CodexAuthState>("/api/codex-auth/logout", { method: "POST" }),
   globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
   updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>
     json<GlobalModelSettingsResponse>("/api/model-settings/defaults", {

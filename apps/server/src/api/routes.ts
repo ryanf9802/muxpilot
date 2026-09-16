@@ -29,7 +29,6 @@ import type {
   MuxpilotGitSkillStatus,
   UpdateNotificationSettingRequest,
   UpdateRemoteAccessSettingsRequest,
-  StartCodexAuthLoginRequest
 } from "@muxpilot/core";
 import type { ManagedSession } from "@muxpilot/core";
 import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
@@ -64,7 +63,7 @@ import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
-import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../services/codexAuthLifecycle.js";
+import type { CodexAuthLifecycle } from "../services/codexAuthLifecycle.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const modelSettingsSchema = z.object({
@@ -152,11 +151,6 @@ const codexResetCreditSchema = z.object({
   creditId: z.string().trim().min(1).max(500).nullable().optional()
 }).strict();
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
-const codexAuthLoginSchema = z.object({
-  label: z.string().trim().min(1).max(80),
-  replaceProfileId: z.string().uuid().nullable().optional()
-}).strict();
-const codexAuthProfileSchema = z.object({ label: z.string().trim().min(1).max(80) }).strict();
 const sessionDirectorySchema = z.object({ path: z.string().trim().min(1).max(4096) });
 const sessionTransferExportSchema = z.object({ sessionIds: z.array(z.string().min(1)).min(1).max(500) });
 const sessionTransferImportSchema = z.object({
@@ -250,60 +244,8 @@ export function registerRoutes(
   );
 
   if (codexAuth) {
-    const handleAuthError = (error: unknown, reply: FastifyReply) => {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
-      throw error;
-    };
     app.get("/api/codex-auth", { preHandler: access.requireAccess }, async () => codexAuth.state());
     app.post("/api/codex-auth/refresh", { preHandler: access.requireAccess }, async () => codexAuth.refresh());
-    app.post("/api/codex-auth/logins", { preHandler: access.requireAccess }, async (request, reply) => {
-      try {
-        return await codexAuth.startLogin(codexAuthLoginSchema.parse(request.body) satisfies StartCodexAuthLoginRequest);
-      } catch (error) {
-        return handleAuthError(error, reply);
-      }
-    });
-    app.get("/api/codex-auth/logins/:loginId", { preHandler: access.requireAccess }, async (request, reply) => {
-      const { loginId } = z.object({ loginId: z.string().uuid() }).parse(request.params);
-      const login = codexAuth.login(loginId);
-      return login ?? reply.code(404).send({ error: "Codex login not found." });
-    });
-    app.delete("/api/codex-auth/logins/:loginId", { preHandler: access.requireAccess }, async (request, reply) => {
-      const { loginId } = z.object({ loginId: z.string().uuid() }).parse(request.params);
-      await codexAuth.cancelLogin(loginId);
-      return { ok: true };
-    });
-    app.patch("/api/codex-auth/profiles/:profileId", { preHandler: access.requireAccess }, async (request, reply) => {
-      try {
-        const { profileId } = z.object({ profileId: z.string().uuid() }).parse(request.params);
-        return await codexAuth.renameProfile(profileId, codexAuthProfileSchema.parse(request.body).label);
-      } catch (error) {
-        return handleAuthError(error, reply);
-      }
-    });
-    app.post("/api/codex-auth/profiles/:profileId/activate", { preHandler: access.requireAccess }, async (request, reply) => {
-      try {
-        const { profileId } = z.object({ profileId: z.string().uuid() }).parse(request.params);
-        return await codexAuth.activateProfile(profileId);
-      } catch (error) {
-        return handleAuthError(error, reply);
-      }
-    });
-    app.delete("/api/codex-auth/profiles/:profileId", { preHandler: access.requireAccess }, async (request, reply) => {
-      try {
-        const { profileId } = z.object({ profileId: z.string().uuid() }).parse(request.params);
-        return await codexAuth.forgetProfile(profileId);
-      } catch (error) {
-        return handleAuthError(error, reply);
-      }
-    });
-    app.post("/api/codex-auth/logout", { preHandler: access.requireAccess }, async (_request, reply) => {
-      try {
-        return await codexAuth.logout();
-      } catch (error) {
-        return handleAuthError(error, reply);
-      }
-    });
   }
 
   app.get("/api/model-settings/defaults", { preHandler: access.requireAccess }, async () => ({

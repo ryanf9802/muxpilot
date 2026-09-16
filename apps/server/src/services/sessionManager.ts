@@ -345,7 +345,7 @@ export class SessionManager {
           ...session,
           status: "waiting" as const,
           runtime: { ...session.runtime, state: "stopped" as const },
-          authenticationError: "Codex account authentication required.",
+          authenticationError: "Codex authentication is required. Sign in with the Codex CLI, then return to muxpilot.",
           authenticationResumeRequired: true
         };
         await this.db.upsertSession(updated, nowIso());

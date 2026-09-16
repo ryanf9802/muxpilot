@@ -97,10 +97,11 @@ function authenticationFailure(method: string, value: unknown): string | null {
   if (method !== "connection/error" && !(method === "turn/completed" && turn?.status === "failed")) return null;
   const text = collectErrorText(value).join(" ");
   if (!/unauthori[sz]ed|access token|refresh token|logged out|signed in to another account|authentication required/i.test(text)) return null;
-  return text
+  const sanitized = text
     .replace(/((?:access|refresh|id)[_-]?token|api[_-]?key|authorization)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[credential redacted]")
     .replace(/(?:sk-|sess-|Bearer\s+)[A-Za-z0-9._-]+/gi, "[credential redacted]")
-    .slice(0, 1_000) || "Codex account authentication required.";
+    .slice(0, 800) || "Codex account authentication required.";
+  return `${sanitized} Manage Codex authentication with the Codex CLI, then return to muxpilot.`;
 }
 
 function collectErrorText(value: unknown, depth = 0): string[] {

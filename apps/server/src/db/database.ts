@@ -7,7 +7,6 @@ import type {
   BtwExchange,
   ChatMessage,
   CollaborationMode,
-  CodexAuthProfile,
   GitWorkspaceSummary,
   NotificationDeliveryChannel,
   NotificationDeliverySettings,
@@ -729,12 +728,8 @@ export class AppDatabase {
     return this.call("setApprovalReviewerSettings", settings, updatedAt) as Promise<ApprovalReviewerSettings>;
   }
 
-  getCodexAuthProfiles(): Promise<CodexAuthProfile[]> {
-    return this.call("getCodexAuthProfiles") as Promise<CodexAuthProfile[]>;
-  }
-
-  setCodexAuthProfiles(profiles: CodexAuthProfile[], updatedAt: string): Promise<void> {
-    return this.call("setCodexAuthProfiles", profiles, updatedAt) as Promise<void>;
+  clearCodexAuthProfiles(): Promise<void> {
+    return this.call("clearCodexAuthProfiles") as Promise<void>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -2660,13 +2655,8 @@ export class SyncAppDatabase {
     return settings;
   }
 
-  getCodexAuthProfiles(): CodexAuthProfile[] {
-    const profiles = parseStoredJson<unknown>(this.getSetting(CODEX_AUTH_PROFILES));
-    return Array.isArray(profiles) ? profiles.filter(isCodexAuthProfile) : [];
-  }
-
-  setCodexAuthProfiles(profiles: CodexAuthProfile[], updatedAt: string): void {
-    this.setSetting(CODEX_AUTH_PROFILES, JSON.stringify(profiles), updatedAt);
+  clearCodexAuthProfiles(): void {
+    this.db.prepare("DELETE FROM app_settings WHERE key = ?").run(CODEX_AUTH_PROFILES);
   }
 
   getUnrestrictedRemoteAccessEnabled(): boolean {
@@ -4803,17 +4793,4 @@ function timestampsAreNear(first: string, second: string): boolean {
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-function isCodexAuthProfile(value: unknown): value is CodexAuthProfile {
-  const profile = recordValue(value);
-  const account = recordValue(profile?.account);
-  return typeof profile?.id === "string"
-    && typeof profile.label === "string"
-    && typeof profile.createdAt === "string"
-    && typeof profile.updatedAt === "string"
-    && typeof profile.requiresReauthentication === "boolean"
-    && typeof account?.type === "string"
-    && (account.email === null || typeof account.email === "string")
-    && (account.planType === null || typeof account.planType === "string");
 }

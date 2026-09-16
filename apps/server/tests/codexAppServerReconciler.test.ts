@@ -332,7 +332,7 @@ describe("CodexAppServerReconciler", () => {
     expect(store.upsertSession).toHaveBeenCalledWith(expect.objectContaining({
       status: "waiting",
       authenticationResumeRequired: true,
-      authenticationError: expect.stringContaining("Access token unauthorized")
+      authenticationError: expect.stringMatching(/Access token unauthorized.*Codex CLI/)
     }), "2026-09-01T12:00:00.000Z");
     expect(onAuthenticationFailure).toHaveBeenCalledWith("session-1", expect.stringContaining("Access token unauthorized"));
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({

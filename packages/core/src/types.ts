@@ -1108,8 +1108,6 @@ export type CodexAuthLifecycleStatus =
   | "checking"
   | "ready"
   | "signed_out"
-  | "signing_in"
-  | "switching"
   | "authentication_required"
   | "temporarily_unavailable";
 
@@ -1119,44 +1117,14 @@ export interface CodexAuthAccount {
   planType: string | null;
 }
 
-export interface CodexAuthProfile {
-  id: string;
-  label: string;
-  account: CodexAuthAccount;
-  createdAt: string;
-  updatedAt: string;
-  requiresReauthentication: boolean;
-}
-
 export interface CodexAuthState {
   status: CodexAuthLifecycleStatus;
   account: CodexAuthAccount | null;
-  activeProfileId: string | null;
-  profiles: CodexAuthProfile[];
   revision: number;
   observedAt: string;
   error: string | null;
   admissionHeld: boolean;
   pendingSessionIds: string[];
-  credentialStorage: "file" | "unsupported";
-}
-
-export interface CodexAuthLogin {
-  id: string;
-  status: "pending" | "completed" | "failed" | "cancelled";
-  verificationUrl: string | null;
-  userCode: string | null;
-  profile: CodexAuthProfile | null;
-  error: string | null;
-}
-
-export interface StartCodexAuthLoginRequest {
-  label: string;
-  replaceProfileId?: string | null;
-}
-
-export interface UpdateCodexAuthProfileRequest {
-  label: string;
 }
 
 export interface CodexTokenUsageDailyPoint {
