@@ -2918,6 +2918,7 @@ export class SessionManager {
         ...(currentActiveModel.model ? { model: currentActiveModel } : {}),
         ...(current.fastMode === null ? {} : { fastMode: current.fastMode })
       });
+      await driver.rename(resumedSession, sessionName(resumedSession));
       await this.db.upsertSession(resumedSession, nowIso());
       await this.bindOrchestratedLaunch(prepared.capabilityId, session.id);
       const reconciled = await this.db.getSession(session.id);
@@ -3093,9 +3094,12 @@ export class SessionManager {
     }
     if (action.type === "rename") {
       const name = requireSessionName(action.name);
-      await driver.rename(session, name);
-      const current = requireSession(await this.db.getSession(sessionId));
-      await this.db.upsertSession({ ...current, name }, nowIso());
+      await this.serializeRuntimeOperation(sessionId, async () => {
+        const current = requireSession(await this.db.getSession(sessionId));
+        if (current.runtime?.state === "connected") await driver.rename(current, name);
+        const latest = requireSession(await this.db.getSession(sessionId));
+        await this.db.upsertSession({ ...latest, name }, nowIso());
+      });
     }
     if (action.type === "pin") await this.db.setSessionPinned(sessionId, true, nowIso());
     if (action.type === "unpin") await this.db.setSessionPinned(sessionId, false, nowIso());

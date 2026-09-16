@@ -228,6 +228,95 @@ describe("SessionManager app-server helpers", () => {
     expect(publish).toHaveBeenCalledWith("session.updated", current.id, expect.objectContaining({ archived: true }));
   });
 
+  it("renames a hibernated session locally and defers the Codex thread rename until wake", async () => {
+    let current = {
+      ...managedSession(),
+      name: "before",
+      status: "idle" as const,
+      runtime: { ...managedSession().runtime!, state: "hibernated" as const }
+    };
+    const rename = vi.fn(async () => undefined);
+    const db = {
+      getSession: vi.fn(async () => current),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session; }),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const publish = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      requireAppServerDriver: () => ({ rename }),
+      publish
+    }) as SessionManager;
+
+    await expect(manager.act(current.id, { type: "rename", name: "after" }))
+      .resolves.toMatchObject({ name: "after", runtime: { state: "hibernated" } });
+
+    expect(rename).not.toHaveBeenCalled();
+    expect(db.addAudit).toHaveBeenCalledWith("local", "rename", current.id, "ok", expect.any(String));
+    expect(publish).toHaveBeenCalledWith("session.updated", current.id, expect.objectContaining({ name: "after" }));
+  });
+
+  it("synchronizes the canonical session name to Codex when a hibernated session wakes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-wake-rename-"));
+    temporaryRoots.push(directory);
+    let current = {
+      ...managedSession(),
+      name: "renamed-while-asleep",
+      cwd: directory,
+      status: "idle" as const,
+      runtime: { ...managedSession().runtime!, state: "hibernated" as const },
+      documentScopeId: "scope-1"
+    };
+    const connectedRuntime = { ...current.runtime, state: "connected" as const };
+    const rename = vi.fn(async () => undefined);
+    const driver = {
+      resume: vi.fn(async () => ({
+        sessionId: current.id,
+        provider: current.provider!,
+        runtime: connectedRuntime,
+        capabilities: current.capabilities,
+        ready: Promise.resolve()
+      })),
+      setPreferences: vi.fn(async () => undefined),
+      rename,
+      kill: vi.fn(async () => undefined)
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
+      setSessionInitializationResult: vi.fn(async (_id: string, status: ManagedSession["status"], startupError: string | null) => {
+        current = { ...current, status, initializing: false, startupError };
+        return current;
+      })
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      managedEnvironment: {},
+      requireAppServerDriver: () => driver,
+      ensureDocumentScope: vi.fn(async () => "scope-1"),
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      bindOrchestratedLaunch: vi.fn(async () => undefined),
+      processQueuedInputs: vi.fn(async () => undefined),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      performAppServerResume(session: ManagedSession): Promise<ManagedSession>;
+    }).performAppServerResume(current)).resolves.toMatchObject({
+      name: "renamed-while-asleep",
+      runtime: { state: "connected" }
+    });
+
+    expect(rename).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "renamed-while-asleep" }),
+      "renamed-while-asleep"
+    );
+  });
+
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
