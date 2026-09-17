@@ -98,7 +98,7 @@ describe("CodexUsagePanel interactions", () => {
     expect(buttonLabels).not.toContain("30d");
   });
 
-  it("reuses an uncertain attempt after the panel remounts", async () => {
+  it("automatically confirms an uncertain attempt after the panel remounts", async () => {
     apiMocks.consumeCodexResetCredit.mockRejectedValueOnce(new Error("Connection closed"));
 
     await clickButton("Use token");
@@ -113,10 +113,96 @@ describe("CodexUsagePanel interactions", () => {
     root = createRoot(container);
     apiMocks.consumeCodexResetCredit.mockResolvedValueOnce({ outcome: "alreadyRedeemed", summary });
     await renderPanel();
-    await clickButton("Retry");
 
     expect(apiMocks.consumeCodexResetCredit.mock.calls[1]?.[0]).toEqual(firstAttempt);
     expect(container.textContent).toContain("already completed");
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
+  });
+
+  it("does not show an error while a new reset is in flight", async () => {
+    let resolveReset!: (value: unknown) => void;
+    apiMocks.consumeCodexResetCredit.mockReturnValue(new Promise((resolve) => { resolveReset = resolve; }));
+
+    await clickButton("Use token");
+    await clickButton("Use reset token");
+
+    expect(container.textContent).not.toContain("previous reset attempt");
+    await act(async () => resolveReset({ outcome: "reset", summary }));
+  });
+
+  it("shares an in-flight request when recovery remounts", async () => {
+    let resolveReset!: (value: unknown) => void;
+    apiMocks.consumeCodexResetCredit.mockReturnValue(new Promise((resolve) => { resolveReset = resolve; }));
+    await clickButton("Use token");
+    await clickButton("Use reset token");
+
+    await act(async () => root.unmount());
+    container.replaceChildren();
+    root = createRoot(container);
+    await renderPanel();
+
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("Confirming previous reset");
+    await act(async () => resolveReset({ outcome: "reset", summary }));
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
+  });
+
+  it("runs automatic recovery only once and preserves the exact attempt for manual retry", async () => {
+    const attempt = {
+      idempotencyKey: "2b86245c-5b67-4f22-877f-805f06437a1e",
+      creditId: "reset-original"
+    };
+    await remountWithPending(attempt);
+    apiMocks.consumeCodexResetCredit.mockRejectedValueOnce(new Error("Still offline"));
+
+    await renderPanel();
+
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
+    expect(apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0]).toEqual(attempt);
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toContain('"recoveryAttempted":true');
+    expect(container.textContent).toContain("Still offline");
+
+    await act(async () => root.unmount());
+    container.replaceChildren();
+    root = createRoot(container);
+    await renderPanel();
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
+
+    apiMocks.consumeCodexResetCredit.mockResolvedValueOnce({ outcome: "alreadyRedeemed", summary });
+    await clickButton("Retry");
+    expect(apiMocks.consumeCodexResetCredit.mock.calls[1]?.[0]).toEqual(attempt);
+  });
+
+  it("does not let an older completion clear a newer pending attempt", async () => {
+    let resolveReset!: (value: unknown) => void;
+    apiMocks.consumeCodexResetCredit.mockReturnValue(new Promise((resolve) => { resolveReset = resolve; }));
+    await clickButton("Use token");
+    await clickButton("Use reset token");
+
+    const newerAttempt = {
+      idempotencyKey: "1f5ba965-50e2-49a7-a8a2-5555ef9ed662",
+      creditId: "reset-newer",
+      recoveryAttempted: true
+    };
+    await act(async () => {
+      window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify(newerAttempt));
+      window.dispatchEvent(new StorageEvent("storage", { key: PENDING_RESET_KEY }));
+    });
+    await act(async () => resolveReset({ outcome: "reset", summary }));
+
+    expect(JSON.parse(window.localStorage.getItem(PENDING_RESET_KEY)!)).toEqual(newerAttempt);
+    expect(container.textContent).not.toContain("Usage limit reset");
+  });
+
+  it("discards malformed saved attempts without making a redemption request", async () => {
+    await act(async () => root.unmount());
+    container.replaceChildren();
+    window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify({ idempotencyKey: "", creditId: "reset-1" }));
+    root = createRoot(container);
+
+    await renderPanel();
+
+    expect(apiMocks.consumeCodexResetCredit).not.toHaveBeenCalled();
     expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
   });
 
@@ -125,6 +211,13 @@ describe("CodexUsagePanel interactions", () => {
       root.render(<CodexUsagePanel summary={summary} />);
       await Promise.resolve();
     });
+  }
+
+  async function remountWithPending(attempt: { idempotencyKey: string; creditId: string | null }) {
+    await act(async () => root.unmount());
+    container.replaceChildren();
+    window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify(attempt));
+    root = createRoot(container);
   }
 
   async function clickButton(label: string) {

@@ -6,7 +6,8 @@ import type {
   CodexTokenUsageResponse,
   CodexUsageLimit,
   CodexUsageSummaryResponse,
-  ConsumeCodexResetCreditOutcome
+  ConsumeCodexResetCreditOutcome,
+  ConsumeCodexResetCreditResponse
 } from "@muxpilot/core";
 import { api } from "../api/client.js";
 import { Button, DialogActions } from "./Button.js";
@@ -19,7 +20,12 @@ const CODEX_USAGE_HISTORY_DAYS = 30;
 interface PendingResetAttempt {
   idempotencyKey: string;
   creditId: string | null;
+  recoveryAttempted: boolean;
 }
+
+type ResetAction = "using" | "confirming" | "retrying";
+
+const resetRequests = new Map<string, Promise<ConsumeCodexResetCreditResponse>>();
 
 export function CodexUsagePanel({
   summary,
@@ -36,7 +42,7 @@ export function CodexUsagePanel({
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [selectedCredit, setSelectedCredit] = useState<CodexRateLimitResetCredit | null | undefined>(undefined);
   const [pendingAttempt, setPendingAttempt] = useState<PendingResetAttempt | null>(() => loadPendingResetAttempt());
-  const [resetBusy, setResetBusy] = useState(false);
+  const [resetAction, setResetAction] = useState<ResetAction | null>(null);
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetOutcome, setResetOutcome] = useState<ConsumeCodexResetCreditOutcome | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -77,9 +83,38 @@ export function CodexUsagePanel({
     return () => window.clearInterval(timer);
   }, []);
 
+  const resetBusy = resetAction !== null;
+
   useEffect(() => {
-    if (pendingAttempt) setResetError((current) => current ?? "A previous reset attempt did not receive a confirmed result.");
-  }, [pendingAttempt]);
+    const restoredAttempt = loadPendingResetAttempt();
+    if (!restoredAttempt || restoredAttempt.recoveryAttempted) return;
+    const recoveryAttempt = { ...restoredAttempt, recoveryAttempted: true };
+    if (!replacePendingResetAttempt(restoredAttempt, recoveryAttempt)) {
+      setPendingAttempt(loadPendingResetAttempt());
+      return;
+    }
+    setPendingAttempt(recoveryAttempt);
+    void consumeReset(recoveryAttempt, "confirming", false);
+    // Recovery runs once for the attempt restored by this mount. Further retries are manual.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (pendingAttempt && !resetBusy) {
+      setResetError((current) => current ?? "A previous reset attempt did not receive a confirmed result.");
+    }
+  }, [pendingAttempt, resetBusy]);
+
+  useEffect(() => {
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== PENDING_RESET_KEY) return;
+      const nextAttempt = loadPendingResetAttempt();
+      setPendingAttempt(nextAttempt);
+      if (!nextAttempt) setResetError(null);
+    }
+    window.addEventListener("storage", handleStorage);
+    return () => window.removeEventListener("storage", handleStorage);
+  }, []);
 
   async function refreshAll() {
     setRefreshing(true);
@@ -93,37 +128,36 @@ export function CodexUsagePanel({
     }
   }
 
-  async function consumeReset(attempt: PendingResetAttempt) {
-    setResetBusy(true);
+  async function consumeReset(attempt: PendingResetAttempt, action: ResetAction, persist = true) {
+    setResetAction(action);
     setResetError(null);
     setResetOutcome(null);
     setPendingAttempt(attempt);
-    savePendingResetAttempt(attempt);
+    if (persist) savePendingResetAttempt(attempt);
     try {
-      const response = await api.consumeCodexResetCredit({
-        idempotencyKey: attempt.idempotencyKey,
-        creditId: attempt.creditId
-      });
-      clearPendingResetAttempt();
-      setPendingAttempt(null);
+      const response = await requestReset(attempt);
+      clearPendingResetAttempt(attempt);
+      const nextAttempt = loadPendingResetAttempt();
+      setPendingAttempt(nextAttempt);
       setSelectedCredit(undefined);
-      setResetOutcome(response.outcome);
+      if (!nextAttempt) setResetOutcome(response.outcome);
       onSummaryChange?.(response.summary);
       await loadHistory(true);
     } catch (error) {
       setSelectedCredit(undefined);
       setResetError(error instanceof Error ? error.message : "The reset attempt could not be confirmed.");
     } finally {
-      setResetBusy(false);
+      setResetAction(null);
     }
   }
 
   function confirmReset() {
     const attempt = {
       idempotencyKey: createIdempotencyKey(),
-      creditId: selectedCredit?.id ?? null
+      creditId: selectedCredit?.id ?? null,
+      recoveryAttempted: false
     };
-    void consumeReset(attempt);
+    void consumeReset(attempt, "using");
   }
 
   const credits = useMemo(
@@ -181,10 +215,13 @@ export function CodexUsagePanel({
           <Button variant="secondary" onClick={() => setSelectedCredit(null)} disabled={resetBusy || Boolean(pendingAttempt)}>Use next token</Button>
         ) : null}
 
-        {pendingAttempt && resetError ? (
+        {pendingAttempt && resetAction === "confirming" ? (
+          <p className="codex-reset-result" role="status">Confirming previous reset…</p>
+        ) : null}
+        {pendingAttempt && resetError && !resetBusy ? (
           <div className="codex-reset-result usage-error" role="alert">
             <span>{resetError} Retry to check the same reset attempt without spending another token.</span>
-            <Button variant="secondary" onClick={() => void consumeReset(pendingAttempt)} disabled={resetBusy} busy={resetBusy} busyLabel="Retrying">Retry</Button>
+            <Button variant="secondary" onClick={() => void consumeReset(pendingAttempt, "retrying", false)}>Retry</Button>
           </div>
         ) : null}
         {resetOutcome ? <p className="codex-reset-result" role="status">{resetOutcomeMessage(resetOutcome)}</p> : null}
@@ -356,26 +393,78 @@ function loadPendingResetAttempt(): PendingResetAttempt | null {
   if (typeof window === "undefined") return null;
   try {
     const value = JSON.parse(window.localStorage.getItem(PENDING_RESET_KEY) ?? "null") as Partial<PendingResetAttempt> | null;
-    return value && typeof value.idempotencyKey === "string" && (typeof value.creditId === "string" || value.creditId === null)
-      ? { idempotencyKey: value.idempotencyKey, creditId: value.creditId }
-      : null;
+    if (
+      !value
+      || typeof value.idempotencyKey !== "string"
+      || value.idempotencyKey.length === 0
+      || (typeof value.creditId !== "string" && value.creditId !== null)
+      || value.creditId === ""
+    ) {
+      removePendingResetAttempt();
+      return null;
+    }
+    return {
+      idempotencyKey: value.idempotencyKey,
+      creditId: value.creditId,
+      recoveryAttempted: value.recoveryAttempted === true
+    };
   } catch {
+    removePendingResetAttempt();
     return null;
   }
 }
 
-function savePendingResetAttempt(attempt: PendingResetAttempt): void {
+function savePendingResetAttempt(attempt: PendingResetAttempt): boolean {
   try {
     window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify(attempt));
+    return true;
   } catch {
     // Redemption remains safe in-memory when storage is unavailable.
+    return false;
   }
 }
 
-function clearPendingResetAttempt(): void {
+function replacePendingResetAttempt(expected: PendingResetAttempt, replacement: PendingResetAttempt): boolean {
+  try {
+    const current = loadPendingResetAttempt();
+    if (!sameResetAttempt(current, expected)) return false;
+    return savePendingResetAttempt(replacement);
+  } catch {
+    return false;
+  }
+}
+
+function clearPendingResetAttempt(attempt: PendingResetAttempt): void {
+  try {
+    if (sameResetAttempt(loadPendingResetAttempt(), attempt)) removePendingResetAttempt();
+  } catch {
+    // Nothing else is required when storage is unavailable.
+  }
+}
+
+function removePendingResetAttempt(): void {
   try {
     window.localStorage.removeItem(PENDING_RESET_KEY);
   } catch {
     // Nothing else is required when storage is unavailable.
   }
+}
+
+function sameResetAttempt(left: PendingResetAttempt | null, right: PendingResetAttempt): boolean {
+  return left?.idempotencyKey === right.idempotencyKey && left.creditId === right.creditId;
+}
+
+function requestReset(attempt: PendingResetAttempt): Promise<ConsumeCodexResetCreditResponse> {
+  const key = `${attempt.idempotencyKey}\u0000${attempt.creditId ?? ""}`;
+  const existing = resetRequests.get(key);
+  if (existing) return existing;
+  const request = api.consumeCodexResetCredit({
+    idempotencyKey: attempt.idempotencyKey,
+    creditId: attempt.creditId
+  });
+  resetRequests.set(key, request);
+  void request.finally(() => {
+    if (resetRequests.get(key) === request) resetRequests.delete(key);
+  }).catch(() => undefined);
+  return request;
 }
