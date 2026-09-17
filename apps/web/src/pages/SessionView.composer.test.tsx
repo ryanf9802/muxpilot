@@ -2,11 +2,11 @@
 
 import { EditorView } from "@codemirror/view";
 import { getCM } from "@replit/codemirror-vim";
-import { act } from "react";
+import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CodexSkill } from "@muxpilot/core";
-import { composerContent, SkillTextArea } from "./SessionView.js";
+import { ComposerSubmissionAlert, composerContent, composerSubmissionError, SkillTextArea } from "./SessionView.js";
 import { api } from "../api/client.js";
 
 const skills: CodexSkill[] = [
@@ -84,6 +84,15 @@ describe("composer lifecycle", () => {
     });
   });
 
+  it("preserves the server explanation for rejected composer submissions", () => {
+    const explanation = composerSubmissionError(new Error("Waiting for active sessions to reach a safe boundary."));
+    expect(explanation).toBe("Waiting for active sessions to reach a safe boundary.");
+    expect(composerSubmissionError("Connection closed")).toBe("Connection closed");
+
+    renderNode(<ComposerSubmissionAlert error={explanation} />);
+    expect(container?.querySelector('[role="alert"]')?.textContent).toBe(explanation);
+  });
+
   it("inserts a pasted image at the caret and replaces its upload marker in place", async () => {
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:preview");
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
@@ -139,6 +148,15 @@ function renderComposer({
       />
     );
   });
+}
+
+function renderNode(node: ReactNode) {
+  if (!container) {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  }
+  act(() => root?.render(node));
 }
 
 function requireEditor(): HTMLElement {

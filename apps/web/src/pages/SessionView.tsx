@@ -434,6 +434,14 @@ export function composerContent(value: string): { text: string; content: Message
   return { text: content.filter((part) => part.type === "text").map((part) => part.text).join(""), content };
 }
 
+export function composerSubmissionError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function ComposerSubmissionAlert({ error }: { error: string }) {
+  return error ? <p className="composer-submit-error" role="alert">{error}</p> : null;
+}
+
 function composerSource(text: string, content?: MessageContentPart[]): string {
   return content?.length
     ? content.map((part) => part.type === "text" ? part.text : `[[muxpilot-image:${part.id}:${part.mimeType}]]`).join("")
@@ -1600,6 +1608,7 @@ export function SessionView() {
   const [composerUploading, setComposerUploading] = useState(false);
   const [actionBusy, setActionBusy] = useState<SessionAction["type"] | null>(null);
   const [inputDeliveryError, setInputDeliveryError] = useState("");
+  const [composerSubmitError, setComposerSubmitError] = useState("");
   const [agentGuardError, setAgentGuardError] = useState("");
   const [sessionLoadError, setSessionLoadError] = useState("");
   const [sessionLoadRetrying, setSessionLoadRetrying] = useState(false);
@@ -2120,6 +2129,7 @@ export function SessionView() {
       setPlanActionBusy(null);
       setPlanActionError("");
       setSubmitBusy(false);
+      setComposerSubmitError("");
       setActionBusy(null);
       setAgentGuardError("");
       pendingFastModeRef.current = null;
@@ -2908,7 +2918,8 @@ export function SessionView() {
     event.preventDefault();
     if (submitBusy || btwSubmitting || composerLocked || composerUploading) return;
     if (!composerHasContent(text)) return;
-    const value = text.trimEnd();
+    const draft = text;
+    const value = draft.trimEnd();
     const parsedContent = composerContent(value);
     const btwInput = parseBtwComposerInput(parsedContent.text);
     if (btwInput) {
@@ -2924,6 +2935,7 @@ export function SessionView() {
       return;
     }
     const pendingMessage = createPendingUserMessage(id, parsedContent.text, session?.inputMode ?? "default", undefined, parsedContent.content);
+    setComposerSubmitError("");
     blurActiveElementForVimSubmit(effectiveVimEnabled, document.activeElement);
     updateComposerText("");
     setPendingUserMessage(pendingMessage);
@@ -2955,9 +2967,9 @@ export function SessionView() {
         }
       }
     } catch (error) {
-      updateComposerText(value);
+      updateComposerText(draft);
       setPendingUserMessage((current) => (current?.id === pendingMessage.id ? null : current));
-      throw error;
+      setComposerSubmitError(composerSubmissionError(error));
     } finally {
       setSubmitBusy(false);
     }
@@ -3691,6 +3703,7 @@ export function SessionView() {
           ) : null}
           {inputModeError ? <p className="mode-toggle-error" role="alert">{inputModeError}</p> : null}
           {fastModeError ? <p className="mode-toggle-error" role="alert">{fastModeError}</p> : null}
+          <ComposerSubmissionAlert error={composerSubmitError} />
           <form
             className={vimAvailable ? "composer composer-vim-available" : "composer"}
             ref={composerFormRef}

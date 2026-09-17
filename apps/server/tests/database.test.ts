@@ -59,6 +59,16 @@ describe("AppDatabase session visibility", () => {
     await db.close();
   });
 
+  it("persists the reconciled Codex authentication principal", async () => {
+    const db = await tempDb();
+    expect(await db.getCodexAuthReconciledPrincipal()).toBeNull();
+
+    await db.setCodexAuthReconciledPrincipal("principal-v1", "2026-09-17T00:00:00.000Z");
+
+    expect(await db.getCodexAuthReconciledPrincipal()).toBe("principal-v1");
+    await db.close();
+  });
+
   it("reopens canonical session data without changing runtime fields", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-reopen-"));
     const path = join(dir, "test.db");

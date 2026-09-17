@@ -14,6 +14,10 @@ const RECONCILE_INTERVAL_MS = 15_000;
 const WATCH_DEBOUNCE_MS = 250;
 
 type AuthClient = Pick<CodexAppServerClient, "request" | "stop">;
+type AuthDatabase = Pick<
+  AppDatabase,
+  "clearCodexAuthProfiles" | "getCodexAuthReconciledPrincipal" | "setCodexAuthReconciledPrincipal"
+>;
 
 export interface CodexAuthRuntimeHooks {
   blockers(): Promise<string[]>;
@@ -52,11 +56,12 @@ export class CodexAuthLifecycle {
   private reconciliationObservedGeneration: number | null = null;
   private changeGeneration = 0;
   private lastObservedGeneration = 0;
-  private lastAuthDigest: string | null = null;
+  private lastObservedPrincipal: string | null = null;
+  private reconciledPrincipal: string | null = null;
   private stateValue: CodexAuthState;
 
   constructor(
-    private readonly db: Pick<AppDatabase, "clearCodexAuthProfiles">,
+    private readonly db: AuthDatabase,
     private readonly events: EventBus,
     codexHome: string,
     private readonly dataDir: string,
@@ -82,7 +87,8 @@ export class CodexAuthLifecycle {
 
   async start(): Promise<void> {
     await this.removeLegacyAccountData();
-    await this.observeAndReconcile("startup", true, true, true);
+    this.reconciledPrincipal = await this.db.getCodexAuthReconciledPrincipal();
+    await this.observeAndReconcile("startup", false, true, true);
     if (this.watchCredentials) {
       this.watcher = watch(dirname(this.authPath), { persistent: false }, (_event, filename) => {
         if (filename?.toString() !== "auth.json") return;
@@ -90,7 +96,7 @@ export class CodexAuthLifecycle {
         if (this.watchTimer) clearTimeout(this.watchTimer);
         this.watchTimer = setTimeout(() => {
           this.watchTimer = null;
-          void this.serialize(() => this.observeAndReconcile("external credential change", true, true));
+          void this.serialize(() => this.observeAndReconcile("external credential change", true));
         }, WATCH_DEBOUNCE_MS);
       });
     }
@@ -149,12 +155,12 @@ export class CodexAuthLifecycle {
     this.reconciliationPending = true;
     this.update({ status: "authentication_required", admissionHeld: true, error: cliRecoveryMessage(message) });
     this.hooks?.invalidateConsumers();
-    void this.serialize(() => this.observeAndReconcile("runtime authentication failure", true, true));
+    void this.serialize(() => this.observeAndReconcile("runtime authentication failure", true));
   }
 
   reportAccountUpdated(): void {
     this.signalExternalChange();
-    void this.serialize(() => this.observeAndReconcile("Codex account update notification", true, true));
+    void this.serialize(() => this.observeAndReconcile("Codex account update notification", true));
   }
 
   private serialize(operation: () => Promise<void>): Promise<void> {
@@ -168,24 +174,22 @@ export class CodexAuthLifecycle {
   private async observeAndReconcile(
     reason: string,
     forceTokenRefresh: boolean,
-    knownChange = false,
-    deferReconciliation = false
+    deferReconciliation = false,
+    startup = false
   ): Promise<void> {
     const observedGeneration = this.changeGeneration;
-    const previousAccount = this.stateValue.account;
     const previousStatus = this.stateValue.status;
-    const previousDigest = this.lastAuthDigest;
-    if (knownChange && !this.reconciliationPending) {
-      this.update({ admissionHeld: true });
-    }
+    const previousPrincipal = this.lastObservedPrincipal;
 
     this.client.stop(new Error(`Codex authentication observer refreshed: ${reason}`));
     let account: CodexAuthAccount | null = null;
+    let requiresOpenaiAuth = true;
     let status: CodexAuthState["status"];
     let error: string | null = null;
     try {
       const response = await this.client.request<AccountReadResponse>("account/read", { refreshToken: forceTokenRefresh });
       account = normalizeAccount(response.account);
+      requiresOpenaiAuth = response.requiresOpenaiAuth;
       status = account || !response.requiresOpenaiAuth ? "ready" : "signed_out";
       if (status === "signed_out") error = "Codex authentication is required. Sign in with the Codex CLI, then return to muxpilot.";
     } catch (cause) {
@@ -193,20 +197,32 @@ export class CodexAuthLifecycle {
       status = isAuthenticationError(message) ? "authentication_required" : "temporarily_unavailable";
       error = status === "authentication_required" ? cliRecoveryMessage(message) : message;
     }
-    const digest = await fileDigest(this.authPath);
+    const principal = await authPrincipalFingerprint(this.authPath, account, requiresOpenaiAuth);
     this.lastObservedGeneration = observedGeneration;
-    const changed = previousDigest !== digest
-      || previousStatus !== status
-      || !accountsEqual(previousAccount, account);
-    this.lastAuthDigest = digest;
+    const changed = previousPrincipal !== principal || previousStatus !== status;
+    this.lastObservedPrincipal = principal;
+
+    if (startup) {
+      this.update({ status, account, admissionHeld: true, error });
+      if (status === "ready" && (this.reconciledPrincipal === null || this.reconciledPrincipal === principal)) {
+        await this.persistReconciledPrincipal(principal);
+        this.reconciliationPending = false;
+        this.reconciliationSessionIds = [];
+        this.reconciliationObservedGeneration = observedGeneration;
+        this.update({ admissionHeld: false, pendingSessionIds: [], error: null });
+        this.hooks?.admissionReleased();
+        return;
+      }
+      this.reconciliationPending = true;
+      this.reconciliationSessionIds = null;
+      this.reconciliationObservedGeneration = observedGeneration;
+      this.update({ admissionHeld: true });
+      this.hooks?.invalidateConsumers();
+      return;
+    }
 
     if (!changed && !this.reconciliationPending) {
-      if (knownChange) {
-        this.update({ admissionHeld: false, pendingSessionIds: [] });
-        this.hooks?.admissionReleased();
-      } else {
-        this.stateValue = { ...this.stateValue, observedAt: nowIso() };
-      }
+      this.stateValue = { ...this.stateValue, status, account, error, observedAt: nowIso() };
       return;
     }
     if (!this.reconciliationPending) {
@@ -233,13 +249,15 @@ export class CodexAuthLifecycle {
       const pending = await this.hooks?.reconcile(this.reconciliationSessionIds) ?? [];
       this.reconciliationSessionIds = pending;
       const newerChangePending = observedGeneration !== this.changeGeneration;
+      const complete = pending.length === 0 && !newerChangePending;
+      if (complete) await this.persistReconciledPrincipal(this.lastObservedPrincipal);
       this.reconciliationPending = pending.length > 0 || newerChangePending;
       this.update({
         admissionHeld: pending.length > 0 || newerChangePending,
         pendingSessionIds: pending,
         error: pending.length > 0 ? "Waiting for active sessions to reach a safe boundary." : null
       });
-      if (pending.length === 0 && !newerChangePending) this.hooks?.admissionReleased();
+      if (complete) this.hooks?.admissionReleased();
       return;
     }
     const pending = this.stateValue.status === "signed_out" || this.stateValue.status === "authentication_required"
@@ -250,11 +268,15 @@ export class CodexAuthLifecycle {
   }
 
   private signalExternalChange(): void {
+    // A write can be an ordinary access-token refresh. Observe the resulting
+    // principal before holding admission or replacing any session runtimes.
     this.changeGeneration += 1;
-    if (!this.stateValue.admissionHeld) {
-      this.update({ admissionHeld: true });
-      this.hooks?.invalidateConsumers();
-    }
+  }
+
+  private async persistReconciledPrincipal(principal: string | null): Promise<void> {
+    if (principal === null || principal === this.reconciledPrincipal) return;
+    await this.db.setCodexAuthReconciledPrincipal(principal, nowIso());
+    this.reconciledPrincipal = principal;
   }
 
   private async removeLegacyAccountData(): Promise<void> {
@@ -286,16 +308,34 @@ function normalizeAccount(account: AccountReadResponse["account"]): CodexAuthAcc
   };
 }
 
-function accountsEqual(left: CodexAuthAccount | null, right: CodexAuthAccount | null): boolean {
-  return left === right || Boolean(left && right
-    && left.type === right.type
-    && left.email === right.email
-    && left.planType === right.planType);
+async function authPrincipalFingerprint(
+  path: string,
+  account: CodexAuthAccount | null,
+  requiresOpenaiAuth: boolean
+): Promise<string | null> {
+  const content = await readFile(path).catch(() => null);
+  if (content) {
+    try {
+      const parsed = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
+      const authMode = typeof parsed.auth_mode === "string" ? parsed.auth_mode : "unknown";
+      const tokens = parsed.tokens && typeof parsed.tokens === "object" && !Array.isArray(parsed.tokens)
+        ? parsed.tokens as Record<string, unknown>
+        : null;
+      const accountId = typeof tokens?.account_id === "string" ? tokens.account_id : null;
+      if (accountId) return fingerprint(["chatgpt", authMode, accountId]);
+      const apiKey = typeof parsed.OPENAI_API_KEY === "string" ? parsed.OPENAI_API_KEY : null;
+      if (apiKey) return fingerprint(["api_key", authMode, fingerprint([apiKey])]);
+    } catch {
+      // Fall back to the normalized account identity below. Invalid files are
+      // still surfaced by account/read rather than treated as a token change.
+    }
+  }
+  if (account) return fingerprint(["account", account.type, account.email ?? ""]);
+  return requiresOpenaiAuth ? null : fingerprint(["authentication_not_required"]);
 }
 
-async function fileDigest(path: string): Promise<string | null> {
-  const content = await readFile(path).catch(() => null);
-  return content ? createHash("sha256").update(content).digest("hex") : null;
+function fingerprint(parts: string[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
 }
 
 async function removeOwnedPath(dataDir: string, candidate: string): Promise<void> {

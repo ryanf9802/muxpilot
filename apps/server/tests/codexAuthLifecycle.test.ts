@@ -27,7 +27,7 @@ describe("CodexAuthLifecycle", () => {
     await expect(access(join(fixture.dataDir, "private", "codex-auth-profiles"))).rejects.toThrow();
     await expect(access(join(fixture.dataDir, "runtime", "codex-auth-logins"))).rejects.toThrow();
     expect(await readFile(join(outside, "saved-token"), "utf8")).toBe("preserve");
-    expect(await readFile(join(fixture.codexHome, "auth.json"), "utf8")).toBe("cli-credentials");
+    expect(await readFile(join(fixture.codexHome, "auth.json"), "utf8")).toContain("initial-account");
     await fixture.lifecycle.stop();
   });
 
@@ -42,7 +42,7 @@ describe("CodexAuthLifecycle", () => {
     await expect(fixture.lifecycle.start()).rejects.toThrow("Refusing to follow");
 
     expect(await readFile(join(outside, "codex-auth-profiles", "saved-token"), "utf8")).toBe("preserve");
-    expect(await readFile(join(fixture.codexHome, "auth.json"), "utf8")).toBe("cli-credentials");
+    expect(await readFile(join(fixture.codexHome, "auth.json"), "utf8")).toContain("initial-account");
     await fixture.lifecycle.stop();
   });
 
@@ -52,6 +52,7 @@ describe("CodexAuthLifecycle", () => {
     await fixture.lifecycle.reconcileAfterStartup();
     fixture.hooks.invalidateConsumers.mockClear();
     fixture.hooks.reconcile.mockClear();
+    await writeCredential(fixture.codexHome, "second-account", "rotated-access-token");
 
     const state = await fixture.lifecycle.refresh();
 
@@ -62,18 +63,49 @@ describe("CodexAuthLifecycle", () => {
     await fixture.lifecycle.stop();
   });
 
-  it("reconciles same-account credential replacement", async () => {
+  it("ignores same-principal token rotation", async () => {
     const fixture = await createFixture([account("same@example.com"), account("same@example.com")]);
     await fixture.lifecycle.start();
     await fixture.lifecycle.reconcileAfterStartup();
     fixture.hooks.invalidateConsumers.mockClear();
     fixture.hooks.reconcile.mockClear();
-    await writeFile(join(fixture.codexHome, "auth.json"), "rotated-cli-credentials");
+    await writeCredential(fixture.codexHome, "initial-account", "rotated-access-token");
 
-    await fixture.lifecycle.refresh();
+    const state = await fixture.lifecycle.refresh();
 
-    expect(fixture.hooks.invalidateConsumers).toHaveBeenCalledOnce();
-    expect(fixture.hooks.reconcile).toHaveBeenCalledOnce();
+    expect(state.admissionHeld).toBe(false);
+    expect(fixture.hooks.invalidateConsumers).not.toHaveBeenCalled();
+    expect(fixture.hooks.reconcile).not.toHaveBeenCalled();
+    await fixture.lifecycle.stop();
+  });
+
+  it("seeds the reconciled principal on first startup without replacing runtimes", async () => {
+    const fixture = await createFixture();
+
+    await fixture.lifecycle.start();
+    await fixture.lifecycle.reconcileAfterStartup();
+
+    expect(fixture.lifecycle.state()).toMatchObject({ status: "ready", admissionHeld: false, pendingSessionIds: [] });
+    expect(fixture.hooks.reconcile).not.toHaveBeenCalled();
+    expect(fixture.setReconciledPrincipal).toHaveBeenCalledOnce();
+    await fixture.lifecycle.stop();
+  });
+
+  it("does not reconcile startup when the persisted principal matches", async () => {
+    const initial = await createFixture();
+    await initial.lifecycle.start();
+    const principal = initial.setReconciledPrincipal.mock.calls[0]?.[0];
+    expect(typeof principal).toBe("string");
+    await initial.lifecycle.stop();
+
+    const fixture = await createFixture([account("operator@example.com")], null, principal);
+    await fixture.lifecycle.start();
+    await fixture.lifecycle.reconcileAfterStartup();
+
+    expect(fixture.lifecycle.state().admissionHeld).toBe(false);
+    expect(fixture.hooks.invalidateConsumers).not.toHaveBeenCalled();
+    expect(fixture.hooks.reconcile).not.toHaveBeenCalled();
+    expect(fixture.setReconciledPrincipal).not.toHaveBeenCalled();
     await fixture.lifecycle.stop();
   });
 
@@ -89,20 +121,20 @@ describe("CodexAuthLifecycle", () => {
 
     expect(fixture.lifecycle.state().admissionHeld).toBe(false);
     expect(fixture.hooks.reconcile).not.toHaveBeenCalled();
-    expect(fixture.hooks.admissionReleased).toHaveBeenCalledTimes(2);
+    expect(fixture.hooks.admissionReleased).toHaveBeenCalledOnce();
     await fixture.lifecycle.stop();
   });
 
   it("periodically detects a credential change missed by the file watcher", async () => {
     const fixture = await createFixture(
-      [account("same@example.com"), account("same@example.com"), account("same@example.com")],
+      [account("same@example.com"), account("different@example.com"), account("different@example.com")],
       10
     );
     await fixture.lifecycle.start();
     await fixture.lifecycle.reconcileAfterStartup();
     fixture.hooks.invalidateConsumers.mockClear();
     fixture.hooks.reconcile.mockClear();
-    await writeFile(join(fixture.codexHome, "auth.json"), "periodically-observed-credentials");
+    await writeCredential(fixture.codexHome, "different-account", "periodically-observed-token");
 
     await vi.waitFor(() => expect(fixture.hooks.invalidateConsumers).toHaveBeenCalled());
     await vi.waitFor(() => expect(fixture.lifecycle.state().admissionHeld).toBe(false));
@@ -126,10 +158,10 @@ describe("CodexAuthLifecycle", () => {
       .mockImplementationOnce(() => firstReconcile.promise)
       .mockImplementationOnce(() => secondReconcile.promise);
 
-    await writeFile(join(fixture.codexHome, "auth.json"), "second-account-credentials");
+    await writeCredential(fixture.codexHome, "second-account", "second-account-token");
     const firstRefresh = fixture.lifecycle.refresh();
     await vi.waitFor(() => expect(fixture.hooks.reconcile).toHaveBeenCalledTimes(1));
-    await writeFile(join(fixture.codexHome, "auth.json"), "third-account-credentials");
+    await writeCredential(fixture.codexHome, "third-account", "third-account-token");
     fixture.lifecycle.reportAccountUpdated();
     firstReconcile.resolve([]);
     await firstRefresh;
@@ -158,7 +190,7 @@ describe("CodexAuthLifecycle", () => {
   });
 
   it("retries safe-boundary reconciliation even when credentials do not change again", async () => {
-    const fixture = await createFixture([account("operator@example.com"), account("operator@example.com")]);
+    const fixture = await createFixture([account("operator@example.com"), account("operator@example.com")], null, "stale-principal");
     fixture.hooks.reconcile.mockResolvedValueOnce(["busy-session"]).mockResolvedValueOnce([]);
     await fixture.lifecycle.start();
     await fixture.lifecycle.reconcileAfterStartup();
@@ -195,13 +227,14 @@ describe("CodexAuthLifecycle", () => {
 
 async function createFixture(
   responses: Array<unknown | Error> = [account("operator@example.com")],
-  reconcileIntervalMs: number | null = null
+  reconcileIntervalMs: number | null = null,
+  storedPrincipal: string | null = null
 ) {
   const root = await temporaryDirectory("muxpilot-auth-");
   const codexHome = join(root, "codex-home");
   const dataDir = join(root, "data");
   await mkdir(codexHome, { recursive: true });
-  await writeFile(join(codexHome, "auth.json"), "cli-credentials");
+  await writeCredential(codexHome, "initial-account", "initial-access-token");
   const queue = [...responses];
   const fallback = responses.at(-1);
   const request = vi.fn(async () => {
@@ -214,9 +247,15 @@ async function createFixture(
     stop: vi.fn()
   };
   const clearProfiles = vi.fn(async () => undefined);
+  const getReconciledPrincipal = vi.fn(async () => storedPrincipal);
+  const setReconciledPrincipal = vi.fn(async () => undefined);
   const hooks = testHooks();
   const lifecycle = new CodexAuthLifecycle(
-    { clearCodexAuthProfiles: clearProfiles },
+    {
+      clearCodexAuthProfiles: clearProfiles,
+      getCodexAuthReconciledPrincipal: getReconciledPrincipal,
+      setCodexAuthReconciledPrincipal: setReconciledPrincipal
+    },
     new EventBus(),
     codexHome,
     dataDir,
@@ -224,7 +263,29 @@ async function createFixture(
     { client, reconcileIntervalMs, watchCredentials: false }
   );
   lifecycle.setRuntimeHooks(hooks);
-  return { lifecycle, hooks, clearProfiles, codexHome, dataDir, client: { ...client, request } };
+  return {
+    lifecycle,
+    hooks,
+    clearProfiles,
+    getReconciledPrincipal,
+    setReconciledPrincipal,
+    codexHome,
+    dataDir,
+    client: { ...client, request }
+  };
+}
+
+async function writeCredential(codexHome: string, accountId: string, accessToken: string): Promise<void> {
+  await writeFile(join(codexHome, "auth.json"), JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      account_id: accountId,
+      access_token: accessToken,
+      id_token: `${accessToken}-id`,
+      refresh_token: `${accessToken}-refresh`
+    },
+    last_refresh: new Date().toISOString()
+  }));
 }
 
 function testHooks() {

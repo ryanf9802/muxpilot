@@ -51,6 +51,7 @@ const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
 const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
 const CODEX_AUTH_PROFILES = "codex_auth_profiles_v1";
+const CODEX_AUTH_RECONCILED_PRINCIPAL = "codex_auth_reconciled_principal_v1";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 
 export interface SessionRecoveryRuntimeState {
@@ -731,6 +732,14 @@ export class AppDatabase {
 
   clearCodexAuthProfiles(): Promise<void> {
     return this.call("clearCodexAuthProfiles") as Promise<void>;
+  }
+
+  getCodexAuthReconciledPrincipal(): Promise<string | null> {
+    return this.call("getCodexAuthReconciledPrincipal") as Promise<string | null>;
+  }
+
+  setCodexAuthReconciledPrincipal(principal: string, updatedAt: string): Promise<void> {
+    return this.call("setCodexAuthReconciledPrincipal", principal, updatedAt) as Promise<void>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -2660,6 +2669,14 @@ export class SyncAppDatabase {
 
   clearCodexAuthProfiles(): void {
     this.db.prepare("DELETE FROM app_settings WHERE key = ?").run(CODEX_AUTH_PROFILES);
+  }
+
+  getCodexAuthReconciledPrincipal(): string | null {
+    return this.getSetting(CODEX_AUTH_RECONCILED_PRINCIPAL);
+  }
+
+  setCodexAuthReconciledPrincipal(principal: string, updatedAt: string): void {
+    this.setSetting(CODEX_AUTH_RECONCILED_PRINCIPAL, principal, updatedAt);
   }
 
   getUnrestrictedRemoteAccessEnabled(): boolean {

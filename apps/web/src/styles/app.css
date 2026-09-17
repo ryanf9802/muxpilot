@@ -4483,6 +4483,12 @@ select:focus-visible {
   font-size: 12px;
 }
 
+.composer-submit-error {
+  margin: 0;
+  color: var(--color-error);
+  font-size: 12px;
+}
+
 .session-actions {
   display: flex;
   align-items: center;
