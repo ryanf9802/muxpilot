@@ -230,6 +230,7 @@ export function BtwDrawer({
                   </div>
                 ) : null}
                 {exchange.error ? <p className="btw-error" role="alert"><CircleAlert size={15} /> <span>{exchange.error}</span></p> : null}
+                {exchange.documentWarning ? <p className="btw-warning"><CircleAlert size={15} /> <span>{exchange.documentWarning}</span></p> : null}
                 {exchange.documentOperation ? (
                   <DocumentOperation exchange={exchange} onOpenDocument={onOpenDocument} />
                 ) : null}

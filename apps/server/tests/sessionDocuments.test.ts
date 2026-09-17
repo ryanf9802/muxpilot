@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SessionDocumentError, SessionDocumentService } from "../src/services/sessionDocuments.js";
+import {
+  isSessionDocumentCapacityError,
+  MAX_SESSION_DOCUMENT_BYTES,
+  SessionDocumentError,
+  SessionDocumentService,
+  validateSessionDocumentSnapshots
+} from "../src/services/sessionDocuments.js";
 
 const roots: string[] = [];
 
@@ -40,6 +46,28 @@ describe("SessionDocumentService", () => {
     await rm(join(root, "documents", "not-markdown.txt"));
     await writeFile(join(root, "documents", "large.md"), Buffer.alloc(256 * 1024 + 1));
     await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 413 });
+  });
+
+  it("classifies file, count, and total capacity errors for read-only fallback", () => {
+    const oversized = captureError(() => validateSessionDocumentSnapshots([
+      { name: "large.md", contents: Buffer.alloc(MAX_SESSION_DOCUMENT_BYTES + 1), updatedAt: "2026-01-01T00:00:00.000Z" }
+    ]));
+    const tooMany = captureError(() => validateSessionDocumentSnapshots(Array.from({ length: 101 }, (_, index) => ({
+      name: `note-${index}.md`,
+      contents: Buffer.alloc(0),
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    }))));
+    const excessiveTotal = captureError(() => validateSessionDocumentSnapshots(Array.from({ length: 41 }, (_, index) => ({
+      name: `chunk-${index}.md`,
+      contents: Buffer.alloc(MAX_SESSION_DOCUMENT_BYTES),
+      updatedAt: "2026-01-01T00:00:00.000Z"
+    }))));
+
+    expect(oversized.message).toContain("256 KiB");
+    expect(tooMany.message).toContain("more than 100");
+    expect(excessiveTotal.message).toContain("10 MiB total");
+    expect([oversized, tooMany, excessiveTotal].every(isSessionDocumentCapacityError)).toBe(true);
+    expect(isSessionDocumentCapacityError(new SessionDocumentError("Invalid document name", 400))).toBe(false);
   });
 
   it("ignores empty sandbox metadata directories but rejects content inside them", async () => {
@@ -132,4 +160,14 @@ async function fixture(): Promise<SessionDocumentService> {
   const root = await mkdtemp(join(tmpdir(), "muxpilot-documents-"));
   roots.push(root);
   return new SessionDocumentService(root);
+}
+
+function captureError(action: () => void): SessionDocumentError {
+  try {
+    action();
+  } catch (error) {
+    if (error instanceof SessionDocumentError) return error;
+    throw error;
+  }
+  throw new Error("Expected a SessionDocumentError");
 }

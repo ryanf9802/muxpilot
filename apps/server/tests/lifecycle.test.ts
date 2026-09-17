@@ -110,6 +110,8 @@ describe("production bundled skill startup", () => {
       expect(installedDocumentsSkill).toContain("MUXPILOT_DOCUMENTS_DIR");
       expect(installedDocumentsSkill).toContain("Read `INDEX.md` first");
       expect(installedDocumentsSkill).toContain("The session working directory is not the documents directory");
+      expect(installedDocumentsSkill).toContain("retire agent-managed documents that are obsolete");
+      expect(installedDocumentsSkill).toContain("user-requested document");
       expect(installedDocumentsSkill).toContain("Never attempt a cross-session document write");
       expect(installedDocumentsSkill).toContain("The muxpilot BTW flow is a controlled exception");
       expect(installedDocumentsSkill).toContain("Plan mode does not make the session's documents read-only");

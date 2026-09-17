@@ -46,6 +46,10 @@ export class SessionDocumentError extends Error {
   }
 }
 
+export function isSessionDocumentCapacityError(error: unknown): error is SessionDocumentError {
+  return error instanceof SessionDocumentError && error.statusCode === 413;
+}
+
 export class SessionDocumentService {
   constructor(private readonly sessionRoot: string) {}
 

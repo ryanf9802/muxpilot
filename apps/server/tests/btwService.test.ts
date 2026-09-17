@@ -7,6 +7,7 @@ import { AppDatabase } from "../src/db/database.js";
 import { BtwService, type BtwError } from "../src/services/btwService.js";
 import type { CodexAppServerMessage } from "../src/services/codexUsage.js";
 import { EventBus } from "../src/services/eventBus.js";
+import { SessionDocumentError } from "../src/services/sessionDocuments.js";
 
 describe("BtwService", () => {
   it("isolates document writes and waits for a safe applied handoff", async () => {
@@ -77,6 +78,61 @@ describe("BtwService", () => {
       documentOperation: null
     });
     expect(coordinator.applyCalls).toBe(0);
+    await service.stop();
+    await db.close();
+  });
+
+  it("falls back to a warned read-only answer when documents exceed capacity", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    coordinator.prepareError = new SessionDocumentError("Document 'INDEX.md' exceeds the 256 KiB limit", 413);
+    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    await service.start();
+
+    const exchange = await service.ask("source", "What should I clean up?");
+    await eventually(() => client.requests.some((request) => request.method === "turn/start"));
+    expect(client.requests.find((request) => request.method === "thread/fork")?.params).toMatchObject({
+      sandbox: "read-only",
+      developerInstructions: expect.stringContaining("Document editing is unavailable for this request")
+    });
+    expect(client.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({
+      sandboxPolicy: { type: "readOnly", networkAccess: false }
+    });
+
+    client.emit({ method: "item/agentMessage/delta", params: { threadId: "btw-thread", delta: "Trim the index." } });
+    client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "completed");
+
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      status: "completed",
+      answer: "Trim the index.",
+      documentWarning: "Document editing is unavailable: Document 'INDEX.md' exceeds the 256 KiB limit. Ask the main session to clean up its documents.",
+      documentOperation: null
+    });
+    expect(coordinator.applyCalls).toBe(0);
+    await service.stop();
+    await db.close();
+  });
+
+  it("still fails BTW when document staging has a non-capacity error", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const coordinator = new FakeDocumentCoordinator();
+    coordinator.prepareError = new SessionDocumentError("Session documents directory is invalid", 409);
+    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    await service.start();
+
+    const exchange = await service.ask("source", "Question");
+    await eventually(async () => (await db.getBtwExchange("source", exchange.id))?.status === "failed");
+    expect(await db.getBtwExchange("source", exchange.id)).toMatchObject({
+      status: "failed",
+      error: "Session documents directory is invalid",
+      documentWarning: null
+    });
+    expect(client.requests.some((request) => request.method === "thread/fork")).toBe(false);
     await service.stop();
     await db.close();
   });
@@ -369,9 +425,11 @@ class FakeDocumentCoordinator {
   prepareCalls = 0;
   conflictsRemaining = 0;
   changes = { created: ["plan.md"], updated: [] as string[] };
+  prepareError: Error | null = null;
 
   async prepareBtwDocumentStaging(): Promise<{ documentsRoot: string; sourceCwd: string }> {
     this.prepareCalls += 1;
+    if (this.prepareError) throw this.prepareError;
     return { documentsRoot: "/staging/documents", sourceCwd: "/repo" };
   }
 

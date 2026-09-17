@@ -559,6 +559,7 @@ export interface BtwExchange {
   answer: string;
   status: BtwExchangeStatus;
   error: string | null;
+  documentWarning?: string | null;
   createdAt: string;
   firstTokenAt: string | null;
   completedAt: string | null;

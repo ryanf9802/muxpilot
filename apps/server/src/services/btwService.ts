@@ -9,6 +9,7 @@ import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import type { EventBus } from "./eventBus.js";
 import type { BtwDocumentApplyResult, BtwDocumentChanges } from "./sessionDocuments.js";
+import { isSessionDocumentCapacityError } from "./sessionDocuments.js";
 import {
   CodexAppServerClient,
   type CodexAppServerClientOptions,
@@ -205,6 +206,7 @@ export class BtwService {
         answer: "",
         status: "running",
         error: null,
+        documentWarning: null,
         createdAt: this.now(),
         firstTokenAt: null,
         completedAt: null,
@@ -275,9 +277,21 @@ export class BtwService {
   private async runAttempt(run: ActiveBtwRun): Promise<void> {
     try {
       if (this.documents) {
-        const staging = await this.documents.prepareBtwDocumentStaging(run.exchange.sessionId, run.exchange.id);
-        run.documentsRoot = staging.documentsRoot;
-        run.sourceCwd = staging.sourceCwd;
+        try {
+          const staging = await this.documents.prepareBtwDocumentStaging(run.exchange.sessionId, run.exchange.id);
+          run.documentsRoot = staging.documentsRoot;
+          run.sourceCwd = staging.sourceCwd;
+        } catch (error) {
+          if (!isSessionDocumentCapacityError(error)) throw error;
+          run.documentsRoot = null;
+          run.sourceCwd = null;
+          run.exchange = {
+            ...run.exchange,
+            documentOperation: null,
+            documentWarning: `Document editing is unavailable: ${error.message}. Ask the main session to clean up its documents.`
+          };
+          await this.persistAndPublish(run);
+        }
       }
       run.timeout = setTimeout(() => void this.timeoutRun(run), BTW_TIMEOUT_MS);
       const fork = await this.client.request<ThreadForkResponse>("thread/fork", this.forkParams(run));
@@ -327,7 +341,9 @@ export class BtwService {
         excludeTurns: true,
         approvalPolicy: "never",
         sandbox: "read-only",
-        developerInstructions: BTW_READ_ONLY_INSTRUCTIONS
+        developerInstructions: run.exchange.documentWarning
+          ? `${BTW_READ_ONLY_INSTRUCTIONS}\nDocument editing is unavailable for this request because the session document limits were exceeded. Answer without creating or changing documents.`
+          : BTW_READ_ONLY_INSTRUCTIONS
       };
     }
     return {
@@ -401,7 +417,7 @@ export class BtwService {
   private async completeGeneration(run: ActiveBtwRun): Promise<void> {
     await this.cleanupGenerationThread(run);
     if (run.finished || run.cancelled) return;
-    if (!this.documents) {
+    if (!this.documents || !run.documentsRoot) {
       await this.finish(run, "completed", null);
       return;
     }

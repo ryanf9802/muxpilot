@@ -568,12 +568,14 @@ export class SessionManager {
       "Use $muxpilot-documents whenever durable plans, checklists, reminders, requirements, decisions, or acceptance criteria would help.",
       "Before substantive work on each turn, and after resume or context compaction, inspect the existing documents and read INDEX.md first when present.",
       "Keep relevant documents current after material progress or decisions and before asking a question or giving a final answer.",
+      "At task transitions, material milestones, resume, and completion, reconcile documents: update current facts, consolidate useful material, retire obsolete agent notes, and keep INDEX.md as a concise navigation map rather than a progress log.",
+      "Identify INDEX.md entries as agent or user-requested; automatically saved approved plans are agent notes unless explicitly preserved. You may maintain agent notes autonomously, but must ask before editing, renaming, or deleting an explicitly user-requested document unless that change is already authorized; if existing ownership is unclear, ask before destructive changes.",
       "As an explicit scoped exception to Plan mode's general non-mutation rule, the main agent may autonomously create, edit, rename, and delete files inside $MUXPILOT_DOCUMENTS_DIR whenever durable state is genuinely useful; this permission is not limited to particular document contents and does not require document work every turn.",
       "Do not persist the current formal <proposed_plan> before operator approval; muxpilot creates a separate indexed plan document when the operator selects Implement or Clear context and implement.",
       "Plan-mode document permission does not authorize repository changes, writes outside $MUXPILOT_DOCUMENTS_DIR, or other implementation side effects.",
       "A muxpilot BTW document notice inside <environment_context> is internal additive context, not a replacement operator request: read the named documents, reconcile them with newer user instructions, maintain INDEX.md, continue unfinished work, and do not emit a standalone acknowledgement.",
       "Document scopes are private: agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR and return structured proposed updates; built-in Codex subagents share this session's scope and must not edit documents; only the main parent agent verifies and updates canonical documents, and cross-session document writes are forbidden.",
-      "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; do not store secrets or raw transcripts."
+      "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; check these limits after maintenance and do not store secrets or raw transcripts."
     ].join(" ");
     return {
       ...options,

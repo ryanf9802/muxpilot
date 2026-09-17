@@ -267,6 +267,33 @@ describe("BtwDrawer", () => {
     expect(openDocument).toHaveBeenCalledWith("plan.md");
     act(() => root.unmount());
   });
+
+  it("shows document capacity fallback as a warning", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    act(() => root.render(
+      <BtwDrawer
+        open
+        exchanges={[exchange({
+          answer: "You can still ask questions.",
+          documentWarning: "Document editing is unavailable: Document 'INDEX.md' exceeds the 256 KiB limit."
+        })]}
+        loading={false}
+        error=""
+        submitting={false}
+        onClose={() => undefined}
+        onAsk={async () => true}
+        onCancel={async () => undefined}
+        onOpenDocument={() => undefined}
+      />
+    ));
+
+    expect(container.querySelector(".btw-warning")?.textContent).toContain("Document editing is unavailable");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    act(() => root.unmount());
+  });
 });
 
 function exchange(overrides: Partial<BtwExchange> = {}): BtwExchange {

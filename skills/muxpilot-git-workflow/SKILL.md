@@ -52,7 +52,7 @@ Treat a command as heavyweight when any of these conditions applies:
 
 The following are normally not heavyweight: inspecting files or Git state, syntax-only checks, linting selected files, and running one explicitly selected test file or test case without parallel workers.
 
-When uncertain, use the heavyweight wrapper. The wrapper only schedules an already-authorized command; repository guidance can authorize a required full build, but the wrapper does not itself authorize repository-wide validation. Do not broaden a focused check into a repository-wide command merely because the wrapper is available. Do not repeat an unchanged successful heavyweight gate; rerun it only when material code, configuration, dependencies, target-base changes, or required re-review invalidates the prior result.
+When uncertain, use the heavyweight wrapper. The wrapper only schedules an already-authorized command; repository guidance can authorize a required full build, but the wrapper does not authorize repository-wide validation. Do not broaden a focused check into a repository-wide command merely because the wrapper is available. Do not repeat an unchanged successful heavyweight gate; rerun it only when material code, configuration, dependencies, target-base changes, or required re-review invalidates the prior result.
 
 ## Changing the target branch
 

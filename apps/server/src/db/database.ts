@@ -306,6 +306,7 @@ interface BtwExchangeRow {
   answer: string;
   status: string;
   error: string | null;
+  document_warning: string | null;
   created_at: string;
   first_token_at: string | null;
   completed_at: string | null;
@@ -1305,13 +1306,14 @@ export class SyncAppDatabase {
   putBtwExchange(exchange: BtwExchange): void {
     this.db.prepare(
       `INSERT INTO btw_exchanges
-        (id, session_id, question, answer, status, error, created_at, first_token_at, completed_at, document_operation_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, session_id, question, answer, status, error, document_warning, created_at, first_token_at, completed_at, document_operation_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET
          question=excluded.question,
          answer=excluded.answer,
          status=excluded.status,
          error=excluded.error,
+         document_warning=excluded.document_warning,
          first_token_at=excluded.first_token_at,
          completed_at=excluded.completed_at,
          document_operation_json=excluded.document_operation_json`
@@ -1322,6 +1324,7 @@ export class SyncAppDatabase {
       exchange.answer,
       exchange.status,
       exchange.error,
+      exchange.documentWarning ?? null,
       exchange.createdAt,
       exchange.firstTokenAt,
       exchange.completedAt,
@@ -3624,6 +3627,7 @@ export class SyncAppDatabase {
         answer TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL,
         error TEXT,
+        document_warning TEXT,
         created_at TEXT NOT NULL,
         first_token_at TEXT,
         completed_at TEXT,
@@ -3725,6 +3729,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("queued_inputs", "actor_session_id", "TEXT");
     this.addColumnIfMissing("queued_inputs", "content_json", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
+    this.addColumnIfMissing("btw_exchanges", "document_warning", "TEXT");
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
@@ -4581,6 +4586,7 @@ function hydrateBtwExchange(row: BtwExchangeRow): BtwExchange {
     answer: row.answer,
     status,
     error: row.error,
+    documentWarning: row.document_warning,
     createdAt: row.created_at,
     firstTokenAt: row.first_token_at,
     completedAt: row.completed_at,
