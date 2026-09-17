@@ -648,13 +648,13 @@ describe("DocumentsModal", () => {
     act(() => root.unmount());
   });
 
-  it("renders the Documents button only when documents exist", () => {
+  it("renders the Documents button before documents exist", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
-    act(() => root.render(<DocumentsButton documentCount={0} open={false} onOpen={() => undefined} />));
-    expect(container.querySelector("button")).toBeNull();
+    act(() => root.render(<DocumentsButton open={false} onOpen={() => undefined} />));
+    expect(container.querySelector("button")?.textContent).toContain("Documents");
 
-    act(() => root.render(<DocumentsButton documentCount={1} open={false} onOpen={() => undefined} />));
+    act(() => root.render(<DocumentsButton open={false} onOpen={() => undefined} />));
     expect(container.querySelector("button")?.textContent).toContain("Documents");
     act(() => root.unmount());
   });

@@ -76,17 +76,19 @@ export class SessionDocumentService {
   }
 
   async list(scopeId: string): Promise<SessionDocumentsResponse> {
-    const snapshots = await this.snapshot(scopeId);
+    const root = this.documentsRoot(scopeId);
+    await this.ensureScope(scopeId);
     return {
-      documents: snapshots.map(({ name, contents, updatedAt }) => ({ name, sizeBytes: contents.length, updatedAt })),
+      documents: await listDirectory(root),
       sampledAt: new Date().toISOString()
     };
   }
 
   async read(scopeId: string, name: string): Promise<SessionDocumentResponse> {
     requireDocumentName(name);
-    const document = (await this.snapshot(scopeId)).find((candidate) => candidate.name === name);
-    if (!document) throw new SessionDocumentError("Document not found", 404);
+    const root = this.documentsRoot(scopeId);
+    await this.ensureScope(scopeId);
+    const document = await readDocumentFile(root, name);
     return {
       document: {
         name,
@@ -268,6 +270,51 @@ export class SessionDocumentService {
     const candidate = resolve(root, scopeId);
     if (candidate === root || !candidate.startsWith(`${root}${sep}`)) throw new SessionDocumentError("Invalid document scope", 400);
     return candidate;
+  }
+}
+
+async function listDirectory(root: string): Promise<SessionDocumentsResponse["documents"]> {
+  const rootDetails = await lstat(root).catch(() => null);
+  if (!rootDetails?.isDirectory() || rootDetails.isSymbolicLink()) {
+    throw new SessionDocumentError("Session documents directory is invalid", 409);
+  }
+  const documents: SessionDocumentsResponse["documents"] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (await isEmptySandboxMetadataDirectory(root, entry.name, entry.isDirectory())) continue;
+    requireDocumentName(entry.name);
+    const document = await openDocument(root, entry.name);
+    try {
+      const details = await document.stat();
+      if (!details.isFile()) throw new SessionDocumentError(`Document '${entry.name}' is not a regular file`, 409);
+      documents.push({ name: entry.name, sizeBytes: details.size, updatedAt: details.mtime.toISOString() });
+    } finally {
+      await document.close();
+    }
+  }
+  return documents.sort((first, second) => documentNameOrder(first.name, second.name));
+}
+
+async function readDocumentFile(root: string, name: string): Promise<SessionDocumentSnapshot> {
+  const document = await openDocument(root, name, true);
+  try {
+    const details = await document.stat();
+    if (!details.isFile()) throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
+    const contents = await document.readFile();
+    decodeDocument(contents);
+    return { name, contents, updatedAt: details.mtime.toISOString() };
+  } finally {
+    await document.close();
+  }
+}
+
+async function openDocument(root: string, name: string, missingIsNotFound = false) {
+  try {
+    return await open(join(root, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (missingIsNotFound && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new SessionDocumentError("Document not found", 404);
+    }
+    throw new SessionDocumentError(`Document '${name}' is not a regular file`, 409);
   }
 }
 

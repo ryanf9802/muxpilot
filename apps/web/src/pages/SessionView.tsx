@@ -1368,8 +1368,7 @@ export function DocumentsModal({
   );
 }
 
-export function DocumentsButton({ documentCount, open, onOpen }: { documentCount: number; open: boolean; onOpen: () => void }) {
-  if (documentCount === 0) return null;
+export function DocumentsButton({ open, onOpen }: { open: boolean; onOpen: () => void }) {
   return (
     <button
       className="session-documents-button"
@@ -2279,7 +2278,6 @@ export function SessionView() {
         if (cancelled) return;
         setDocuments(response.documents);
         setDocumentsError("");
-        if (response.documents.length === 0 && !referencedDocumentSourceRef.current) setDocumentsOpen(false);
       } catch (error) {
         if (!cancelled) setDocumentsError(error instanceof Error ? error.message : "Unable to load documents");
       } finally {
@@ -3418,7 +3416,7 @@ export function SessionView() {
             <Plus size={18} />
             <span className="session-new-session-button-label">New session</span>
           </button>
-          <DocumentsButton documentCount={documents.length} open={documentsOpen} onOpen={() => {
+          <DocumentsButton open={documentsOpen} onOpen={() => {
             showCurrentDocuments();
           }} />
           <button

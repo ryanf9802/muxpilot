@@ -31,7 +31,7 @@ describe("SessionDocumentService", () => {
     expect((await service.read("documents-copy", "notes.md")).document.content).toBe("# Notes\n");
   });
 
-  it("rejects unsafe names, symlinks, invalid UTF-8, and oversized files", async () => {
+  it("rejects unsafe names and symlinks while isolating invalid UTF-8 to the requested document", async () => {
     const service = await fixture();
     const root = await service.ensureScope("documents-safety");
     await expect(service.read("documents-safety", "../escape.md")).rejects.toBeInstanceOf(SessionDocumentError);
@@ -39,13 +39,31 @@ describe("SessionDocumentService", () => {
     await expect(service.read("documents-safety", "linked.md")).rejects.toMatchObject({ statusCode: 409 });
     await rm(join(root, "documents", "linked.md"));
     await writeFile(join(root, "documents", "invalid.md"), Buffer.from([0xff]));
-    await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 422 });
+    await writeFile(join(root, "documents", "healthy.md"), "# Healthy\n");
+    expect((await service.list("documents-safety")).documents.map((document) => document.name)).toEqual(["healthy.md", "invalid.md"]);
+    expect((await service.read("documents-safety", "healthy.md")).document.content).toBe("# Healthy\n");
+    await expect(service.read("documents-safety", "invalid.md")).rejects.toMatchObject({ statusCode: 422 });
     await rm(join(root, "documents", "invalid.md"));
     await writeFile(join(root, "documents", "not-markdown.txt"), "nope");
     await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 400 });
-    await rm(join(root, "documents", "not-markdown.txt"));
-    await writeFile(join(root, "documents", "large.md"), Buffer.alloc(256 * 1024 + 1));
-    await expect(service.list("documents-safety")).rejects.toMatchObject({ statusCode: 413 });
+    await expect(service.read("documents-safety", "missing.md")).rejects.toMatchObject({ statusCode: 404 });
+  });
+
+  it("lists and reads documents regardless of capacity while snapshots remain bounded", async () => {
+    const service = await fixture();
+    const root = await service.ensureScope("documents-capacity");
+    const documents = join(root, "documents");
+    const oversized = Buffer.alloc(MAX_SESSION_DOCUMENT_BYTES + 1, "a");
+    await writeFile(join(documents, "INDEX.md"), oversized);
+    for (let index = 0; index < 100; index += 1) {
+      await writeFile(join(documents, `note-${index}.md`), Buffer.alloc(MAX_SESSION_DOCUMENT_BYTES, "b"));
+    }
+
+    const listed = await service.list("documents-capacity");
+    expect(listed.documents).toHaveLength(101);
+    expect(listed.documents[0]).toMatchObject({ name: "INDEX.md", sizeBytes: MAX_SESSION_DOCUMENT_BYTES + 1 });
+    expect((await service.read("documents-capacity", "INDEX.md")).document.content).toHaveLength(MAX_SESSION_DOCUMENT_BYTES + 1);
+    await expect(service.snapshot("documents-capacity")).rejects.toMatchObject({ statusCode: 413 });
   });
 
   it("classifies file, count, and total capacity errors for read-only fallback", () => {
