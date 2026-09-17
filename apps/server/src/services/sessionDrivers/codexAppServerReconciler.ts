@@ -10,6 +10,7 @@ import type { EventBus } from "../eventBus.js";
 import { projectAppServerEvent, type AppServerEventProjection } from "./codexAppServerEvents.js";
 import type { AppServerDriverEventSink } from "./codexAppServerDriver.js";
 import type { DriverEvent } from "./types.js";
+import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
 
 export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
@@ -52,19 +53,24 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     const rootThreadId = existingSession.provider?.kind === "codex" ? existingSession.provider.threadId : null;
     if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return;
     const current = await this.store.getAppServerReconciliationState(sessionId);
-    const normalizedProjection = normalizePlanModeStatus(projection, existingSession.inputMode);
+    const normalizedProjection = preserveInputFailure(
+      normalizePlanModeStatus(projection, existingSession.inputMode),
+      existingSession.status
+    );
     const pendingPlan = normalizedProjection.status === "idle"
       ? await this.store.latestPlanReadyMessage(sessionId)
       : null;
     const applied = await this.store.applyAppServerProjection(input(
       sessionId,
       preservePlanReady(normalizedProjection, current, pendingPlan),
+      authenticationError ? null : codexTurnFailure(event.params),
       event.receivedAt
     ));
     const session = applied.messageChanged || applied.statusChanged
       ? await this.requireSession(sessionId)
       : null;
     if (applied.messageChanged && applied.message) this.publish("message.appended", sessionId, applied.message, event.receivedAt);
+    if (applied.failedSubmission) this.publish("message.appended", sessionId, applied.failedSubmission, event.receivedAt);
     if (applied.statusChanged && applied.state.status) {
       this.publish("status.changed", sessionId, { status: applied.state.status }, event.receivedAt);
     }
@@ -129,7 +135,12 @@ function isInteractiveServerRequest(event: DriverEvent): boolean {
   );
 }
 
-function input(sessionId: string, projection: AppServerEventProjection, observedAt: string): AppServerProjectionInput {
+function input(
+  sessionId: string,
+  projection: AppServerEventProjection,
+  turnFailure: ReturnType<typeof codexTurnFailure>,
+  observedAt: string
+): AppServerProjectionInput {
   return {
     sessionId,
     ...projection.identity,
@@ -137,8 +148,17 @@ function input(sessionId: string, projection: AppServerEventProjection, observed
     status: projection.status,
     message: projection.message,
     evidence: projection.payload,
+    turnFailure,
     observedAt
   };
+}
+
+function preserveInputFailure(
+  projection: AppServerEventProjection,
+  status: ManagedSession["status"]
+): AppServerEventProjection {
+  if (status !== "input_failed" || !projection.status || !["idle", "waiting"].includes(projection.status)) return projection;
+  return { ...projection, status: "input_failed" };
 }
 
 function preservePlanReady(

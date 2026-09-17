@@ -1891,6 +1891,216 @@ describe("AppDatabase notifications", () => {
   });
 });
 
+describe("AppDatabase failed app-server turns", () => {
+  it("atomically marks the matching acknowledged submission and session as input failed", async () => {
+    const db = await tempDb();
+    const session = { ...testSession("failed-turn"), status: "working" as const };
+    await db.upsertSession(session, "2026-09-17T15:21:17.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Inspect the documents bug", "2026-09-17T15:21:17.100Z"),
+      payload: {
+        collaborationMode: "plan",
+        muxpilotSubmission: {
+          state: "acknowledged",
+          deliveryPhase: "acknowledged",
+          threadId: "thread-docs",
+          turnId: "turn-docs",
+          attemptCount: 1
+        }
+      }
+    };
+    await db.appendMessage(submitted);
+
+    const projection = {
+      sessionId: session.id,
+      threadId: "thread-docs",
+      turnId: "turn-docs",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      evidence: { turn: { id: "turn-docs", status: "failed" } },
+      turnFailure: {
+        failureCode: "turn_failed",
+        providerErrorCode: "serverOverloaded",
+        failureReason: "Selected model is at capacity."
+      },
+      observedAt: "2026-09-17T15:21:19.000Z"
+    } as const;
+    const result = await db.applyAppServerProjection(projection);
+
+    expect(result.statusChanged).toBe(true);
+    expect(result.failedSubmission).toMatchObject({
+      id: submitted.id,
+      payload: { muxpilotSubmission: {
+        state: "failed",
+        deliveryPhase: "failed",
+        failureCode: "turn_failed",
+        providerErrorCode: "serverOverloaded",
+        failureReason: "Selected model is at capacity."
+      } }
+    });
+    expect(await db.getSession(session.id)).toMatchObject({ status: "input_failed" });
+    expect(await db.listMessages(session.id)).toHaveLength(1);
+    expect(await db.applyAppServerProjection(projection)).toMatchObject({
+      statusChanged: false,
+      failedSubmission: null
+    });
+    await db.close();
+  });
+
+  it("repairs a failed turn persisted before failure handling was available", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const session = { ...testSession("failed-turn-repair"), status: "working" as const };
+    const db = new AppDatabase(path);
+    await db.upsertSession(session, "2026-09-17T15:21:17.000Z");
+    await db.appendMessage({
+      ...testMessage(session.id, 1, "user", "Inspect the documents bug", "2026-09-17T15:21:17.100Z"),
+      payload: { muxpilotSubmission: {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        threadId: "thread-docs",
+        turnId: "turn-docs"
+      } }
+    });
+    await db.applyAppServerProjection({
+      sessionId: session.id,
+      threadId: "thread-docs",
+      turnId: "turn-docs",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      evidence: {
+        threadId: "thread-docs",
+        turn: {
+          id: "turn-docs",
+          status: "failed",
+          error: { message: "Selected model is at capacity.", codexErrorInfo: "serverOverloaded" }
+        }
+      },
+      observedAt: "2026-09-17T15:21:19.000Z"
+    });
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.getSession(session.id)).toMatchObject({ status: "input_failed" });
+    expect(await restarted.latestUserMessage(session.id)).toMatchObject({
+      payload: { muxpilotSubmission: {
+        state: "failed",
+        failureCode: "turn_failed",
+        providerErrorCode: "serverOverloaded",
+        failureReason: "Selected model is at capacity."
+      } }
+    });
+    restarted.close();
+  });
+
+  it("does not resurrect a dismissed failed turn during startup repair", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const session = { ...testSession("dismissed-failed-turn"), status: "working" as const };
+    const db = new AppDatabase(path);
+    await db.upsertSession(session, "2026-09-17T15:21:17.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Inspect the documents bug", "2026-09-17T15:21:17.100Z"),
+      payload: { muxpilotSubmission: {
+        state: "acknowledged",
+        deliveryPhase: "acknowledged",
+        threadId: "thread-docs",
+        turnId: "turn-docs"
+      } }
+    };
+    await db.appendMessage(submitted);
+    await db.applyAppServerProjection({
+      sessionId: session.id,
+      threadId: "thread-docs",
+      turnId: "turn-docs",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      evidence: { threadId: "thread-docs", turn: {
+        id: "turn-docs",
+        status: "failed",
+        error: { message: "Selected model is at capacity.", codexErrorInfo: "serverOverloaded" }
+      } },
+      observedAt: "2026-09-17T15:21:19.000Z"
+    });
+    await db.updateMuxpilotSubmission(submitted, { state: "dismissed" });
+    await db.setSessionStatus(session.id, "waiting", "2026-09-17T15:22:00.000Z");
+    db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.getSession(session.id)).toMatchObject({ status: "waiting" });
+    expect(await restarted.latestUserMessage(session.id)).toMatchObject({
+      payload: { muxpilotSubmission: { state: "dismissed" } }
+    });
+    restarted.close();
+  });
+
+  it("does not let a late completion from a dismissed failed turn stop its retry", async () => {
+    const db = await tempDb();
+    const session = { ...testSession("late-failed-completion"), status: "input_failed" as const };
+    await db.upsertSession(session, "2026-09-17T15:21:19.000Z");
+    const submitted = {
+      ...testMessage(session.id, 1, "user", "Inspect the documents bug", "2026-09-17T15:21:17.100Z"),
+      payload: { muxpilotSubmission: {
+        state: "dismissed",
+        deliveryPhase: "failed",
+        failureCode: "turn_failed",
+        threadId: "thread-docs",
+        turnId: "failed-turn"
+      } }
+    };
+    await db.appendMessage(submitted);
+    await db.setSessionStatus(session.id, "planning", "2026-09-17T15:30:00.000Z");
+
+    const result = await db.applyAppServerProjection({
+      sessionId: session.id,
+      threadId: "thread-docs",
+      turnId: "failed-turn",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      evidence: { turn: { id: "failed-turn", status: "failed" } },
+      turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Failed" },
+      observedAt: "2026-09-17T15:30:01.000Z"
+    });
+
+    expect(result).toMatchObject({ statusChanged: false, failedSubmission: null });
+    expect(await db.getSession(session.id)).toMatchObject({ status: "planning" });
+    await db.close();
+  });
+
+  it("leaves unmatched failed turns in their projected waiting state", async () => {
+    const db = await tempDb();
+    const session = { ...testSession("unmatched-failed-turn"), status: "working" as const };
+    await db.upsertSession(session, "2026-09-17T15:21:17.000Z");
+    await db.applyAppServerProjection({
+      sessionId: session.id,
+      threadId: "thread-docs",
+      turnId: "external-turn",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      evidence: { turn: { id: "external-turn", status: "failed" } },
+      turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Failed" },
+      observedAt: "2026-09-17T15:21:19.000Z"
+    });
+    expect(await db.getSession(session.id)).toMatchObject({ status: "waiting" });
+    await db.close();
+  });
+});
+
 describe("AppDatabase touched repositories", () => {
   it("persists dismissals until the directory is touched again", async () => {
     const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));

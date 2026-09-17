@@ -341,6 +341,32 @@ describe("CodexAppServerReconciler", () => {
     }));
   });
 
+  it("classifies a provider-failed turn for actionable persistence", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          error: { message: "Selected model is at capacity.", codexErrorInfo: "serverOverloaded" }
+        }
+      },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      turnFailure: {
+        failureCode: "turn_failed",
+        providerErrorCode: "serverOverloaded",
+        failureReason: "Selected model is at capacity."
+      }
+    }));
+  });
+
   it("forwards account updates before thread-scoped projection filtering", async () => {
     const store = projectionStore([]);
     const onAccountUpdated = vi.fn();
@@ -380,6 +406,7 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
         message: projection.message ? { ...projection.message, sessionId: projection.sessionId, sequence: 1 } : null,
         messageInserted: Boolean(projection.message),
         messageChanged: Boolean(projection.message),
+        failedSubmission: null,
         statusChanged: Boolean(projection.status),
         state
       };

@@ -2,8 +2,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ManagedSession } from "@muxpilot/core";
-import type { StoredGitWorkspace } from "../src/db/database.js";
+import type { ChatMessage, ManagedSession } from "@muxpilot/core";
+import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
@@ -14,6 +14,91 @@ afterEach(async () => {
 });
 
 describe("SessionManager app-server helpers", () => {
+  it("retries a confirmed failed turn with a new persisted message and client identity", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-failed-turn-retry-"));
+    temporaryRoots.push(directory);
+    const db = new AppDatabase(join(directory, "test.db"));
+    const session = { ...managedSession(), status: "input_failed" as const, inputMode: "plan" as const };
+    await db.upsertSession(session, "2026-09-17T15:21:19.000Z");
+    const failedMessage: ChatMessage = {
+      id: "failed-message",
+      sessionId: session.id,
+      sequence: 1,
+      type: "user",
+      role: "user",
+      timestamp: "2026-09-17T15:21:17.000Z",
+      text: "Inspect the documents bug",
+      payload: {
+        collaborationMode: "plan",
+        muxpilotSubmission: {
+          state: "failed",
+          deliveryPhase: "failed",
+          failureCode: "turn_failed",
+          failureReason: "Selected model is at capacity.",
+          threadId: "thread-1",
+          turnId: "failed-turn",
+          attemptCount: 1,
+          actor: { kind: "operator" }
+        }
+      }
+    };
+    await db.appendMessage(failedMessage);
+    const sendMessage = vi.fn(async (_session, _text, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-1",
+      turnId: "retry-turn",
+      acceptedAt: "2026-09-17T15:30:00.000Z"
+    }));
+    const driver = { sendMessage, setPreferences: vi.fn(async () => undefined) };
+    const codexStore = { stop: vi.fn() };
+    const manager = new SessionManager(
+      db,
+      codexStore as never,
+      new EventBus(),
+      60_000,
+      60_000,
+      {} as never,
+      null,
+      null,
+      null,
+      null,
+      {},
+      null,
+      { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
+    );
+
+    await manager.act(session.id, { type: "retryInputDelivery" });
+
+    const messages = await db.listMessages(session.id);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      id: failedMessage.id,
+      payload: { muxpilotSubmission: {
+        state: "dismissed",
+        resolvedBy: "retry",
+        retriedByMessageId: messages[1]?.id
+      } }
+    });
+    expect(messages[1]).toMatchObject({
+      text: failedMessage.text,
+      payload: { muxpilotSubmission: {
+        state: "acknowledged",
+        retryOfMessageId: failedMessage.id,
+        attemptCount: 2,
+        turnId: "retry-turn"
+      } }
+    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id, inputMode: "plan" }),
+      failedMessage.text,
+      messages[1]?.id,
+      undefined
+    );
+    expect(await db.getSession(session.id)).toMatchObject({ status: "planning" });
+    manager.stop();
+    await db.close();
+  });
+
   it("uses available authentication for fresh sessions while existing-session input stays reconciled", async () => {
     const directory = await mkdtemp(join(tmpdir(), "muxpilot-auth-admission-"));
     temporaryRoots.push(directory);

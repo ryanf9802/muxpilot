@@ -3818,8 +3818,8 @@ export function InputDeliveryFailureBanner({
   return (
     <section className="session-input-failed-banner" role="alert">
       <div>
-        <strong>Input delivery could not be verified.</strong>
-        <p>{detail || "Codex did not acknowledge the last input."} The message remains preserved for retry or dismissal.</p>
+        <strong>The last input needs attention.</strong>
+        <p>{detail || "Codex did not complete the last input."} The message remains preserved for retry or dismissal.</p>
         {error ? <p className="session-input-failed-error">{error}</p> : null}
       </div>
       <div className="session-input-failed-actions">

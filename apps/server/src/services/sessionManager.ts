@@ -145,7 +145,8 @@ type InputDeliveryIntent = "auto" | "steer";
 type InputDeliveryFailureCode =
   | "no_codex_acknowledgement"
   | "session_unavailable"
-  | "app_server_rejected";
+  | "app_server_rejected"
+  | "turn_failed";
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -3224,7 +3225,61 @@ export class SessionManager {
     const submission = message ? muxpilotSubmission(message) : null;
     const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
     if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) throw new InputDeliveryError("There is no failed input delivery to retry");
+    if (submission.failureCode === "turn_failed") {
+      await this.retryFailedTurn(session, message, submission);
+      return;
+    }
     await this.retryAppServerInputDelivery(session, message, submission, this.requireAppServerDriver());
+  }
+
+  private async retryFailedTurn(
+    session: ManagedSession,
+    failedMessage: ChatMessage,
+    submission: Record<string, unknown>
+  ): Promise<void> {
+    if (this.deliveringInputSessionIds.has(session.id)) throw new InputDeliveryError("Another input delivery is already in progress for this session");
+    if (session.status !== "input_failed") throw new InputDeliveryError("Codex is not ready to retry this failed turn");
+    const mode = collaborationModeFromMessage(failedMessage) ?? session.inputMode;
+    const content = Array.isArray(failedMessage.payload.content)
+      ? failedMessage.payload.content as import("@muxpilot/core").MessageContentPart[]
+      : undefined;
+    const actor = recordValue(submission.actor);
+    const actorSessionId = actor?.kind === "session" && typeof actor.sessionId === "string" ? actor.sessionId : null;
+    const submittedAt = nowIso();
+    let retry = await this.recordSubmittedInput(
+      session,
+      failedMessage.text,
+      mode,
+      submittedAt,
+      null,
+      actorSessionId,
+      "turn_start",
+      content
+    );
+    retry = await this.updateInputDelivery(retry, {
+      retryOfMessageId: failedMessage.id,
+      attemptCount: numericSubmissionField(submission, "attemptCount") + 1
+    });
+    const resolvedFailure = await this.updateInputDelivery(failedMessage, {
+      state: "dismissed",
+      resolvedBy: "retry",
+      retriedByMessageId: retry.id
+    });
+    this.publish("message.appended", session.id, resolvedFailure);
+    this.publish("message.appended", session.id, retry);
+    retry = await this.deliverSubmittedInput(session, retry, mode);
+    const updatedAt = nowIso();
+    await this.db.setSessionInputMode(session.id, mode, updatedAt);
+    const status = activeInputStatus(mode);
+    await this.db.setSessionStatus(session.id, status, updatedAt);
+    await this.db.addAudit("local", `retry_failed_turn:${mode}`, session.id, JSON.stringify({
+      failedMessageId: failedMessage.id,
+      retryMessageId: retry.id,
+      promptHash: inputPromptHash(session.id, retry.text)
+    }), updatedAt);
+    this.publish("message.appended", session.id, retry);
+    this.publish("status.changed", session.id, { status });
+    this.publish("session.updated", session.id, await this.db.getSession(session.id));
   }
 
   private async retryAppServerInputDelivery(
@@ -3768,6 +3823,7 @@ function inputPromptHash(sessionId: string, text: string): string {
 function inputDeliveryFailureMessage(reason: InputDeliveryFailureCode): string {
   if (reason === "session_unavailable") return "The session became unavailable before the input could be replayed.";
   if (reason === "app_server_rejected") return "Codex app-server did not accept the input.";
+  if (reason === "turn_failed") return "Codex accepted the input but could not complete the turn.";
   return "Codex app-server did not acknowledge the input.";
 }
 

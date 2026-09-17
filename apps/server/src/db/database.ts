@@ -42,6 +42,7 @@ import {
   sessionWaitEventSummary,
   withSessionWaitEventPayload
 } from "@muxpilot/core";
+import { codexTurnFailure, type CodexTurnFailure } from "../utils/codexTurnFailure.js";
 
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
@@ -201,6 +202,7 @@ export interface AppServerProjectionInput {
   status: SessionStatus | null;
   message: Omit<ChatMessage, "sessionId" | "sequence"> | null;
   evidence: unknown;
+  turnFailure?: CodexTurnFailure | null;
   observedAt: string;
 }
 
@@ -220,6 +222,7 @@ export interface AppServerProjectionResult {
   message: ChatMessage | null;
   messageInserted: boolean;
   messageChanged: boolean;
+  failedSubmission: ChatMessage | null;
   statusChanged: boolean;
   state: AppServerReconciliationState;
 }
@@ -958,6 +961,7 @@ export class SyncAppDatabase {
     this.db = new DatabaseSync(path);
     try {
       this.migrate();
+      this.repairPersistedAppServerTurnFailures();
     } catch (error) {
       this.db.close();
       throw error;
@@ -3093,7 +3097,18 @@ export class SyncAppDatabase {
     let message: ChatMessage | null = null;
     let messageInserted = false;
     let messageChanged = false;
-    const statusChanged = projection.status !== null && existingSession.status !== projection.status;
+    let failedSubmission: ChatMessage | null = null;
+    const matchedTurnSubmission = projection.turnFailure && projection.turnId
+      ? this.findAppServerTurnSubmission(projection.sessionId, projection.threadId, projection.turnId, true)
+      : null;
+    const matchedSubmissionState = recordValue(matchedTurnSubmission?.payload.muxpilotSubmission)?.state;
+    const failedSubmissionCandidate = matchedSubmissionState === "dismissed" ? null : matchedTurnSubmission;
+    const targetStatus = failedSubmissionCandidate
+      ? "input_failed"
+      : matchedSubmissionState === "dismissed"
+        ? null
+        : projection.status;
+    const statusChanged = targetStatus !== null && existingSession.status !== targetStatus;
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -3107,13 +3122,13 @@ export class SyncAppDatabase {
         messageInserted = write.inserted;
         messageChanged = write.changed;
       }
-      if (projection.status !== null) {
+      if (targetStatus !== null) {
         const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
         this.db.prepare(
           "UPDATE managed_sessions SET status = ?, data_json = ?, updated_at = ? WHERE id = ?"
         ).run(
-          projection.status,
-          JSON.stringify({ ...sessionData, status: projection.status }),
+          targetStatus,
+          JSON.stringify({ ...sessionData, status: targetStatus }),
           projection.observedAt,
           projection.sessionId
         );
@@ -3138,10 +3153,19 @@ export class SyncAppDatabase {
         projection.itemId,
         projection.clientMessageId,
         projection.method,
-        projection.status,
+        targetStatus,
         evidenceJson,
         projection.observedAt
       );
+      if (projection.turnFailure && projection.turnId) {
+        failedSubmission = this.markAppServerTurnSubmissionFailed(
+          projection.sessionId,
+          projection.threadId,
+          projection.turnId,
+          projection.turnFailure,
+          projection.observedAt
+        );
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -3150,7 +3174,96 @@ export class SyncAppDatabase {
 
     const state = this.getAppServerReconciliationState(projection.sessionId);
     if (!state) throw new Error(`App-server projection state was not persisted: ${projection.sessionId}`);
-    return { message: messageChanged ? message : null, messageInserted, messageChanged, statusChanged, state };
+    return { message: messageChanged ? message : null, messageInserted, messageChanged, failedSubmission, statusChanged, state };
+  }
+
+  private markAppServerTurnSubmissionFailed(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    failure: CodexTurnFailure,
+    failedAt: string
+  ): ChatMessage | null {
+    const candidate = this.findAppServerTurnSubmission(sessionId, threadId, turnId);
+    if (!candidate) return null;
+    const submission = recordValue(candidate.payload.muxpilotSubmission) ?? {};
+    if (
+      submission.state === "failed"
+      && submission.failureCode === failure.failureCode
+      && submission.failureReason === failure.failureReason
+    ) return null;
+    const payload = {
+      ...candidate.payload,
+      muxpilotSubmission: {
+        ...submission,
+        state: "failed",
+        deliveryPhase: "failed",
+        failureCode: failure.failureCode,
+        providerErrorCode: failure.providerErrorCode,
+        failureReason: failure.failureReason,
+        failedAt
+      }
+    };
+    this.db.prepare("UPDATE messages SET payload_json = ? WHERE id = ? AND session_id = ?")
+      .run(JSON.stringify(payload), candidate.id, sessionId);
+    return { ...candidate, payload };
+  }
+
+  private findAppServerTurnSubmission(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    includeDismissed = false
+  ): ChatMessage | null {
+    const rows = this.db.prepare(
+      `SELECT * FROM messages
+       WHERE session_id = ? AND role = 'user'
+         AND json_type(payload_json, '$.muxpilotSubmission') = 'object'
+       ORDER BY sequence DESC`
+    ).all(sessionId) as unknown as MessageRow[];
+    return rows.map(hydrateMessage).find((message) => {
+      const submission = recordValue(message.payload.muxpilotSubmission);
+      if (!includeDismissed && submission?.state === "dismissed") return false;
+      const projectedIdentity = recordValue(message.payload.codexItemIdentity);
+      return (
+        (submission?.threadId === threadId && submission.turnId === turnId)
+        || (projectedIdentity?.threadId === threadId && projectedIdentity.turnId === turnId)
+      );
+    }) ?? null;
+  }
+
+  private repairPersistedAppServerTurnFailures(): void {
+    const rows = this.db.prepare(
+      "SELECT * FROM app_server_reconciliation WHERE method = 'turn/completed' AND turn_id IS NOT NULL"
+    ).all() as unknown as AppServerReconciliationRow[];
+    for (const row of rows) {
+      const evidence = parseJsonObject(row.evidence_json);
+      const failure = codexTurnFailure(evidence);
+      if (!failure || !row.turn_id) continue;
+      const existingSession = this.db.prepare("SELECT status, data_json FROM managed_sessions WHERE id = ?")
+        .get(row.session_id) as Pick<SessionRow, "status" | "data_json"> | undefined;
+      if (!existingSession) continue;
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const matched = this.findAppServerTurnSubmission(row.session_id, row.thread_id, row.turn_id);
+        this.markAppServerTurnSubmissionFailed(
+          row.session_id,
+          row.thread_id,
+          row.turn_id,
+          failure,
+          row.observed_at
+        );
+        if (matched && existingSession.status !== "input_failed") {
+          const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
+          this.db.prepare("UPDATE managed_sessions SET status = ?, data_json = ?, updated_at = ? WHERE id = ?")
+            .run("input_failed", JSON.stringify({ ...sessionData, status: "input_failed" }), row.observed_at, row.session_id);
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+    }
   }
 
   getAppServerReconciliationState(sessionId: string): AppServerReconciliationState | null {

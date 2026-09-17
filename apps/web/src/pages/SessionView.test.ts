@@ -147,7 +147,7 @@ describe("InputDeliveryFailureBanner", () => {
       onDismiss: () => undefined
     }));
 
-    expect(html).toContain("Input delivery could not be verified");
+    expect(html).toContain("The last input needs attention");
     expect(html).toContain("Codex did not display the pasted input");
     expect(html).toContain("Retry input");
     expect(html).toContain("Dismiss");
