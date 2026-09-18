@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
   RuntimeEvidence,
@@ -71,11 +71,13 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     await preparePrivateDirectory(paths.directory);
     await preparePrivateDirectory(this.socketRoot);
     await preparePrivateDirectory(paths.socketDirectory);
-    await writeEnvironmentFile(paths.environmentPath, {
+    const environment = {
       ...spec.environment,
       ...(this.executablePath ? { PATH: this.executablePath } : {}),
       CODEX_HOME: spec.codexHome
-    });
+    };
+    const nextEnvironment = environmentFileContents(environment);
+    const environmentMatches = await readFile(paths.environmentPath, "utf8").then((current) => current === nextEnvironment).catch(() => false);
 
     const runtime: SystemdSessionRuntimeRef = {
       kind: "systemd_service",
@@ -85,10 +87,11 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       codexVersion: spec.codexVersion
     };
     const existing = await this.inspect(runtime);
-    if (existing.activeState === "active" && existing.socketPresent) return { ...runtime, state: "connected" };
+    if (existing.activeState === "active" && existing.socketPresent && environmentMatches) return { ...runtime, state: "connected" };
     if (existing.activeState && existing.activeState !== "inactive") {
       await this.dependencies.run("systemctl", ["--user", "stop", paths.unit]).catch(() => undefined);
     }
+    await writeEnvironmentFile(paths.environmentPath, nextEnvironment);
     await rm(paths.socketPath, { force: true });
     await this.dependencies.run("systemctl", ["--user", "reset-failed", paths.unit]).catch(() => undefined);
     await this.dependencies.run("systemd-run", systemdRunArgs(spec, paths));
@@ -113,6 +116,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       if (!isMissingSystemdUnitError(error)) throw error;
     }
     await rm(runtime.socketPath, { force: true });
+    await rm(join(dirname(runtime.socketPath), "environment"), { force: true });
     return { ...runtime, state: "stopped" };
   }
 
@@ -187,7 +191,7 @@ export function runtimePaths(runtimeRoot: string, capabilityId: string, socketRo
     directory,
     socketDirectory,
     socketPath: join(socketDirectory, "app-server.sock"),
-    environmentPath: join(directory, "environment"),
+    environmentPath: join(socketDirectory, "environment"),
     unit: appServerServiceUnit(capabilityId)
   };
 }
@@ -257,7 +261,7 @@ async function preparePrivateDirectory(path: string): Promise<void> {
   await chmod(path, 0o700);
 }
 
-async function writeEnvironmentFile(path: string, environment: Record<string, string>): Promise<void> {
+function environmentFileContents(environment: Record<string, string>): string {
   const lines = Object.entries(environment)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, value]) => {
@@ -265,8 +269,12 @@ async function writeEnvironmentFile(path: string, environment: Record<string, st
       if (/[\0\r\n]/.test(value)) throw new Error(`Invalid app-server environment value for ${key}`);
       return `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
     });
+  return `${lines.join("\n")}\n`;
+}
+
+async function writeEnvironmentFile(path: string, contents: string): Promise<void> {
   await rm(path, { force: true });
-  await writeFile(path, `${lines.join("\n")}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await writeFile(path, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
   await chmod(path, 0o600);
 }
 

@@ -31,7 +31,8 @@ muxpilot adds an operator layer without replacing the tools already doing the wo
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
 - **Visible delegated work.** Run durable agent-managed child sessions with independent context and resources, bounded budgets, parent/child status rollups, and event-driven wake-ups.
 - **Non-interrupting side questions.** Use BTW for an independent answer or safe document update while the main Codex turn keeps working.
-- **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with optional encryption.
+- **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with passphrase encryption.
+- **Private session variables.** Save write-only variables and secrets for one session and its agent-created children without putting values in prompts or command text.
 - **Agent-managed documents.** Let long-running agents maintain persistent Markdown plans, checklists, reminders, and acceptance criteria outside the conversation context.
 - **Recovery and resource controls.** Restore conversations after an unclean shutdown, inspect failed input and heavyweight commands, and keep sessions and managed Docker work inside shared limits.
 - **Notifications that matter.** Get browser, sound, or Web Push alerts when work finishes or a session needs attention.

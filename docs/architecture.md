@@ -49,7 +49,7 @@ Managed Git sessions store the repository entry point, current existing local ta
 - Session orchestration broker: binds a capability-scoped MCP server to each managed Codex launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
 - Heavy command service: observes shared queue metadata, resumes reserved sessions, serves bounded live output, and terminates exact process groups on operator request.
 - Resource governor and Docker proxy: allocate muxpilot-owned systemd scopes and label/constrain containers created through managed sessions.
-- Session transfer service: packages portable transcript prefixes, preferences, documents, and eligible committed Git objects with optional authenticated encryption.
+- Session transfer service: packages portable transcript prefixes, preferences, documents, encrypted session variables, and eligible committed Git objects with passphrase-based authenticated encryption.
 - Local Git workflow skill and authenticated broker: the skill creates task worktrees, links dependencies, and guides focused validation and iterative self-review. On finish, the broker revalidates workspace ownership, clean state, target identity, and fast-forward ancestry before updating the local target and removing completed task state.
 
 ## Operator Access

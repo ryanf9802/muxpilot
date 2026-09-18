@@ -64,6 +64,7 @@ import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
 import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../services/codexAuthLifecycle.js";
+import { SessionEnvironmentError, type SessionEnvironmentService } from "../services/sessionEnvironment.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
 const modelSettingsSchema = z.object({
@@ -152,7 +153,11 @@ const codexResetCreditSchema = z.object({
 }).strict();
 const remoteAccessSettingsSchema = z.object({ unrestrictedRemoteAccess: z.boolean() });
 const sessionDirectorySchema = z.object({ path: z.string().trim().min(1).max(4096) });
-const sessionTransferExportSchema = z.object({ sessionIds: z.array(z.string().min(1)).min(1).max(500) });
+const sessionTransferExportSchema = z.object({
+  sessionIds: z.array(z.string().min(1)).min(1).max(500),
+  passphrase: z.string().min(12).max(1024)
+}).strict();
+const sessionEnvironmentSchema = z.object({ name: z.string().min(1).max(200), value: z.string().max(100_000) }).strict();
 const sessionTransferImportSchema = z.object({
   token: z.string().min(16).max(100),
   mappings: z.array(z.object({
@@ -227,7 +232,8 @@ export function registerRoutes(
   btw?: BtwService,
   appServerCompatibility?: AppServerCompatibility,
   sessionImages?: SessionImageService,
-  codexAuth?: CodexAuthLifecycle
+  codexAuth?: CodexAuthLifecycle,
+  sessionEnvironment?: SessionEnvironmentService
 ): void {
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
@@ -289,14 +295,10 @@ export function registerRoutes(
   });
 
   if (sessionTransfers) {
-    app.get("/api/session-transfers/status", { preHandler: access.requireLocalAccess }, async () => ({
-      encryptionEnabled: sessionTransfers.encryptionEnabled()
-    }));
-
     app.post("/api/session-transfers/export", { preHandler: access.requireLocalAccess }, async (request, reply) => {
       try {
         const body = sessionTransferExportSchema.parse(request.body) satisfies SessionTransferExportRequest;
-        const archive = await sessionTransfers.export(body.sessionIds);
+        const archive = await sessionTransfers.export(body.sessionIds, body.passphrase);
         return reply
           .header("Content-Type", "application/vnd.muxpilot.session")
           .header("Content-Disposition", `attachment; filename="${archive.filename}"`)
@@ -310,7 +312,8 @@ export function registerRoutes(
     app.post("/api/session-transfers/inspect", { preHandler: access.requireLocalAccess }, async (request, reply) => {
       try {
         if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: "Upload a .mpsession file" });
-        return await sessionTransfers.inspect(request.body);
+        const upload = transferUpload(request.body, request.headers["content-type"]);
+        return await sessionTransfers.inspect(upload.file, upload.passphrase);
       } catch (error) {
         if (error instanceof SessionTransferError) return reply.code(error.statusCode).send({ error: error.message });
         throw error;
@@ -537,6 +540,25 @@ export function registerRoutes(
     if (!session) return reply.code(404).send({ error: "Session not found" });
     return { session };
   });
+
+  if (sessionEnvironment) {
+    app.get("/api/sessions/:id/environment", { preHandler: access.requireAccess }, async (request, reply) => {
+      try { return await sessionEnvironment.describe((request.params as { id: string }).id); }
+      catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
+    });
+    app.put("/api/sessions/:id/environment", { preHandler: access.requireAccess }, async (request, reply) => {
+      try {
+        const { name, value } = sessionEnvironmentSchema.parse(request.body);
+        return await sessionEnvironment.set((request.params as { id: string }).id, name, value);
+      } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
+    });
+    app.delete("/api/sessions/:id/environment/:name", { preHandler: access.requireAccess }, async (request, reply) => {
+      try {
+        const { id, name } = request.params as { id: string; name: string };
+        return await sessionEnvironment.delete(id, name);
+      } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
+    });
+  }
 
   app.get("/api/sessions/:id/documents", { preHandler: access.requireAccess }, async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -1058,4 +1080,19 @@ function parseSessionHistoryLimit(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_SESSION_HISTORY_LIMIT);
   if (!Number.isFinite(parsed)) return DEFAULT_SESSION_HISTORY_LIMIT;
   return Math.min(MAX_SESSION_HISTORY_LIMIT, Math.max(1, Math.floor(parsed)));
+}
+
+function transferUpload(body: Buffer, contentType: string | undefined): { file: Buffer; passphrase?: string } {
+  if (!contentType?.startsWith("application/vnd.muxpilot.session+passphrase")) return { file: body };
+  if (body.length < 5) throw new SessionTransferError("Session archive upload is invalid");
+  const metadataBytes = body.readUInt32BE(0);
+  if (metadataBytes < 2 || metadataBytes > 4096 || body.length <= 4 + metadataBytes) throw new SessionTransferError("Session archive upload is invalid");
+  let metadata: unknown;
+  try { metadata = JSON.parse(body.subarray(4, 4 + metadataBytes).toString("utf8")); }
+  catch { throw new SessionTransferError("Session archive passphrase metadata is invalid"); }
+  const passphrase = typeof metadata === "object" && metadata !== null && "passphrase" in metadata
+    ? (metadata as { passphrase?: unknown }).passphrase
+    : undefined;
+  if (typeof passphrase !== "string" || passphrase.length > 1024) throw new SessionTransferError("Session archive passphrase is invalid");
+  return { file: body.subarray(4 + metadataBytes), passphrase };
 }

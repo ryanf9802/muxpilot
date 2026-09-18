@@ -19,7 +19,7 @@ describe("SystemdAppServerSupervisor", () => {
 
     const paths = runtimePaths(runtimeRoot, capabilityId, socketRoot);
 
-    expect(paths.environmentPath).toBe(join(runtimeRoot, capabilityId, "environment"));
+    expect(paths.environmentPath).toBe(join(socketRoot, capabilityId, "environment"));
     expect(paths.socketPath).toBe(join(socketRoot, capabilityId, "app-server.sock"));
     expect(Buffer.byteLength(paths.socketPath)).toBeLessThanOrEqual(107);
   });

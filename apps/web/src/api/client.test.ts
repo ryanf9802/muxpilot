@@ -296,10 +296,11 @@ describe("api client request headers", () => {
       }
     }));
 
-    const download = await api.exportSessionTransfer(["session-1"]);
+    const download = await api.exportSessionTransfer(["session-1"], "correct horse battery staple");
 
     expect(download.filename).toBe("release-notes.mpsession");
     expect(fetchMock).toHaveBeenCalledWith("/api/session-transfers/export", expect.objectContaining({ method: "POST", credentials: "include" }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/session-transfers/export", expect.objectContaining({ body: JSON.stringify({ sessionIds: ["session-1"], passphrase: "correct horse battery staple" }) }));
   });
 
   it("creates sessions from a cwd and name", async () => {

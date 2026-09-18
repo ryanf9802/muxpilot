@@ -133,7 +133,13 @@ For managed Git sessions, current exports can include the committed local target
 
 Transfer archives do not contain dirty files, staged or untracked changes, stashes, active worktrees, dependencies, Git LFS payloads, submodule repositories, queued input, notification rules, machine-wide Codex configuration, or live processes. Copy or clone the repositories separately.
 
-Set the same `MUXPILOT_SESSION_FILE_KEY` value on both hosts to encrypt exports and decrypt imports. Plaintext archives remain importable when a key is configured.
+Choose a passphrase in the transfer dialog when exporting, then enter the same passphrase before selecting the archive on the importing host. New exports are always encrypted; legacy plaintext archives remain importable.
+
+## Session variables and secrets
+
+Open **Variables** in a session to save an environment variable. The value is write-only after saving: muxpilot returns its name and lifecycle state to the UI, while the value remains encrypted in local storage. Tell the agent to use the variable by name instead of putting its value in a prompt or command.
+
+Changes apply when that session starts its next turn at a safe boundary. An active turn keeps its current environment. Agent-created child sessions reference their parent's variables and may override a name locally; they do not receive stored copies. A program running inside the session can read and print its environment, so avoid asking agents to display variables, run environment dumps, or enable shell tracing around credentials.
 
 ## Sending and queuing input
 

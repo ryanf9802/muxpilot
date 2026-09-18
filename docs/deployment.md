@@ -70,7 +70,7 @@ Recommended defaults:
 - Keep the configured SQLite database backed up if transcripts, queued inputs, usage/cost records, summaries, or audit history matter.
 - Keep `MUXPILOT_DB_PATH` outside build output such as `dist/`.
 - Set `MUXPILOT_SESSION_SECRET` only if browser access sessions should survive backend restarts.
-- Set `MUXPILOT_SESSION_FILE_KEY` on export/import hosts when transfer archives must be encrypted.
+- Keep the passphrase used for each session export available to the operator who will import it.
 
 Start bound to the LAN:
 

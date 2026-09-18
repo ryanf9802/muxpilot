@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
   type PortableGitBranch
 } from "./gitBranchTransfer.js";
 import type { SessionManager } from "./sessionManager.js";
+import type { SessionEnvironmentService } from "./sessionEnvironment.js";
 import {
   MAX_SESSION_DOCUMENT_BYTES,
   MAX_SESSION_DOCUMENTS,
@@ -66,12 +67,15 @@ export interface PortableSession {
   provider?: AgentProviderRef;
   name?: string;
   cwd?: string;
+  environment?: Record<string, string>;
+  environmentParentCodexSessionId?: string | null;
 }
 
 const PORTABLE_SESSION_KEYS = new Set<keyof PortableSession>([
   "codexSessionId", "sessionName", "sourceCwd", "repoName", "workspaceMode", "targetBranch",
   "inputMode", "models", "fastMode", "pinned", "forkedFrom", "lastActivityAt", "transcriptEntry",
-  "transcriptBytes", "transcriptSha256", "gitBranchId", "documents", "provider", "name", "cwd"
+  "transcriptBytes", "transcriptSha256", "gitBranchId", "documents", "provider", "name", "cwd",
+  "environment", "environmentParentCodexSessionId"
 ]);
 
 export interface PortableDocument {
@@ -82,7 +86,7 @@ export interface PortableDocument {
 }
 
 interface Manifest {
-  formatVersion: 6;
+  formatVersion: 6 | 7;
   createdAt: string;
   sessions: PortableSession[];
   gitBranches: PortableGitBranch[];
@@ -98,6 +102,7 @@ interface StagedTransfer {
   encrypted: boolean;
   manifest: Manifest;
   expiresAtMs: number;
+  derivedKey?: Buffer;
 }
 
 export class SessionTransferError extends Error {
@@ -109,15 +114,16 @@ export class SessionTransferError extends Error {
 export class SessionTransferService {
   private readonly staged = new Map<string, StagedTransfer>();
   private readonly stagingDir = join(tmpdir(), `muxpilot-session-transfers-${process.pid}`);
+  private readonly sessionEnvironment?: SessionEnvironmentService;
+  private readonly legacyKey?: string;
 
   constructor(
     private readonly db: AppDatabase,
     private readonly manager: SessionManager,
-    private readonly encryptionKey?: string
-  ) {}
-
-  encryptionEnabled(): boolean {
-    return Boolean(this.encryptionKey);
+    environmentOrLegacyKey?: SessionEnvironmentService | string
+  ) {
+    if (typeof environmentOrLegacyKey === "string") this.legacyKey = environmentOrLegacyKey;
+    else this.sessionEnvironment = environmentOrLegacyKey;
   }
 
   async initialize(): Promise<void> {
@@ -125,13 +131,17 @@ export class SessionTransferService {
     await mkdir(this.stagingDir, { recursive: true, mode: 0o700 });
   }
 
-  async export(sessionIds: string[]): Promise<SessionTransferExport> {
-    const uniqueIds = [...new Set(sessionIds)];
+  async export(sessionIds: string[], passphrase?: string): Promise<SessionTransferExport> {
+    const encryptionKey = passphrase ?? this.legacyKey;
+    if (passphrase !== undefined) requirePassphrase(passphrase);
+    const uniqueIds = this.sessionEnvironment
+      ? await this.sessionEnvironment.requiredAncestors([...new Set(sessionIds)])
+      : [...new Set(sessionIds)];
     if (uniqueIds.length === 0) throw new SessionTransferError("Select at least one session");
     if (uniqueIds.length > MAX_SESSIONS) throw new SessionTransferError(`At most ${MAX_SESSIONS} sessions can be exported`);
 
     const createdAt = new Date().toISOString();
-    const manifest: Manifest = { formatVersion: 6, createdAt, sessions: [], gitBranches: [] };
+    const manifest: Manifest = { formatVersion: this.sessionEnvironment ? 7 : 6, createdAt, sessions: [], gitBranches: [] };
     const contents = new Map<string, Buffer>();
     const branchIds = new Map<string, string>();
     const codexSessionIds = new Set<string>();
@@ -181,22 +191,30 @@ export class SessionTransferService {
           sha256: sha256(document.contents)
         };
       });
-      manifest.sessions.push({ ...portableSession(session, entry, transcript, gitBranchId), documents: portableDocuments });
+      const portable = portableSession(session, entry, transcript, gitBranchId);
+      if (this.sessionEnvironment) {
+        portable.environment = await this.sessionEnvironment.exportOwned(id);
+        const parentId = session.agentOwnership?.parentSessionId ?? null;
+        portable.environmentParentCodexSessionId = parentId
+          ? (await this.db.getSession(parentId))?.codexSessionId ?? null
+          : null;
+      }
+      manifest.sessions.push({ ...portable, documents: portableDocuments });
     }
 
     const archive = await buildTar(manifest, contents);
     const compressed = await gzipAsync(archive, { level: 6 });
-    const envelope = await encodeEnvelope(compressed, this.encryptionKey);
+    const envelope = await encodeEnvelope(compressed, encryptionKey);
     if (envelope.length > MAX_ARCHIVE_BYTES) throw new SessionTransferError("Export exceeds the 512 MiB archive limit", 413);
     return {
       contents: envelope,
-      filename: sessionTransferFilename(manifest.sessions.map((session) => session.sessionName), Boolean(this.encryptionKey), createdAt)
+      filename: sessionTransferFilename(manifest.sessions.map((session) => session.sessionName), Boolean(encryptionKey), createdAt)
     };
   }
 
-  async inspect(file: Buffer): Promise<SessionTransferInspectResponse> {
+  async inspect(file: Buffer, passphrase?: string): Promise<SessionTransferInspectResponse> {
     if (file.length > MAX_ARCHIVE_BYTES) throw new SessionTransferError("Session archive exceeds the 512 MiB upload limit", 413);
-    const decoded = await decodeEnvelope(file, this.encryptionKey);
+    const decoded = await decodeEnvelope(file, passphrase ?? this.legacyKey);
     const contents = await readTar(await gunzipArchive(decoded.payload));
     const manifest = parseManifest(contents.get("manifest.json"));
     validateTranscripts(manifest, contents);
@@ -206,7 +224,7 @@ export class SessionTransferService {
     const path = join(this.stagingDir, `${token}.mpsession`);
     await writeFile(path, file, { mode: 0o600 });
     const expiresAtMs = Date.now() + TOKEN_TTL_MS;
-    this.staged.set(token, { path, encrypted: decoded.encrypted, manifest, expiresAtMs });
+    this.staged.set(token, { path, encrypted: decoded.encrypted, manifest, expiresAtMs, derivedKey: decoded.derivedKey });
     const expiry = setTimeout(() => void this.cancel(token), TOKEN_TTL_MS);
     expiry.unref();
     this.pruneExpired();
@@ -245,7 +263,7 @@ export class SessionTransferService {
     }
 
     const file = await readFile(staged.path);
-    const decoded = await decodeEnvelope(file, this.encryptionKey);
+    const decoded = await decodeEnvelope(file, this.legacyKey, staged.derivedKey);
     const contents = await readTar(await gunzipArchive(decoded.payload));
     const manifest = parseManifest(contents.get("manifest.json"));
     validateTranscripts(manifest, contents);
@@ -281,6 +299,17 @@ export class SessionTransferService {
         });
       }
     }
+    if (this.sessionEnvironment && manifest.formatVersion >= 7) {
+      const importedByCodexId = new Map(results.flatMap((result) => result.sessionId ? [[result.codexSessionId, result.sessionId] as const] : []));
+      for (const portable of manifest.sessions) {
+        const importedId = importedByCodexId.get(portable.codexSessionId);
+        if (!importedId) continue;
+        const parentId = portable.environmentParentCodexSessionId
+          ? importedByCodexId.get(portable.environmentParentCodexSessionId) ?? null
+          : null;
+        await this.sessionEnvironment.importOwned(importedId, portable.environment ?? {}, parentId);
+      }
+    }
     await this.cancel(token);
     return { results, branches };
   }
@@ -288,7 +317,10 @@ export class SessionTransferService {
   async cancel(token: string): Promise<void> {
     const staged = this.staged.get(token);
     this.staged.delete(token);
-    if (staged) await rm(staged.path, { force: true });
+    if (staged) {
+      staged.derivedKey?.fill(0);
+      await rm(staged.path, { force: true });
+    }
   }
 
   private requireStage(token: string): StagedTransfer {
@@ -385,7 +417,7 @@ function parseManifest(value: Buffer | undefined): Manifest {
   try { raw = JSON.parse(value.toString("utf8")); } catch { throw new SessionTransferError("Session archive manifest is invalid JSON"); }
   if (!raw || typeof raw !== "object") throw new SessionTransferError("Session archive manifest is invalid");
   const manifest = raw as Manifest;
-  if (manifest.formatVersion !== 6 || !Array.isArray(manifest.sessions)
+  if (![6, 7].includes(manifest.formatVersion) || !Array.isArray(manifest.sessions)
     || manifest.sessions.length === 0 || manifest.sessions.length > MAX_SESSIONS) {
     throw new SessionTransferError("Unsupported or invalid session archive manifest");
   }
@@ -414,6 +446,11 @@ function parseManifest(value: Buffer | undefined): Manifest {
         || typeof session.name !== "string" || session.name !== session.sessionName
         || typeof session.cwd !== "string" || session.cwd !== session.sourceCwd) {
       throw new SessionTransferError("Session archive manifest contains invalid provider metadata");
+    }
+    if (manifest.formatVersion >= 7 && (!session.environment || typeof session.environment !== "object" || Array.isArray(session.environment)
+        || Object.entries(session.environment).some(([name, entry]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof entry !== "string" || entry.includes("\0"))
+        || (session.environmentParentCodexSessionId !== null && typeof session.environmentParentCodexSessionId !== "string"))) {
+      throw new SessionTransferError("Session archive manifest contains invalid environment metadata");
     }
     validateDocumentManifest(session, sessionIndex);
     ids.add(session.codexSessionId);
@@ -548,12 +585,12 @@ async function encodeEnvelope(payload: Buffer, key?: string): Promise<Buffer> {
   return Buffer.concat([MAGIC, Buffer.from([FLAG_ENCRYPTED]), salt, nonce, encrypted, cipher.getAuthTag()]);
 }
 
-async function decodeEnvelope(file: Buffer, key?: string): Promise<{ encrypted: boolean; payload: Buffer }> {
+async function decodeEnvelope(file: Buffer, key?: string, suppliedDerivedKey?: Buffer): Promise<{ encrypted: boolean; payload: Buffer; derivedKey?: Buffer }> {
   if (file.length < MAGIC.length + 1 || !file.subarray(0, MAGIC.length).equals(MAGIC)) throw new SessionTransferError("Not a supported .mpsession file");
   const flags = file[MAGIC.length]!;
   if (flags === 0) return { encrypted: false, payload: file.subarray(MAGIC.length + 1) };
   if (flags !== FLAG_ENCRYPTED) throw new SessionTransferError("Unsupported .mpsession encryption flags");
-  if (!key) throw new SessionTransferError("This .mpsession file is encrypted; configure MUXPILOT_SESSION_FILE_KEY", 422);
+  if (!key && !suppliedDerivedKey) throw new SessionTransferError("This .mpsession file is encrypted; enter its passphrase", 422);
   const minimum = MAGIC.length + 1 + SALT_BYTES + NONCE_BYTES + TAG_BYTES;
   if (file.length < minimum) throw new SessionTransferError("Encrypted .mpsession file is truncated");
   const saltStart = MAGIC.length + 1;
@@ -561,16 +598,20 @@ async function decodeEnvelope(file: Buffer, key?: string): Promise<{ encrypted: 
   const bodyStart = nonceStart + NONCE_BYTES;
   const tagStart = file.length - TAG_BYTES;
   try {
-    const derived = await deriveKey(key, file.subarray(saltStart, nonceStart));
+    const derived = suppliedDerivedKey ?? await deriveKey(key!, file.subarray(saltStart, nonceStart));
     const decipher = createDecipheriv("aes-256-gcm", derived, file.subarray(nonceStart, bodyStart));
     decipher.setAAD(file.subarray(0, bodyStart));
     decipher.setAuthTag(file.subarray(tagStart));
-    return { encrypted: true, payload: Buffer.concat([decipher.update(file.subarray(bodyStart, tagStart)), decipher.final()]) };
+    return { encrypted: true, payload: Buffer.concat([decipher.update(file.subarray(bodyStart, tagStart)), decipher.final()]), derivedKey: derived };
   } catch { throw new SessionTransferError("Unable to decrypt .mpsession file; the key is incorrect or the file was modified", 422); }
 }
 
 async function deriveKey(key: string, salt: Buffer): Promise<Buffer> {
-  return scryptSync(key, salt, 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  return await new Promise((resolve, reject) => scrypt(key, salt, 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (error, value) => error ? reject(error) : resolve(value)));
+}
+
+function requirePassphrase(passphrase: string): void {
+  if (passphrase.length < 12) throw new SessionTransferError("Export passphrase must be at least 12 characters");
 }
 
 async function gunzipArchive(payload: Buffer): Promise<Buffer> {

@@ -2043,7 +2043,9 @@ function SessionTransferDialog({ compatibility, onClose }: {
   const [tab, setTab] = useState<"export" | "import">("export");
   const [sessions, setSessions] = useState<ManagedSession[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [encryptionEnabled, setEncryptionEnabled] = useState(false);
+  const [exportPassphrase, setExportPassphrase] = useState("");
+  const [exportPassphraseConfirmation, setExportPassphraseConfirmation] = useState("");
+  const [importPassphrase, setImportPassphrase] = useState("");
   const [preview, setPreview] = useState<SessionTransferInspectResponse | null>(null);
   const [mappings, setMappings] = useState<Record<string, { destinationCwd: string; targetBranch: string }>>({});
   const [result, setResult] = useState<SessionTransferImportResponse | null>(null);
@@ -2055,10 +2057,9 @@ function SessionTransferDialog({ compatibility, onClose }: {
   const [mappingProbes, setMappingProbes] = useState<Record<string, SessionTransferMappingProbe>>({});
 
   useEffect(() => {
-    void Promise.all([api.transferableSessions(), api.sessionTransferStatus()])
-      .then(([sessionResponse, status]) => {
+    void api.transferableSessions()
+      .then((sessionResponse) => {
         setSessions(sessionResponse.sessions);
-        setEncryptionEnabled(status.encryptionEnabled);
       })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   }, []);
@@ -2118,7 +2119,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
     setBusy(true);
     setError("");
     try {
-      const download = await api.exportSessionTransfer([...selected]);
+      const download = await api.exportSessionTransfer(expandedTransferSelection(selected, sessions), exportPassphrase);
       const url = URL.createObjectURL(download.blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -2143,7 +2144,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
     setResult(null);
     if (preview) await api.cancelSessionTransfer(preview.token).catch(() => undefined);
     try {
-      const next = await api.inspectSessionTransfer(file);
+      const next = await api.inspectSessionTransfer(file, importPassphrase);
       setPreview(next);
       setMappings(Object.fromEntries(next.mappings.map((mapping) => [mapping.sourceCwd, {
         destinationCwd: mapping.sourceCwd,
@@ -2187,6 +2188,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
   }
 
   const portableSessions = sessions.filter((session) => Boolean(session.codexSessionId && session.codexJsonlPath));
+  const expandedSelectedIds = expandedTransferSelection(selected, sessions);
   const mappingComplete = preview?.mappings.every((requirement) => {
     const value = mappings[requirement.sourceCwd];
     if (!value?.destinationCwd.trim()) return false;
@@ -2197,7 +2199,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
       || targetBranchSuggestions(mappingProbe.probe).some((suggestion) => suggestion.value === value.targetBranch);
   }) ?? false;
   const selectedWithActiveWork = portableSessions.filter((session) =>
-    selected.has(session.id) && session.gitWorkspace?.sessionBranch && session.gitWorkspace.worktreePath);
+    expandedSelectedIds.includes(session.id) && session.gitWorkspace?.sessionBranch && session.gitWorkspace.worktreePath);
 
   return (
     <Modal
@@ -2213,7 +2215,8 @@ function SessionTransferDialog({ compatibility, onClose }: {
         </div>
         {tab === "export" ? (
           <div className="session-transfer-panel">
-            <p className="session-git-probe-note">{encryptionEnabled ? "Exports are encrypted with MUXPILOT_SESSION_FILE_KEY." : "Exports are not encrypted. Configure MUXPILOT_SESSION_FILE_KEY to protect them."}</p>
+            <p className="session-git-probe-note">Every export is encrypted with a passphrase. Selected child sessions automatically include ancestors needed for inherited variables.</p>
+            {expandedSelectedIds.length > selected.size ? <p className="session-git-probe-note">The export will include {expandedSelectedIds.length} sessions: {selected.size} selected and {expandedSelectedIds.length - selected.size} required ancestor{expandedSelectedIds.length - selected.size === 1 ? "" : "s"}.</p> : null}
             <div className="session-history-results session-transfer-list">
               {portableSessions.map((session) => (
                 <label className="session-transfer-option" key={session.id}>
@@ -2230,16 +2233,21 @@ function SessionTransferDialog({ compatibility, onClose }: {
             {selectedWithActiveWork.length ? <p className="session-git-probe-note dialog-error">
               Unfinished task-worktree changes are not included. Only the committed target branch will be exported for {selectedWithActiveWork.map(sessionBaseName).join(", ")}.
             </p> : null}
+            <label className="rename-field"><span>Export passphrase</span><input type="password" autoComplete="new-password" value={exportPassphrase} onChange={(event) => setExportPassphrase(event.target.value)} /></label>
+            <label className="rename-field"><span>Confirm passphrase</span><input type="password" autoComplete="new-password" value={exportPassphraseConfirmation} onChange={(event) => setExportPassphraseConfirmation(event.target.value)} /></label>
+            {exportPassphraseConfirmation && exportPassphrase !== exportPassphraseConfirmation ? <p className="session-git-probe-note dialog-error">Passphrases do not match.</p> : null}
             <DialogActions>
               <Button variant="ghost" onClick={() => void close()} disabled={busy}>Cancel</Button>
-              <Button variant="primary" icon={<Download size={16} />} disabled={busy || selected.size === 0} busy={busy} busyLabel="Exporting" onClick={() => void exportSelected()}>
-                Export {selected.size || ""} session{selected.size === 1 ? "" : "s"}
+              <Button variant="primary" icon={<Download size={16} />} disabled={busy || selected.size === 0 || exportPassphrase.length < 12 || exportPassphrase !== exportPassphraseConfirmation} busy={busy} busyLabel="Exporting" onClick={() => void exportSelected()}>
+                Export {expandedSelectedIds.length || ""} session{expandedSelectedIds.length === 1 ? "" : "s"}
               </Button>
             </DialogActions>
           </div>
         ) : (
           <div className="session-transfer-panel">
             {!preview ? <>
+              <label className="rename-field"><span>Archive passphrase</span><input type="password" autoComplete="current-password" value={importPassphrase} onChange={(event) => setImportPassphrase(event.target.value)} /></label>
+              <p className="session-git-probe-note">Required for encrypted archives. Legacy plaintext archives can be imported with this field empty.</p>
               <label
                 className="session-transfer-dropzone"
                 data-dragging={importDragging || undefined}
@@ -2333,6 +2341,21 @@ function SessionTransferDialog({ compatibility, onClose }: {
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}
     </Modal>
   );
+}
+
+function expandedTransferSelection(selected: Set<string>, sessions: ManagedSession[]): string[] {
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  const expanded = new Set(selected);
+  for (const selectedId of selected) {
+    const visited = new Set<string>();
+    let parentId = byId.get(selectedId)?.agentOwnership?.parentSessionId ?? null;
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId);
+      expanded.add(parentId);
+      parentId = byId.get(parentId)?.agentOwnership?.parentSessionId ?? null;
+    }
+  }
+  return [...expanded];
 }
 
 export function appServerCompatibilityLabel(compatibility: AppServerCompatibility | null): string {

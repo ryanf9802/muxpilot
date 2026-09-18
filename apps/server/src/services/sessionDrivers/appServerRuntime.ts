@@ -16,6 +16,10 @@ export interface AppServerRuntimeCompositionOptions {
   runtimeDir?: string;
   codexHome: string;
   environment: Record<string, string>;
+  sessionEnvironment?: {
+    resolveForLaunch(sessionId: string): Promise<{ environment: Record<string, string>; revision: number }>;
+    markApplied(sessionId: string, revision?: number): Promise<void>;
+  };
   db: AppDatabase;
   events: EventBus;
   onAuthenticationFailure?: (sessionId: string, error: string) => void;
@@ -35,6 +39,7 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
   const socketRoot = join(options.runtimeDir, "muxpilot", "app-server-sessions");
   const journalRoot = join(options.dataDir, "protocol", "app-server-sessions");
   const journals = new Map<string, ProtocolJournal>();
+  const environmentLaunchRevisions = new Map<string, number>();
   const supervisor = new SystemdAppServerSupervisor(runtimeRoot, {}, {
     socketRoot,
     legacySocketRoots: [runtimeRoot]
@@ -55,19 +60,29 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
     requestStore: options.db,
     processStore: options.db,
     eventSink: reconciler,
-    runtimeSpec: (spec) => ({
-      sessionId: spec.sessionId,
-      capabilityId: capabilityId(spec.sessionId),
-      cwd: spec.cwd,
-      codexHome: options.codexHome,
-      codexVersion: options.compatibility.codexVersion,
-      environment: {
-        ...options.environment,
-        ...(spec.options.environment ?? {}),
-        ...(options.environment.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {})
-      },
-      mcpServers: spec.options.mcpServers ?? []
-    })
+    runtimeSpec: async (spec) => {
+      const sessionEnvironment = await options.sessionEnvironment?.resolveForLaunch(spec.sessionId);
+      if (sessionEnvironment) environmentLaunchRevisions.set(spec.sessionId, sessionEnvironment.revision);
+      return {
+        sessionId: spec.sessionId,
+        capabilityId: capabilityId(spec.sessionId),
+        cwd: spec.cwd,
+        codexHome: options.codexHome,
+        codexVersion: options.compatibility.codexVersion,
+        environment: {
+          ...options.environment,
+          ...(spec.options.environment ?? {}),
+          ...(sessionEnvironment?.environment ?? {}),
+          ...(options.environment.MUXPILOT_SHADOW === "1" ? { MUXPILOT_SHADOW: "1" } : {})
+        },
+        mcpServers: spec.options.mcpServers ?? []
+      };
+    },
+    runtimeStarted: async (sessionId) => {
+      const revision = environmentLaunchRevisions.get(sessionId);
+      environmentLaunchRevisions.delete(sessionId);
+      await options.sessionEnvironment?.markApplied(sessionId, revision);
+    }
   }));
   return registry;
 }

@@ -3054,6 +3054,12 @@ select:focus-visible {
   overflow: hidden;
 }
 
+.session-environment-modal { --modal-max-width: 620px; }
+.session-environment-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.session-environment-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.session-environment-row > span { display: grid; min-width: 0; gap: 2px; }
+.session-environment-row small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
+
 .documents-source-context {
   display: flex;
   align-items: center;

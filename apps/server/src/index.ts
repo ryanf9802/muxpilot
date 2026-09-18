@@ -16,6 +16,7 @@ import { eventId } from "./utils/ids.js";
 import { nowIso } from "./utils/time.js";
 import { GitWorkspaceManager } from "./services/gitWorkspaceManager.js";
 import { SessionTransferService } from "./services/sessionTransfer.js";
+import { SessionEnvironmentService } from "./services/sessionEnvironment.js";
 import { SessionDocumentService } from "./services/sessionDocuments.js";
 import { ResourceGovernor, UserSystemdController } from "./services/resourceGovernor.js";
 import { DockerResourceProxy } from "./services/dockerResourceProxy.js";
@@ -127,12 +128,15 @@ if (config.resourceGovernor !== "off") {
   }
 }
 const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
+const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
+await sessionEnvironment.initialize();
 const sessionDrivers = createSessionDriverRegistry({
   compatibility: appServerCompatibility,
   dataDir: config.dataDir,
   runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
   codexHome: config.codexHome,
   environment: managedEnvironment,
+  sessionEnvironment,
   db,
   events,
   onAuthenticationFailure: (_sessionId, error) => codexAuth.reportAuthenticationFailure(error),
@@ -153,7 +157,8 @@ const manager = new SessionManager(
   codexModels,
   sessionDrivers,
   config.appServerHibernateMs,
-  (sessionId, imageId) => sessionImages.path(sessionId, imageId)
+  (sessionId, imageId) => sessionImages.path(sessionId, imageId),
+  sessionEnvironment
 );
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 manager.setAuthenticationGuard(() => codexAuth.assertReady());
@@ -233,7 +238,7 @@ const resourceGovernor = new ResourceGovernor({
   });
 });
 manager.setResourceUsageLookup(resourceGovernor);
-const sessionTransfers = new SessionTransferService(db, manager, config.sessionFileKey);
+const sessionTransfers = new SessionTransferService(db, manager, sessionEnvironment);
 await sessionTransfers.initialize();
 const access = createAccessControl(config, {
   unrestrictedRemoteAccessEnabled: await db.getUnrestrictedRemoteAccessEnabled()
@@ -257,9 +262,14 @@ app.addContentTypeParser(
   { parseAs: "buffer", bodyLimit: 512 * 1024 * 1024 },
   (_request, body, done) => done(null, body)
 );
+app.addContentTypeParser(
+  "application/vnd.muxpilot.session+passphrase",
+  { parseAs: "buffer", bodyLimit: 512 * 1024 * 1024 + 4096 },
+  (_request, body, done) => done(null, body)
+);
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages, codexAuth);
+registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages, codexAuth, sessionEnvironment);
 
 app.get("/healthz", async () => ({
   ok: true,

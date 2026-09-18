@@ -64,6 +64,7 @@ import {
   type SessionDocumentSnapshot
 } from "./sessionDocuments.js";
 import type { ApprovalReviewResult } from "./approvalReviewer.js";
+import type { SessionEnvironmentService } from "./sessionEnvironment.js";
 
 interface ApprovalReviewProvider {
   review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult>;
@@ -205,7 +206,8 @@ export class SessionManager {
     private readonly codexMetadata: CodexMetadataLookup | null = null,
     private readonly sessionDrivers: SessionDriverRegistry | null = null,
     private readonly appServerHibernateMs = 900_000,
-    private readonly imagePath: ((sessionId: string, imageId: string) => string) | null = null
+    private readonly imagePath: ((sessionId: string, imageId: string) => string) | null = null,
+    private readonly sessionEnvironment: SessionEnvironmentService | null = null
   ) {
     this.unsubscribeQueueReadiness = this.events.subscribe((event) => {
       if (event.type !== "status.changed") return;
@@ -1592,6 +1594,7 @@ export class SessionManager {
     if (await this.shouldQueueInput(session, text)) {
       return { queuedInput: await this.enqueueInput(sessionId, text, mode, actorSessionId, content) };
     }
+    session = await this.applyPendingSessionEnvironment(session);
     const targetMode = mode ?? session.inputMode;
     const now = nowIso();
     let message = await this.recordSubmittedInput(session, text, targetMode, now, null, actorSessionId, "turn_start", content);
@@ -1610,6 +1613,19 @@ export class SessionManager {
     this.publish("status.changed", sessionId, { status });
     this.publish("session.updated", sessionId, updatedSession);
     return { session: updatedSession, message };
+  }
+
+  private async applyPendingSessionEnvironment(session: ManagedSession): Promise<ManagedSession> {
+    if (!this.sessionEnvironment || session.runtime?.kind !== "systemd_service") return session;
+    const environment = await this.sessionEnvironment.describe(session.id);
+    if (environment.state === "applied" || session.runtime.state === "hibernated" || session.runtime.state === "stopped") return session;
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status) && session.status !== "input_failed") {
+      throw new InputDeliveryError("Session variables are pending until the current work reaches a safe boundary.");
+    }
+    await this.requireAppServerDriver().kill(session);
+    const stopped = { ...session, runtime: { ...session.runtime, state: "stopped" as const } };
+    await this.db.upsertSession(stopped, nowIso());
+    return this.resumeAppServerSession(stopped);
   }
 
   private async sendSteeredInputExclusive(
@@ -1916,6 +1932,7 @@ export class SessionManager {
         budgetExhaustedAt: null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
+      await this.sessionEnvironment?.setReferenceParent(child.id, actor.id);
       for (const descendant of claimedSubtree.slice(1)) {
         if (!descendant.agentOwnership) continue;
         await this.db.setSessionAgentOwnership(descendant.id, { ...descendant.agentOwnership, rootSessionId }, nowIso());
@@ -1934,6 +1951,7 @@ export class SessionManager {
         throw new AgentSessionError("Release live descendants before releasing their parent session");
       }
       const updated = requireSession(await this.db.detachSessionAgentOwnership(child.id, nowIso()));
+      await this.sessionEnvironment?.setReferenceParent(child.id, null);
       for (const descendant of descendants) {
         if (!descendant.agentOwnership) continue;
         await this.db.setSessionAgentOwnership(descendant.id, {
@@ -1954,6 +1972,7 @@ export class SessionManager {
       const subtreeIds = new Set([child.id, ...agentDescendants(all, child.id).map((session) => session.id)]);
       if (parentSessionId === null) {
         const updated = requireSession(await this.db.detachSessionAgentOwnership(child.id, nowIso()));
+        await this.sessionEnvironment?.setReferenceParent(child.id, null);
         for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
           if (!descendant.agentOwnership) continue;
           await this.db.setSessionAgentOwnership(descendant.id, {
@@ -1997,6 +2016,7 @@ export class SessionManager {
         budgetExhaustedAt: child.agentOwnership?.budgetExhaustedAt ?? null
       };
       const updated = requireSession(await this.db.setSessionAgentOwnership(child.id, ownership, nowIso()));
+      await this.sessionEnvironment?.setReferenceParent(child.id, parent.id);
       for (const descendant of all.filter((session) => subtreeIds.has(session.id) && session.id !== child.id)) {
         if (!descendant.agentOwnership) continue;
         await this.db.setSessionAgentOwnership(descendant.id, {
@@ -2795,6 +2815,7 @@ export class SessionManager {
       return;
     }
     if (!plan) throw new InputModeSwitchError("Pending proposed plan is incomplete");
+    session = await this.applyPendingSessionEnvironment(session);
     const launchOptions = action === "clear_context_implement"
       ? await this.appServerThreadLaunchOptions(session, "default")
       : undefined;
@@ -3303,6 +3324,7 @@ export class SessionManager {
 
   private async retryInputDelivery(session: ManagedSession): Promise<void> {
     if (this.deliveringInputSessionIds.has(session.id)) throw new InputDeliveryError("Another input delivery is already in progress for this session");
+    session = await this.applyPendingSessionEnvironment(session);
     const message = await this.db.latestUserMessage(session.id);
     const submission = message ? muxpilotSubmission(message) : null;
     const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
@@ -3482,13 +3504,15 @@ export class SessionManager {
       const input = inputs.find((candidate) => candidate.status === "queued" || candidate.status === "failed");
       if (!input) return;
 
-      const session = requireSession(await this.db.getSession(sessionId));
+      let session = requireSession(await this.db.getSession(sessionId));
       if (session.status === "input_failed") return;
       if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return;
       if (!queuedInputMatchesSession(input, session)) {
         await this.markQueuedInputFailed(input, "Session source changed before this input was sent");
         return;
       }
+
+      session = await this.applyPendingSessionEnvironment(session);
 
       const readySession = readyAppServerInputSession(session);
       if (!readySession) return;

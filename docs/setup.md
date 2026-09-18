@@ -127,7 +127,7 @@ pnpm app restart
 
 `pnpm app restart` restarts production. Use `pnpm app restart all` to restart only the modes that are already running.
 
-If you move sessions between hosts, set the same `MUXPILOT_SESSION_FILE_KEY` on both hosts before exporting to encrypt the `.mpsession` archive. The key must contain at least 16 characters. See [Moving sessions between hosts](usage.md#moving-sessions-between-hosts).
+Session exports are encrypted with a passphrase entered in the transfer dialog. Use that passphrase when importing the archive on another host. See [Moving sessions between hosts](usage.md#moving-sessions-between-hosts).
 
 ## Troubleshooting
 

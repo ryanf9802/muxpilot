@@ -5,7 +5,6 @@ muxpilot is a single-operator developer console. The Web UI runs in a browser, a
 ## User Settings
 
 - `MUXPILOT_LAN_ENABLED`: set to `1`, `true`, `yes`, or `on` to expose the backend and Web UI on the local network for phone access. Defaults to loopback-only local access.
-- `MUXPILOT_SESSION_FILE_KEY`: optional encryption key for exported `.mpsession` archives. It must be at least 16 characters; use the same value on the importing host. Plaintext archives remain importable when a key is configured.
 
 The app lifecycle scripts load `.env` first and `.env.local` second. Local setup helpers such as `pnpm pwa:setup` write machine-specific settings to `.env.local`, which is ignored by git.
 

@@ -98,12 +98,6 @@ describe("config LAN access validation", () => {
     expect(config.corsOrigins).toEqual(["https://example.test", "https://phone.example.test"]);
   });
 
-  it("accepts an optional session transfer key and rejects short keys", () => {
-    expect(parseConfig({}).sessionFileKey).toBeUndefined();
-    expect(parseConfig({ MUXPILOT_SESSION_FILE_KEY: "correct horse battery staple" }).sessionFileKey).toBe("correct horse battery staple");
-    expect(() => parseConfig({ MUXPILOT_SESSION_FILE_KEY: "too-short" })).toThrow();
-  });
-
   it("uses conservative resource defaults and accepts environment overrides", () => {
     const defaults = parseConfig({});
     expect(defaults).toMatchObject({

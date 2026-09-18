@@ -9,6 +9,7 @@ import {
   Copy,
   FileText,
   HelpCircle,
+  KeyRound,
   GitBranch,
   GitFork,
   Gauge,
@@ -91,6 +92,7 @@ import type {
   QueuedInput,
   SessionEvent,
   SessionDocumentSummary,
+  SessionEnvironmentResponse,
   SessionModelSettings,
   SessionAction,
   SessionActionResponse,
@@ -1385,6 +1387,48 @@ export function DocumentsButton({ open, onOpen }: { open: boolean; onOpen: () =>
   );
 }
 
+function SessionEnvironmentModal({ open, sessionId, sessions, onClose }: { open: boolean; sessionId: string; sessions: ManagedSession[]; onClose: () => void }) {
+  const [environment, setEnvironment] = useState<SessionEnvironmentResponse | null>(null);
+  const [name, setName] = useState("");
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => {
+    setError("");
+    try { setEnvironment(await api.sessionEnvironment(sessionId)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+  }, [sessionId]);
+  useEffect(() => { if (open) void load(); }, [open, load]);
+  async function save() {
+    setBusy(true); setError("");
+    try { setEnvironment(await api.setSessionEnvironment(sessionId, name.trim(), value)); setName(""); setValue(""); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
+  async function remove(variableName: string) {
+    setBusy(true); setError("");
+    try { setEnvironment(await api.deleteSessionEnvironment(sessionId, variableName)); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
+  return <Modal open={open} onClose={onClose} title={<><KeyRound size={18} /> Variables &amp; secrets</>} panelClassName="session-environment-modal" dismissible={!busy}>
+    <p className="session-git-probe-note">Values are encrypted locally and cannot be read back here. They become available before the next safe turn. Programs can still print environment values, so reference names instead of asking the agent to display them.</p>
+    {environment ? <p className="session-git-probe-note"><strong>{environment.state === "applied" ? "Applied" : "Pending next turn"}</strong>{environment.state === "pending" ? " · this session will reload at its next safe boundary" : ""}</p> : null}
+    <div className="session-environment-list">
+      {environment?.variables.map((variable) => <div className="session-environment-row" key={`${variable.ownerSessionId}:${variable.name}`}>
+        <span><strong>{variable.name}</strong><small>{variable.inherited ? `Inherited from ${sessions.find((session) => session.id === variable.ownerSessionId)?.name ?? "Parent session"}` : "Saved in this session"}</small></span>
+        {!variable.inherited ? <button type="button" className="icon-button" aria-label={`Delete ${variable.name}`} title={`Delete ${variable.name}`} disabled={busy} onClick={() => void remove(variable.name)}><Trash2 size={16} /></button> : null}
+      </div>)}
+      {environment && environment.variables.length === 0 ? <p className="prompt-history-muted">No variables configured.</p> : null}
+    </div>
+    <label className="rename-field"><span>Variable name</span><input {...noAutofillTextField} value={name} placeholder="PAYLOCITY_CLIENT_ID" onChange={(event) => setName(event.target.value.toUpperCase())} /></label>
+    <label className="rename-field"><span>Secret value</span><input type="password" autoComplete="new-password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
+    <p className="session-git-probe-note">Saving an existing name replaces its value. Saved values are never returned by the API.</p>
+    {error ? <p className="dialog-error" role="alert">{error}</p> : null}
+    <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Close</button><button type="button" className="primary-button" disabled={busy || !name.trim() || !value} onClick={() => void save()}>{busy ? "Saving…" : "Save variable"}</button></div>
+  </Modal>;
+}
+
 function heavyStateLabel(state: HeavyCommand["state"]): string {
   return { waiting: "Waiting for slot", reserved: "Resuming session", running: "Running", stalled: "No observed progress", terminating: "Terminating", reporting: "Reporting result" }[state];
 }
@@ -1613,6 +1657,7 @@ export function SessionView() {
   const [sessionLoadRetrying, setSessionLoadRetrying] = useState(false);
   const [sessionLoadRetryNonce, setSessionLoadRetryNonce] = useState(0);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
   const [documentsOpen, setDocumentsOpen] = useState(false);
   const [requestedDocument, setRequestedDocument] = useState<string | null>(null);
   const [requestedDocumentFragment, setRequestedDocumentFragment] = useState<string | null>(null);
@@ -2145,6 +2190,7 @@ export function SessionView() {
       setImagePreview(null);
       setMessageActionError("");
       setGitPanelOpen(false);
+      setEnvironmentOpen(false);
       setDocumentsOpen(false);
       setRequestedDocument(null);
       setRequestedDocumentFragment(null);
@@ -3366,6 +3412,7 @@ export function SessionView() {
         onReturnToCurrent={() => showCurrentDocuments()}
         onClose={closeDocuments}
       />
+      <SessionEnvironmentModal open={environmentOpen} sessionId={readySession.id} sessions={shellSessions} onClose={() => setEnvironmentOpen(false)} />
       <BtwDrawer
         open={btwOpen}
         exchanges={btwExchanges}
@@ -3419,6 +3466,9 @@ export function SessionView() {
           <DocumentsButton open={documentsOpen} onOpen={() => {
             showCurrentDocuments();
           }} />
+          <button type="button" className="session-documents-button" onClick={() => setEnvironmentOpen(true)} aria-haspopup="dialog" aria-expanded={environmentOpen} aria-label="Open session variables and secrets" title="Variables & secrets">
+            <KeyRound size={17} /><span className="session-action-label">Variables</span>
+          </button>
           <button
             type="button"
             className="btw-button"

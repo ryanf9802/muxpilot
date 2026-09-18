@@ -49,6 +49,7 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
 
 export interface CodexAppServerDriverOptions {
   runtimeSpec(spec: AgentSessionLaunchSpec): RuntimeStartSpec | Promise<RuntimeStartSpec>;
+  runtimeStarted?(sessionId: string): void | Promise<void>;
   requestStore?: AppServerRequestStore;
   processStore?: AppServerProcessStore;
   eventSink?: AppServerDriverEventSink;
@@ -450,6 +451,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const runtimeSpec = await this.options.runtimeSpec(spec);
     if (runtimeSpec.sessionId !== spec.sessionId) throw new Error("Runtime spec session id does not match launch spec");
     const runtime = await this.supervisor.start(runtimeSpec);
+    await this.options.runtimeStarted?.(spec.sessionId);
     try {
       if (operation === "resume") this.sessionThreads.set(spec.sessionId, requireSourceThread(spec));
       else this.sessionThreads.delete(spec.sessionId);

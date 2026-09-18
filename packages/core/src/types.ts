@@ -400,6 +400,23 @@ export interface SessionDocumentResponse {
   document: SessionDocumentSummary & { content: string };
 }
 
+export interface SessionEnvironmentVariable {
+  name: string;
+  ownerSessionId: string;
+  inherited: boolean;
+  updatedAt: string;
+}
+
+export interface SessionEnvironmentResponse {
+  variables: SessionEnvironmentVariable[];
+  desiredRevision: number;
+  appliedRevision: number;
+  state: "applied" | "pending" | "applying" | "error";
+  error?: string | null;
+}
+
+export interface SetSessionEnvironmentVariableRequest { name: string; value: string }
+
 export interface ChatMessage {
   id: string;
   sessionId: string;
@@ -831,6 +848,7 @@ export interface RestoreSessionRecoveryResponse {
 
 export interface SessionTransferExportRequest {
   sessionIds: string[];
+  passphrase: string;
 }
 
 export interface SessionTransferPreviewSession {
@@ -867,7 +885,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3 | 4 | 5 | 6;
+  formatVersion: 2 | 3 | 4 | 5 | 6 | 7;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }

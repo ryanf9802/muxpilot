@@ -41,6 +41,7 @@ import type {
   SessionDirectoriesResponse,
   SessionDocumentResponse,
   SessionDocumentsResponse,
+  SessionEnvironmentResponse,
   SessionHistoryResponse,
   SessionSummaryListResponse,
   SendInputResponse,
@@ -146,13 +147,15 @@ export const api = {
   sessionDirectories: () => json<SessionDirectoriesResponse>("/api/session-directories"),
   dismissSessionDirectory: (path: string) =>
     json<{ ok: true }>("/api/session-directories", { method: "DELETE", body: JSON.stringify({ path }) }),
-  sessionTransferStatus: () => json<{ encryptionEnabled: boolean }>("/api/session-transfers/status"),
-  inspectSessionTransfer: async (file: File) => {
+  inspectSessionTransfer: async (file: File, passphrase: string) => {
+    const metadata = new TextEncoder().encode(JSON.stringify({ passphrase }));
+    const prefix = new Uint8Array(4);
+    new DataView(prefix.buffer).setUint32(0, metadata.byteLength);
     const response = await fetch("/api/session-transfers/inspect", {
       method: "POST",
       credentials: "include",
-      headers: { "Content-Type": "application/vnd.muxpilot.session" },
-      body: file
+      headers: { "Content-Type": "application/vnd.muxpilot.session+passphrase" },
+      body: new Blob([prefix, metadata, file])
     });
     if (!response.ok) throw new ApiError(await responseError(response), response.status);
     return await response.json() as SessionTransferInspectResponse;
@@ -161,12 +164,12 @@ export const api = {
     json<SessionTransferImportResponse>("/api/session-transfers/import", { method: "POST", body: JSON.stringify(request) }),
   cancelSessionTransfer: (token: string) =>
     json<{ ok: true }>(`/api/session-transfers/${encodeURIComponent(token)}`, { method: "DELETE" }),
-  exportSessionTransfer: async (sessionIds: string[]) => {
+  exportSessionTransfer: async (sessionIds: string[], passphrase: string) => {
     const response = await fetch("/api/session-transfers/export", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionIds })
+      body: JSON.stringify({ sessionIds, passphrase })
     });
     if (!response.ok) throw new ApiError(await responseError(response), response.status);
     return { blob: await response.blob(), filename: downloadFilename(response.headers.get("Content-Disposition")) };
@@ -200,6 +203,12 @@ export const api = {
     json<SessionSnapshotResponse>(`/api/sessions/${encodeURIComponent(id)}/snapshot?limit=${limit}`, { signal }),
   sessionDocuments: (id: string) =>
     json<SessionDocumentsResponse>(`/api/sessions/${encodeURIComponent(id)}/documents`),
+  sessionEnvironment: (id: string) =>
+    json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment`),
+  setSessionEnvironment: (id: string, name: string, value: string) =>
+    json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment`, { method: "PUT", body: JSON.stringify({ name, value }) }),
+  deleteSessionEnvironment: (id: string, name: string) =>
+    json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment/${encodeURIComponent(name)}`, { method: "DELETE" }),
   sessionDocument: (id: string, name: string) =>
     json<SessionDocumentResponse>(`/api/sessions/${encodeURIComponent(id)}/documents/${encodeURIComponent(name)}`),
   heavyCommands: (id: string) => json<HeavyCommandsResponse>(`/api/sessions/${encodeURIComponent(id)}/heavy-commands`),

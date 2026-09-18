@@ -10,6 +10,7 @@ import type { ManagedSession } from "@muxpilot/core";
 import type { AppDatabase } from "../src/db/database.js";
 import type { SessionManager } from "../src/services/sessionManager.js";
 import { SessionTransferError, SessionTransferService, sessionTransferFilename } from "../src/services/sessionTransfer.js";
+import type { SessionEnvironmentService } from "../src/services/sessionEnvironment.js";
 
 const roots: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -143,6 +144,37 @@ describe.sequential("SessionTransferService", () => {
     tampered[tampered.length - 20] ^= 1;
     await expect(encrypted.inspect(tampered)).rejects.toBeInstanceOf(SessionTransferError);
     expect((await encrypted.inspect(file)).sessions[0]?.codexSessionId).toBe(fixture.sessions[0]?.codexSessionId);
+  });
+
+  it("encrypts environment values with a passphrase and expands child exports to include their parent", async () => {
+    const fixture = await createFixture();
+    fixture.sessions[1]!.agentOwnership = {
+      parentSessionId: fixture.sessions[0]!.id,
+      rootSessionId: fixture.sessions[0]!.id,
+      origin: "created", createdAt: new Date(0).toISOString(), workTokenBaseline: 0,
+      workTokensUsed: 0, workTokenBudget: 1, completedAt: null, budgetExhaustedAt: null
+    };
+    const imported: Array<{ sessionId: string; values: Record<string, string>; parentSessionId?: string | null }> = [];
+    const environment = {
+      requiredAncestors: async () => [fixture.sessions[1]!.id, fixture.sessions[0]!.id],
+      exportOwned: async (id: string) => id === fixture.sessions[0]!.id ? { PAYLOCITY_SECRET: "archive-secret" } : {},
+      importOwned: async (sessionId: string, values: Record<string, string>, parentSessionId?: string | null) => { imported.push({ sessionId, values, parentSessionId }); }
+    } as unknown as SessionEnvironmentService;
+    const db = { getSession: async (id: string) => fixture.sessions.find((session) => session.id === id) ?? null } as AppDatabase;
+    const manager = {
+      snapshotDocuments: async () => [], assertPortableRuntimeAvailable: () => undefined,
+      validatePortableMapping: async () => undefined,
+      importPortableSession: async (session: { codexSessionId: string; sessionName: string }) => ({ codexSessionId: session.codexSessionId, sessionName: session.sessionName, status: "resumed" as const, sessionId: `imported-${session.codexSessionId}`, error: null })
+    } as unknown as SessionManager;
+    const service = new SessionTransferService(db, manager, environment);
+    await service.initialize();
+    const archive = await service.export([fixture.sessions[1]!.id], "correct horse battery staple");
+    expect(archive.contents.toString("utf8")).not.toContain("archive-secret");
+    const preview = await service.inspect(archive.contents, "correct horse battery staple");
+    expect(preview.sessions).toHaveLength(2);
+    await service.import(preview.token, [{ sourceCwd: fixture.root, destinationCwd: fixture.root }]);
+    expect(imported).toContainEqual(expect.objectContaining({ values: { PAYLOCITY_SECRET: "archive-secret" } }));
+    expect(imported.find((entry) => entry.values.PAYLOCITY_SECRET === undefined)?.parentSessionId).toBe(`imported-${fixture.sessions[0]!.codexSessionId}`);
   });
 
   it("rejects selecting duplicate records for one Codex session", async () => {
