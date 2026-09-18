@@ -1271,6 +1271,23 @@ export class SessionManager {
     return reasons;
   }
 
+  async notificationCompletionEvidence(sessionId: string): Promise<{ completed: boolean; identity: string | null }> {
+    const state = await this.db.getAppServerReconciliationState(sessionId);
+    const evidence = state?.evidence && typeof state.evidence === "object" && !Array.isArray(state.evidence)
+      ? state.evidence as Record<string, unknown>
+      : null;
+    const turn = evidence?.turn && typeof evidence.turn === "object" && !Array.isArray(evidence.turn)
+      ? evidence.turn as Record<string, unknown>
+      : null;
+    const identity = state
+      ? [state.threadId, state.turnId ?? "", state.itemId ?? "", state.method].join(":")
+      : null;
+    return {
+      completed: state?.method === "turn/completed" && turn?.status === "completed",
+      identity
+    };
+  }
+
   private withResourceUsage(session: ManagedSession): ManagedSession {
     if (!this.resourceUsageLookup) return session;
     return { ...session, resourceUsage: this.resourceUsageLookup.usageForSession(session.id) };

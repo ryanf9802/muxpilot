@@ -161,6 +161,10 @@ describe("projectAppServerEvent", () => {
     expect(projectAppServerEvent({
       method: "turn/completed",
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "failed" } }
+    }, receivedAt)?.status).toBe("input_failed");
+    expect(projectAppServerEvent({
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }
     }, receivedAt)?.status).toBe("waiting");
   });
 

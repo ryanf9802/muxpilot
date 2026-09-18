@@ -5,7 +5,7 @@ export const NOTIFICATION_RULE_TYPES: readonly NotificationRuleType[] = ["done_t
 
 export function notificationRuleLabel(type: NotificationRuleType): string {
   if (type === "done_task") return "Done task";
-  if (type === "approval_gate") return "Approval gate";
+  if (type === "approval_gate") return "Needs attention";
   return "Status change";
 }
 

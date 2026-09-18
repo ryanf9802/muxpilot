@@ -2108,7 +2108,7 @@ describe("AppDatabase failed app-server turns", () => {
     await db.close();
   });
 
-  it("leaves unmatched failed turns in their projected waiting state", async () => {
+  it("leaves unmatched failed turns in their projected attention state", async () => {
     const db = await tempDb();
     const session = { ...testSession("unmatched-failed-turn"), status: "working" as const };
     await db.upsertSession(session, "2026-09-17T15:21:17.000Z");
@@ -2119,13 +2119,13 @@ describe("AppDatabase failed app-server turns", () => {
       itemId: null,
       clientMessageId: null,
       method: "turn/completed",
-      status: "waiting",
+      status: "input_failed",
       message: null,
       evidence: { turn: { id: "external-turn", status: "failed" } },
       turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Failed" },
       observedAt: "2026-09-17T15:21:19.000Z"
     });
-    expect(await db.getSession(session.id)).toMatchObject({ status: "waiting" });
+    expect(await db.getSession(session.id)).toMatchObject({ status: "input_failed" });
     await db.close();
   });
 });

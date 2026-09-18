@@ -359,7 +359,8 @@ function completedTurnStatus(turn: Record<string, unknown> | null): SessionStatu
     const hasPlan = Array.isArray(turn.items) && turn.items.some((item) => record(item)?.type === "plan");
     return hasPlan ? "plan_ready" : "idle";
   }
-  if (turn?.status === "interrupted" || turn?.status === "failed") return "waiting";
+  if (turn?.status === "failed") return "input_failed";
+  if (turn?.status === "interrupted") return "waiting";
   return "unknown";
 }
 

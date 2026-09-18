@@ -1016,6 +1016,34 @@ describe("SessionManager app-server helpers", () => {
     ]);
   });
 
+  it("confirms notification completion only from a successful terminal turn", async () => {
+    const db = {
+      getAppServerReconciliationState: vi.fn(async () => ({
+        sessionId: "session-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: null,
+        clientMessageId: null,
+        method: "turn/completed",
+        status: "idle",
+        evidence: { turn: { id: "turn-1", status: "completed" } },
+        observedAt: "2026-09-18T12:00:00.000Z"
+      }))
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), { db }) as SessionManager;
+
+    await expect(manager.notificationCompletionEvidence("session-1")).resolves.toEqual({
+      completed: true,
+      identity: "thread-1:turn-1::turn/completed"
+    });
+
+    db.getAppServerReconciliationState.mockResolvedValueOnce({
+      ...(await db.getAppServerReconciliationState()),
+      evidence: { turn: { id: "turn-1", status: "failed" } }
+    });
+    await expect(manager.notificationCompletionEvidence("session-1")).resolves.toMatchObject({ completed: false });
+  });
+
   it("does not promote a rejected transcript-only question to actionable status", async () => {
     const path = await rejectedQuestionRollout();
     const session = { ...managedSession(), codexJsonlPath: path, provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path } };

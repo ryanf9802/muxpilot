@@ -207,6 +207,52 @@ describe("CodexAppServerReconciler", () => {
     expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({ status: "idle" }));
   });
 
+  it("keeps an active turn running through idle until terminal completion", async () => {
+    const store = projectionStore([]);
+    const publish = vi.fn();
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish });
+
+    await reconciler.handle("session-1", {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-1" } },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+    await reconciler.handle("session-1", {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "idle" } },
+      receivedAt: "2026-09-01T12:00:01.000Z"
+    });
+    await reconciler.handle("session-1", {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed", items: [] } },
+      receivedAt: "2026-09-01T12:00:02.000Z"
+    });
+
+    expect(store.applyAppServerProjection.mock.calls.map(([projection]) => projection.status)).toEqual([
+      "working",
+      null,
+      "idle"
+    ]);
+    expect(publish.mock.calls.filter(([event]) => event.type === "status.changed").map(([event]) => event.payload)).toEqual([
+      { status: "working" },
+      { status: "idle" }
+    ]);
+  });
+
+  it("accepts authoritative idle while restoring an interrupted event stream", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    await reconciler.handle("session-1", {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-1" } },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    await reconciler.restore("session-1", "thread-1", { type: "idle" }, null, "2026-09-01T12:01:00.000Z");
+
+    expect(store.applyAppServerProjection).toHaveBeenLastCalledWith(expect.objectContaining({ status: "idle" }));
+  });
+
   it("allows a new turn to advance beyond a pending plan", async () => {
     const store = projectionStore([], "plan");
     const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });

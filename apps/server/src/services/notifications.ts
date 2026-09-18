@@ -29,8 +29,14 @@ interface NotificationServiceOptions {
   duplicateWindowMs?: number;
   nowMs?: () => number;
   pendingAutomaticWork?: (sessionId: string) => Promise<readonly string[]>;
+  completionEvidence?: (sessionId: string) => Promise<NotificationCompletionEvidence>;
   usageSummary?: () => Promise<CodexUsageSummaryResponse>;
   usagePollIntervalMs?: number;
+}
+
+export interface NotificationCompletionEvidence {
+  completed: boolean;
+  identity: string | null;
 }
 
 interface NotificationSourceEvent {
@@ -44,6 +50,7 @@ export class NotificationService {
   private readonly knownParentIds = new Map<string, string | null>();
   private readonly syncingSessions = new Set<string>();
   private readonly lastTriggeredAt = new Map<string, number>();
+  private readonly lastTriggeredIdentity = new Map<string, string>();
   private eventQueue = Promise.resolve();
   private unsubscribe: (() => void) | null = null;
   private vapidKeys: PushVapidKeys | null = null;
@@ -154,9 +161,13 @@ export class NotificationService {
       return;
     }
 
+    const completionEvidence = await this.completionEvidence(root.id, sourceEvent);
     const settingsByDevice = await this.db.listNotificationSettings();
     const candidates = Object.entries(settingsByDevice).flatMap(([deviceId, settings]) => {
-      const rules = matchingNotificationRules(settings, root.id, previousStatus, nextTreeStatus, { inputMode: source.inputMode });
+      const rules = matchingNotificationRules(settings, root.id, previousStatus, nextTreeStatus, {
+        inputMode: source.inputMode,
+        successfulCompletion: completionEvidence.completed
+      });
       return rules.length > 0 ? [{ deviceId, settings, rules }] : [];
     });
     if (candidates.length > 0 && isInputReadyStatus(nextTreeStatus) && this.options.pendingAutomaticWork) {
@@ -189,12 +200,32 @@ export class NotificationService {
       }
     }
 
+    if (candidates.some((candidate) => candidate.rules.includes("done_task"))) {
+      const currentEvidence = await this.completionEvidence(root.id, sourceEvent);
+      if (!currentEvidence.completed || currentEvidence.identity !== completionEvidence.identity) {
+        this.logger.info?.({
+          notification: {
+            decision: "suppressed",
+            decisionId: sourceEvent?.id ?? eventId(),
+            sessionId: root.id,
+            sourceSessionId: source.id,
+            previousStatus,
+            status: nextTreeStatus,
+            rules: ["done_task"],
+            reasons: ["completion_evidence_changed"],
+            sourceEvent
+          }
+        }, "notification suppressed after completion evidence changed");
+        return;
+      }
+    }
+
     this.knownTreeStatuses.set(root.id, nextTreeStatus);
     await Promise.all(
       candidates.map(async ({ deviceId, settings, rules: matchedRules }) => {
         const rules: NotificationRuleType[] = [];
         for (const rule of matchedRules) {
-          if (this.shouldTrigger(deviceId, root.id, rule, nextTreeStatus)) {
+          if (this.shouldTrigger(deviceId, root.id, rule, nextTreeStatus, completionEvidence.identity)) {
             rules.push(rule);
           } else {
             this.logger.info?.({
@@ -242,6 +273,19 @@ export class NotificationService {
         if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload, triggeredEvent.id);
       })
     );
+  }
+
+  private async completionEvidence(
+    sessionId: string,
+    sourceEvent?: NotificationSourceEvent
+  ): Promise<NotificationCompletionEvidence> {
+    if (!this.options.completionEvidence) return { completed: false, identity: sourceEvent?.id ?? null };
+    try {
+      return await this.options.completionEvidence(sessionId);
+    } catch (error) {
+      this.logger.warn({ err: error, sessionId, sourceEvent }, "notification completion-evidence lookup failed");
+      return { completed: false, identity: sourceEvent?.id ?? null };
+    }
   }
 
   private scheduleUsagePoll(delay: number): void {
@@ -346,14 +390,18 @@ export class NotificationService {
     deviceId: string,
     sessionId: string,
     rule: NotificationRuleType,
-    status: SessionStatus
+    status: SessionStatus,
+    identity: string | null
   ): boolean {
     const now = (this.options.nowMs ?? Date.now)();
-    const key = [deviceId, sessionId, rule, status].join("\u0000");
+    const identityKey = [deviceId, sessionId, rule].join("\u0000");
+    if (identity && this.lastTriggeredIdentity.get(identityKey) === identity) return false;
+    const key = [deviceId, sessionId, rule, status, identity ?? ""].join("\u0000");
     const previous = this.lastTriggeredAt.get(key);
     const duplicateWindowMs = this.options.duplicateWindowMs ?? DEFAULT_DUPLICATE_WINDOW_MS;
     if (previous !== undefined && now - previous < duplicateWindowMs) return false;
     this.lastTriggeredAt.set(key, now);
+    if (identity) this.lastTriggeredIdentity.set(identityKey, identity);
     return true;
   }
 
@@ -428,9 +476,9 @@ export function matchingNotificationRules(
   sessionId: string,
   previousStatus: SessionStatus,
   status: SessionStatus,
-  context: { inputMode?: CollaborationMode | null } = {}
+  context: { inputMode?: CollaborationMode | null; successfulCompletion?: boolean } = {}
 ): NotificationRuleType[] {
-  if (status === "missing" || status === "startup_failed") return [];
+  if (status === "missing") return [];
   const enabled = new Set<NotificationRuleType>([...settings.globalRules, ...(settings.sessionRules[sessionId] ?? [])]);
   return NOTIFICATION_RULE_TYPES.filter((type) => enabled.has(type) && notificationRuleMatches(type, previousStatus, status, context));
 }
@@ -439,12 +487,12 @@ function notificationRuleMatches(
   type: NotificationRuleType,
   previousStatus: SessionStatus,
   status: SessionStatus,
-  context: { inputMode?: CollaborationMode | null }
+  context: { inputMode?: CollaborationMode | null; successfulCompletion?: boolean }
 ): boolean {
   if (context.inputMode === "plan" && isInputReadyStatus(status)) return false;
   if (type === "status_change") return previousStatus !== status;
   if (type === "approval_gate") return statusSeverity(status) === "red";
-  return isTaskRunningStatus(previousStatus) && (status === "waiting" || status === "idle");
+  return context.successfulCompletion === true && isTaskRunningStatus(previousStatus) && status === "idle";
 }
 
 function isTaskRunningStatus(status: SessionStatus): boolean {
@@ -501,7 +549,7 @@ function statusSeverity(status: SessionStatus): NotificationSeverity {
 
 function notificationRuleLabel(type: NotificationRuleType): string {
   if (type === "done_task") return "Task done";
-  if (type === "approval_gate") return "Approval gate";
+  if (type === "approval_gate") return "Needs attention";
   return "Status changed";
 }
 

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { notificationToastMessage } from "./notifications.js";
+import { notificationRuleLabel, notificationToastMessage } from "./notifications.js";
 
 describe("notificationToastMessage", () => {
+  it("labels the persisted approval rule as needs attention", () => {
+    expect(notificationRuleLabel("approval_gate")).toBe("Needs attention");
+  });
+
   it("shows only the new status in a concise message", () => {
     expect(
       notificationToastMessage({
@@ -31,7 +35,7 @@ describe("notificationToastMessage", () => {
         previousStatus: "working",
         status: "approval",
         severity: "red",
-        title: "Approval gate",
+        title: "Needs attention",
         body: "parent · child: approval",
         url: "/sessions/child"
       })

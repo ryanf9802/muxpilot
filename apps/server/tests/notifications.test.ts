@@ -5,14 +5,14 @@ import { matchingNotificationRules, mostUrgentCrossedThreshold, NotificationServ
 import { EventBus } from "../src/services/eventBus.js";
 
 describe("matchingNotificationRules", () => {
-  it("fires done task only for yellow to waiting transitions", () => {
+  it("fires done task only for confirmed successful completion", () => {
     const settings = testNotificationSettings([], { a: ["done_task"] });
 
-    expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task"]);
-    expect(matchingNotificationRules(settings, "a", "running", "waiting")).toEqual(["done_task"]);
-    expect(matchingNotificationRules(settings, "a", "generating", "idle")).toEqual(["done_task"]);
+    expect(matchingNotificationRules(settings, "a", "working", "waiting", { successfulCompletion: true })).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "running", "idle")).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "generating", "idle", { successfulCompletion: true })).toEqual(["done_task"]);
     expect(matchingNotificationRules(settings, "a", "planning", "waiting")).toEqual([]);
-    expect(matchingNotificationRules(settings, "a", "working", "waiting", { inputMode: "plan" })).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "working", "idle", { inputMode: "plan", successfulCompletion: true })).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "waiting", "waiting")).toEqual([]);
     expect(matchingNotificationRules(settings, "a", "approval", "waiting")).toEqual([]);
   });
@@ -75,10 +75,10 @@ describe("matchingNotificationRules", () => {
       delivery: { pushEnabled: false, soundEnabled: true }
     };
 
-    expect(matchingNotificationRules(settings, "a", "working", "waiting")).toEqual(["done_task", "status_change"]);
+    expect(matchingNotificationRules(settings, "a", "working", "idle", { successfulCompletion: true })).toEqual(["done_task", "status_change"]);
   });
 
-  it("does not fire notifications for sessions becoming missing", () => {
+  it("keeps missing sessions silent and reports startup failures", () => {
     const settings: NotificationSettings = {
       globalRules: ["approval_gate" as const, "status_change" as const],
       sessionRules: { a: ["approval_gate" as const, "status_change" as const] },
@@ -87,7 +87,7 @@ describe("matchingNotificationRules", () => {
     };
 
     expect(matchingNotificationRules(settings, "a", "waiting", "missing")).toEqual([]);
-    expect(matchingNotificationRules(settings, "a", "waiting", "startup_failed")).toEqual([]);
+    expect(matchingNotificationRules(settings, "a", "waiting", "startup_failed")).toEqual(["approval_gate", "status_change"]);
   });
 
   it("fires done task from discovered session updates", async () => {
@@ -101,15 +101,16 @@ describe("matchingNotificationRules", () => {
         getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
         listSessions: async () => [testSession({ status: "working" })],
         listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
-        getSession: async () => testSession({ status: "waiting" }),
+        getSession: async () => testSession({ status: "idle" }),
         listPushSubscriptions: async () => []
       } as never,
       events,
-      { warn: () => undefined, error: () => undefined } as never
+      { warn: () => undefined, error: () => undefined } as never,
+      { completionEvidence: completedEvidence }
     );
-    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void> };
+    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void> };
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
 
     await vi.waitFor(() => expect(appendedEvents).toHaveLength(1));
     expect(appendedEvents[0]).toMatchObject({
@@ -119,7 +120,7 @@ describe("matchingNotificationRules", () => {
         deviceId: "device-test",
         rules: ["done_task"],
         previousStatus: "working",
-        status: "waiting"
+        status: "idle"
       }
     });
   });
@@ -139,19 +140,19 @@ describe("matchingNotificationRules", () => {
         listNotificationSettings: async () => ({
           "device-test": testNotificationSettings(["done_task", "status_change"])
         }),
-        getSession: async () => testSession({ status: "waiting" }),
+        getSession: async () => testSession({ status: "idle" }),
         listPushSubscriptions: async () => []
       } as never,
       events,
       { info, warn: () => undefined, error: () => undefined } as never,
-      { pendingAutomaticWork: async () => pendingReasons }
+      { pendingAutomaticWork: async () => pendingReasons, completionEvidence: completedEvidence }
     );
     const transitionHandler = service as unknown as {
-      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void>;
     };
 
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
     expect(triggeredEvents).toEqual([]);
     expect(info).toHaveBeenCalledWith(expect.objectContaining({
       notification: expect.objectContaining({ decision: "suppressed", reasons: ["heavy_command"] })
@@ -159,7 +160,7 @@ describe("matchingNotificationRules", () => {
 
     pendingReasons = [];
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
     expect(triggeredEvents).toHaveLength(1);
     expect(triggeredEvents[0]?.payload).toMatchObject({ rules: ["done_task", "status_change"] });
   });
@@ -180,14 +181,50 @@ describe("matchingNotificationRules", () => {
       } as never,
       events,
       { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
-      { pendingAutomaticWork: async () => { throw new Error("unavailable"); } }
+      {
+        pendingAutomaticWork: async () => { throw new Error("unavailable"); },
+        completionEvidence: completedEvidence
+      }
     );
     const transitionHandler = service as unknown as {
-      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void>;
     };
 
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
+    expect(triggeredEvents).toEqual([]);
+  });
+
+  it("suppresses stale completion after the session resumes before delivery", async () => {
+    const events = new EventBus();
+    const triggeredEvents: SessionEvent[] = [];
+    let evidenceReads = 0;
+    events.subscribe((event) => {
+      if (event.type === "notification.triggered") triggeredEvents.push(event);
+    });
+    const service = new NotificationService(
+      {
+        getPushVapidKeys: async () => ({ publicKey: "public", privateKey: "private" }),
+        listSessions: async () => [testSession({ status: "working" })],
+        listNotificationSettings: async () => ({ "device-test": testNotificationSettings(["done_task"]) }),
+        getSession: async () => testSession({ status: "idle" }),
+        listPushSubscriptions: async () => []
+      } as never,
+      events,
+      { info: () => undefined, warn: () => undefined, error: () => undefined } as never,
+      {
+        completionEvidence: async () => (++evidenceReads === 1
+          ? { completed: true, identity: "thread-1:turn-1:turn/completed" }
+          : { completed: false, identity: "thread-1:turn-2:turn/started" })
+      }
+    );
+    const transitionHandler = service as unknown as {
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void>;
+    };
+
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "idle");
+
     expect(triggeredEvents).toEqual([]);
   });
 
@@ -218,13 +255,14 @@ describe("matchingNotificationRules", () => {
         deletePushSubscription: async () => undefined
       } as never,
       events,
-      { warn: () => undefined, error: () => undefined } as never
+      { warn: () => undefined, error: () => undefined } as never,
+      { completionEvidence: completedEvidence }
     );
-    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void> };
+    const transitionHandler = service as unknown as { handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void> };
 
     try {
       await transitionHandler.handleStatusTransition("a", "working");
-      await transitionHandler.handleStatusTransition("a", "waiting");
+      await transitionHandler.handleStatusTransition("a", "idle");
 
       await vi.waitFor(() => expect(appendedEvents).toHaveLength(2));
       expect(appendedEvents.map((event) => (event.payload as { deviceId: string }).deviceId).sort()).toEqual(["device-muted", "device-push"]);
@@ -265,7 +303,7 @@ describe("matchingNotificationRules", () => {
     events.subscribe((event) => {
       if (event.type === "notification.triggered") appendedEvents.push(event);
     });
-    let currentStatus: ManagedSession["status"] = "waiting";
+    let currentStatus: ManagedSession["status"] = "idle";
     const vapidKeys = webPush.generateVAPIDKeys();
     const service = new NotificationService(
       {
@@ -276,7 +314,8 @@ describe("matchingNotificationRules", () => {
         listPushSubscriptions: async () => []
       } as never,
       events,
-      { warn: () => undefined, error: () => undefined } as never
+      { warn: () => undefined, error: () => undefined } as never,
+      { completionEvidence: completedEvidence }
     );
 
     await service.start();
@@ -298,12 +337,12 @@ describe("matchingNotificationRules", () => {
       payload: testSession({ status: "working" }),
       timestamp: "2026-07-08T00:00:01.000Z"
     });
-    currentStatus = "waiting";
+    currentStatus = "idle";
     events.publish({
       id: "event-waiting",
       type: "session.updated",
       sessionId: "a",
-      payload: testSession({ status: "waiting" }),
+      payload: testSession({ status: "idle" }),
       timestamp: "2026-07-08T00:00:02.000Z"
     });
 
@@ -315,7 +354,7 @@ describe("matchingNotificationRules", () => {
         deviceId: "device-test",
         rules: ["done_task"],
         previousStatus: "working",
-        status: "waiting"
+        status: "idle"
       }
     });
     service.stop();
@@ -409,10 +448,11 @@ describe("matchingNotificationRules", () => {
     service.stop();
   });
 
-  it("deduplicates rapid identical notifications per device, rule, and status", async () => {
+  it("deduplicates completion by turn identity and allows a new turn", async () => {
     const events = new EventBus();
     const triggeredEvents: SessionEvent[] = [];
     let now = 1_000;
+    let completionIdentity = "thread-1:turn-1:turn/completed";
     events.subscribe((event) => {
       if (event.type === "notification.triggered") triggeredEvents.push(event);
     });
@@ -426,21 +466,29 @@ describe("matchingNotificationRules", () => {
       } as never,
       events,
       { warn: () => undefined, error: () => undefined } as never,
-      { nowMs: () => now }
+      {
+        nowMs: () => now,
+        completionEvidence: async () => ({ completed: true, identity: completionIdentity })
+      }
     );
     const transitionHandler = service as unknown as {
-      handleStatusTransition: (sessionId: string, nextStatus: "working" | "waiting") => Promise<void>;
+      handleStatusTransition: (sessionId: string, nextStatus: "working" | "idle") => Promise<void>;
     };
 
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
     expect(triggeredEvents).toHaveLength(1);
 
     now += 60_000;
     await transitionHandler.handleStatusTransition("a", "working");
-    await transitionHandler.handleStatusTransition("a", "waiting");
+    await transitionHandler.handleStatusTransition("a", "idle");
+    expect(triggeredEvents).toHaveLength(1);
+
+    completionIdentity = "thread-1:turn-2:turn/completed";
+    await transitionHandler.handleStatusTransition("a", "working");
+    await transitionHandler.handleStatusTransition("a", "idle");
     expect(triggeredEvents).toHaveLength(2);
   });
 
@@ -717,6 +765,10 @@ function testUsageSummary(remainingPercent: number): CodexUsageSummaryResponse {
     },
     resetCredits: null
   };
+}
+
+async function completedEvidence(): Promise<{ completed: true; identity: string }> {
+  return { completed: true, identity: "thread-1:turn-1:turn/completed" };
 }
 
 function testSession(input: Partial<ManagedSession> = {}): ManagedSession {

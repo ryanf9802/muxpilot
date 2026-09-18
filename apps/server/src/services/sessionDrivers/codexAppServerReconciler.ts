@@ -57,7 +57,8 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
   private async handleExclusive(
     sessionId: string,
     event: DriverEvent,
-    recoveryGuard?: { threadKey: string; turnId: string }
+    recoveryGuard?: { threadKey: string; turnId: string },
+    restoring = false
   ): Promise<boolean> {
     if (event.method === "account/updated") {
       this.onAccountUpdated?.();
@@ -83,9 +84,14 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return true;
     const current = await this.store.getAppServerReconciliationState(sessionId);
     const normalizedProjection = preserveBudgetBlock(
-      preserveInputFailure(
-        normalizePlanModeStatus(projection, existingSession.inputMode),
-        existingSession.status
+      preserveActiveTurnUntilCompletion(
+        preserveInputFailure(
+          normalizePlanModeStatus(projection, existingSession.inputMode),
+          existingSession.status
+        ),
+        current,
+        existingSession.status,
+        restoring
       ),
       existingSession
     );
@@ -163,7 +169,7 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       method: "thread/status/changed",
       params: { threadId, status },
       receivedAt: restoredAt
-    }, recoveryGuard);
+    }, recoveryGuard, true);
   }
 
   private serialize(sessionId: string, operation: () => Promise<void>): Promise<void> {
@@ -299,6 +305,29 @@ function preserveBudgetBlock(
   return session.agentOwnership?.budgetExhaustedAt
     ? { ...projection, status: "blocked" }
     : projection;
+}
+
+function preserveActiveTurnUntilCompletion(
+  projection: AppServerEventProjection,
+  current: AppServerReconciliationState | null,
+  sessionStatus: ManagedSession["status"],
+  restoring: boolean
+): AppServerEventProjection {
+  if (
+    projection.method === "thread/status/changed"
+    && projection.status === "idle"
+    && !restoring
+    && current?.turnId
+    && current.method !== "turn/completed"
+    && isActiveTurnStatus(sessionStatus)
+  ) {
+    return { ...projection, status: null };
+  }
+  return projection;
+}
+
+function isActiveTurnStatus(status: ManagedSession["status"]): boolean {
+  return status === "working" || status === "running" || status === "generating" || status === "executing" || status === "planning";
 }
 
 function preservePlanReady(
