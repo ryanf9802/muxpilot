@@ -1431,6 +1431,20 @@ describe("SessionManager Codex authentication runtime safety", () => {
 });
 
 describe("SessionManager session environment reconciliation", () => {
+  it("returns immediately while reconciliation waits behind another runtime operation", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "idle" });
+    let releaseReconciliation: (() => void) | null = null;
+    const reconciliation = new Promise<void>((resolve) => { releaseReconciliation = resolve; });
+    const reconcileSessionEnvironment = vi.fn(() => reconciliation);
+    const environment = { affectedSessionIds: vi.fn(async () => ["session-1"]) };
+    Object.assign(harness.manager, { sessionEnvironment: environment, reconcileSessionEnvironment });
+
+    expect(harness.manager.sessionEnvironmentChanged("session-1")).toBeUndefined();
+    await vi.waitFor(() => expect(reconcileSessionEnvironment).toHaveBeenCalledWith("session-1"));
+    releaseReconciliation?.();
+    await reconciliation;
+  });
+
   it("reloads an idle runtime immediately and marks the revision as applying", async () => {
     const harness = authenticationManager({ ...managedSession(), status: "idle" });
     const environment = {

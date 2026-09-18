@@ -254,10 +254,12 @@ export class SessionManager {
     await this.runIngestTick();
   }
 
-  async sessionEnvironmentChanged(ownerSessionId: string): Promise<void> {
+  sessionEnvironmentChanged(ownerSessionId: string): void {
     if (!this.sessionEnvironment) return;
-    const affected = await this.sessionEnvironment.affectedSessionIds(ownerSessionId);
-    await Promise.all(affected.map((sessionId) => this.reconcileSessionEnvironment(sessionId)));
+    this.runBackgroundTask("session environment", async () => {
+      const affected = await this.sessionEnvironment!.affectedSessionIds(ownerSessionId);
+      await Promise.all(affected.map((sessionId) => this.reconcileSessionEnvironment(sessionId)));
+    });
   }
 
   async reconcileSessionEnvironment(sessionId: string): Promise<void> {

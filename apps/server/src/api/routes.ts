@@ -558,7 +558,7 @@ export function registerRoutes(
         const sessionId = (request.params as { id: string }).id;
         const { name, value } = sessionEnvironmentSchema.parse(request.body);
         await sessionEnvironment.set(sessionId, name, value);
-        await manager.sessionEnvironmentChanged(sessionId);
+        manager.sessionEnvironmentChanged(sessionId);
         return await sessionEnvironment.describe(sessionId);
       } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
     });
@@ -566,7 +566,7 @@ export function registerRoutes(
       try {
         const { id, name } = request.params as { id: string; name: string };
         await sessionEnvironment.delete(id, name);
-        await manager.sessionEnvironmentChanged(id);
+        manager.sessionEnvironmentChanged(id);
         return await sessionEnvironment.describe(id);
       } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
     });
