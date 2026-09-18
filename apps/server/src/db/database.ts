@@ -2325,7 +2325,12 @@ export class SyncAppDatabase {
   }
 
   private activeTailOutputAnchorSequence(sessionId: string, output: MessageRow): number {
-    if (output.type !== "assistant") return output.sequence;
+    const counterpartType = output.type === "assistant"
+      ? "assistant_update"
+      : output.type === "assistant_update"
+        ? "assistant"
+        : null;
+    if (!counterpartType) return output.sequence;
     const previous = this.db
       .prepare(
         `SELECT * FROM messages
@@ -2334,7 +2339,7 @@ export class SyncAppDatabase {
          LIMIT 1`
       )
       .get(sessionId, output.sequence) as MessageRow | undefined;
-    if (previous?.role === "assistant" && previous.type === "assistant_update" && previous.text === output.text) {
+    if (previous?.role === "assistant" && previous.type === counterpartType && previous.text === output.text) {
       return previous.sequence;
     }
     return output.sequence;

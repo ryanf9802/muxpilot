@@ -2131,6 +2131,19 @@ describe("groupStackableMessages", () => {
     expect(html).not.toContain("Progress");
   });
 
+  it("ignores a delayed duplicate progress update after the assistant response", () => {
+    const items = groupStackableMessages([
+      message("session-a", 1, "prompt"),
+      message("session-a", 2, "checking files", "assistant", "assistant"),
+      message("session-a", 3, "checking files", "assistant", "assistant_update")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "message"]);
+    expect(items[1]).toMatchObject({
+      message: expect.objectContaining({ sequence: 2, text: "checking files", type: "assistant" })
+    });
+  });
+
   it("keeps every assistant message visible when a turn has multiple assistant messages", () => {
     const items = groupStackableMessages([
       message("session-a", 1, "prompt"),

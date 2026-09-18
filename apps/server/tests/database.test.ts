@@ -1507,6 +1507,28 @@ describe("AppDatabase session prompts", () => {
     db.close();
   });
 
+  it("deduplicates a delayed progress record across the active-tail pagination boundary", async () => {
+    const db = await tempDb();
+    const session = testSession("session-active-tail-delayed-progress");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "Older prompt"));
+    db.appendMessage(testMessage(session.id, 2, "assistant", "Checking files", undefined, "assistant"));
+    db.appendMessage(testMessage(session.id, 3, "assistant", "Checking files", undefined, "assistant_update"));
+    db.appendMessage(testMessage(session.id, 4, "user", "Current prompt"));
+    db.appendMessage(testMessage(session.id, 5, "tool", "Tool output", undefined, "tool_output"));
+
+    const tail = db.listActiveTailMessages(session.id, 3);
+
+    expect(itemSpans(tail)).toEqual([
+      [1, 1, "message"],
+      [2, 2, "message"],
+      [4, 4, "message"],
+      [5, 5, "range:activity"]
+    ]);
+    expect(tail.hasMoreBefore).toBe(false);
+    db.close();
+  });
+
   it("falls back to a fixed recent page when active tail has no visible prompt", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail-no-prompt");

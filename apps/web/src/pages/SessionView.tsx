@@ -6879,8 +6879,9 @@ function displayMessages(messages: ChatMessage[]): ChatMessage[] {
 
 function replaceDuplicateAssistantUpdateResponse(messages: ChatMessage[], message: ChatMessage): boolean {
   const previous = messages.at(-1);
-  if (!previous || !isAssistantUpdate(previous) || !isRegularAssistantMessage(message)) return false;
-  if (displayText(previous) !== displayText(message)) return false;
+  if (!previous || displayText(previous) !== displayText(message)) return false;
+  if (isRegularAssistantMessage(previous) && isAssistantUpdate(message)) return true;
+  if (!isAssistantUpdate(previous) || !isRegularAssistantMessage(message)) return false;
   messages[messages.length - 1] = message;
   return true;
 }

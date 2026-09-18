@@ -76,6 +76,24 @@ describe("buildTranscriptItems", () => {
     ]);
   });
 
+  it("coalesces a delayed duplicate update after the assistant response", () => {
+    const items = buildTranscriptItems([
+      message(1, "prompt"),
+      message(2, "checking files", "assistant", "assistant"),
+      message(3, "checking files", "assistant", "assistant_update")
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({ type: "message", message: expect.objectContaining({ text: "prompt" }) }),
+      expect.objectContaining({
+        type: "message",
+        firstSequence: 2,
+        lastSequence: 2,
+        message: expect.objectContaining({ type: "assistant" })
+      })
+    ]);
+  });
+
   it("never puts assistant updates inside expanded event stacks", () => {
     const items = buildExpandedTranscriptItems([
       message(1, "tool_result", "tool", "tool_output"),
