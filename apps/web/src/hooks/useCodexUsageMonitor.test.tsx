@@ -17,7 +17,6 @@ vi.mock("react-toastify", () => ({ toast: toastMocks }));
 import {
   CODEX_USAGE_POLL_INTERVAL_MS,
   PENDING_RESET_KEY,
-  notifyThresholdCrossings,
   observedReset,
   useCodexUsageMonitor,
   type CodexUsageMonitor
@@ -27,48 +26,7 @@ beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
-describe("Codex usage thresholds", () => {
-  beforeEach(() => {
-    installLocalStorage();
-    toastMocks.warning.mockReset();
-    toastMocks.error.mockReset();
-  });
-
-  it("silently establishes a baseline and emits only the highest newly crossed threshold", () => {
-    notifyThresholdCrossings(null, summary(40));
-    expect(toastMocks.warning).not.toHaveBeenCalled();
-
-    notifyThresholdCrossings(summary(40), summary(76));
-    expect(toastMocks.warning).toHaveBeenCalledOnce();
-    expect(toastMocks.warning).toHaveBeenLastCalledWith(expect.stringContaining("76% used"));
-
-    notifyThresholdCrossings(summary(76), summary(91));
-    expect(toastMocks.warning).toHaveBeenCalledTimes(2);
-
-    notifyThresholdCrossings(summary(91), summary(100));
-    expect(toastMocks.error).toHaveBeenCalledOnce();
-    expect(toastMocks.error).toHaveBeenCalledWith(expect.stringContaining("100% used"));
-  });
-
-  it("treats a new usage window as a silent baseline", () => {
-    notifyThresholdCrossings(null, summary(40));
-    notifyThresholdCrossings(summary(40), summary(76));
-    toastMocks.warning.mockClear();
-
-    notifyThresholdCrossings(summary(76), summary(80, 1_900_000_000));
-    expect(toastMocks.warning).not.toHaveBeenCalled();
-  });
-
-  it("silences the first reading after an app reload while retaining threshold deduplication", () => {
-    notifyThresholdCrossings(null, summary(40));
-    notifyThresholdCrossings(null, summary(76));
-    expect(toastMocks.warning).not.toHaveBeenCalled();
-
-    notifyThresholdCrossings(summary(76), summary(91));
-    expect(toastMocks.warning).toHaveBeenCalledOnce();
-    expect(toastMocks.warning).toHaveBeenCalledWith(expect.stringContaining("91% used"));
-  });
-
+describe("Codex usage reset observation", () => {
   it("recognizes full capacity or a usage decrease without accepting an unchanged full limit", () => {
     expect(observedReset(summary(60), summary(0))).toBe(true);
     expect(observedReset(summary(60), summary(25))).toBe(true);

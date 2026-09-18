@@ -3,10 +3,13 @@ import {
   agentSessionRoot,
   operatorSessionStatusPresentation,
   type CollaborationMode,
+  type CodexUsageSummaryResponse,
   type ManagedSession,
   type NotificationRuleType,
   type NotificationSettings,
   type NotificationTriggeredPayload,
+  type UsageLimitNotificationTriggeredPayload,
+  type UsageLimitThreshold,
   type PushSubscriptionInput,
   type SessionEvent,
   type SessionStatus
@@ -18,12 +21,16 @@ import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 
 type NotificationSeverity = NotificationTriggeredPayload["severity"];
+type NotificationDeliveryPayload = NotificationTriggeredPayload | UsageLimitNotificationTriggeredPayload;
 const DEFAULT_DUPLICATE_WINDOW_MS = 60_000;
+const DEFAULT_USAGE_POLL_INTERVAL_MS = 10_000;
 
 interface NotificationServiceOptions {
   duplicateWindowMs?: number;
   nowMs?: () => number;
   pendingAutomaticWork?: (sessionId: string) => Promise<readonly string[]>;
+  usageSummary?: () => Promise<CodexUsageSummaryResponse>;
+  usagePollIntervalMs?: number;
 }
 
 interface NotificationSourceEvent {
@@ -40,6 +47,9 @@ export class NotificationService {
   private eventQueue = Promise.resolve();
   private unsubscribe: (() => void) | null = null;
   private vapidKeys: PushVapidKeys | null = null;
+  private usageTimer: ReturnType<typeof setTimeout> | null = null;
+  private usageStopped = true;
+  private readonly knownUsageLimits = new Map<"fiveHour" | "weekly", { identity: string; remainingPercent: number }>();
 
   constructor(
     private readonly db: AppDatabase,
@@ -49,6 +59,7 @@ export class NotificationService {
   ) {}
 
   async start(): Promise<void> {
+    this.usageStopped = false;
     this.vapidKeys = await this.ensureVapidKeys();
     webPush.setVapidDetails("mailto:muxpilot@localhost", this.vapidKeys.publicKey, this.vapidKeys.privateKey);
     await this.reseedNotificationBaselines();
@@ -57,11 +68,15 @@ export class NotificationService {
         this.logger.error({ err: error }, "notification event handling failed");
       });
     });
+    this.scheduleUsagePoll(0);
   }
 
   stop(): void {
+    this.usageStopped = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
+    if (this.usageTimer) clearTimeout(this.usageTimer);
+    this.usageTimer = null;
   }
 
   async publicPushKey(): Promise<string> {
@@ -229,6 +244,58 @@ export class NotificationService {
     );
   }
 
+  private scheduleUsagePoll(delay: number): void {
+    if (!this.options.usageSummary || this.usageStopped || this.usageTimer) return;
+    this.usageTimer = setTimeout(() => {
+      this.usageTimer = null;
+      void this.pollUsageLimits();
+    }, delay);
+  }
+
+  private async pollUsageLimits(): Promise<void> {
+    try {
+      const settings = await this.db.listNotificationSettings();
+      if (Object.keys(settings).length === 0) return;
+      const summary = await this.options.usageSummary!();
+      await this.handleUsageSummary(summary, settings);
+    } catch (error) {
+      this.logger.warn({ err: error }, "usage limit notification polling failed");
+    } finally {
+      this.scheduleUsagePoll(this.options.usagePollIntervalMs ?? DEFAULT_USAGE_POLL_INTERVAL_MS);
+    }
+  }
+
+  private async handleUsageSummary(summary: CodexUsageSummaryResponse, settingsByDevice: Record<string, NotificationSettings>): Promise<void> {
+    if (!summary.available || !summary.account) return;
+    for (const limitKey of ["fiveHour", "weekly"] as const) {
+      const limit = summary.limits[limitKey];
+      if (!limit || limit.remainingPercent === null) continue;
+      const identity = `${summary.account.kind}:${summary.account.email ?? ""}:${limit.limitName ?? ""}:${limit.windowDurationMins ?? ""}:${limit.resetsAt ?? ""}`;
+      const previous = this.knownUsageLimits.get(limitKey);
+      const remainingPercent = Math.max(0, Math.min(100, limit.remainingPercent));
+      if (!previous || previous.identity !== identity || remainingPercent > previous.remainingPercent) {
+        this.knownUsageLimits.set(limitKey, { identity, remainingPercent });
+        continue;
+      }
+      await Promise.all(Object.entries(settingsByDevice).map(async ([deviceId, settings]) => {
+        const threshold = mostUrgentCrossedThreshold(previous.remainingPercent, remainingPercent, settings.usageLimitThresholds);
+        if (threshold === null) return;
+        const payload = usageLimitNotificationPayload(deviceId, limitKey, limit.label, remainingPercent, threshold);
+        const triggeredEvent: SessionEvent = {
+          id: eventId(),
+          type: "usage.notification.triggered",
+          sessionId: "codex-usage",
+          payload,
+          timestamp: nowIso()
+        };
+        this.events.publish(triggeredEvent);
+        this.logger.info?.({ notificationId: triggeredEvent.id, deviceId, limit: limitKey, threshold, remainingPercent, pushEnabled: settings.delivery.pushEnabled }, "usage limit notification triggered");
+        if (settings.delivery.pushEnabled) await this.sendPushNotifications(deviceId, payload, triggeredEvent.id);
+      }));
+      this.knownUsageLimits.set(limitKey, { identity, remainingPercent });
+    }
+  }
+
   private async notificationSessions(sessionId: string, status: SessionStatus): Promise<ManagedSession[]> {
     const sessions = await this.db.listSessions(true);
     const stored = await this.db.getSession(sessionId) ?? sessions.find((session) => session.id === sessionId);
@@ -290,8 +357,9 @@ export class NotificationService {
     return true;
   }
 
-  private async sendPushNotifications(deviceId: string, payload: NotificationTriggeredPayload, notificationId: string): Promise<void> {
+  private async sendPushNotifications(deviceId: string, payload: NotificationDeliveryPayload, notificationId: string): Promise<void> {
     const subscriptions = await this.db.listPushSubscriptions(deviceId);
+    const notificationContext = notificationDeliveryContext(payload);
     const outcomes = await Promise.all(
       subscriptions.map(async (subscription) => {
         try {
@@ -302,7 +370,7 @@ export class NotificationService {
             await this.db.deletePushSubscription(subscription.deviceId, subscription.endpoint);
             return "expired" as const;
           } else {
-            this.logger.warn({ err: error, notificationId, sessionId: payload.sessionId, deviceId }, "push notification send failed");
+            this.logger.warn({ err: error, notificationId, deviceId, ...notificationContext }, "push notification send failed");
             return "failed" as const;
           }
         }
@@ -310,14 +378,49 @@ export class NotificationService {
     );
     this.logger.info?.({
       notificationId,
-      sessionId: payload.sessionId,
       deviceId,
+      ...notificationContext,
       subscriptionCount: subscriptions.length,
       sentCount: outcomes.filter((outcome) => outcome === "sent").length,
       expiredCount: outcomes.filter((outcome) => outcome === "expired").length,
       failedCount: outcomes.filter((outcome) => outcome === "failed").length
     }, "push notification delivery completed");
   }
+}
+
+function notificationDeliveryContext(payload: NotificationDeliveryPayload): { sessionId: string } | { usageLimit: string } {
+  return "sessionId" in payload ? { sessionId: payload.sessionId } : { usageLimit: payload.limit };
+}
+
+export function mostUrgentCrossedThreshold(
+  previousRemaining: number,
+  remaining: number,
+  enabledThresholds: readonly UsageLimitThreshold[]
+): UsageLimitThreshold | null {
+  const crossed = enabledThresholds.filter((threshold) => previousRemaining > threshold && remaining <= threshold);
+  return crossed.length ? Math.min(...crossed) as UsageLimitThreshold : null;
+}
+
+function usageLimitNotificationPayload(
+  deviceId: string,
+  limit: "fiveHour" | "weekly",
+  label: string,
+  remainingPercent: number,
+  threshold: UsageLimitThreshold
+): UsageLimitNotificationTriggeredPayload {
+  const roundedRemaining = Math.round(remainingPercent);
+  const limitLabel = label || (limit === "fiveHour" ? "5h limit" : "Weekly limit");
+  return {
+    deviceId,
+    limit,
+    limitLabel,
+    remainingPercent,
+    threshold,
+    severity: threshold === 0 ? "red" : "yellow",
+    title: threshold === 0 ? "Codex usage limit exhausted" : "Codex usage limit warning",
+    body: `${limitLabel} has ${roundedRemaining}% remaining.`,
+    url: "/"
+  };
 }
 
 export function matchingNotificationRules(

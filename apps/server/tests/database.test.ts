@@ -1840,7 +1840,7 @@ describe("AppDatabase notifications", () => {
     const db = await tempDb();
     const deviceId = "device-test";
 
-    expect(await db.getNotificationSettings(deviceId)).toEqual({ globalRules: [], sessionRules: {}, delivery: { pushEnabled: false, soundEnabled: true } });
+    expect(await db.getNotificationSettings(deviceId)).toEqual({ globalRules: [], sessionRules: {}, usageLimitThresholds: [75, 50, 25, 10, 0], delivery: { pushEnabled: false, soundEnabled: true } });
     await db.setNotificationRule(deviceId, "global", null, "status_change", true, "2026-07-08T00:00:00.000Z");
     await db.setNotificationRule(deviceId, "session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
     await db.setNotificationRule(deviceId, "session", "session-1", "approval_gate", true, "2026-07-08T00:00:02.000Z");
@@ -1848,6 +1848,7 @@ describe("AppDatabase notifications", () => {
     expect(await db.getNotificationSettings(deviceId)).toEqual({
       globalRules: ["status_change"],
       sessionRules: { "session-1": ["approval_gate", "done_task"] },
+      usageLimitThresholds: [75, 50, 25, 10, 0],
       delivery: { pushEnabled: false, soundEnabled: true }
     });
 
@@ -1855,6 +1856,7 @@ describe("AppDatabase notifications", () => {
     expect(await db.getNotificationSettings(deviceId)).toEqual({
       globalRules: ["status_change"],
       sessionRules: { "session-1": ["approval_gate"] },
+      usageLimitThresholds: [75, 50, 25, 10, 0],
       delivery: { pushEnabled: false, soundEnabled: true }
     });
     db.close();
@@ -1867,26 +1869,31 @@ describe("AppDatabase notifications", () => {
     await db.setNotificationRule("device-two", "session", "session-1", "done_task", true, "2026-07-08T00:00:01.000Z");
     await db.setNotificationDeliverySetting("device-two", "sound", false, "2026-07-08T00:00:02.000Z");
     await db.setNotificationDeliverySetting("device-two", "push", true, "2026-07-08T00:00:03.000Z");
+    await db.setUsageLimitNotificationSetting("device-two", 50, false, "2026-07-08T00:00:04.000Z");
 
     expect(await db.getNotificationSettings("device-one")).toEqual({
       globalRules: ["status_change"],
       sessionRules: {},
+      usageLimitThresholds: [75, 50, 25, 10, 0],
       delivery: { pushEnabled: false, soundEnabled: true }
     });
     expect(await db.getNotificationSettings("device-two")).toEqual({
       globalRules: [],
       sessionRules: { "session-1": ["done_task"] },
+      usageLimitThresholds: [75, 25, 10, 0],
       delivery: { pushEnabled: true, soundEnabled: false }
     });
     expect(await db.listNotificationSettings()).toEqual({
       "device-one": {
         globalRules: ["status_change"],
         sessionRules: {},
+        usageLimitThresholds: [75, 50, 25, 10, 0],
         delivery: { pushEnabled: false, soundEnabled: true }
       },
       "device-two": {
         globalRules: [],
         sessionRules: { "session-1": ["done_task"] },
+        usageLimitThresholds: [75, 25, 10, 0],
         delivery: { pushEnabled: true, soundEnabled: false }
       }
     });

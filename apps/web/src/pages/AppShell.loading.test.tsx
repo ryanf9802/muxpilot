@@ -33,6 +33,53 @@ describe("AppShell session loading", () => {
     expect(container?.querySelector('[aria-label="Clear access"]')).not.toBeNull();
   });
 
+  it("offers remaining-capacity notification thresholds beneath status changes", async () => {
+    mockShellApi(fakeSocket(), async () => ({ sessions: [] }));
+    await renderShell(() => undefined);
+
+    await act(async () => {
+      (container?.querySelector('[aria-label="Global notifications"]') as HTMLButtonElement).click();
+    });
+    const menuLabels = Array.from(container?.querySelectorAll('[aria-label="Global notification settings"] button') ?? [], (button) => button.textContent?.trim());
+    expect(menuLabels.indexOf("Usage limits")).toBe(menuLabels.indexOf("Status change") + 1);
+
+    await act(async () => buttonWithText("Usage limits").click());
+    expect(Array.from(container?.querySelectorAll('[aria-label="Usage limit notification settings"] button') ?? [], (button) => button.textContent?.trim()))
+      .toEqual(["75% left", "50% left", "25% left", "10% left", "0% left"]);
+
+    await act(async () => buttonWithText("25% left").click());
+    expect(client.api.updateNotificationSetting).toHaveBeenCalledWith(expect.objectContaining({ setting: "usage_limit", threshold: 25, enabled: false }));
+  });
+
+  it("renders server usage-limit events through the global toast channel", async () => {
+    const socket = fakeSocket();
+    mockShellApi(socket, async () => ({ sessions: [] }));
+    await renderShell(() => undefined);
+
+    await act(async () => {
+      socket.onmessage?.(messageEvent({
+        id: "usage-warning",
+        type: "usage.notification.triggered",
+        sessionId: "codex-usage",
+        timestamp: "2026-09-18T12:00:00.000Z",
+        payload: {
+          deviceId: "device-test",
+          limit: "fiveHour",
+          limitLabel: "5h limit",
+          remainingPercent: 24,
+          threshold: 25,
+          severity: "yellow",
+          title: "Codex usage limit warning",
+          body: "5h limit has 24% remaining.",
+          url: "/"
+        }
+      }));
+      await flushPromises();
+    });
+
+    expect(container?.textContent).toContain("5h limit has 24% remaining.");
+  });
+
   it("finishes initial loading without overwriting a live session update", async () => {
     const snapshot = deferred<{ sessions: DashboardSessionSummary[] }>();
     const socket = fakeSocket();
@@ -117,7 +164,14 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
     sessionHostMode: "local"
   });
   vi.spyOn(client.api, "sessionSummaries").mockImplementation(summaries);
-  vi.spyOn(client.api, "notificationSettings").mockResolvedValue({} as never);
+  const notificationSettings = {
+    globalRules: ["status_change" as const],
+    sessionRules: {},
+    usageLimitThresholds: [75, 50, 25, 10, 0] as const,
+    delivery: { pushEnabled: false, soundEnabled: true }
+  };
+  vi.spyOn(client.api, "notificationSettings").mockResolvedValue(notificationSettings as never);
+  vi.spyOn(client.api, "updateNotificationSetting").mockResolvedValue(notificationSettings as never);
   vi.spyOn(client.api, "codexUsageSummary").mockResolvedValue({
     available: true,
     error: null,
@@ -136,6 +190,12 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
     missingCapabilities: []
   });
   vi.spyOn(client, "eventSocket").mockReturnValue(socket as unknown as WebSocket);
+}
+
+function buttonWithText(label: string): HTMLButtonElement {
+  const button = Array.from(container?.querySelectorAll("button") ?? []).find((candidate) => candidate.textContent?.trim() === label);
+  expect(button, `button ${label}`).toBeDefined();
+  return button as HTMLButtonElement;
 }
 
 function fakeSocket() {

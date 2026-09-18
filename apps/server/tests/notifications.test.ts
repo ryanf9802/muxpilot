@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import webPush from "web-push";
-import type { ManagedSession, NotificationRuleType, NotificationSettings, SessionEvent } from "@muxpilot/core";
-import { matchingNotificationRules, NotificationService } from "../src/services/notifications.js";
+import type { CodexUsageSummaryResponse, ManagedSession, NotificationRuleType, NotificationSettings, SessionEvent, UsageLimitNotificationTriggeredPayload } from "@muxpilot/core";
+import { matchingNotificationRules, mostUrgentCrossedThreshold, NotificationService } from "../src/services/notifications.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 describe("matchingNotificationRules", () => {
@@ -68,9 +68,10 @@ describe("matchingNotificationRules", () => {
   });
 
   it("combines overlapping global and session rules once", () => {
-    const settings = {
+    const settings: NotificationSettings = {
       globalRules: ["status_change" as const, "done_task" as const],
       sessionRules: { a: ["done_task" as const, "approval_gate" as const] },
+      usageLimitThresholds: [75, 50, 25, 10, 0],
       delivery: { pushEnabled: false, soundEnabled: true }
     };
 
@@ -78,9 +79,10 @@ describe("matchingNotificationRules", () => {
   });
 
   it("does not fire notifications for sessions becoming missing", () => {
-    const settings = {
+    const settings: NotificationSettings = {
       globalRules: ["approval_gate" as const, "status_change" as const],
       sessionRules: { a: ["approval_gate" as const, "status_change" as const] },
+      usageLimitThresholds: [75, 50, 25, 10, 0],
       delivery: { pushEnabled: false, soundEnabled: true }
     };
 
@@ -626,12 +628,95 @@ describe("matchingNotificationRules", () => {
   });
 });
 
+describe("usage limit notifications", () => {
+  it("selects the lowest remaining threshold crossed in one update", () => {
+    expect(mostUrgentCrossedThreshold(80, 20, [75, 50, 25, 10, 0])).toBe(25);
+    expect(mostUrgentCrossedThreshold(20, 15, [75, 50, 25, 10, 0])).toBeNull();
+    expect(mostUrgentCrossedThreshold(11, 0, [10, 0])).toBe(0);
+  });
+
+  it("baselines silently and publishes device-specific remaining-capacity crossings", async () => {
+    const events = new EventBus();
+    const triggered: UsageLimitNotificationTriggeredPayload[] = [];
+    events.subscribe((event) => {
+      if (event.type === "usage.notification.triggered") triggered.push(event.payload as UsageLimitNotificationTriggeredPayload);
+    });
+    const service = new NotificationService(
+      { listPushSubscriptions: async () => [] } as never,
+      events,
+      { info: () => undefined, warn: () => undefined, error: () => undefined } as never
+    );
+    const reconcile = service as unknown as {
+      handleUsageSummary: (summary: CodexUsageSummaryResponse, settings: Record<string, NotificationSettings>) => Promise<void>;
+    };
+    const settings: Record<string, NotificationSettings> = {
+      "device-one": { ...testNotificationSettings(), usageLimitThresholds: [75, 50, 25] },
+      "device-two": { ...testNotificationSettings(), usageLimitThresholds: [10, 0] }
+    };
+
+    await reconcile.handleUsageSummary(testUsageSummary(80), settings);
+    expect(triggered).toEqual([]);
+    await reconcile.handleUsageSummary(testUsageSummary(20), settings);
+    expect(triggered).toEqual([expect.objectContaining({ deviceId: "device-one", threshold: 25, remainingPercent: 20, severity: "yellow" })]);
+    await reconcile.handleUsageSummary(testUsageSummary(0), settings);
+    expect(triggered).toEqual([
+      expect.objectContaining({ deviceId: "device-one", threshold: 25 }),
+      expect.objectContaining({ deviceId: "device-two", threshold: 0, remainingPercent: 0, severity: "red" })
+    ]);
+  });
+
+  it("rearms threshold crossings after remaining capacity increases", async () => {
+    const events = new EventBus();
+    const triggered: UsageLimitNotificationTriggeredPayload[] = [];
+    events.subscribe((event) => {
+      if (event.type === "usage.notification.triggered") triggered.push(event.payload as UsageLimitNotificationTriggeredPayload);
+    });
+    const service = new NotificationService(
+      { listPushSubscriptions: async () => [] } as never,
+      events,
+      { info: () => undefined, warn: () => undefined, error: () => undefined } as never
+    );
+    const reconcile = service as unknown as {
+      handleUsageSummary: (summary: CodexUsageSummaryResponse, settings: Record<string, NotificationSettings>) => Promise<void>;
+    };
+    const settings: Record<string, NotificationSettings> = { device: { ...testNotificationSettings(), usageLimitThresholds: [50] } };
+
+    await reconcile.handleUsageSummary(testUsageSummary(60), settings);
+    await reconcile.handleUsageSummary(testUsageSummary(40), settings);
+    await reconcile.handleUsageSummary(testUsageSummary(100), settings);
+    await reconcile.handleUsageSummary(testUsageSummary(45), settings);
+
+    expect(triggered).toHaveLength(2);
+  });
+});
+
 function testNotificationSettings(
   globalRules: NotificationRuleType[] = [],
   sessionRules: Record<string, NotificationRuleType[]> = {},
   delivery = { pushEnabled: false, soundEnabled: true }
 ): NotificationSettings {
-  return { globalRules, sessionRules, delivery };
+  return { globalRules, sessionRules, usageLimitThresholds: [75, 50, 25, 10, 0], delivery };
+}
+
+function testUsageSummary(remainingPercent: number): CodexUsageSummaryResponse {
+  return {
+    available: true,
+    error: null,
+    refreshedAt: "2026-09-18T12:00:00.000Z",
+    account: { kind: "chatgpt", email: "engineer@example.com", planType: "plus" },
+    limits: {
+      fiveHour: {
+        label: "5h limit",
+        limitName: "codex",
+        usedPercent: 100 - remainingPercent,
+        remainingPercent,
+        windowDurationMins: 300,
+        resetsAt: 1_800_000_000
+      },
+      weekly: null
+    },
+    resetCredits: null
+  };
 }
 
 function testSession(input: Partial<ManagedSession> = {}): ManagedSession {

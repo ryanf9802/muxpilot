@@ -14,6 +14,7 @@ import type {
   NotificationRuleScope,
   NotificationRuleType,
   NotificationSettings,
+  UsageLimitThreshold,
   PromptHistoryResult,
   PushSubscriptionInput,
   QueuedInput,
@@ -54,6 +55,7 @@ const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
 const CODEX_AUTH_PROFILES = "codex_auth_profiles_v1";
 const CODEX_AUTH_RECONCILED_PRINCIPAL = "codex_auth_reconciled_principal_v1";
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
+const USAGE_LIMIT_THRESHOLDS: readonly UsageLimitThreshold[] = [75, 50, 25, 10, 0];
 
 export interface SessionRecoveryRuntimeState {
   runId: string;
@@ -339,6 +341,7 @@ interface NotificationDeviceSettingsRow {
   device_id: string;
   push_enabled: number;
   sound_enabled: number;
+  usage_limit_thresholds_json: string;
 }
 
 interface SessionRepositoryRow {
@@ -779,6 +782,15 @@ export class AppDatabase {
     updatedAt: string
   ): Promise<NotificationSettings> {
     return this.call("setNotificationDeliverySetting", deviceId, channel, enabled, updatedAt) as Promise<NotificationSettings>;
+  }
+
+  setUsageLimitNotificationSetting(
+    deviceId: string,
+    threshold: UsageLimitThreshold,
+    enabled: boolean,
+    updatedAt: string
+  ): Promise<NotificationSettings> {
+    return this.call("setUsageLimitNotificationSetting", deviceId, threshold, enabled, updatedAt) as Promise<NotificationSettings>;
   }
 
   upsertPushSubscription(deviceId: string, subscription: PushSubscriptionInput, updatedAt: string): Promise<void> {
@@ -2699,10 +2711,12 @@ export class SyncAppDatabase {
 
   getNotificationSettings(deviceId: string): NotificationSettings {
     const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.ensureNotificationDeviceSettings(normalizedDeviceId, new Date().toISOString());
     const rows = this.db
       .prepare("SELECT scope, session_id, type FROM notification_device_rules WHERE device_id = ? ORDER BY scope, session_id, type")
       .all(normalizedDeviceId) as unknown as NotificationRuleRow[];
-    return notificationSettingsFromRows(rows, this.getNotificationDeliverySettings(normalizedDeviceId));
+    const deviceSettings = this.getNotificationDeviceSettings(normalizedDeviceId);
+    return notificationSettingsFromRows(rows, deviceSettings.delivery, deviceSettings.usageLimitThresholds);
   }
 
   listNotificationSettings(): Record<string, NotificationSettings> {
@@ -2710,7 +2724,7 @@ export class SyncAppDatabase {
       .prepare("SELECT device_id, scope, session_id, type FROM notification_device_rules ORDER BY device_id, scope, session_id, type")
       .all() as unknown as NotificationRuleRow[];
     const settingsRows = this.db
-      .prepare("SELECT device_id, push_enabled, sound_enabled FROM notification_device_settings ORDER BY device_id")
+      .prepare("SELECT device_id, push_enabled, sound_enabled, usage_limit_thresholds_json FROM notification_device_settings ORDER BY device_id")
       .all() as unknown as NotificationDeviceSettingsRow[];
     const deviceIds = new Set<string>();
     for (const row of rows) if (row.device_id) deviceIds.add(row.device_id);
@@ -2724,10 +2738,11 @@ export class SyncAppDatabase {
       deviceRows.push(row);
       rulesByDevice.set(deviceId, deviceRows);
     }
-    const deliveryByDevice = new Map(settingsRows.map((row) => [row.device_id, notificationDeliverySettingsFromRow(row)]));
+    const deviceSettingsByDevice = new Map(settingsRows.map((row) => [row.device_id, notificationDeviceSettingsFromRow(row)]));
     const settings: Record<string, NotificationSettings> = {};
     for (const deviceId of deviceIds) {
-      settings[deviceId] = notificationSettingsFromRows(rulesByDevice.get(deviceId) ?? [], deliveryByDevice.get(deviceId) ?? defaultNotificationDeliverySettings());
+      const deviceSettings = deviceSettingsByDevice.get(deviceId) ?? defaultNotificationDeviceSettings();
+      settings[deviceId] = notificationSettingsFromRows(rulesByDevice.get(deviceId) ?? [], deviceSettings.delivery, deviceSettings.usageLimitThresholds);
     }
     return settings;
   }
@@ -2773,11 +2788,28 @@ export class SyncAppDatabase {
     return this.getNotificationSettings(normalizedDeviceId);
   }
 
-  private getNotificationDeliverySettings(deviceId: string): NotificationDeliverySettings {
+  setUsageLimitNotificationSetting(
+    deviceId: string,
+    threshold: UsageLimitThreshold,
+    enabled: boolean,
+    updatedAt: string
+  ): NotificationSettings {
+    const normalizedDeviceId = normalizeNotificationDeviceId(deviceId);
+    this.ensureNotificationDeviceSettings(normalizedDeviceId, updatedAt);
+    const current = this.getNotificationDeviceSettings(normalizedDeviceId).usageLimitThresholds;
+    const next = enabled
+      ? USAGE_LIMIT_THRESHOLDS.filter((candidate) => candidate === threshold || current.includes(candidate))
+      : current.filter((candidate) => candidate !== threshold);
+    this.db.prepare("UPDATE notification_device_settings SET usage_limit_thresholds_json = ?, updated_at = ? WHERE device_id = ?")
+      .run(JSON.stringify(next), updatedAt, normalizedDeviceId);
+    return this.getNotificationSettings(normalizedDeviceId);
+  }
+
+  private getNotificationDeviceSettings(deviceId: string): { delivery: NotificationDeliverySettings; usageLimitThresholds: UsageLimitThreshold[] } {
     const row = this.db
-      .prepare("SELECT device_id, push_enabled, sound_enabled FROM notification_device_settings WHERE device_id = ?")
+      .prepare("SELECT device_id, push_enabled, sound_enabled, usage_limit_thresholds_json FROM notification_device_settings WHERE device_id = ?")
       .get(deviceId) as NotificationDeviceSettingsRow | undefined;
-    return row ? notificationDeliverySettingsFromRow(row) : defaultNotificationDeliverySettings();
+    return row ? notificationDeviceSettingsFromRow(row) : defaultNotificationDeviceSettings();
   }
 
   private ensureNotificationDeviceSettings(deviceId: string, updatedAt: string): void {
@@ -3795,6 +3827,7 @@ export class SyncAppDatabase {
         device_id TEXT PRIMARY KEY,
         push_enabled INTEGER NOT NULL DEFAULT 0,
         sound_enabled INTEGER NOT NULL DEFAULT 1,
+        usage_limit_thresholds_json TEXT NOT NULL DEFAULT '[75,50,25,10,0]',
         updated_at TEXT NOT NULL
       );
 
@@ -3865,6 +3898,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("queued_inputs", "content_json", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_warning", "TEXT");
+    this.addColumnIfMissing("notification_device_settings", "usage_limit_thresholds_json", "TEXT NOT NULL DEFAULT '[75,50,25,10,0]'");
     this.removePersistedContextGuards();
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
@@ -4304,12 +4338,29 @@ function defaultNotificationDeliverySettings(): NotificationDeliverySettings {
   return { pushEnabled: false, soundEnabled: true };
 }
 
+function defaultNotificationDeviceSettings(): { delivery: NotificationDeliverySettings; usageLimitThresholds: UsageLimitThreshold[] } {
+  return { delivery: defaultNotificationDeliverySettings(), usageLimitThresholds: [...USAGE_LIMIT_THRESHOLDS] };
+}
+
 function notificationDeliverySettingsFromRow(row: NotificationDeviceSettingsRow): NotificationDeliverySettings {
   return { pushEnabled: row.push_enabled === 1, soundEnabled: row.sound_enabled !== 0 };
 }
 
-function notificationSettingsFromRows(rows: NotificationRuleRow[], delivery: NotificationDeliverySettings): NotificationSettings {
-  const settings: NotificationSettings = { globalRules: [], sessionRules: {}, delivery };
+function notificationDeviceSettingsFromRow(row: NotificationDeviceSettingsRow): { delivery: NotificationDeliverySettings; usageLimitThresholds: UsageLimitThreshold[] } {
+  let stored: unknown;
+  try {
+    stored = JSON.parse(row.usage_limit_thresholds_json);
+  } catch {
+    stored = null;
+  }
+  const usageLimitThresholds = Array.isArray(stored)
+    ? USAGE_LIMIT_THRESHOLDS.filter((threshold) => stored.includes(threshold))
+    : [...USAGE_LIMIT_THRESHOLDS];
+  return { delivery: notificationDeliverySettingsFromRow(row), usageLimitThresholds };
+}
+
+function notificationSettingsFromRows(rows: NotificationRuleRow[], delivery: NotificationDeliverySettings, usageLimitThresholds: UsageLimitThreshold[]): NotificationSettings {
+  const settings: NotificationSettings = { globalRules: [], sessionRules: {}, usageLimitThresholds, delivery };
   for (const row of rows) {
     if (row.scope === "global") {
       settings.globalRules.push(row.type);

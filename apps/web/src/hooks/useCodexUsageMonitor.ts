@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "react-toastify";
 import type {
-  CodexUsageLimit,
   CodexUsageSummaryResponse,
   ConsumeCodexResetCreditOutcome,
   ConsumeCodexResetCreditResponse
@@ -13,8 +12,6 @@ export const CODEX_USAGE_RETRY_DELAYS_MS = [20_000, 40_000, 60_000] as const;
 export const CODEX_RESET_CONFIRM_INTERVAL_MS = 5_000;
 export const CODEX_RESET_CONFIRM_TIMEOUT_MS = 20_000;
 export const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
-const THRESHOLD_STATE_KEY = "muxpilot.codex-usage.thresholds.v1";
-const USAGE_THRESHOLDS = [50, 75, 90, 100] as const;
 
 export interface PendingResetAttempt {
   idempotencyKey: string;
@@ -53,12 +50,10 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
   const resetBusyRef = useRef(false);
 
   const acceptSummary = useCallback((next: CodexUsageSummaryResponse) => {
-    const previous = summaryRef.current;
     summaryRef.current = next;
     setSummary(next);
     setInitialLoading(false);
     setRefreshError(null);
-    notifyThresholdCrossings(previous, next);
   }, []);
 
   const refreshSummary = useCallback(async (force = false): Promise<CodexUsageSummaryResponse> => {
@@ -215,7 +210,6 @@ async function confirmResetUsage(
     }
   }
   if (observedReset(before, current)) {
-    rearmThresholds(current);
     const remaining = highestObservedRemaining(before, current);
     toast.success(remaining === 100
       ? "Usage reset confirmed. 100% capacity is available."
@@ -248,77 +242,6 @@ function highestObservedRemaining(before: CodexUsageSummaryResponse | null, afte
     return [];
   });
   return observed.length ? Math.max(...observed) : null;
-}
-
-export function notifyThresholdCrossings(previous: CodexUsageSummaryResponse | null, current: CodexUsageSummaryResponse): void {
-  if (!current.available || !current.account) return;
-  const state = loadThresholdState();
-  for (const key of ["fiveHour", "weekly"] as const) {
-    const limit = current.limits[key];
-    if (!limit || limit.usedPercent === null) continue;
-    const usedPercent = limit.usedPercent;
-    const identity = thresholdIdentity(current, key, limit);
-    const record = state[identity];
-    if (!record || typeof record.usedPercent !== "number" || !Array.isArray(record.notified)) {
-      const prefix = thresholdIdentityPrefix(current, key);
-      for (const storedIdentity of Object.keys(state)) {
-        if (storedIdentity.startsWith(prefix)) delete state[storedIdentity];
-      }
-      state[identity] = { usedPercent, notified: USAGE_THRESHOLDS.filter((value) => value <= usedPercent) };
-      continue;
-    }
-    if (!previous) {
-      record.usedPercent = usedPercent;
-      record.notified = [...new Set([...record.notified, ...USAGE_THRESHOLDS.filter((value) => value <= usedPercent)])];
-      continue;
-    }
-    const crossed = USAGE_THRESHOLDS.filter((value) => record.usedPercent < value && usedPercent >= value && !record.notified.includes(value));
-    const highest = crossed.at(-1);
-    record.usedPercent = usedPercent;
-    record.notified = [...new Set([...record.notified, ...USAGE_THRESHOLDS.filter((value) => value <= usedPercent)])];
-    if (highest !== undefined) {
-      const message = `${limit.label || (key === "fiveHour" ? "5h limit" : "Weekly limit")} is ${Math.round(limit.usedPercent)}% used${limit.resetsAt ? `. Resets ${formatTimestamp(limit.resetsAt)}.` : "."}`;
-      if (highest === 100) toast.error(message);
-      else toast.warning(message);
-    }
-  }
-  saveThresholdState(state);
-}
-
-function rearmThresholds(summary: CodexUsageSummaryResponse): void {
-  if (!summary.account) return;
-  const state = loadThresholdState();
-  const prefix = `${summary.account.kind}:${summary.account.email ?? ""}:`;
-  for (const key of Object.keys(state)) if (key.startsWith(prefix)) delete state[key];
-  saveThresholdState(state);
-  notifyThresholdCrossings(null, summary);
-}
-
-function thresholdIdentity(summary: CodexUsageSummaryResponse, key: "fiveHour" | "weekly", limit: CodexUsageLimit): string {
-  return `${thresholdIdentityPrefix(summary, key)}${limit.limitName ?? ""}:${limit.windowDurationMins ?? ""}:${limit.resetsAt ?? ""}`;
-}
-
-function thresholdIdentityPrefix(summary: CodexUsageSummaryResponse, key: "fiveHour" | "weekly"): string {
-  return `${summary.account!.kind}:${summary.account!.email ?? ""}:${key}:`;
-}
-
-type ThresholdState = Record<string, { usedPercent: number; notified: number[] }>;
-
-function loadThresholdState(): ThresholdState {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(THRESHOLD_STATE_KEY) ?? "{}");
-    return parsed && typeof parsed === "object" ? parsed as ThresholdState : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveThresholdState(state: ThresholdState): void {
-  try {
-    window.localStorage.setItem(THRESHOLD_STATE_KEY, JSON.stringify(state));
-  } catch {
-    // Usage monitoring must continue when storage is unavailable.
-  }
 }
 
 function requestReset(attempt: PendingResetAttempt): Promise<ConsumeCodexResetCreditResponse> {
@@ -378,10 +301,6 @@ function sameAttempt(left: PendingResetAttempt | null, right: PendingResetAttemp
 
 function unavailableSummary(error: string): CodexUsageSummaryResponse {
   return { available: false, error, refreshedAt: new Date().toISOString(), account: null, limits: { fiveHour: null, weekly: null }, resetCredits: null };
-}
-
-function formatTimestamp(value: number): string {
-  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(value < 10_000_000_000 ? value * 1000 : value);
 }
 
 function delay(ms: number): Promise<void> {

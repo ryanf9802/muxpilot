@@ -15,6 +15,8 @@ import type {
   NotificationRuleType,
   NotificationSettings,
   NotificationTriggeredPayload,
+  UsageLimitNotificationTriggeredPayload,
+  UsageLimitThreshold,
   PromptHistoryResult,
   RemoteAccessResponse,
   SessionDirectorySuggestion,
@@ -69,7 +71,10 @@ export const SESSION_LIST_REQUEST_TIMEOUT_MS = 10_000;
 export const SESSION_LIST_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 30_000] as const;
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
-const GLOBAL_NOTIFICATION_MENU_HEIGHT = 230;
+const GLOBAL_NOTIFICATION_MENU_HEIGHT = 270;
+const GLOBAL_USAGE_LIMIT_MENU_HEIGHT = 205;
+const GLOBAL_USAGE_LIMIT_MENU_OFFSET_Y = 108;
+const USAGE_LIMIT_THRESHOLDS: readonly UsageLimitThreshold[] = [75, 50, 25, 10, 0];
 const GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT = 96;
 const GLOBAL_NOTIFICATION_SETTINGS_MENU_OFFSET_Y = 145;
 const MENU_EDGE = 8;
@@ -131,6 +136,7 @@ export function AppShell() {
   const [notificationSettings, setNotificationSettings] = useState<NotificationSettings | null>(null);
   const [notificationMenu, setNotificationMenu] = useState<{ x: number; y: number } | null>(null);
   const [notificationSettingsSubmenuOpen, setNotificationSettingsSubmenuOpen] = useState(false);
+  const [usageLimitsSubmenuOpen, setUsageLimitsSubmenuOpen] = useState(false);
   const [notificationToggleBusy, setNotificationToggleBusy] = useState(false);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
   const [shellSocketEpoch, setShellSocketEpoch] = useState(0);
@@ -478,6 +484,15 @@ export function AppShell() {
           ariaLabel: `${message}. Open chat session`,
           onClick: () => navigate(event.payload.url)
         });
+      } else if (isUsageLimitNotificationTriggeredEvent(event)) {
+        if (notificationSoundEnabled(notificationSettingsRef.current)) playNotificationBell();
+        toast(event.payload.body, {
+          position: locationPathRef.current.startsWith("/sessions/") ? "top-right" : "top-left",
+          type: event.payload.severity === "red" ? "error" : "warning",
+          className: "session-notification-toast",
+          ariaLabel: `${event.payload.body}. Open dashboard`,
+          onClick: () => navigate(event.payload.url)
+        });
       }
     };
     socket.onclose = () => {
@@ -633,6 +648,7 @@ export function AppShell() {
   useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
     setNotificationMenu(null);
     setNotificationSettingsSubmenuOpen(false);
+    setUsageLimitsSubmenuOpen(false);
   });
 
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
@@ -1090,6 +1106,7 @@ export function AppShell() {
   function openGlobalNotificationMenu(event: ReactMouseEvent<HTMLButtonElement>) {
     const rect = event.currentTarget.getBoundingClientRect();
     setNotificationSettingsSubmenuOpen(false);
+    setUsageLimitsSubmenuOpen(false);
     setNotificationMenu(dropdownMenuPosition(rect, { width: GLOBAL_NOTIFICATION_MENU_WIDTH, height: GLOBAL_NOTIFICATION_MENU_HEIGHT, edge: MENU_EDGE }));
   }
 
@@ -1098,6 +1115,17 @@ export function AppShell() {
     setNotificationToggleBusy(true);
     try {
       const settings = await api.updateNotificationSetting({ deviceId: notificationDeviceId(), setting: "rule", scope: "global", type, enabled });
+      setNotificationSettings(settings);
+    } finally {
+      setNotificationToggleBusy(false);
+    }
+  }
+
+  async function toggleUsageLimitNotification(threshold: UsageLimitThreshold, enabled: boolean) {
+    if (notificationToggleBusy) return;
+    setNotificationToggleBusy(true);
+    try {
+      const settings = await api.updateNotificationSetting({ deviceId: notificationDeviceId(), setting: "usage_limit", threshold, enabled });
       setNotificationSettings(settings);
     } finally {
       setNotificationToggleBusy(false);
@@ -1164,15 +1192,65 @@ export function AppShell() {
             onToggle={(type, enabled) => void toggleGlobalNotification(type, enabled)}
             disabled={notificationToggleBusy}
           />
+          <ContextMenuItem
+            trailing={<ChevronRight className="menu-chevron" size={16} />}
+            aria-haspopup="menu"
+            aria-expanded={usageLimitsSubmenuOpen}
+            onMouseEnter={() => {
+              setUsageLimitsSubmenuOpen(true);
+              setNotificationSettingsSubmenuOpen(false);
+            }}
+            onFocus={() => {
+              setUsageLimitsSubmenuOpen(true);
+              setNotificationSettingsSubmenuOpen(false);
+            }}
+            onClick={() => {
+              setUsageLimitsSubmenuOpen(true);
+              setNotificationSettingsSubmenuOpen(false);
+            }}
+            disabled={notificationToggleBusy}
+          >
+            Usage limits
+          </ContextMenuItem>
+          {usageLimitsSubmenuOpen ? (
+            <ContextMenu
+              className="notification-rule-menu session-notify-submenu"
+              position={usageLimitSubmenuPosition(notificationMenu)}
+              label="Usage limit notification settings"
+            >
+              {USAGE_LIMIT_THRESHOLDS.map((threshold) => {
+                const enabled = notificationSettings?.usageLimitThresholds?.includes(threshold) ?? false;
+                return (
+                  <ContextMenuCheckboxItem
+                    key={threshold}
+                    checked={enabled}
+                    disabled={notificationToggleBusy}
+                    onClick={() => void toggleUsageLimitNotification(threshold, !enabled)}
+                  >
+                    {threshold}% left
+                  </ContextMenuCheckboxItem>
+                );
+              })}
+            </ContextMenu>
+          ) : null}
           <ContextMenuSeparator />
           <ContextMenuItem
             icon={<Settings size={16} />}
             trailing={<ChevronRight className="menu-chevron" size={16} />}
             aria-haspopup="menu"
             aria-expanded={notificationSettingsSubmenuOpen}
-            onMouseEnter={() => setNotificationSettingsSubmenuOpen(true)}
-            onFocus={() => setNotificationSettingsSubmenuOpen(true)}
-            onClick={() => setNotificationSettingsSubmenuOpen(true)}
+            onMouseEnter={() => {
+              setNotificationSettingsSubmenuOpen(true);
+              setUsageLimitsSubmenuOpen(false);
+            }}
+            onFocus={() => {
+              setNotificationSettingsSubmenuOpen(true);
+              setUsageLimitsSubmenuOpen(false);
+            }}
+            onClick={() => {
+              setNotificationSettingsSubmenuOpen(true);
+              setUsageLimitsSubmenuOpen(false);
+            }}
             disabled={notificationToggleBusy}
           >
             Settings
@@ -1634,6 +1712,10 @@ function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): e
   return event.type === "notification.triggered" && Boolean((event as { payload?: unknown }).payload);
 }
 
+function isUsageLimitNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: UsageLimitNotificationTriggeredPayload } {
+  return event.type === "usage.notification.triggered" && Boolean((event as { payload?: unknown }).payload);
+}
+
 function toastTypeForNotification(payload: NotificationTriggeredPayload): "success" | "warning" | "error" {
   if (payload.severity === "red") return "error";
   if (payload.severity === "green") return "success";
@@ -1646,6 +1728,16 @@ function notificationSettingsSubmenuPosition(position: { x: number; y: number })
     width: GLOBAL_NOTIFICATION_MENU_WIDTH,
     height: GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT,
     itemOffsetY: GLOBAL_NOTIFICATION_SETTINGS_MENU_OFFSET_Y,
+    edge: MENU_EDGE
+  });
+}
+
+function usageLimitSubmenuPosition(position: { x: number; y: number }): { x: number; y: number } {
+  return submenuPosition(position, {
+    parentWidth: GLOBAL_NOTIFICATION_MENU_WIDTH,
+    width: GLOBAL_NOTIFICATION_MENU_WIDTH,
+    height: GLOBAL_USAGE_LIMIT_MENU_HEIGHT,
+    itemOffsetY: GLOBAL_USAGE_LIMIT_MENU_OFFSET_Y,
     edge: MENU_EDGE
   });
 }

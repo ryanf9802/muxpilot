@@ -210,7 +210,8 @@ const heavyCommands = new HeavyCommandService(
 manager.setHeavyCommandQueue(heavyCommands);
 await heavyCommands.start(manager);
 const notifications = new NotificationService(db, events, app.log, {
-  pendingAutomaticWork: (sessionId) => manager.notificationPendingWorkReasons(sessionId)
+  pendingAutomaticWork: (sessionId) => manager.notificationPendingWorkReasons(sessionId),
+  usageSummary: () => codexUsage.summary()
 });
 const resourceGovernor = new ResourceGovernor({
   configured: sessionScopes.configured,

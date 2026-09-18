@@ -168,6 +168,7 @@ const sessionTransferImportSchema = z.object({
 }).strict();
 const notificationDeviceIdSchema = z.string().regex(/^[a-zA-Z0-9_-]{8,80}$/);
 const notificationRuleTypeSchema = z.enum(["done_task", "approval_gate", "status_change"]);
+const usageLimitThresholdSchema = z.union([z.literal(75), z.literal(50), z.literal(25), z.literal(10), z.literal(0)]);
 const notificationSettingSchema = z.union([
   z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("rule"), scope: z.literal("global"), type: notificationRuleTypeSchema, enabled: z.boolean() }),
   z.object({
@@ -178,7 +179,8 @@ const notificationSettingSchema = z.union([
     type: notificationRuleTypeSchema,
     enabled: z.boolean()
   }),
-  z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("delivery"), channel: z.enum(["push", "sound"]), enabled: z.boolean() })
+  z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("delivery"), channel: z.enum(["push", "sound"]), enabled: z.boolean() }),
+  z.object({ deviceId: notificationDeviceIdSchema, setting: z.literal("usage_limit"), threshold: usageLimitThresholdSchema, enabled: z.boolean() })
 ]);
 const pushSubscriptionSchema = z.object({
   endpoint: z.string().url(),
@@ -362,6 +364,9 @@ export function registerRoutes(
     const parsed = notificationSettingSchema.parse(request.body) satisfies UpdateNotificationSettingRequest;
     if (parsed.setting === "delivery") {
       return db.setNotificationDeliverySetting(parsed.deviceId, parsed.channel, parsed.enabled, new Date().toISOString());
+    }
+    if (parsed.setting === "usage_limit") {
+      return db.setUsageLimitNotificationSetting(parsed.deviceId, parsed.threshold, parsed.enabled, new Date().toISOString());
     }
     return db.setNotificationRule(parsed.deviceId, parsed.scope, parsed.scope === "session" ? parsed.sessionId : null, parsed.type, parsed.enabled, new Date().toISOString());
   });
@@ -952,7 +957,7 @@ export function registerRoutes(
     access.trackRemoteSocket(request, socket);
     const socketDeviceId = notificationSocketDeviceId(request.query);
     const unsubscribe = events.subscribe((event) => {
-      if (event.type === "notification.triggered" && !shouldSendNotificationEventToDevice(event.payload, socketDeviceId)) return;
+      if ((event.type === "notification.triggered" || event.type === "usage.notification.triggered") && !shouldSendNotificationEventToDevice(event.payload, socketDeviceId)) return;
       socket.send(JSON.stringify(event));
     });
     socket.on("close", () => {

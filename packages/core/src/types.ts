@@ -609,6 +609,7 @@ export interface SessionEvent {
     | "status.changed"
     | "notification.created"
     | "notification.triggered"
+    | "usage.notification.triggered"
     | "queue.updated"
     | "btw.started"
     | "btw.delta"
@@ -624,6 +625,7 @@ export interface SessionEvent {
 export type NotificationRuleType = "done_task" | "approval_gate" | "status_change";
 export type NotificationRuleScope = "global" | "session";
 export type NotificationDeliveryChannel = "push" | "sound";
+export type UsageLimitThreshold = 75 | 50 | 25 | 10 | 0;
 
 export interface NotificationDeliverySettings {
   pushEnabled: boolean;
@@ -633,6 +635,7 @@ export interface NotificationDeliverySettings {
 export interface NotificationSettings {
   globalRules: NotificationRuleType[];
   sessionRules: Record<string, NotificationRuleType[]>;
+  usageLimitThresholds: UsageLimitThreshold[];
   delivery: NotificationDeliverySettings;
 }
 
@@ -652,7 +655,14 @@ export interface UpdateNotificationDeliverySettingRequest {
   enabled: boolean;
 }
 
-export type UpdateNotificationSettingRequest = UpdateNotificationRuleSettingRequest | UpdateNotificationDeliverySettingRequest;
+export interface UpdateUsageLimitNotificationSettingRequest {
+  deviceId: string;
+  setting: "usage_limit";
+  threshold: UsageLimitThreshold;
+  enabled: boolean;
+}
+
+export type UpdateNotificationSettingRequest = UpdateNotificationRuleSettingRequest | UpdateNotificationDeliverySettingRequest | UpdateUsageLimitNotificationSettingRequest;
 
 export interface NotificationTriggeredPayload {
   deviceId: string;
@@ -664,6 +674,18 @@ export interface NotificationTriggeredPayload {
   previousStatus: SessionStatus;
   status: SessionStatus;
   severity: "red" | "yellow" | "green";
+  title: string;
+  body: string;
+  url: string;
+}
+
+export interface UsageLimitNotificationTriggeredPayload {
+  deviceId: string;
+  limit: "fiveHour" | "weekly";
+  limitLabel: string;
+  remainingPercent: number;
+  threshold: UsageLimitThreshold;
+  severity: "yellow" | "red";
   title: string;
   body: string;
   url: string;
