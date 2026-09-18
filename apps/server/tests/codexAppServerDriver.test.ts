@@ -639,7 +639,7 @@ describe("CodexAppServerDriver", () => {
       "thread/backgroundTerminals/terminate",
       { threadId: "thread-1", processId: "process-1" }
     );
-    await expect(harness.driver.interrupt(session, null)).rejects.toThrow("without an active turn id");
+    await expect(harness.driver.interrupt(session, null)).resolves.toBe("already_idle");
   });
 
   it("persists command ownership before exposing lifecycle events and removes it on completion", async () => {
@@ -965,6 +965,36 @@ describe("CodexAppServerDriver", () => {
       threadId: "thread-1",
       turnId: "turn-new"
     });
+  });
+
+  it("checks the authoritative thread before treating an untracked running status as idle", async () => {
+    const harness = createHarness();
+    const session = { ...managedSession(), status: "running" as const };
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-1", status: { type: "active" }, turns: [] } };
+      }
+      if (method === "thread/turns/list") return { data: [], nextCursor: null };
+      if (method === "thread/backgroundTerminals/list") return { data: [] };
+      return {};
+    });
+
+    await expect(harness.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn"]);
+  });
+
+  it("accepts authoritative idle evidence for an untracked stale running status", async () => {
+    const harness = createHarness();
+    const session = { ...managedSession(), status: "running" as const };
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } };
+      }
+      if (method === "thread/turns/list") return { data: [], nextCursor: null };
+      if (method === "thread/backgroundTerminals/list") return { data: [] };
+      return {};
+    });
+
+    await expect(harness.driver.hibernationBlockers(session)).resolves.toEqual([]);
   });
 });
 

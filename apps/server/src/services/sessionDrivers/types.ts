@@ -54,6 +54,8 @@ export interface DriverInputReceipt {
   acceptedAt: string;
 }
 
+export type DriverInterruptOutcome = "interrupted" | "already_idle";
+
 export interface DriverPlanActionRequest {
   plan: string | null;
   clientMessageId: string | null;
@@ -85,7 +87,7 @@ export interface AgentSessionDriver {
   sendMessage(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt>;
   reconcileInput(session: ManagedSession, clientMessageId: string): Promise<DriverInputReceipt | null>;
   steer(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt>;
-  interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<void>;
+  interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<DriverInterruptOutcome>;
   kill(session: ManagedSession): Promise<void>;
   answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;
   answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void>;

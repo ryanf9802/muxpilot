@@ -136,6 +136,14 @@ const STEERABLE_SESSION_STATUSES = new Set<SessionStatus>([
   "running",
   "planning"
 ]);
+const RUNTIME_ACTIVITY_STATUSES = new Set<SessionStatus>([
+  "generating",
+  "executing",
+  "working",
+  "running",
+  "planning",
+  "queued"
+]);
 const AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES = new Set<SessionStatus>([
   "idle",
   "waiting",
@@ -338,7 +346,10 @@ export class SessionManager {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
         if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
-        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(session);
+        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(
+          session,
+          candidate.status === session.status
+        );
         if (restartBlockers.length > 0) {
           blockers.add(session.id);
           await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restart_deferred", session.id, restartBlockers);
@@ -374,7 +385,10 @@ export class SessionManager {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
         if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
-        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(session);
+        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(
+          session,
+          candidate.status === session.status
+        );
         if (restartBlockers.length > 0) {
           blockers.add(session.id);
           await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_deferred", session.id, restartBlockers);
@@ -396,18 +410,34 @@ export class SessionManager {
     return [...blockers];
   }
 
-  private async codexAuthenticationRuntimeRestartBlockers(session: ManagedSession): Promise<string[]> {
+  private async codexAuthenticationRuntimeRestartBlockers(
+    session: ManagedSession,
+    reconcileStaleStatus = false
+  ): Promise<string[]> {
     const blockers: string[] = [];
     if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") {
       blockers.push(`runtime_${session.runtime?.state ?? "unavailable"}`);
     }
     if (session.initializing) blockers.push("initializing");
-    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status)) {
-      blockers.push(`status_${session.status}`);
+    let current = session;
+    if (blockers.length === 0 && reconcileStaleStatus && RUNTIME_ACTIVITY_STATUSES.has(current.status)) {
+      current = await this.reconcileInactiveSessionStatus(current.id, "idle", "authentication_reconciliation");
+    }
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(current.status)) {
+      let liveStatusBlockers: string[] = [];
+      if (reconcileStaleStatus && RUNTIME_ACTIVITY_STATUSES.has(current.status)) {
+        try {
+          liveStatusBlockers = await this.requireAppServerDriver().hibernationBlockers(current);
+        } catch {
+          liveStatusBlockers = ["runtime_evidence_unavailable"];
+        }
+      }
+      blockers.push(...liveStatusBlockers);
+      if (liveStatusBlockers.length === 0) blockers.push(`status_${current.status}`);
     }
     if (blockers.length === 0) {
       try {
-        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session));
+        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(current));
       } catch {
         blockers.push("runtime_evidence_unavailable");
       }
@@ -625,11 +655,13 @@ export class SessionManager {
     const sessionId = await this.sessionIdForWorkspace(workspaceId) ??
       (await this.db.listSessions(true)).find((session) => session.gitWorkspace?.id === workspaceId)?.id ?? null;
     if (!sessionId) return;
-    const session = await this.db.getSession(sessionId);
     if (status === null) {
-      if (session?.status === "queued" || session?.status === "running") await this.runDiscoverTick();
+      await this.serializeRuntimeOperation(sessionId, async () => {
+        await this.reconcileInactiveSessionStatus(sessionId, "idle", "heavy_command_inactive");
+      });
       return;
     }
+    const session = await this.db.getSession(sessionId);
     if (
       !session ||
       session.archived ||
@@ -642,6 +674,36 @@ export class SessionManager {
     await this.db.setSessionStatus(sessionId, status, now);
     this.publish("status.changed", sessionId, { status });
     this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+  }
+
+  private async reconcileInactiveSessionStatus(
+    sessionId: string,
+    settledStatus: "idle" | "waiting",
+    reason: "authentication_reconciliation" | "heavy_command_inactive" | "operator_interrupt"
+  ): Promise<ManagedSession> {
+    const current = requireSession(await this.db.getSession(sessionId));
+    if (!RUNTIME_ACTIVITY_STATUSES.has(current.status)) return current;
+    if (this.deliveringInputSessionIds?.has(sessionId) || this.processingQueuedSessionIds?.has(sessionId)) return current;
+    if (current.gitWorkspace && await this.heavyCommandQueue?.hasActive(current.gitWorkspace.id)) return current;
+    const blockers = await this.requireAppServerDriver().hibernationBlockers(current).catch(() => ["runtime_evidence_unavailable"]);
+    if (blockers.length > 0) return current;
+
+    const latest = requireSession(await this.db.getSession(sessionId));
+    if (latest.status !== current.status) return latest;
+    if (this.deliveringInputSessionIds?.has(sessionId) || this.processingQueuedSessionIds?.has(sessionId)) return latest;
+    if (latest.gitWorkspace && await this.heavyCommandQueue?.hasActive(latest.gitWorkspace.id)) return latest;
+
+    const updatedAt = nowIso();
+    await this.db.setSessionStatus(sessionId, settledStatus, updatedAt);
+    await this.db.addAudit("muxpilot", "runtime:stale_status_reconciled", sessionId, JSON.stringify({
+      previousStatus: latest.status,
+      status: settledStatus,
+      reason
+    }), updatedAt);
+    this.publish("status.changed", sessionId, { status: settledStatus });
+    const updated = requireSession(await this.db.getSession(sessionId));
+    this.publish("session.updated", sessionId, updated);
+    return updated;
   }
 
   async resumeHeavyCommand(sessionId: string, message: string): Promise<boolean> {
@@ -3071,10 +3133,30 @@ export class SessionManager {
       this.runBackgroundTask("queued input", () => this.processQueuedInputs(sessionId));
     }
     if (action.type === "interrupt") {
-      if (session.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(session.gitWorkspace.id, "session interrupted by operator");
-      await driver.interrupt(session, null);
-      await this.db.setSessionStatus(sessionId, "waiting", nowIso());
-      this.publish("status.changed", sessionId, { status: "waiting" });
+      await this.serializeRuntimeOperation(sessionId, async () => {
+        const current = requireSession(await this.db.getSession(sessionId));
+        let heavyCommandCancellationRequested = false;
+        let outcome: Awaited<ReturnType<AgentSessionDriver["interrupt"]>>;
+        try {
+          if (current.gitWorkspace && this.heavyCommandQueue) {
+            await this.heavyCommandQueue.cancelWorkspace(current.gitWorkspace.id, "session interrupted by operator");
+            heavyCommandCancellationRequested = true;
+          }
+          outcome = await driver.interrupt(current, null);
+        } catch (error) {
+          await this.db.addAudit("local", "interrupt_runtime", sessionId, JSON.stringify({
+            heavyCommandCancellationRequested,
+            turn: "failed",
+            error: error instanceof Error ? error.message : String(error)
+          }), nowIso());
+          throw error;
+        }
+        await this.db.addAudit("local", "interrupt_runtime", sessionId, JSON.stringify({
+          heavyCommandCancellationRequested,
+          turn: outcome
+        }), nowIso());
+        await this.reconcileInactiveSessionStatus(sessionId, "waiting", "operator_interrupt");
+      });
     }
     if (action.type === "hibernate") await this.hibernateAppServerSession(session, false);
     if (action.type === "wake") await this.wakeAppServerSession(session, false);

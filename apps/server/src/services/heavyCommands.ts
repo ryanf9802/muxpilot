@@ -70,6 +70,7 @@ export class HeavyCommandService {
     this.coordinator = coordinator;
     if (this.timer) return;
     if (this.launchBroker?.enabled) await this.startLaunchBroker();
+    this.activeStatusWorkspaces = new Set((await this.readPersistentOwners()).map((owner) => owner.workspaceId));
     this.timer = setInterval(() => this.scheduleTick(), 250);
     this.scheduleTick();
   }

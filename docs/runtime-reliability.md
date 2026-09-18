@@ -65,6 +65,8 @@ The helper refreshes both the run record and its slot lease. If heartbeat or con
 
 New operator messages are held while a run is waiting or reserved, and while a resumed command is active. If an operator interrupt ends the deferred phase, the held message is delivered normally and any later resume request for that run is stale; the agent must not replay the abandoned command on its own.
 
+Operator interrupt treats deferred-command cancellation and Codex turn interruption as independent outcomes. An already-completed Codex turn is an idempotent success, while genuine protocol failures remain visible and are audited alongside whether heavyweight cancellation was requested. When a command becomes inactive, muxpilot clears its projected activity status only after current thread, interaction, terminal, input-delivery, and queue evidence all confirm that no newer work owns the session. The same evidence-based repair runs after scheduler restart and before authentication reconciliation can treat a projected activity status as a global safe-boundary blocker.
+
 The session header indicator opens an operator view containing:
 
 - Command, working directory, state, slot, PID, and queue position.

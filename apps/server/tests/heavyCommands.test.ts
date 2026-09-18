@@ -62,6 +62,38 @@ describe("HeavyCommandService", () => {
     }
   });
 
+  it("clears terminal owner status after a scheduler restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
+    roots.push(root);
+    const leases = join(root, "leases");
+    const runId = "mabc123-acacacacacac";
+    const runDir = join(leases, "runs", runId);
+    await mkdir(runDir, { recursive: true });
+    await writeFile(join(runDir, "owner.json"), JSON.stringify({
+      ...owner(runId, "workspace-cancelled", null),
+      version: 4,
+      runnerPath: "/skills/muxpilot-git-run.mjs",
+      runnerOptions: [],
+      state: "cancelled",
+      slot: null,
+      finishedAt: new Date().toISOString(),
+      terminationReason: "session interrupted by operator"
+    }));
+    const statuses: Array<string | null> = [];
+    const service = new HeavyCommandService(leases, join(root, "sessions"));
+    await service.start({
+      sessionIdForWorkspace: async () => "session-cancelled",
+      resumeHeavyCommand: async () => false,
+      syncHeavyCommandSessionStatus: async (_workspaceId, status) => { statuses.push(status); }
+    });
+    try {
+      await waitFor(() => statuses.includes(null));
+      expect(statuses).toEqual([null]);
+    } finally {
+      await service.stop();
+    }
+  });
+
   it("ignores wrapper-owned acquiring records until they become queue eligible", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-heavy-service-"));
     roots.push(root);

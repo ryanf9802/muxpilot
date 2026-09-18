@@ -14,6 +14,7 @@ import type {
   AgentSessionLaunchSpec,
   DriverEvent,
   DriverInputReceipt,
+  DriverInterruptOutcome,
   DriverPlanActionRequest,
   DriverPlanActionResult,
   DriverSubscription,
@@ -209,18 +210,20 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return receipt(threadId, response.turnId, clientMessageId, this.now());
   }
 
-  async interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<void> {
+  async interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<DriverInterruptOutcome> {
     const { threadId, protocol } = this.protocolFor(session);
     const turnId = expectedTurnId ?? this.activeTurns.get(session.id);
-    if (!turnId) throw new Error("Cannot interrupt app-server session without an active turn id");
-    await protocol.interruptTurn(threadId, turnId);
-    const processIds = this.turnProcesses.get(session.id)?.get(turnId) ?? [];
+    if (turnId) await protocol.interruptTurn(threadId, turnId);
+    const processIds = turnId ? this.turnProcesses.get(session.id)?.get(turnId) ?? [] : [];
     for (const processId of processIds) {
       await protocol.terminateBackgroundTerminal(threadId, processId);
     }
-    await this.processStore?.removeAppServerTurnCommandProcesses(session.id, threadId, turnId).catch(() => undefined);
-    this.turnProcesses.get(session.id)?.delete(turnId);
+    if (turnId) {
+      await this.processStore?.removeAppServerTurnCommandProcesses(session.id, threadId, turnId).catch(() => undefined);
+      this.turnProcesses.get(session.id)?.delete(turnId);
+    }
     this.activeTurns.delete(session.id);
+    return turnId ? "interrupted" : "already_idle";
   }
 
   async kill(session: ManagedSession): Promise<void> {
@@ -266,6 +269,11 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const blockers: string[] = [];
     await this.reconcileActiveTurnForHibernation(session.id, threadId, protocol);
     if (this.activeTurns.has(session.id)) blockers.push("active_turn");
+    if (!this.activeTurns.has(session.id) && isActivityStatus(session.status)) {
+      const current = (await protocol.readThread(threadId, true)).thread;
+      if (current.id !== threadId) throw new Error("App-server activity evidence returned the wrong thread");
+      if (recordValue(current, "status")?.type !== "idle") blockers.push("active_turn");
+    }
     if ([...this.pendingRequests.values()].some((request) => request.sessionId === session.id)) {
       blockers.push("interactive_request");
     }
@@ -937,6 +945,15 @@ function recordValue(value: unknown, key: string): Record<string, unknown> | nul
   return candidate && typeof candidate === "object" && !Array.isArray(candidate)
     ? candidate as Record<string, unknown>
     : null;
+}
+
+function isActivityStatus(status: ManagedSession["status"]): boolean {
+  return status === "generating"
+    || status === "executing"
+    || status === "working"
+    || status === "running"
+    || status === "planning"
+    || status === "queued";
 }
 
 function recordArray(value: unknown, key: string): string[] | null {

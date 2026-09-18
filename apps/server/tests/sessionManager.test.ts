@@ -313,6 +313,117 @@ describe("SessionManager app-server helpers", () => {
     expect(publish).toHaveBeenCalledWith("session.updated", current.id, expect.objectContaining({ archived: true }));
   });
 
+  it("treats an already-idle Codex turn as a successful operator interrupt", async () => {
+    let current = { ...managedSession(), status: "running" as const, gitWorkspace: gitWorkspace("main", "workspace-1") };
+    const driver = {
+      interrupt: vi.fn(async () => "already_idle" as const),
+      hibernationBlockers: vi.fn(async () => [])
+    };
+    const cancelWorkspace = vi.fn(async () => undefined);
+    const hasActive = vi.fn(async () => false);
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const publish = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      deliveringInputSessionIds: new Set<string>(),
+      processingQueuedSessionIds: new Set<string>(),
+      heavyCommandQueue: { cancelWorkspace, hasActive },
+      requireAppServerDriver: () => driver,
+      publish
+    }) as SessionManager;
+
+    await expect(manager.act(current.id, { type: "interrupt" })).resolves.toMatchObject({ status: "waiting" });
+
+    expect(cancelWorkspace).toHaveBeenCalledWith("workspace-1", "session interrupted by operator");
+    expect(driver.interrupt).toHaveBeenCalledOnce();
+    expect(db.addAudit).toHaveBeenCalledWith(
+      "local",
+      "interrupt_runtime",
+      current.id,
+      JSON.stringify({ heavyCommandCancellationRequested: true, turn: "already_idle" }),
+      expect.any(String)
+    );
+    expect(db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:stale_status_reconciled",
+      current.id,
+      JSON.stringify({ previousStatus: "running", status: "waiting", reason: "operator_interrupt" }),
+      expect.any(String)
+    );
+  });
+
+  it("settles a cancelled heavyweight status only after its worker becomes inactive", async () => {
+    let current = { ...managedSession(), status: "running" as const, gitWorkspace: gitWorkspace("main", "workspace-1") };
+    let active = true;
+    const db = {
+      getSession: vi.fn(async () => current),
+      listSessions: vi.fn(async () => [current]),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const publish = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      deliveringInputSessionIds: new Set<string>(),
+      processingQueuedSessionIds: new Set<string>(),
+      gitWorkspaces: { get: vi.fn(async () => ({ sessionId: current.id })) },
+      heavyCommandQueue: { hasActive: vi.fn(async () => active) },
+      requireAppServerDriver: () => ({ hibernationBlockers: vi.fn(async () => []) }),
+      publish
+    }) as SessionManager;
+
+    await manager.syncHeavyCommandSessionStatus("workspace-1", null);
+    expect(current.status).toBe("running");
+
+    active = false;
+    await manager.syncHeavyCommandSessionStatus("workspace-1", null);
+    expect(current.status).toBe("idle");
+    expect(db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:stale_status_reconciled",
+      current.id,
+      JSON.stringify({ previousStatus: "running", status: "idle", reason: "heavy_command_inactive" }),
+      expect.any(String)
+    );
+    expect(publish).toHaveBeenCalledWith("status.changed", current.id, { status: "idle" });
+  });
+
+  it("does not let late heavyweight cleanup overwrite a newer turn status", async () => {
+    let current = { ...managedSession(), status: "running" as const, gitWorkspace: gitWorkspace("main", "workspace-1") };
+    const db = {
+      getSession: vi.fn(async () => current),
+      listSessions: vi.fn(async () => [current]),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      deliveringInputSessionIds: new Set<string>(),
+      processingQueuedSessionIds: new Set<string>(),
+      gitWorkspaces: { get: vi.fn(async () => ({ sessionId: current.id })) },
+      heavyCommandQueue: { hasActive: vi.fn(async () => false) },
+      requireAppServerDriver: () => ({
+        hibernationBlockers: vi.fn(async () => {
+          current = { ...current, status: "executing" };
+          return [];
+        })
+      }),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await manager.syncHeavyCommandSessionStatus("workspace-1", null);
+
+    expect(current.status).toBe("executing");
+    expect(db.setSessionStatus).not.toHaveBeenCalled();
+  });
+
   it("renames a hibernated session locally and defers the Codex thread rename until wake", async () => {
     let current = {
       ...managedSession(),
@@ -1122,8 +1233,6 @@ describe("SessionManager app-server helpers", () => {
 
 describe("SessionManager Codex authentication runtime safety", () => {
   it.each([
-    "executing",
-    "planning",
     "question",
     "approval",
     "startup_failed",
@@ -1140,6 +1249,41 @@ describe("SessionManager Codex authentication runtime safety", () => {
       "runtime:auth_restart_deferred",
       "session-1",
       JSON.stringify({ blockers: [`status_${status}`] }),
+      expect.any(String)
+    );
+  });
+
+  it.each(["executing", "planning", "running", "queued"] as const)(
+    "repairs stale %s status from positive idle runtime evidence before authentication restart",
+    async (status) => {
+      const harness = authenticationManager({ ...managedSession(), status });
+
+      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual([]);
+
+      expect(harness.db.setSessionStatus).toHaveBeenCalledWith("session-1", "idle", expect.any(String));
+      expect(harness.db.addAudit).toHaveBeenCalledWith(
+        "muxpilot",
+        "runtime:stale_status_reconciled",
+        "session-1",
+        JSON.stringify({ previousStatus: status, status: "idle", reason: "authentication_reconciliation" }),
+        expect.any(String)
+      );
+      expect(harness.driver.kill).toHaveBeenCalledOnce();
+    }
+  );
+
+  it("keeps a running session blocked when fresh runtime evidence reports an active turn", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "running" }, ["active_turn"]);
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.db.setSessionStatus).not.toHaveBeenCalled();
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["active_turn"] }),
       expect.any(String)
     );
   });
@@ -1341,6 +1485,7 @@ function authenticationManager(
   const db = {
     listSessions: vi.fn(async () => [observed]),
     getSession: vi.fn(async () => current),
+    setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
     upsertSession: vi.fn(async (session: ManagedSession) => { current = session; }),
     addAudit: vi.fn(async () => undefined)
   };
@@ -1352,6 +1497,9 @@ function authenticationManager(
       require: vi.fn(() => driver)
     },
     runtimeOperationTails: new Map<string, Promise<void>>(),
+    deliveringInputSessionIds: new Set<string>(),
+    processingQueuedSessionIds: new Set<string>(),
+    heavyCommandQueue: { hasActive: vi.fn(async () => false) },
     resumeAppServerSession,
     publish: vi.fn()
   }) as SessionManager;
