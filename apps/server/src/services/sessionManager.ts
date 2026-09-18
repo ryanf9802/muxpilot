@@ -2985,8 +2985,9 @@ export class SessionManager {
   }
 
   private async performAppServerResume(session: ManagedSession): Promise<ManagedSession> {
+    const startFreshThread = isDisposableEmptyAppServerThread(session);
     const sourceThreadId = session.provider?.threadId ?? session.codexSessionId;
-    if (!sourceThreadId) throw new Error("App-server session does not have a Codex thread id to resume");
+    if (!startFreshThread && !sourceThreadId) throw new Error("App-server session does not have a Codex thread id to resume");
     const driver = this.requireAppServerDriver();
     const documentScopeId = await this.ensureDocumentScope(session);
     const activeModel = session.models[session.inputMode];
@@ -3019,21 +3020,28 @@ export class SessionManager {
     try {
       let launch: AgentSessionLaunchResult;
       try {
-        launch = await driver.resume({
-          sessionId: session.id,
-          name: sessionName(session),
-          cwd: directory,
-          options: prepared.options,
-          sourceThreadId
-        });
+        launch = startFreshThread
+          ? await driver.start({
+              sessionId: session.id,
+              name: sessionName(session),
+              cwd: directory,
+              options: prepared.options
+            })
+          : await driver.resume({
+              sessionId: session.id,
+              name: sessionName(session),
+              cwd: directory,
+              options: prepared.options,
+              sourceThreadId: sourceThreadId!
+            });
       } catch (error) {
         throw new AppServerRuntimeStoppedError(error);
       }
       recoveredLaunch = launch;
       if (launch.sessionId !== session.id) {
-        throw new Error(`App-server driver returned the wrong resumed session id: expected ${session.id}, received ${launch.sessionId}`);
+        throw new Error(`App-server driver returned the wrong recovered session id: expected ${session.id}, received ${launch.sessionId}`);
       }
-      if (launch.provider.threadId !== sourceThreadId) {
+      if (!startFreshThread && launch.provider.threadId !== sourceThreadId) {
         throw new Error(`App-server driver resumed the wrong Codex thread: expected ${sourceThreadId}, received ${launch.provider.threadId ?? "none"}`);
       }
       await launch.ready;
@@ -4967,6 +4975,13 @@ function notLoadedProjectionAt(state: AppServerReconciliationState | null, obser
     state.observedAt !== observedAt
   ) return false;
   return recordValue(recordValue(state.evidence)?.status)?.type === "notLoaded";
+}
+
+function isDisposableEmptyAppServerThread(session: ManagedSession): boolean {
+  return session.transcriptSize === 0
+    && session.lastActivityAt === null
+    && !session.provider?.rolloutPath
+    && !session.codexJsonlPath;
 }
 
 function stringValue(value: unknown): string | null {

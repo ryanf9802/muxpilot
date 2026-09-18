@@ -513,6 +513,70 @@ describe("SessionManager app-server helpers", () => {
     );
   });
 
+  it("replaces an empty unpersisted Codex thread instead of trying to resume it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-empty-thread-reload-"));
+    temporaryRoots.push(directory);
+    let current = {
+      ...managedSession(),
+      cwd: directory,
+      status: "idle" as const,
+      provider: { kind: "codex" as const, threadId: "thread-unpersisted", rolloutPath: null },
+      codexSessionId: "thread-unpersisted",
+      codexJsonlPath: null,
+      documentScopeId: "scope-1"
+    };
+    const replacementProvider = { kind: "codex" as const, threadId: "thread-replacement", rolloutPath: null };
+    const connectedRuntime = { ...current.runtime!, state: "connected" as const };
+    const driver = {
+      start: vi.fn(async () => ({
+        sessionId: current.id,
+        provider: replacementProvider,
+        runtime: connectedRuntime,
+        capabilities: current.capabilities,
+        ready: Promise.resolve()
+      })),
+      resume: vi.fn(),
+      setPreferences: vi.fn(async () => undefined),
+      rename: vi.fn(async () => undefined),
+      kill: vi.fn(async () => undefined)
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
+      setSessionInitializationResult: vi.fn(async (_id: string, status: ManagedSession["status"], startupError: string | null) => {
+        current = { ...current, status, initializing: false, startupError };
+        return current;
+      })
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      managedEnvironment: {},
+      requireAppServerDriver: () => driver,
+      ensureDocumentScope: vi.fn(async () => "scope-1"),
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      bindOrchestratedLaunch: vi.fn(async () => undefined),
+      processQueuedInputs: vi.fn(async () => undefined),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      performAppServerResume(session: ManagedSession): Promise<ManagedSession>;
+    }).performAppServerResume(current)).resolves.toMatchObject({
+      codexSessionId: "thread-replacement",
+      provider: replacementProvider,
+      runtime: { state: "connected" }
+    });
+
+    expect(driver.start).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: current.id,
+      cwd: directory
+    }));
+    expect(driver.resume).not.toHaveBeenCalled();
+  });
+
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
