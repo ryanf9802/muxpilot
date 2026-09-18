@@ -82,7 +82,7 @@ describe("api client request headers", () => {
       })
     );
 
-    await expect(api.action("session-1", { type: "retryInputDelivery" })).rejects.toEqual(
+    await expect(api.action("session-1", { type: "retryInputDelivery", messageId: "message-1", turnId: "turn-1" })).rejects.toEqual(
       new ApiError("The Codex composer already contains input", 409)
     );
   });

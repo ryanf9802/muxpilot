@@ -6,6 +6,32 @@ import { describe, expect, it } from "vitest";
 import { AppDatabase } from "../src/db/database.js";
 
 describe("app-server projection persistence", () => {
+  it("loads durable intentional interruption kinds by exact thread and turn", async () => {
+    const { db, sessionId } = await projectionDb();
+    expect(await db.getAppServerTurnInterruptionKind(sessionId, "thread-1", "turn-1")).toBeNull();
+    await db.appendMessage({
+      id: "budget-interruption",
+      sessionId,
+      sequence: 1,
+      type: "status",
+      role: "system",
+      timestamp: "2026-09-01T00:00:01.000Z",
+      text: "Turn interrupted because the agent work-token budget was exhausted.",
+      payload: {
+        interruption: {
+          kind: "budget_guard",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          observedAt: "2026-09-01T00:00:01.000Z"
+        }
+      }
+    });
+
+    expect(await db.getAppServerTurnInterruptionKind(sessionId, "thread-1", "turn-1")).toBe("budget_guard");
+    expect(await db.getAppServerTurnInterruptionKind(sessionId, "thread-1", "turn-other")).toBeNull();
+    await db.close();
+  });
+
   it("atomically applies completed content and replay-safe reconciliation state", async () => {
     const { db, path, sessionId } = await projectionDb();
     const projection = {
@@ -480,6 +506,11 @@ describe("app-server projection persistence", () => {
     ]);
     expect(await reopened.removeAppServerCommandProcess(
       rekeyedId, "thread-1", "item-active", "process-active"
+    )).toBe(true);
+    expect(await reopened.listAppServerCommandProcesses(rekeyedId, "thread-1")).toEqual([]);
+    await reopened.upsertAppServerCommandProcess({ ...process, sessionId: rekeyedId });
+    expect(await reopened.removeAppServerTurnCommandProcess(
+      rekeyedId, "thread-1", "turn-active", "process-active"
     )).toBe(true);
     expect(await reopened.listAppServerCommandProcesses(rekeyedId, "thread-1")).toEqual([]);
     await reopened.upsertAppServerCommandProcess({ ...process, sessionId: rekeyedId });

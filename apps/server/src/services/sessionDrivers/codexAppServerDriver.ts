@@ -14,6 +14,7 @@ import type {
   AgentSessionLaunchSpec,
   DriverEvent,
   DriverInputReceipt,
+  DriverInterruptIntent,
   DriverInterruptOutcome,
   DriverPlanActionRequest,
   DriverPlanActionResult,
@@ -49,7 +50,7 @@ export const CODEX_APP_SERVER_CAPABILITIES: SessionCapabilities = {
 
 export interface CodexAppServerDriverOptions {
   runtimeSpec(spec: AgentSessionLaunchSpec): RuntimeStartSpec | Promise<RuntimeStartSpec>;
-  runtimeStarted?(sessionId: string): void | Promise<void>;
+  runtimeStarted?(sessionId: string, launchDisposition: "started" | "reused"): void | Promise<void>;
   requestStore?: AppServerRequestStore;
   processStore?: AppServerProcessStore;
   eventSink?: AppServerDriverEventSink;
@@ -58,8 +59,10 @@ export interface CodexAppServerDriverOptions {
 }
 
 export interface AppServerProcessStore {
+  getAppServerTurnInterruptionKind(sessionId: string, threadId: string, turnId: string): Promise<DriverInterruptIntent | null>;
   upsertAppServerCommandProcess(process: AppServerProcessOwnership & { sessionId: string; observedAt: string }): Promise<void>;
   removeAppServerCommandProcess(sessionId: string, threadId: string, itemId: string, processId: string): Promise<boolean>;
+  removeAppServerTurnCommandProcess(sessionId: string, threadId: string, turnId: string, processId: string): Promise<boolean>;
   removeAppServerTurnCommandProcesses(sessionId: string, threadId: string, turnId: string): Promise<number>;
   clearAppServerCommandProcesses(sessionId: string): Promise<number>;
   listAppServerCommandProcesses(sessionId: string, threadId: string): Promise<Array<AppServerProcessOwnership & {
@@ -77,7 +80,14 @@ interface AppServerProcessOwnership {
 
 export interface AppServerDriverEventSink {
   handle(sessionId: string, event: DriverEvent): Promise<void>;
-  restore(sessionId: string, threadId: string, status: unknown, restoredAt: string): Promise<void>;
+  restore(sessionId: string, threadId: string, status: unknown, latestTurn: Record<string, unknown> | null, restoredAt: string): Promise<void>;
+  recordIntentionalInterruption?(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    intent: DriverInterruptIntent,
+    observedAt: string
+  ): Promise<void>;
 }
 
 export interface AppServerRequestStore {
@@ -113,6 +123,16 @@ export class AppServerSteerUnavailableError extends Error {
   }
 }
 
+export class AppServerLaunchAttemptError extends Error {
+  constructor(
+    readonly launchDisposition: "started" | "reused",
+    readonly originalError: unknown
+  ) {
+    super(originalError instanceof Error ? originalError.message : String(originalError));
+    this.name = "AppServerLaunchAttemptError";
+  }
+}
+
 export class CodexAppServerDriver implements AgentSessionDriver {
   readonly kind = "codex_app_server" as const;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
@@ -120,6 +140,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
   private readonly activeTurns = new Map<string, string>();
   private readonly sessionThreads = new Map<string, string>();
   private readonly turnProcesses = new Map<string, Map<string, Set<string>>>();
+  private readonly confirmedTerminatedProcesses = new Set<string>();
   private readonly pendingRequests = new Map<string, {
     sessionId: string;
     id: string | number;
@@ -177,6 +198,8 @@ export class CodexAppServerDriver implements AgentSessionDriver {
 
   async sendMessage(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt> {
     const { threadId, protocol } = this.protocolFor(session);
+    const cleanup = await this.cleanupTrackedProcesses(session.id, threadId, protocol);
+    if (cleanup.pending) throw new Error("Surviving background-terminal cleanup is still pending");
     const response = await protocol.startTurn(threadId, text, clientMessageId, turnOptions(session), protocolInput(text, content));
     this.activeTurns.set(session.id, response.turn.id);
     return receipt(threadId, response.turn.id, clientMessageId, this.now());
@@ -211,20 +234,84 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     return receipt(threadId, response.turnId, clientMessageId, this.now());
   }
 
-  async interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<DriverInterruptOutcome> {
+  async interrupt(session: ManagedSession, expectedTurnId: string | null, intent?: DriverInterruptIntent): Promise<DriverInterruptOutcome> {
     const { threadId, protocol } = this.protocolFor(session);
     const turnId = expectedTurnId ?? this.activeTurns.get(session.id);
-    if (turnId) await protocol.interruptTurn(threadId, turnId);
-    const processIds = turnId ? this.turnProcesses.get(session.id)?.get(turnId) ?? [] : [];
-    for (const processId of processIds) {
-      await protocol.terminateBackgroundTerminal(threadId, processId);
-    }
     if (turnId) {
-      await this.processStore?.removeAppServerTurnCommandProcesses(session.id, threadId, turnId).catch(() => undefined);
-      this.turnProcesses.get(session.id)?.delete(turnId);
+      await protocol.interruptTurn(threadId, turnId);
+      if (intent) {
+        await this.eventSink?.recordIntentionalInterruption?.(session.id, threadId, turnId, intent, this.now().toISOString());
+      }
     }
+    const cleanup = await this.cleanupTrackedProcesses(session.id, threadId, protocol);
     this.activeTurns.delete(session.id);
-    return turnId ? "interrupted" : "already_idle";
+    return turnId
+      ? cleanup.pending ? "interrupted_cleanup_pending" : "interrupted"
+      : cleanup.pending ? "interrupted_cleanup_pending" : cleanup.attempted > 0 ? "cleanup_completed" : "already_idle";
+  }
+
+  private async cleanupTrackedProcesses(
+    sessionId: string,
+    threadId: string,
+    protocol: CodexAppServerProtocol
+  ): Promise<{ attempted: number; pending: boolean }> {
+    const turns = this.turnProcesses.get(sessionId) ?? new Map<string, Set<string>>();
+    const loadedDurableProcesses = new Set<string>();
+    let loadFailed = false;
+    if (this.processStore) {
+      try {
+        for (const ownership of await this.processStore.listAppServerCommandProcesses(sessionId, threadId)) {
+          const intentional = turns.has(ownership.turnId)
+            || await this.processStore.getAppServerTurnInterruptionKind(sessionId, threadId, ownership.turnId) !== null;
+          if (!intentional) continue;
+          const processes = turns.get(ownership.turnId) ?? new Set<string>();
+          if (!processes.has(ownership.processId)) {
+            loadedDurableProcesses.add(processTerminationKey(sessionId, threadId, ownership.turnId, ownership.processId));
+          }
+          processes.add(ownership.processId);
+          turns.set(ownership.turnId, processes);
+        }
+      } catch {
+        loadFailed = true;
+      }
+    }
+    if (turns.size > 0) this.turnProcesses.set(sessionId, turns);
+    const liveDurableProcesses = loadedDurableProcesses.size > 0
+      ? await protocol.listBackgroundTerminals(threadId)
+        .then((terminals) => new Set(backgroundProcessIds(terminals)))
+        .catch(() => null)
+      : null;
+    let attempted = 0;
+    for (const [ownedTurnId, processIds] of turns) {
+      for (const processId of [...processIds]) {
+        attempted += 1;
+        const terminationKey = processTerminationKey(sessionId, threadId, ownedTurnId, processId);
+        try {
+          if (loadedDurableProcesses.has(terminationKey) && liveDurableProcesses && !liveDurableProcesses.has(processId)) {
+            this.confirmedTerminatedProcesses.add(terminationKey);
+          }
+          if (!this.confirmedTerminatedProcesses.has(terminationKey)) {
+            await protocol.terminateBackgroundTerminal(threadId, processId);
+            this.confirmedTerminatedProcesses.add(terminationKey);
+          }
+          await this.processStore?.removeAppServerTurnCommandProcess(sessionId, threadId, ownedTurnId, processId);
+          processIds.delete(processId);
+          this.confirmedTerminatedProcesses.delete(terminationKey);
+        } catch {
+          // Retain both in-memory and durable ownership for a later cleanup sweep.
+        }
+      }
+      if (processIds.size === 0) turns.delete(ownedTurnId);
+    }
+    if (turns.size === 0) this.turnProcesses.delete(sessionId);
+    return { attempted, pending: loadFailed || turns.size > 0 };
+  }
+
+  private clearConfirmedTerminations(sessionId: string): void {
+    const prefix = `${sessionId}\0`;
+    for (const key of this.confirmedTerminatedProcesses) {
+      if (key.startsWith(prefix)) this.confirmedTerminatedProcesses.delete(key);
+    }
   }
 
   async kill(session: ManagedSession): Promise<void> {
@@ -244,6 +331,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.activeTurns.delete(session.id);
     this.sessionThreads.delete(session.id);
     this.turnProcesses.delete(session.id);
+    this.clearConfirmedTerminations(session.id);
     this.clearPendingRequests(session.id);
     this.cancelInteractiveRequestReplay(session.id);
     await this.supervisor.stop(runtime);
@@ -331,6 +419,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     }
     this.activeTurns.delete(session.id);
     this.turnProcesses.delete(session.id);
+    this.clearConfirmedTerminations(session.id);
     this.clearPendingRequests(session.id);
     this.cancelInteractiveRequestReplay(session.id);
     await this.processStore?.clearAppServerCommandProcesses(session.id).catch(() => undefined);
@@ -450,9 +539,11 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     const activeTurnBeforeLaunch = this.activeTurns.get(spec.sessionId);
     const runtimeSpec = await this.options.runtimeSpec(spec);
     if (runtimeSpec.sessionId !== spec.sessionId) throw new Error("Runtime spec session id does not match launch spec");
-    const runtime = await this.supervisor.start(runtimeSpec);
-    await this.options.runtimeStarted?.(spec.sessionId);
+    const launchedRuntime = await this.supervisor.start(runtimeSpec);
+    const launchDisposition = launchedRuntime.launchDisposition ?? "started";
+    const { launchDisposition: _launchDisposition, ...runtime } = launchedRuntime;
     try {
+      await this.options.runtimeStarted?.(spec.sessionId, launchDisposition);
       if (operation === "resume") this.sessionThreads.set(spec.sessionId, requireSourceThread(spec));
       else this.sessionThreads.delete(spec.sessionId);
       const handlers = this.handlers(spec.sessionId);
@@ -512,20 +603,26 @@ export class CodexAppServerDriver implements AgentSessionDriver {
           spec.sessionId,
           connection.threadId,
           recordValue(connection.reconciliation.current.thread, "status"),
+          latestTurn(connection.reconciliation.current.thread),
           this.now().toISOString()
         );
       }
       return {
         sessionId: spec.sessionId,
-        provider: { kind: "codex", threadId: connection.threadId, rolloutPath: null },
+        provider: {
+          kind: "codex",
+          threadId: connection.threadId,
+          rolloutPath: directString(connection.reconciliation.current.thread, "path")
+        },
         runtime,
+        launchDisposition,
         capabilities: { ...this.capabilities },
         ready: Promise.resolve()
       };
     } catch (error) {
       await this.connections.close(spec.sessionId).catch(() => undefined);
-      await this.supervisor.stop(runtime).catch(() => undefined);
-      throw error;
+      if (launchDisposition === "started") await this.supervisor.stop(runtime).catch(() => undefined);
+      throw new AppServerLaunchAttemptError(launchDisposition, error);
     }
   }
 
@@ -882,6 +979,10 @@ function receipt(threadId: string, turnId: string, clientMessageId: string, now:
   return { clientMessageId, threadId, turnId, acceptedAt: now.toISOString() };
 }
 
+function processTerminationKey(sessionId: string, threadId: string, turnId: string, processId: string): string {
+  return `${sessionId}\0${threadId}\0${turnId}\0${processId}`;
+}
+
 function findClientMessageTurnId(thread: Record<string, unknown>, clientMessageId: string): string | null {
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   for (const value of turns) {
@@ -1019,6 +1120,12 @@ function activeTurnIdFromThread(threadId: string, thread: Record<string, unknown
     if (turnId) return turnId;
   }
   return null;
+}
+
+function latestTurn(thread: Record<string, unknown>): Record<string, unknown> | null {
+  const turns = Array.isArray(thread.turns) ? thread.turns : [];
+  const value = turns.at(-1);
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function isTerminalTurnStatus(value: unknown): boolean {

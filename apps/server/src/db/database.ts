@@ -870,6 +870,14 @@ export class AppDatabase {
     return this.call("getAppServerReconciliationState", sessionId) as Promise<AppServerReconciliationState | null>;
   }
 
+  getAppServerTurnInterruptionKind(
+    sessionId: string,
+    threadId: string,
+    turnId: string
+  ): Promise<"operator" | "budget_guard" | null> {
+    return this.call("getAppServerTurnInterruptionKind", sessionId, threadId, turnId) as Promise<"operator" | "budget_guard" | null>;
+  }
+
   repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult> {
     return this.call("repairAppServerProjectionThread", sessionId, threadId) as Promise<AppServerProjectionRepairResult>;
   }
@@ -880,6 +888,10 @@ export class AppDatabase {
 
   removeAppServerCommandProcess(sessionId: string, threadId: string, itemId: string, processId: string): Promise<boolean> {
     return this.call("removeAppServerCommandProcess", sessionId, threadId, itemId, processId) as Promise<boolean>;
+  }
+
+  removeAppServerTurnCommandProcess(sessionId: string, threadId: string, turnId: string, processId: string): Promise<boolean> {
+    return this.call("removeAppServerTurnCommandProcess", sessionId, threadId, turnId, processId) as Promise<boolean>;
   }
 
   removeAppServerTurnCommandProcesses(sessionId: string, threadId: string, turnId: string): Promise<number> {
@@ -3309,6 +3321,24 @@ export class SyncAppDatabase {
     return row ? hydrateAppServerReconciliation(row) : null;
   }
 
+  getAppServerTurnInterruptionKind(
+    sessionId: string,
+    threadId: string,
+    turnId: string
+  ): "operator" | "budget_guard" | null {
+    const row = this.db.prepare(
+      `SELECT json_extract(payload_json, '$.interruption.kind') AS kind
+       FROM messages
+       WHERE session_id = ?
+         AND json_extract(payload_json, '$.interruption.kind') IN ('operator', 'budget_guard')
+         AND json_extract(payload_json, '$.interruption.threadId') = ?
+         AND json_extract(payload_json, '$.interruption.turnId') = ?
+       ORDER BY sequence DESC
+       LIMIT 1`
+    ).get(sessionId, threadId, turnId) as { kind?: unknown } | undefined;
+    return row?.kind === "operator" || row?.kind === "budget_guard" ? row.kind : null;
+  }
+
   repairAppServerProjectionThread(sessionId: string, threadId: string): AppServerProjectionRepairResult {
     if (!sessionId.trim() || !threadId.trim()) throw new Error("App-server projection repair requires session and thread identity");
     const foreignMessages = this.db.prepare(
@@ -3361,6 +3391,14 @@ export class SyncAppDatabase {
       `DELETE FROM app_server_command_processes
        WHERE session_id = ? AND thread_id = ? AND item_id = ? AND process_id = ?`
     ).run(sessionId, threadId, itemId, processId);
+    return result.changes === 1;
+  }
+
+  removeAppServerTurnCommandProcess(sessionId: string, threadId: string, turnId: string, processId: string): boolean {
+    const result = this.db.prepare(
+      `DELETE FROM app_server_command_processes
+       WHERE session_id = ? AND thread_id = ? AND turn_id = ? AND process_id = ?`
+    ).run(sessionId, threadId, turnId, processId);
     return result.changes === 1;
   }
 

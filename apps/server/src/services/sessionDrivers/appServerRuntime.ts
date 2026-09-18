@@ -78,10 +78,10 @@ export function createSessionDriverRegistry(options: AppServerRuntimeComposition
         mcpServers: spec.options.mcpServers ?? []
       };
     },
-    runtimeStarted: async (sessionId) => {
+    runtimeStarted: async (sessionId, launchDisposition) => {
       const revision = environmentLaunchRevisions.get(sessionId);
       environmentLaunchRevisions.delete(sessionId);
-      await options.sessionEnvironment?.markApplied(sessionId, revision);
+      if (launchDisposition === "started") await options.sessionEnvironment?.markApplied(sessionId, revision);
     }
   }));
   return registry;

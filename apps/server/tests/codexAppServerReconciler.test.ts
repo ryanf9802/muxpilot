@@ -187,6 +187,7 @@ describe("CodexAppServerReconciler", () => {
       "session-1",
       "thread-1",
       { type: "idle" },
+      null,
       "2026-09-01T12:05:00.000Z"
     );
 
@@ -281,6 +282,7 @@ describe("CodexAppServerReconciler", () => {
       "session-1",
       "thread-1",
       { type: "active", activeFlags: [] },
+      null,
       "2026-09-01T12:05:00.000Z"
     );
     expect(store.repairAppServerProjectionThread).toHaveBeenCalledWith("session-1", "thread-1");
@@ -304,6 +306,7 @@ describe("CodexAppServerReconciler", () => {
       "session-1",
       "thread-1",
       { type: "active", activeFlags: [] },
+      null,
       "2026-09-01T12:05:00.000Z"
     );
 
@@ -367,6 +370,257 @@ describe("CodexAppServerReconciler", () => {
     }));
   });
 
+  it("classifies an interrupted latest turn during reconnect before restoring idle", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted", error: null },
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      method: "turn/completed",
+      status: "waiting",
+      message: expect.objectContaining({
+        type: "status",
+        role: "system",
+        text: expect.stringContaining("cause could not be confirmed"),
+        payload: expect.objectContaining({
+          interruption: expect.objectContaining({
+            kind: "unexpected",
+            threadId: "thread-1",
+            turnId: "turn-1"
+          })
+        })
+      }),
+      turnFailure: expect.objectContaining({ failureCode: "turn_interrupted" })
+    }));
+    expect(store.applyAppServerProjection).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      method: "thread/status/changed"
+    }));
+  });
+
+  it("does not relabel an operator interruption after its companion status event", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    await reconciler.recordIntentionalInterruption(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "operator",
+      "2026-09-01T11:58:00.000Z"
+    );
+    await reconciler.handle("session-1", {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "idle" } },
+      receivedAt: "2026-09-01T11:59:00.000Z"
+    });
+    store.applyAppServerProjection.mockClear();
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledOnce();
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "turn/completed",
+      status: "waiting",
+      turnFailure: null
+    }));
+  });
+
+  it("preserves a budget-blocked session when reconnect finds its interrupted turn", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    await reconciler.recordIntentionalInterruption(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "budget_guard",
+      "2026-09-01T11:58:00.000Z"
+    );
+    store.applyAppServerProjection.mockClear();
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).not.toHaveBeenCalled();
+    expect(store.getAppServerTurnInterruptionKind).toHaveBeenCalledWith("session-1", "thread-1", "turn-1");
+  });
+
+  it("does not let a companion idle event clear an exhausted budget block", async () => {
+    const store = projectionStore([]);
+    store.getSession.mockResolvedValue({
+      id: "session-1",
+      status: "blocked",
+      inputMode: "default",
+      provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created",
+        createdAt: "2026-09-01T11:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1000,
+        completedAt: null,
+        budgetExhaustedAt: "2026-09-01T11:59:00.000Z"
+      }
+    });
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.handle("session-1", {
+      method: "thread/status/changed",
+      params: { threadId: "thread-1", status: { type: "idle" } },
+      receivedAt: "2026-09-01T12:00:00.000Z"
+    });
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "thread/status/changed",
+      status: "blocked"
+    }));
+  });
+
+  it("does not let stale reconnect evidence overwrite a newer turn notification", async () => {
+    const store = projectionStore([]);
+    store.getAppServerReconciliationState.mockResolvedValue({
+      sessionId: "session-1",
+      threadId: "thread-1",
+      turnId: "turn-2",
+      itemId: null,
+      clientMessageId: null,
+      method: "turn/started",
+      status: "working",
+      evidence: { threadId: "thread-1", turn: { id: "turn-2", status: "inProgress" } },
+      observedAt: "2026-09-01T11:59:59.999Z"
+    });
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).not.toHaveBeenCalled();
+  });
+
+  it("abandons stale reconnect evidence when a newer event arrives during repair", async () => {
+    const store = projectionStore([]);
+    let releaseRepair = () => undefined;
+    let markRepairStarted = () => undefined;
+    const repairStarted = new Promise<void>((resolve) => { markRepairStarted = resolve; });
+    store.repairAppServerProjectionThread.mockImplementationOnce(async () => {
+      markRepairStarted();
+      await new Promise<void>((resolve) => { releaseRepair = resolve; });
+      return { messagesRemoved: 0, processesRemoved: 0, reconciliationReset: false };
+    });
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    const restoring = reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+    await repairStarted;
+    const newer = reconciler.handle("session-1", {
+      method: "turn/started",
+      params: { threadId: "thread-1", turn: { id: "turn-2", status: "inProgress" } },
+      receivedAt: "2026-09-01T12:00:00.001Z"
+    });
+    releaseRepair();
+
+    await restoring;
+    await newer;
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledOnce();
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "turn/started",
+      turnId: "turn-2"
+    }));
+  });
+
+  it("does not let a foreign child turn suppress root interruption recovery", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+    await reconciler.handle("session-1", {
+      method: "turn/started",
+      params: { threadId: "thread-child", turn: { id: "turn-child", status: "inProgress" } },
+      receivedAt: "2026-09-01T11:59:59.000Z"
+    });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "turn/completed",
+      turnId: "turn-1",
+      turnFailure: expect.objectContaining({ failureCode: "turn_interrupted" })
+    }));
+  });
+
+  it("does not let an account update during repair suppress root interruption recovery", async () => {
+    const store = projectionStore([]);
+    let releaseRepair = () => undefined;
+    let markRepairStarted = () => undefined;
+    const repairStarted = new Promise<void>((resolve) => { markRepairStarted = resolve; });
+    store.repairAppServerProjectionThread.mockImplementationOnce(async () => {
+      markRepairStarted();
+      await new Promise<void>((resolve) => { releaseRepair = resolve; });
+      return { messagesRemoved: 0, processesRemoved: 0, reconciliationReset: false };
+    });
+    const onAccountUpdated = vi.fn();
+    const reconciler = new CodexAppServerReconciler(
+      store as unknown as AppServerProjectionStore,
+      { publish: vi.fn() },
+      undefined,
+      onAccountUpdated
+    );
+    const restoring = reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      { id: "turn-1", status: "interrupted" },
+      "2026-09-01T12:00:00.000Z"
+    );
+    await repairStarted;
+    const accountUpdate = reconciler.handle("session-1", {
+      method: "account/updated",
+      params: { authMode: "chatgpt" },
+      receivedAt: "2026-09-01T12:00:00.001Z"
+    });
+    releaseRepair();
+
+    await restoring;
+    await accountUpdate;
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "turn/completed",
+      turnId: "turn-1"
+    }));
+    expect(onAccountUpdated).toHaveBeenCalledOnce();
+  });
+
   it("forwards account updates before thread-scoped projection filtering", async () => {
     const store = projectionStore([]);
     const onAccountUpdated = vi.fn();
@@ -397,9 +651,14 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
     provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
   };
   let state: AppServerReconciliationState | null = null;
+  const intentionalInterruptions = new Map<string, "operator" | "budget_guard">();
   return {
     applyAppServerProjection: vi.fn(async (projection) => {
       order.push("apply");
+      const interruption = projection.message?.payload?.interruption as Record<string, unknown> | undefined;
+      if (interruption?.kind === "operator" || interruption?.kind === "budget_guard") {
+        intentionalInterruptions.set(`${interruption.threadId}:${interruption.turnId}`, interruption.kind);
+      }
       if (projection.status) status = projection.status;
       state = { ...reconciliationState(projection.status), ...projection, evidence: projection.evidence };
       return {
@@ -412,6 +671,9 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
       };
     }),
     getAppServerReconciliationState: vi.fn(async () => { order.push("read"); return state; }),
+    getAppServerTurnInterruptionKind: vi.fn(async (_sessionId, threadId, turnId) => (
+      intentionalInterruptions.get(`${threadId}:${turnId}`) ?? null
+    )),
     latestPlanReadyMessage: vi.fn(async () => null),
     getSession: vi.fn(async () => {
       order.push("session");

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -63,7 +63,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     this.executablePath = options.executablePath ?? process.env.PATH ?? null;
   }
 
-  async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef> {
+  async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef & { launchDisposition: "started" | "reused" }> {
     validateMcpServers(spec.mcpServers);
     const paths = runtimePaths(this.runtimeRoot, spec.capabilityId, this.socketRoot);
     validateSocketPath(paths.socketPath);
@@ -77,8 +77,6 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       CODEX_HOME: spec.codexHome
     };
     const nextEnvironment = environmentFileContents(environment);
-    const environmentMatches = await readFile(paths.environmentPath, "utf8").then((current) => current === nextEnvironment).catch(() => false);
-
     const runtime: SystemdSessionRuntimeRef = {
       kind: "systemd_service",
       unit: paths.unit,
@@ -87,7 +85,12 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       codexVersion: spec.codexVersion
     };
     const existing = await this.inspect(runtime);
-    if (existing.activeState === "active" && existing.socketPresent && environmentMatches) return { ...runtime, state: "connected" };
+    // Recovery reconnects to a healthy runtime even when the desired launch
+    // environment changed while muxpilot was offline. Pending environment
+    // changes are applied later by SessionManager at a safe boundary.
+    if (existing.activeState === "active" && existing.socketPresent) {
+      return { ...runtime, state: "connected", launchDisposition: "reused" };
+    }
     if (existing.activeState && existing.activeState !== "inactive") {
       await this.dependencies.run("systemctl", ["--user", "stop", paths.unit]).catch(() => undefined);
     }
@@ -96,7 +99,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     await this.dependencies.run("systemctl", ["--user", "reset-failed", paths.unit]).catch(() => undefined);
     await this.dependencies.run("systemd-run", systemdRunArgs(spec, paths));
     await this.waitUntilReady(runtime);
-    return { ...runtime, state: "connected" };
+    return { ...runtime, state: "connected", launchDisposition: "started" };
   }
 
   async reconnect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeProxyConnection> {

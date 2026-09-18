@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage, ManagedSession } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
+import { AppServerLaunchAttemptError } from "../src/services/sessionDrivers/codexAppServerDriver.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 
 const temporaryRoots: string[] = [];
@@ -14,7 +15,10 @@ afterEach(async () => {
 });
 
 describe("SessionManager app-server helpers", () => {
-  it("retries a confirmed failed turn with a new persisted message and client identity", async () => {
+  it.each([
+    ["turn_failed", "Inspect the documents bug"],
+    ["turn_interrupted", "Continue the interrupted work. First inspect the existing transcript, repository state, and any partial side effects so you do not repeat completed or external actions. Then continue from the last safe point."]
+  ] as const)("recovers a confirmed %s turn with a new persisted message and client identity", async (failureCode, expectedText) => {
     const directory = await mkdtemp(join(tmpdir(), "muxpilot-failed-turn-retry-"));
     temporaryRoots.push(directory);
     const db = new AppDatabase(join(directory, "test.db"));
@@ -29,11 +33,14 @@ describe("SessionManager app-server helpers", () => {
       timestamp: "2026-09-17T15:21:17.000Z",
       text: "Inspect the documents bug",
       payload: {
+        ...(failureCode === "turn_interrupted" ? {
+          content: [{ type: "image" as const, id: "/images/original.png", mimeType: "image/png" }]
+        } : {}),
         collaborationMode: "plan",
         muxpilotSubmission: {
           state: "failed",
           deliveryPhase: "failed",
-          failureCode: "turn_failed",
+          failureCode,
           failureReason: "Selected model is at capacity.",
           threadId: "thread-1",
           turnId: "failed-turn",
@@ -67,7 +74,7 @@ describe("SessionManager app-server helpers", () => {
       { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
     );
 
-    await manager.act(session.id, { type: "retryInputDelivery" });
+    await manager.act(session.id, { type: "retryInputDelivery", messageId: failedMessage.id, turnId: "failed-turn" });
 
     const messages = await db.listMessages(session.id);
     expect(messages).toHaveLength(2);
@@ -80,7 +87,7 @@ describe("SessionManager app-server helpers", () => {
       } }
     });
     expect(messages[1]).toMatchObject({
-      text: failedMessage.text,
+      text: expectedText,
       payload: { muxpilotSubmission: {
         state: "acknowledged",
         retryOfMessageId: failedMessage.id,
@@ -88,16 +95,86 @@ describe("SessionManager app-server helpers", () => {
         turnId: "retry-turn"
       } }
     });
+    if (failureCode === "turn_interrupted") expect(messages[1]?.payload.content).toBeUndefined();
     expect(sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ id: session.id, inputMode: "plan" }),
-      failedMessage.text,
+      expectedText,
       messages[1]?.id,
       undefined
     );
     expect(await db.getSession(session.id)).toMatchObject({ status: "planning" });
+    await expect(manager.act(session.id, {
+      type: "retryInputDelivery",
+      messageId: failedMessage.id,
+      turnId: "failed-turn"
+    })).rejects.toThrow("failed turn changed");
+    expect(sendMessage).toHaveBeenCalledOnce();
     manager.stop();
     await db.close();
   });
+
+  it.each(["retryInputDelivery", "dismissInputDeliveryFailure"] as const)(
+    "%s accepts a message-bound pre-receipt failure without a turn id",
+    async (actionType) => {
+      const directory = await mkdtemp(join(tmpdir(), "muxpilot-no-turn-failure-"));
+      temporaryRoots.push(directory);
+      const db = new AppDatabase(join(directory, "test.db"));
+      const session = { ...managedSession(), status: "input_failed" as const };
+      await db.upsertSession(session, "2026-09-17T15:21:19.000Z");
+      const failedMessage: ChatMessage = {
+        id: "failed-before-receipt",
+        sessionId: session.id,
+        sequence: 1,
+        type: "user",
+        role: "user",
+        timestamp: "2026-09-17T15:21:17.000Z",
+        text: "Retry me safely",
+        payload: {
+          muxpilotSubmission: {
+            state: "failed",
+            deliveryPhase: "failed",
+            failureCode: "app_server_rejected",
+            failureReason: "Codex rejected the input.",
+            clientMessageId: "failed-before-receipt",
+            attemptCount: 1
+          }
+        }
+      };
+      await db.appendMessage(failedMessage);
+      const reconcileInput = vi.fn(async () => ({
+        clientMessageId: failedMessage.id,
+        threadId: "thread-1",
+        turnId: "reconciled-turn",
+        acceptedAt: "2026-09-17T15:30:00.000Z"
+      }));
+      const driver = { reconcileInput, setPreferences: vi.fn(async () => undefined) };
+      const manager = new SessionManager(
+        db,
+        { stop: vi.fn() } as never,
+        new EventBus(),
+        60_000,
+        60_000,
+        {} as never,
+        null,
+        null,
+        null,
+        null,
+        {},
+        null,
+        { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
+      );
+
+      await manager.act(session.id, { type: actionType, messageId: failedMessage.id, turnId: null });
+
+      const updated = (await db.listMessages(session.id))[0];
+      expect(updated?.payload.muxpilotSubmission).toMatchObject(actionType === "retryInputDelivery"
+        ? { state: "acknowledged", turnId: "reconciled-turn" }
+        : { state: "dismissed" });
+      expect(reconcileInput).toHaveBeenCalledTimes(actionType === "retryInputDelivery" ? 1 : 0);
+      manager.stop();
+      await db.close();
+    }
+  );
 
   it("uses available authentication for fresh sessions while existing-session input stays reconciled", async () => {
     const directory = await mkdtemp(join(tmpdir(), "muxpilot-auth-admission-"));
@@ -471,6 +548,7 @@ describe("SessionManager app-server helpers", () => {
         sessionId: current.id,
         provider: current.provider!,
         runtime: connectedRuntime,
+        launchDisposition: "started" as const,
         capabilities: current.capabilities,
         ready: Promise.resolve()
       })),
@@ -532,6 +610,7 @@ describe("SessionManager app-server helpers", () => {
         sessionId: current.id,
         provider: replacementProvider,
         runtime: connectedRuntime,
+        launchDisposition: "started" as const,
         capabilities: current.capabilities,
         ready: Promise.resolve()
       })),
@@ -575,6 +654,157 @@ describe("SessionManager app-server helpers", () => {
       cwd: directory
     }));
     expect(driver.resume).not.toHaveBeenCalled();
+  });
+
+  it("does not kill a reused runtime when post-resume finalization fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-reused-resume-failure-"));
+    temporaryRoots.push(directory);
+    let current = {
+      ...managedSession(),
+      cwd: directory,
+      status: "idle" as const,
+      documentScopeId: "scope-1"
+    };
+    const failure = new Error("preference update failed");
+    const driver = {
+      resume: vi.fn(async () => ({
+        sessionId: current.id,
+        provider: current.provider!,
+        runtime: current.runtime!,
+        launchDisposition: "reused" as const,
+        capabilities: current.capabilities,
+        ready: Promise.resolve()
+      })),
+      setPreferences: vi.fn(async () => { throw failure; }),
+      rename: vi.fn(async () => undefined),
+      kill: vi.fn(async () => undefined)
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; })
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      managedEnvironment: {},
+      requireAppServerDriver: () => driver,
+      ensureDocumentScope: vi.fn(async () => "scope-1"),
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      performAppServerResume(session: ManagedSession): Promise<ManagedSession>;
+    }).performAppServerResume(current)).rejects.toBe(failure);
+
+    expect(driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("preserves an exhausted agent budget block through app-server recovery", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-budget-block-recovery-"));
+    temporaryRoots.push(directory);
+    let current = {
+      ...managedChild("session-1", "parent", "parent"),
+      cwd: directory,
+      status: "blocked" as const,
+      documentScopeId: "scope-1",
+      agentOwnership: {
+        ...managedChild("session-1", "parent", "parent").agentOwnership!,
+        budgetExhaustedAt: "2026-09-13T00:02:00.000Z"
+      }
+    };
+    const driver = {
+      resume: vi.fn(async () => ({
+        sessionId: current.id,
+        provider: current.provider!,
+        runtime: current.runtime!,
+        launchDisposition: "reused" as const,
+        capabilities: current.capabilities,
+        ready: Promise.resolve()
+      })),
+      setPreferences: vi.fn(async () => undefined),
+      rename: vi.fn(async () => undefined),
+      kill: vi.fn(async () => undefined)
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
+      setSessionInitializationResult: vi.fn(async (_id: string, status: ManagedSession["status"], startupError: string | null) => {
+        current = { ...current, status, initializing: false, startupError };
+        return current;
+      })
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      managedEnvironment: {},
+      requireAppServerDriver: () => driver,
+      ensureDocumentScope: vi.fn(async () => "scope-1"),
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      bindOrchestratedLaunch: vi.fn(async () => undefined),
+      processQueuedInputs: vi.fn(async () => undefined),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      performAppServerResume(session: ManagedSession): Promise<ManagedSession>;
+    }).performAppServerResume(current)).resolves.toMatchObject({ status: "blocked" });
+
+    expect(db.setSessionInitializationResult).toHaveBeenCalledWith(
+      current.id,
+      "blocked",
+      null,
+      expect.any(String)
+    );
+  });
+
+  it("does not mark a reused runtime failed when reconnect rejects", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-reused-reconnect-failure-"));
+    temporaryRoots.push(directory);
+    let current = {
+      ...managedSession(),
+      cwd: directory,
+      status: "waiting" as const,
+      documentScopeId: "scope-1"
+    };
+    const failure = new AppServerLaunchAttemptError("reused", new Error("reconciliation failed"));
+    const driver = {
+      resume: vi.fn(async () => { throw failure; }),
+      kill: vi.fn(async () => undefined)
+    };
+    const db = {
+      getSession: vi.fn(async () => current),
+      setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
+      setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
+      upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
+      setSessionInitializationResult: vi.fn(async (_id: string, status: ManagedSession["status"], startupError: string | null) => {
+        current = { ...current, status, initializing: false, startupError };
+        return current;
+      })
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      managedEnvironment: {},
+      requireAppServerDriver: () => driver,
+      ensureDocumentScope: vi.fn(async () => "scope-1"),
+      withDocumentLaunchOptions: vi.fn(async (options: object) => options),
+      prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect((manager as unknown as {
+      resumeAppServerSession(session: ManagedSession): Promise<ManagedSession>;
+    }).resumeAppServerSession(current)).rejects.toBe(failure);
+
+    expect(current).toMatchObject({
+      status: "startup_failed",
+      runtime: { state: "connected" },
+      startupError: "reconciliation failed"
+    });
+    expect(driver.kill).not.toHaveBeenCalled();
   });
 
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
@@ -895,6 +1125,52 @@ describe("SessionManager app-server helpers", () => {
 
     await expect(manager.act(session.id, { type: "setApprovalMode", mode: "full" })).rejects.toThrow("inherited from its parent");
     expect(setSessionApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it("marks automatic work-token budget interruptions as budget guard actions", async () => {
+    const session = {
+      ...managedSession(),
+      contextUsage: {
+        activeTokens: 100,
+        contextWindowTokens: 1000,
+        contextPercent: 10,
+        lifetimeInputTokens: 700,
+        lifetimeCachedInputTokens: 0,
+        lifetimeOutputTokens: 200,
+        lifetimeReasoningTokens: 100,
+        lifetimeTotalTokens: 1000,
+        lifetimeWorkTokens: 1000,
+        sampledAt: "2026-09-13T00:01:00.000Z"
+      },
+      agentOwnership: {
+        parentSessionId: "parent",
+        rootSessionId: "parent",
+        origin: "created" as const,
+        createdAt: "2026-09-13T00:00:00.000Z",
+        workTokenBaseline: 0,
+        workTokenBudget: 1000,
+        completedAt: null,
+        budgetExhaustedAt: null
+      }
+    };
+    const interrupt = vi.fn(async () => "interrupted" as const);
+    const db = {
+      setSessionAgentOwnership: vi.fn(async () => undefined),
+      setSessionStatus: vi.fn(async () => undefined),
+      addAudit: vi.fn(async () => undefined)
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      requireAppServerDriver: () => ({ interrupt }),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await (manager as unknown as {
+      enforceAgentWorkTokenBudget(session: ManagedSession): Promise<void>;
+    }).enforceAgentWorkTokenBudget(session);
+
+    expect(interrupt).toHaveBeenCalledWith(session, null, "budget_guard");
+    expect(db.setSessionStatus).toHaveBeenCalledWith(session.id, "blocked", expect.any(String));
   });
 
   it("kills attached descendants deepest-first and leaves detached sessions alone", async () => {

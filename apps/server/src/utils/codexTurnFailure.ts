@@ -1,7 +1,17 @@
 export interface CodexTurnFailure {
-  failureCode: "turn_failed";
+  failureCode: "turn_failed" | "turn_interrupted";
   providerErrorCode: string | null;
   failureReason: string;
+}
+
+export function codexTurnInterruption(value: unknown): CodexTurnFailure | null {
+  const turn = record(value);
+  if (turn?.status !== "interrupted") return null;
+  return {
+    failureCode: "turn_interrupted",
+    providerErrorCode: null,
+    failureReason: "Muxpilot found that Codex marked this turn interrupted after reconnecting. The interruption cause could not be confirmed. Partial work may already exist; resume to inspect it and continue safely."
+  };
 }
 
 export function codexTurnFailure(value: unknown): CodexTurnFailure | null {

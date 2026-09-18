@@ -45,6 +45,7 @@ import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../
 import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "./sessionDrivers/types.js";
 import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
 import {
+  AppServerLaunchAttemptError,
   AppServerSteerUnavailableError,
   PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX,
   PLAN_IMPLEMENTATION_MESSAGE
@@ -155,7 +156,8 @@ type InputDeliveryFailureCode =
   | "no_codex_acknowledgement"
   | "session_unavailable"
   | "app_server_rejected"
-  | "turn_failed";
+  | "turn_failed"
+  | "turn_interrupted";
 
 export class SessionManager {
   private discoveryTimer: NodeJS.Timeout | null = null;
@@ -1882,7 +1884,7 @@ export class SessionManager {
     if (used < ownership.workTokenBudget) return;
     const exhaustedAt = nowIso();
     try {
-      await this.interruptSessionRuntime(session);
+      await this.interruptSessionRuntime(session, "budget_guard");
     } catch (error) {
       await this.db.addAudit(
         "muxpilot",
@@ -2227,8 +2229,8 @@ export class SessionManager {
     return run;
   }
 
-  private async interruptSessionRuntime(session: ManagedSession): Promise<void> {
-    await this.requireAppServerDriver().interrupt(session, null);
+  private async interruptSessionRuntime(session: ManagedSession, intent: "budget_guard"): Promise<void> {
+    await this.requireAppServerDriver().interrupt(session, null, intent);
   }
 
   private async waitForAgentChildReady(sessionId: string): Promise<void> {
@@ -3035,6 +3037,7 @@ export class SessionManager {
               sourceThreadId: sourceThreadId!
             });
       } catch (error) {
+        if (error instanceof AppServerLaunchAttemptError && error.launchDisposition === "reused") throw error;
         throw new AppServerRuntimeStoppedError(error);
       }
       recoveredLaunch = launch;
@@ -3072,7 +3075,9 @@ export class SessionManager {
       const reconciled = await this.db.getSession(session.id);
       const ready = await this.db.setSessionInitializationResult(
         session.id,
-        startupReadyStatus(reconciled?.status),
+        session.status === "blocked" && session.agentOwnership?.budgetExhaustedAt
+          ? "blocked"
+          : startupReadyStatus(reconciled?.status),
         null,
         nowIso()
       );
@@ -3082,8 +3087,10 @@ export class SessionManager {
       return ready;
     } catch (error) {
       if (recoveredLaunch) {
-        await driver.kill(appServerLaunchSession(recoveredLaunch, sessionName(session), directory)).catch(() => undefined);
-        throw new AppServerRuntimeStoppedError(error);
+        if (recoveredLaunch.launchDisposition === "started") {
+          await driver.kill(appServerLaunchSession(recoveredLaunch, sessionName(session), directory)).catch(() => undefined);
+          throw new AppServerRuntimeStoppedError(error);
+        }
       }
       throw error;
     }
@@ -3225,7 +3232,7 @@ export class SessionManager {
             await this.heavyCommandQueue.cancelWorkspace(current.gitWorkspace.id, "session interrupted by operator");
             heavyCommandCancellationRequested = true;
           }
-          outcome = await driver.interrupt(current, null);
+          outcome = await driver.interrupt(current, null, "operator");
         } catch (error) {
           await this.db.addAudit("local", "interrupt_runtime", sessionId, JSON.stringify({
             heavyCommandCancellationRequested,
@@ -3285,8 +3292,8 @@ export class SessionManager {
     }
     if (action.type === "setFastMode") await this.setFastMode(session, action.enabled);
     if (action.type === "setAgentParent") await this.operatorSetAgentParent(sessionId, action.parentSessionId);
-    if (action.type === "retryInputDelivery") await this.retryInputDelivery(session);
-    if (action.type === "dismissInputDeliveryFailure") await this.dismissInputDeliveryFailure(session);
+    if (action.type === "retryInputDelivery") await this.retryInputDelivery(session, action.messageId, action.turnId);
+    if (action.type === "dismissInputDeliveryFailure") await this.dismissInputDeliveryFailure(session, action.messageId, action.turnId);
     await this.db.addAudit("local", action.type, sessionId, "ok", nowIso());
     const updatedSession = await this.db.getSession(sessionId);
     this.publish("session.updated", sessionId, updatedSession);
@@ -3384,14 +3391,20 @@ export class SessionManager {
     return failed;
   }
 
-  private async retryInputDelivery(session: ManagedSession): Promise<void> {
+  private async retryInputDelivery(session: ManagedSession, expectedMessageId: string, expectedTurnId: string | null): Promise<void> {
     if (this.deliveringInputSessionIds.has(session.id)) throw new InputDeliveryError("Another input delivery is already in progress for this session");
-    session = await this.applyPendingSessionEnvironment(session);
-    const message = await this.db.latestUserMessage(session.id);
-    const submission = message ? muxpilotSubmission(message) : null;
-    const retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
+    let message = await this.db.latestUserMessage(session.id);
+    let submission = message ? muxpilotSubmission(message) : null;
+    requireInputFailureIdentity(message, submission, expectedMessageId, expectedTurnId);
+    let retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
     if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) throw new InputDeliveryError("There is no failed input delivery to retry");
-    if (submission.failureCode === "turn_failed") {
+    session = await this.applyPendingSessionEnvironment(session);
+    message = await this.db.latestUserMessage(session.id);
+    submission = message ? muxpilotSubmission(message) : null;
+    requireInputFailureIdentity(message, submission, expectedMessageId, expectedTurnId);
+    retryableDismissedFailure = submission?.state === "dismissed" && submission.deliveryPhase === "failed";
+    if (!message || !submission || (submission.state !== "failed" && !retryableDismissedFailure)) throw new InputDeliveryError("There is no failed input delivery to retry");
+    if (submission.failureCode === "turn_failed" || submission.failureCode === "turn_interrupted") {
       await this.retryFailedTurn(session, message, submission);
       return;
     }
@@ -3412,15 +3425,20 @@ export class SessionManager {
     const actor = recordValue(submission.actor);
     const actorSessionId = actor?.kind === "session" && typeof actor.sessionId === "string" ? actor.sessionId : null;
     const submittedAt = nowIso();
+    const interrupted = submission.failureCode === "turn_interrupted";
+    const continuationText = interrupted
+      ? "Continue the interrupted work. First inspect the existing transcript, repository state, and any partial side effects so you do not repeat completed or external actions. Then continue from the last safe point."
+      : failedMessage.text;
+    const retryContent = interrupted ? undefined : content;
     let retry = await this.recordSubmittedInput(
       session,
-      failedMessage.text,
+      continuationText,
       mode,
       submittedAt,
       null,
       actorSessionId,
       "turn_start",
-      content
+      retryContent
     );
     retry = await this.updateInputDelivery(retry, {
       retryOfMessageId: failedMessage.id,
@@ -3515,9 +3533,10 @@ export class SessionManager {
     }
   }
 
-  private async dismissInputDeliveryFailure(session: ManagedSession): Promise<void> {
+  private async dismissInputDeliveryFailure(session: ManagedSession, expectedMessageId: string, expectedTurnId: string | null): Promise<void> {
     const message = await this.db.latestUserMessage(session.id);
     const submission = message ? muxpilotSubmission(message) : null;
+    requireInputFailureIdentity(message, submission, expectedMessageId, expectedTurnId);
     if (!message || !submission || submission.state !== "failed") {
       throw new InputDeliveryError("There is no failed input delivery to dismiss");
     }
@@ -3984,6 +4003,18 @@ function numericSubmissionField(submission: Record<string, unknown>, field: stri
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
+function requireInputFailureIdentity(
+  message: ChatMessage | null,
+  submission: Record<string, unknown> | null,
+  expectedMessageId: string,
+  expectedTurnId: string | null
+): void {
+  const actualTurnId = typeof submission?.turnId === "string" && submission.turnId ? submission.turnId : null;
+  if (!message || message.id !== expectedMessageId || actualTurnId !== expectedTurnId) {
+    throw new InputDeliveryError("The failed turn changed before this action was submitted. Refresh and try again.");
+  }
+}
+
 function inputPromptHash(sessionId: string, text: string): string {
   return stableId(`${sessionId}:${text}`);
 }
@@ -3992,6 +4023,7 @@ function inputDeliveryFailureMessage(reason: InputDeliveryFailureCode): string {
   if (reason === "session_unavailable") return "The session became unavailable before the input could be replayed.";
   if (reason === "app_server_rejected") return "Codex app-server did not accept the input.";
   if (reason === "turn_failed") return "Codex accepted the input but could not complete the turn.";
+  if (reason === "turn_interrupted") return "Codex marked the turn interrupted. The interruption cause could not be confirmed.";
   return "Codex app-server did not acknowledge the input.";
 }
 

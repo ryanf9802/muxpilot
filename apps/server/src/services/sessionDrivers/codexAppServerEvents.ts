@@ -48,8 +48,54 @@ export function projectAppServerEvent(
   if (notification.method === "turn/started") {
     return projection(notification, identity(threadId, turnId, null, null), "working", false, null);
   }
+  if (notification.method === "muxpilot/turn/intentionallyInterrupted") {
+    const eventIdentity = identity(threadId, turnId, null, null);
+    const kind = params.kind === "budget_guard" ? "budget_guard" : "operator";
+    return projection(notification, eventIdentity, null, false, {
+      id: stableProjectionId(eventIdentity, `${kind}Interruption`),
+      type: "status",
+      role: "system",
+      timestamp: receivedAt,
+      text: kind === "budget_guard"
+        ? "Turn interrupted because the agent work-token budget was exhausted."
+        : "Turn interrupted by operator.",
+      payload: {
+        source: "muxpilot",
+        method: notification.method,
+        codexItemIdentity: eventIdentity,
+        appServerIdentity: eventIdentity,
+        interruption: { kind, threadId, turnId, observedAt: receivedAt }
+      }
+    });
+  }
   if (notification.method === "turn/completed") {
-    return projection(notification, identity(threadId, turnId, null, null), completedTurnStatus(turn), false, null);
+    const eventIdentity = identity(threadId, turnId, null, null);
+    const unexpectedInterruption = params.muxpilotUnexpectedInterruption === true;
+    return projection(
+      notification,
+      eventIdentity,
+      completedTurnStatus(turn),
+      false,
+      unexpectedInterruption ? {
+        id: stableProjectionId(eventIdentity, "unexpectedInterruption"),
+        type: "status",
+        role: "system",
+        timestamp: receivedAt,
+        text: "Codex marked this turn interrupted before completion. The interruption cause could not be confirmed. Partial work may already exist.",
+        payload: {
+          source: "codex_app_server",
+          method: notification.method,
+          codexItemIdentity: eventIdentity,
+          appServerIdentity: eventIdentity,
+          interruption: {
+            kind: "unexpected",
+            threadId,
+            turnId,
+            observedAt: receivedAt
+          }
+        }
+      } : null
+    );
   }
 
   const item = record(params.item);

@@ -697,6 +697,22 @@ export function inputDeliveryFailureDetail(messages: ChatMessage[]): string {
   return typeof detail === "string" ? detail : "";
 }
 
+export function inputDeliveryFailureCode(messages: ChatMessage[]): string {
+  const latestUser = messages.findLast((message) => message.role === "user");
+  const submission = latestUser?.payload.muxpilotSubmission;
+  if (!submission || typeof submission !== "object" || Array.isArray(submission)) return "";
+  const code = (submission as Record<string, unknown>).failureCode;
+  return typeof code === "string" ? code : "";
+}
+
+export function inputDeliveryFailureIdentity(messages: ChatMessage[]): { messageId: string; turnId: string | null } | null {
+  const latestUser = messages.findLast((message) => message.role === "user");
+  const submission = latestUser?.payload.muxpilotSubmission;
+  if (!latestUser || !submission || typeof submission !== "object" || Array.isArray(submission)) return null;
+  const turnId = (submission as Record<string, unknown>).turnId;
+  return { messageId: latestUser.id, turnId: typeof turnId === "string" && turnId ? turnId : null };
+}
+
 function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
   if (item.type === "range") return { id: item.id, text: item.label };
   const queueEvent = heavyCommandQueueEventFromPayload(item.message.payload);
@@ -1791,6 +1807,8 @@ export function SessionView() {
 
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const inputDeliveryFailure = useMemo(() => inputDeliveryFailureDetail(loadedMessages), [loadedMessages]);
+  const inputDeliveryCode = useMemo(() => inputDeliveryFailureCode(loadedMessages), [loadedMessages]);
+  const inputDeliveryIdentity = useMemo(() => inputDeliveryFailureIdentity(loadedMessages), [loadedMessages]);
   const lastSequence = useMemo(() => transcriptItems.at(-1)?.lastSequence ?? 0, [transcriptItems]);
   const firstSequence = useMemo(() => transcriptItems[0]?.firstSequence ?? 0, [transcriptItems]);
   lastSequenceRef.current = lastSequence;
@@ -3423,9 +3441,14 @@ export function SessionView() {
         <InputDeliveryFailureBanner
           busyAction={actionBusy}
           detail={inputDeliveryFailure}
+          interrupted={inputDeliveryCode === "turn_interrupted"}
           error={inputDeliveryError}
-          onRetry={() => void resolveInputDelivery({ type: "retryInputDelivery" })}
-          onDismiss={() => void resolveInputDelivery({ type: "dismissInputDeliveryFailure" })}
+          onRetry={() => inputDeliveryIdentity
+            ? void resolveInputDelivery({ type: "retryInputDelivery", ...inputDeliveryIdentity })
+            : setInputDeliveryError("The interrupted turn changed. Refresh and try again.")}
+          onDismiss={() => inputDeliveryIdentity
+            ? void resolveInputDelivery({ type: "dismissInputDeliveryFailure", ...inputDeliveryIdentity })
+            : setInputDeliveryError("The interrupted turn changed. Refresh and try again.")}
         />
       ) : null}
 
@@ -3896,12 +3919,14 @@ export function SessionView() {
 export function InputDeliveryFailureBanner({
   busyAction,
   detail,
+  interrupted = false,
   error,
   onRetry,
   onDismiss
 }: {
   busyAction: SessionAction["type"] | null;
   detail: string;
+  interrupted?: boolean;
   error: string;
   onRetry: () => void;
   onDismiss: () => void;
@@ -3909,13 +3934,13 @@ export function InputDeliveryFailureBanner({
   return (
     <section className="session-input-failed-banner" role="alert">
       <div>
-        <strong>The last input needs attention.</strong>
-        <p>{detail || "Codex did not complete the last input."} The message remains preserved for retry or dismissal.</p>
+        <strong>{interrupted ? "The last turn was interrupted." : "The last input needs attention."}</strong>
+        <p>{detail || "Codex did not complete the last input."} The message remains preserved for {interrupted ? "resumption" : "retry"} or dismissal.</p>
         {error ? <p className="session-input-failed-error">{error}</p> : null}
       </div>
       <div className="session-input-failed-actions">
         <button type="button" disabled={Boolean(busyAction)} onClick={onRetry}>
-          {busyAction === "retryInputDelivery" ? "Retrying…" : "Retry input"}
+          {busyAction === "retryInputDelivery" ? (interrupted ? "Resuming…" : "Retrying…") : (interrupted ? "Resume" : "Retry input")}
         </button>
         <button type="button" disabled={Boolean(busyAction)} onClick={onDismiss}>Dismiss</button>
       </div>

@@ -208,8 +208,8 @@ const actionSchema = z.discriminatedUnion("type", [
     additionalTokens: z.number().int().min(1).max(2_000_000),
     reason: z.string().trim().min(1).max(1_000)
   }),
-  z.object({ type: z.literal("retryInputDelivery") }),
-  z.object({ type: z.literal("dismissInputDeliveryFailure") }),
+  z.object({ type: z.literal("retryInputDelivery"), messageId: z.string().min(1), turnId: z.string().min(1).nullable() }),
+  z.object({ type: z.literal("dismissInputDeliveryFailure"), messageId: z.string().min(1), turnId: z.string().min(1).nullable() }),
   z.object({ type: z.literal("resumeAfterAuthentication") }),
   z.object({ type: z.literal("rename"), name: sessionNameSchema }),
   z.object({ type: z.literal("pin") }),

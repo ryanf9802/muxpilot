@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
 import {
   AppServerSteerUnavailableError,
+  AppServerLaunchAttemptError,
   CodexAppServerDriver,
   type AppServerDriverEventSink,
   type AppServerProcessStore,
@@ -31,11 +32,35 @@ describe("CodexAppServerDriver", () => {
     expect(harness.connections.reconnect).toHaveBeenCalledOnce();
     expect(harness.connections.fork).toHaveBeenCalledOnce();
     expect([start, resume, fork].map((result) => result.provider.threadId)).toEqual(["thread-1", "thread-1", "thread-1"]);
+    expect([start, resume, fork].map((result) => result.launchDisposition)).toEqual(["started", "started", "started"]);
     expect(start.capabilities).toMatchObject({
       sendMessage: true,
       approvals: true,
       questions: true,
       planActions: true
+    });
+  });
+
+  it("does not stop a reused healthy runtime when reconnect reconciliation fails", async () => {
+    const harness = createHarness();
+    harness.supervisor.start.mockResolvedValueOnce({ ...runtime, launchDisposition: "reused" });
+    harness.connections.reconnect.mockRejectedValueOnce(new Error("reconciliation failed"));
+
+    const resumed = harness.driver.resume(launchSpec("thread-1"));
+    await expect(resumed).rejects.toThrow("reconciliation failed");
+    await expect(resumed).rejects.toBeInstanceOf(AppServerLaunchAttemptError);
+
+    expect(harness.connections.close).toHaveBeenCalledWith("session-1");
+    expect(harness.supervisor.stop).not.toHaveBeenCalled();
+  });
+
+  it("reports a reused healthy runtime to recovery callers", async () => {
+    const harness = createHarness();
+    harness.supervisor.start.mockResolvedValueOnce({ ...runtime, launchDisposition: "reused" });
+
+    await expect(harness.driver.resume(launchSpec("thread-1"))).resolves.toMatchObject({
+      launchDisposition: "reused",
+      runtime
     });
   });
 
@@ -274,6 +299,7 @@ describe("CodexAppServerDriver", () => {
       "session-1",
       "thread-1",
       { type: "idle" },
+      null,
       "2026-09-01T12:00:00.000Z"
     );
     expect(order).toContain("restored");
@@ -615,7 +641,13 @@ describe("CodexAppServerDriver", () => {
   });
 
   it("interrupts the turn and terminates surviving background terminals", async () => {
-    const harness = createHarness();
+    const sink = {
+      handle: vi.fn(async () => undefined),
+      restore: vi.fn(async () => undefined),
+      recordIntentionalInterruption: vi.fn(async () => undefined)
+    } satisfies AppServerDriverEventSink;
+    const processStore = processStoreHarness();
+    const harness = createHarness(undefined, sink, processStore);
     const session = managedSession();
     await harness.driver.start(launchSpec());
     await harness.driver.sendMessage(session, "work", "client-1");
@@ -629,17 +661,176 @@ describe("CodexAppServerDriver", () => {
     });
     harness.rpc.request.mockResolvedValue({});
 
-    await harness.driver.interrupt(session, null);
+    await harness.driver.interrupt(session, null, "operator");
 
     expect(harness.rpc.request).toHaveBeenCalledWith(
       "turn/interrupt",
       { threadId: "thread-1", turnId: "turn-1" }
+    );
+    expect(sink.recordIntentionalInterruption).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "operator",
+      "2026-09-01T12:00:00.000Z"
     );
     expect(harness.rpc.request).toHaveBeenCalledWith(
       "thread/backgroundTerminals/terminate",
       { threadId: "thread-1", processId: "process-1" }
     );
     await expect(harness.driver.interrupt(session, null)).resolves.toBe("already_idle");
+  });
+
+  it("records a budget guard interruption without labeling it as operator initiated", async () => {
+    const sink = {
+      handle: vi.fn(async () => undefined),
+      restore: vi.fn(async () => undefined),
+      recordIntentionalInterruption: vi.fn(async () => undefined)
+    } satisfies AppServerDriverEventSink;
+    const harness = createHarness(undefined, sink);
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.driver.sendMessage(session, "work", "client-1");
+
+    await harness.driver.interrupt(session, null, "budget_guard");
+
+    expect(sink.recordIntentionalInterruption).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "budget_guard",
+      "2026-09-01T12:00:00.000Z"
+    );
+  });
+
+  it("completes a budget interruption when background-terminal cleanup fails", async () => {
+    const sink = {
+      handle: vi.fn(async () => undefined),
+      restore: vi.fn(async () => undefined),
+      recordIntentionalInterruption: vi.fn(async () => undefined)
+    } satisfies AppServerDriverEventSink;
+    const processStore = processStoreHarness();
+    const harness = createHarness(undefined, sink, processStore);
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.driver.sendMessage(session, "work", "client-1");
+    await harness.handlers.notification?.({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "command-1", type: "commandExecution", processId: "process-1" }
+      }
+    });
+    harness.rpc.request.mockImplementation(async (method: string) => {
+      if (method === "thread/backgroundTerminals/terminate") throw new Error("terminal cleanup failed");
+      return {};
+    });
+
+    await expect(harness.driver.interrupt(session, null, "budget_guard")).resolves.toBe("interrupted_cleanup_pending");
+
+    expect(sink.recordIntentionalInterruption).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "budget_guard",
+      "2026-09-01T12:00:00.000Z"
+    );
+    expect(processStore.removeAppServerTurnCommandProcess).not.toHaveBeenCalled();
+
+    harness.rpc.request.mockResolvedValue({});
+    await expect(harness.driver.interrupt(session, null, "budget_guard")).resolves.toBe("cleanup_completed");
+    expect(processStore.removeAppServerTurnCommandProcess).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-1",
+      "process-1"
+    );
+  });
+
+  it("reloads durable pending process ownership and sweeps it after reconnect", async () => {
+    const processStore = processStoreHarness();
+    processStore.getAppServerTurnInterruptionKind.mockResolvedValueOnce("budget_guard");
+    processStore.listAppServerCommandProcesses.mockResolvedValueOnce([{
+      sessionId: "session-1",
+      threadId: "thread-1",
+      turnId: "turn-interrupted",
+      itemId: "command-1",
+      processId: "process-surviving",
+      observedAt: "2026-09-01T11:59:00.000Z"
+    }]);
+    const harness = createHarness(undefined, undefined, processStore);
+    harness.rpc.request.mockImplementation(async (method: string) => (
+      method === "thread/backgroundTerminals/list"
+        ? { data: [{ itemId: "command-1", processId: "process-surviving" }] }
+        : {}
+    ));
+    await harness.driver.resume(launchSpec("thread-1"));
+
+    await expect(harness.driver.interrupt(managedSession(), null)).resolves.toBe("cleanup_completed");
+
+    expect(harness.rpc.request).toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-surviving" }
+    );
+    expect(processStore.removeAppServerTurnCommandProcess).toHaveBeenCalledWith(
+      "session-1",
+      "thread-1",
+      "turn-interrupted",
+      "process-surviving"
+    );
+  });
+
+  it("retries only durable deletion after remote process termination succeeds", async () => {
+    const processStore = processStoreHarness();
+    processStore.removeAppServerTurnCommandProcess
+      .mockRejectedValueOnce(new Error("database unavailable"))
+      .mockResolvedValueOnce(true);
+    const harness = createHarness(undefined, undefined, processStore);
+    const session = managedSession();
+    await harness.driver.start(launchSpec());
+    await harness.driver.sendMessage(session, "work", "client-1");
+    await harness.handlers.notification?.({
+      method: "item/started",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "command-1", type: "commandExecution", processId: "process-1" }
+      }
+    });
+
+    await expect(harness.driver.interrupt(session, null, "budget_guard"))
+      .resolves.toBe("interrupted_cleanup_pending");
+
+    processStore.listAppServerCommandProcesses.mockResolvedValueOnce([{
+      sessionId: "session-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "command-1",
+      processId: "process-1",
+      observedAt: "2026-09-01T12:00:00.000Z"
+    }]);
+    processStore.getAppServerTurnInterruptionKind.mockResolvedValueOnce("budget_guard");
+    const recovered = createHarness(undefined, undefined, processStore);
+    recovered.rpc.request.mockImplementation(async (method: string) => (
+      method === "thread/backgroundTerminals/list" ? { data: [] } : {}
+    ));
+    await recovered.driver.resume(launchSpec("thread-1"));
+    await expect(recovered.driver.interrupt(session, null, "budget_guard"))
+      .resolves.toBe("cleanup_completed");
+
+    const terminationCalls = harness.rpc.request.mock.calls.filter(([method]) => (
+      method === "thread/backgroundTerminals/terminate"
+    ));
+    expect(terminationCalls).toEqual([[
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-1" }
+    ]]);
+    expect(recovered.rpc.request).not.toHaveBeenCalledWith(
+      "thread/backgroundTerminals/terminate",
+      expect.anything()
+    );
+    expect(processStore.removeAppServerTurnCommandProcess).toHaveBeenCalledTimes(2);
   });
 
   it("persists command ownership before exposing lifecycle events and removes it on completion", async () => {
@@ -818,8 +1009,8 @@ describe("CodexAppServerDriver", () => {
       "thread/backgroundTerminals/terminate",
       { threadId: "thread-1", processId: "process-persistent" }
     );
-    expect(processStore.removeAppServerTurnCommandProcesses).toHaveBeenCalledWith(
-      "session-1", "thread-1", "turn-restored"
+    expect(processStore.removeAppServerTurnCommandProcess).toHaveBeenCalledWith(
+      "session-1", "thread-1", "turn-restored", "process-restored"
     );
   });
 
@@ -1009,6 +1200,7 @@ function createHarness(
   connections: Record<string, ReturnType<typeof vi.fn>>;
   connection: AppServerSessionConnection & { threadId: string };
   rpc: { request: ReturnType<typeof vi.fn>; respond: ReturnType<typeof vi.fn> };
+  processStore?: AppServerProcessStore;
   handlers: AppServerSessionHandlers;
 } {
   const rpc = {
@@ -1065,7 +1257,7 @@ function createHarness(
       now: () => new Date("2026-09-01T12:00:00.000Z")
     }
   );
-  return { driver, supervisor, connections, connection, rpc, get handlers() { return handlers; } };
+  return { driver, supervisor, connections, connection, rpc, processStore, get handlers() { return handlers; } };
 }
 
 function requestStore() {
@@ -1083,8 +1275,10 @@ function requestStore() {
 
 function processStoreHarness() {
   return {
+    getAppServerTurnInterruptionKind: vi.fn(async () => null),
     upsertAppServerCommandProcess: vi.fn(async () => undefined),
     removeAppServerCommandProcess: vi.fn(async () => true),
+    removeAppServerTurnCommandProcess: vi.fn(async () => true),
     removeAppServerTurnCommandProcesses: vi.fn(async () => 0),
     clearAppServerCommandProcesses: vi.fn(async () => 0),
     listAppServerCommandProcesses: vi.fn(async () => [])

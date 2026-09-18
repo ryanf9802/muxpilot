@@ -982,8 +982,8 @@ export type SessionAction =
   | { type: "setAgentParent"; parentSessionId: string | null }
   | { type: "choosePlanAction"; action: PlanActionChoice; messageId: string }
   | { type: "extendAgentBudget"; additionalTokens: number; reason: string }
-  | { type: "retryInputDelivery" }
-  | { type: "dismissInputDeliveryFailure" }
+  | { type: "retryInputDelivery"; messageId: string; turnId: string | null }
+  | { type: "dismissInputDeliveryFailure"; messageId: string; turnId: string | null }
   | { type: "resumeAfterAuthentication" }
   | { type: "rename"; name: string }
   | { type: "pin" }

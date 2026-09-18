@@ -48,6 +48,7 @@ import {
   inputModeAction,
   InputDeliveryFailureBanner,
   inputDeliveryFailureDetail,
+  inputDeliveryFailureIdentity,
   latestUserPromptTimestamp,
   latestUnmatchedPendingUserMessage,
   LatestGenerationRefreshGate,
@@ -169,6 +170,21 @@ describe("InputDeliveryFailureBanner", () => {
     expect(html).toContain("Retry failed");
     expect(html.match(/disabled/g)).toHaveLength(2);
   });
+
+  it("offers explicit resume for an interrupted turn", () => {
+    const html = renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
+      busyAction: null,
+      detail: "The turn was interrupted.",
+      interrupted: true,
+      error: "",
+      onRetry: () => undefined,
+      onDismiss: () => undefined
+    }));
+
+    expect(html).toContain("The last turn was interrupted");
+    expect(html).toContain(">Resume<");
+    expect(html).toContain("resumption or dismissal");
+  });
 });
 
 describe("child session attention", () => {
@@ -250,6 +266,32 @@ describe("inputDeliveryFailureDetail", () => {
       text: "prompt",
       payload: { muxpilotSubmission: { failureReason: "The composer changed." } }
     }])).toBe("The composer changed.");
+  });
+
+  it("binds failure actions to the latest failed message and provider turn", () => {
+    expect(inputDeliveryFailureIdentity([{
+      id: "failed",
+      sessionId: "session",
+      sequence: 1,
+      type: "user",
+      role: "user",
+      timestamp: "2026-08-24T00:00:00.000Z",
+      text: "prompt",
+      payload: { muxpilotSubmission: { failureCode: "turn_interrupted", turnId: "turn-1" } }
+    }])).toEqual({ messageId: "failed", turnId: "turn-1" });
+  });
+
+  it("binds a pre-receipt failure to its message when no provider turn exists", () => {
+    expect(inputDeliveryFailureIdentity([{
+      id: "failed",
+      sessionId: "session",
+      sequence: 1,
+      type: "user",
+      role: "user",
+      timestamp: "2026-08-24T00:00:00.000Z",
+      text: "prompt",
+      payload: { muxpilotSubmission: { failureCode: "app_server_rejected" } }
+    }])).toEqual({ messageId: "failed", turnId: null });
   });
 });
 

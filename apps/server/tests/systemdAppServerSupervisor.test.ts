@@ -54,7 +54,8 @@ describe("SystemdAppServerSupervisor", () => {
       unit: appServerServiceUnit(capabilityId),
       socketPath: paths.socketPath,
       state: "connected",
-      codexVersion: "0.152.0"
+      codexVersion: "0.152.0",
+      launchDisposition: "started"
     });
     expect(calls.find((call) => call.command === "systemd-run")?.args).toEqual(expect.arrayContaining([
       `--unit=${paths.unit}`,
@@ -87,6 +88,31 @@ describe("SystemdAppServerSupervisor", () => {
       socketPresent: true,
       attachmentCommand: `codex --remote 'unix://${paths.socketPath}'`
     });
+  });
+
+  it("reuses a healthy service when its desired environment changed", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-reuse-"));
+    const socketRoot = await mkdtemp(join(tmpdir(), "muxpilot-app-server-reuse-sockets-"));
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const supervisor = new SystemdAppServerSupervisor(root, {
+      run: vi.fn(async (command, args) => {
+        calls.push({ command, args });
+        return command === "systemctl" && args.includes("show")
+          ? { stdout: "ActiveState=active\nSubState=running\nMainPID=4242\nControlGroup=/user.slice/test\n" }
+          : { stdout: "" };
+      }),
+      socketReady: vi.fn(async () => true),
+      openProxy: vi.fn(),
+      delay: vi.fn(async () => undefined),
+      now: vi.fn(() => 0)
+    }, { executablePath: "/new/path", socketRoot });
+
+    await expect(supervisor.start(spec(root))).resolves.toMatchObject({
+      state: "connected",
+      launchDisposition: "reused"
+    });
+    expect(calls.some((call) => call.command === "systemctl" && call.args.includes("stop"))).toBe(false);
+    expect(calls.some((call) => call.command === "systemd-run")).toBe(false);
   });
 
   it("stops the durable service without deleting thread identity", async () => {

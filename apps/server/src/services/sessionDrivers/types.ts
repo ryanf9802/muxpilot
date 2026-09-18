@@ -43,6 +43,7 @@ export interface AgentSessionLaunchResult {
   sessionId: string;
   provider: AgentProviderRef;
   runtime: SessionRuntimeRef;
+  launchDisposition: "started" | "reused";
   capabilities: SessionCapabilities;
   ready: Promise<void>;
 }
@@ -54,7 +55,8 @@ export interface DriverInputReceipt {
   acceptedAt: string;
 }
 
-export type DriverInterruptOutcome = "interrupted" | "already_idle";
+export type DriverInterruptOutcome = "interrupted" | "interrupted_cleanup_pending" | "cleanup_completed" | "already_idle";
+export type DriverInterruptIntent = "operator" | "budget_guard";
 
 export interface DriverPlanActionRequest {
   plan: string | null;
@@ -87,7 +89,7 @@ export interface AgentSessionDriver {
   sendMessage(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt>;
   reconcileInput(session: ManagedSession, clientMessageId: string): Promise<DriverInputReceipt | null>;
   steer(session: ManagedSession, text: string, clientMessageId: string, content?: import("@muxpilot/core").MessageContentPart[]): Promise<DriverInputReceipt>;
-  interrupt(session: ManagedSession, expectedTurnId: string | null): Promise<DriverInterruptOutcome>;
+  interrupt(session: ManagedSession, expectedTurnId: string | null, intent?: DriverInterruptIntent): Promise<DriverInterruptOutcome>;
   kill(session: ManagedSession): Promise<void>;
   answerApproval(session: ManagedSession, requestId: string | number, decision: ApprovalDecision): Promise<void>;
   answerQuestion(session: ManagedSession, requestId: string | number, answer: QuestionAnswerRequest): Promise<void>;
@@ -136,7 +138,7 @@ export interface RuntimeEvidence {
 }
 
 export interface RuntimeSupervisor {
-  start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef>;
+  start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef & { launchDisposition?: "started" | "reused" }>;
   reconnect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeProxyConnection>;
   stop(runtime: SystemdSessionRuntimeRef): Promise<SystemdSessionRuntimeRef>;
   inspect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeEvidence>;

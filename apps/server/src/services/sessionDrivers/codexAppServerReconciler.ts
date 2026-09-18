@@ -9,12 +9,13 @@ import { eventId } from "../../utils/ids.js";
 import type { EventBus } from "../eventBus.js";
 import { projectAppServerEvent, type AppServerEventProjection } from "./codexAppServerEvents.js";
 import type { AppServerDriverEventSink } from "./codexAppServerDriver.js";
-import type { DriverEvent } from "./types.js";
-import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
+import type { DriverEvent, DriverInterruptIntent } from "./types.js";
+import { codexTurnFailure, codexTurnInterruption } from "../../utils/codexTurnFailure.js";
 
 export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
   getAppServerReconciliationState(sessionId: string): Promise<AppServerReconciliationState | null>;
+  getAppServerTurnInterruptionKind(sessionId: string, threadId: string, turnId: string): Promise<DriverInterruptIntent | null>;
   getSession(sessionId: string): Promise<ManagedSession | null>;
   upsertSession(session: ManagedSession, updatedAt: string): Promise<void>;
   latestPlanReadyMessage(sessionId: string): Promise<ChatMessage | null>;
@@ -22,6 +23,9 @@ export interface AppServerProjectionStore {
 }
 
 export class CodexAppServerReconciler implements AppServerDriverEventSink {
+  private readonly operationTails = new Map<string, Promise<void>>();
+  private readonly latestProjectedTurnIds = new Map<string, string>();
+
   constructor(
     private readonly store: AppServerProjectionStore,
     private readonly events: Pick<EventBus, "publish">,
@@ -29,10 +33,35 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     private readonly onAccountUpdated?: () => void
   ) {}
 
-  async handle(sessionId: string, event: DriverEvent): Promise<void> {
+  handle(sessionId: string, event: DriverEvent): Promise<void> {
+    const eventTurnId = driverEventTurnId(event.params);
+    const eventThreadId = driverEventThreadId(event.params);
+    if (eventThreadId && eventTurnId) this.latestProjectedTurnIds.set(threadTurnKey(sessionId, eventThreadId), eventTurnId);
+    return this.serialize(sessionId, async () => { await this.handleExclusive(sessionId, event); });
+  }
+
+  async recordIntentionalInterruption(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    intent: DriverInterruptIntent,
+    observedAt: string
+  ): Promise<void> {
+    await this.handle(sessionId, {
+      method: "muxpilot/turn/intentionallyInterrupted",
+      params: { threadId, turnId, kind: intent },
+      receivedAt: observedAt
+    });
+  }
+
+  private async handleExclusive(
+    sessionId: string,
+    event: DriverEvent,
+    recoveryGuard?: { threadKey: string; turnId: string }
+  ): Promise<boolean> {
     if (event.method === "account/updated") {
       this.onAccountUpdated?.();
-      return;
+      return true;
     }
     const authenticationError = authenticationFailure(event.method, event.params);
     if (authenticationError) {
@@ -48,22 +77,27 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       this.onAuthenticationFailure?.(sessionId, authenticationError);
     }
     const projection = projectAppServerEvent({ method: event.method, params: event.params }, event.receivedAt);
-    if (!projection || projection.transient) return;
+    if (!projection || projection.transient) return true;
     const existingSession = await this.requireSession(sessionId);
     const rootThreadId = existingSession.provider?.kind === "codex" ? existingSession.provider.threadId : null;
-    if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return;
+    if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return true;
     const current = await this.store.getAppServerReconciliationState(sessionId);
-    const normalizedProjection = preserveInputFailure(
-      normalizePlanModeStatus(projection, existingSession.inputMode),
-      existingSession.status
+    const normalizedProjection = preserveBudgetBlock(
+      preserveInputFailure(
+        normalizePlanModeStatus(projection, existingSession.inputMode),
+        existingSession.status
+      ),
+      existingSession
     );
     const pendingPlan = normalizedProjection.status === "idle"
       ? await this.store.latestPlanReadyMessage(sessionId)
       : null;
+    const projectedTurnId = recoveryGuard ? this.latestProjectedTurnIds.get(recoveryGuard.threadKey) : null;
+    if (projectedTurnId && projectedTurnId !== recoveryGuard?.turnId) return false;
     const applied = await this.store.applyAppServerProjection(input(
       sessionId,
       preservePlanReady(normalizedProjection, current, pendingPlan),
-      authenticationError ? null : codexTurnFailure(event.params),
+      authenticationError ? null : turnFailure(event.params),
       event.receivedAt
     ));
     const session = applied.messageChanged || applied.statusChanged
@@ -75,15 +109,72 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       this.publish("status.changed", sessionId, { status: applied.state.status }, event.receivedAt);
     }
     if (session) this.publish("session.updated", sessionId, session, event.receivedAt);
+    return true;
   }
 
-  async restore(sessionId: string, threadId: string, status: unknown, restoredAt: string): Promise<void> {
+  restore(
+    sessionId: string,
+    threadId: string,
+    status: unknown,
+    latestTurn: Record<string, unknown> | null,
+    restoredAt: string
+  ): Promise<void> {
+    return this.serialize(sessionId, () => this.restoreExclusive(sessionId, threadId, status, latestTurn, restoredAt));
+  }
+
+  private async restoreExclusive(
+    sessionId: string,
+    threadId: string,
+    status: unknown,
+    latestTurn: Record<string, unknown> | null,
+    restoredAt: string
+  ): Promise<void> {
     await this.store.repairAppServerProjectionThread(sessionId, threadId);
-    await this.handle(sessionId, {
+    const current = await this.store.getAppServerReconciliationState(sessionId);
+    const latestTurnId = stringValue(latestTurn?.id);
+    const recoveryGuard = latestTurnId ? { threadKey: threadTurnKey(sessionId, threadId), turnId: latestTurnId } : undefined;
+    if (reconciliationAdvanced(
+      current,
+      latestTurnId,
+      this.latestProjectedTurnIds.get(threadTurnKey(sessionId, threadId)),
+      restoredAt
+    )) return;
+    const intentionalInterruption = codexTurnInterruption(latestTurn) && latestTurnId
+      ? await this.store.getAppServerTurnInterruptionKind(sessionId, threadId, latestTurnId)
+      : null;
+    if (intentionalInterruption === "budget_guard") return;
+    if (intentionalInterruption === "operator") {
+      await this.handleExclusive(sessionId, {
+        method: "turn/completed",
+        params: { threadId, turn: latestTurn },
+        receivedAt: restoredAt
+      }, recoveryGuard);
+      return;
+    }
+    if (codexTurnInterruption(latestTurn)) {
+      const applied = await this.handleExclusive(sessionId, {
+        method: "turn/completed",
+        params: { threadId, turn: latestTurn, muxpilotUnexpectedInterruption: true },
+        receivedAt: restoredAt
+      }, recoveryGuard);
+      if (!applied) return;
+    }
+    await this.handleExclusive(sessionId, {
       method: "thread/status/changed",
       params: { threadId, status },
       receivedAt: restoredAt
+    }, recoveryGuard);
+  }
+
+  private serialize(sessionId: string, operation: () => Promise<void>): Promise<void> {
+    const previous = this.operationTails.get(sessionId) ?? Promise.resolve();
+    const result = previous.catch(() => undefined).then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.operationTails.set(sessionId, tail);
+    void tail.finally(() => {
+      if (this.operationTails.get(sessionId) === tail) this.operationTails.delete(sessionId);
     });
+    return result;
   }
 
   private async requireSession(sessionId: string): Promise<ManagedSession> {
@@ -153,12 +244,61 @@ function input(
   };
 }
 
+function turnFailure(params: unknown): ReturnType<typeof codexTurnFailure> {
+  const root = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+  return codexTurnFailure(params)
+    ?? (root?.muxpilotUnexpectedInterruption === true ? codexTurnInterruption(root.turn) : null);
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value ? value : null;
+}
+
+function driverEventTurnId(params: unknown): string | null {
+  const root = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+  const turn = root?.turn && typeof root.turn === "object" && !Array.isArray(root.turn) ? root.turn as Record<string, unknown> : null;
+  return stringValue(root?.turnId) ?? stringValue(turn?.id);
+}
+
+function driverEventThreadId(params: unknown): string | null {
+  const root = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
+  const nested = root?.params && typeof root.params === "object" && !Array.isArray(root.params)
+    ? root.params as Record<string, unknown>
+    : null;
+  return stringValue(root?.threadId) ?? stringValue(nested?.threadId);
+}
+
+function threadTurnKey(sessionId: string, threadId: string): string {
+  return `${sessionId}\0${threadId}`;
+}
+
+function reconciliationAdvanced(
+  current: AppServerReconciliationState | null,
+  latestTurnId: string | null,
+  latestProjectedTurnId: string | undefined,
+  restoredAt: string
+): boolean {
+  if (current?.observedAt && current.observedAt > restoredAt) return true;
+  if (!latestTurnId) return false;
+  if (latestProjectedTurnId && latestProjectedTurnId !== latestTurnId) return true;
+  return Boolean(current?.turnId && current.turnId !== latestTurnId);
+}
+
 function preserveInputFailure(
   projection: AppServerEventProjection,
   status: ManagedSession["status"]
 ): AppServerEventProjection {
   if (status !== "input_failed" || !projection.status || !["idle", "waiting"].includes(projection.status)) return projection;
   return { ...projection, status: "input_failed" };
+}
+
+function preserveBudgetBlock(
+  projection: AppServerEventProjection,
+  session: ManagedSession
+): AppServerEventProjection {
+  return session.agentOwnership?.budgetExhaustedAt
+    ? { ...projection, status: "blocked" }
+    : projection;
 }
 
 function preservePlanReady(
