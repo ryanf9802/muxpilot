@@ -15,6 +15,7 @@ import {
 } from "@muxpilot/core";
 import {
   activeSkillToken,
+  activeVariableToken,
   applyPlanActionResponse,
   AgentGuardBanner,
   ApprovalBanner,
@@ -114,6 +115,7 @@ import {
   SkillTextArea,
   skillSuggestionScore,
   skillSuggestions,
+  variableSuggestions,
   stripAssistantSideChannelBlocks,
   transcriptItemsContainPendingUserMessage,
   transcriptJumpVisibility,
@@ -123,6 +125,7 @@ import {
   UserAction,
   visibleTranscriptFindEntries,
   replaceSkillToken,
+  replaceVariableToken,
   resizeComposerTextarea,
   RuntimeAttachButton,
   sessionTranscriptSource,
@@ -1083,6 +1086,26 @@ describe("skill composer helpers", () => {
   it("detects active dollar skill tokens until whitespace", () => {
     expect(activeSkillToken("use $team", 9)).toEqual({ start: 4, end: 9, query: "team" });
     expect(activeSkillToken("use $team now", 10)).toBeNull();
+  });
+
+  it("detects variable tokens without treating headings, fragments, or embedded hashes as references", () => {
+    expect(activeVariableToken("use #CLIENT_ID", 14)).toEqual({ start: 4, end: 14, query: "CLIENT_ID" });
+    expect(activeVariableToken("# heading", 1)).toBeNull();
+    expect(activeVariableToken("# heading", 2)).toBeNull();
+    expect(activeVariableToken("https://example.test/#CLIENT", 28)).toBeNull();
+    expect(activeVariableToken("abc#CLIENT", 10)).toBeNull();
+  });
+
+  it("filters and replaces variable references without exposing values", () => {
+    const variables = [
+      { name: "CLIENT_SECRET", ownerSessionId: "parent", inherited: true, updatedAt: "2026-01-01T00:00:00.000Z" },
+      { name: "CLIENT_ID", ownerSessionId: "session", inherited: false, updatedAt: "2026-01-01T00:00:00.000Z" }
+    ];
+    expect(variableSuggestions(variables, "id").map((variable) => variable.name)).toEqual(["CLIENT_ID"]);
+    expect(replaceVariableToken("use #CLI now", { start: 4, end: 8, query: "CLI" }, "CLIENT_ID")).toEqual({
+      text: "use #CLIENT_ID now",
+      caret: 15
+    });
   });
 
   it("filters skill suggestions by prefix before substring", () => {

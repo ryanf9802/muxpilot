@@ -3056,6 +3056,7 @@ select:focus-visible {
 
 .session-environment-modal { --modal-max-width: 620px; }
 .session-environment-list { display: grid; gap: 8px; max-height: 260px; overflow: auto; }
+.session-environment-empty { margin: 0; color: var(--color-text-muted); font-size: 0.82rem; line-height: 1.35; }
 .session-environment-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
 .session-environment-row > span { display: grid; min-width: 0; gap: 2px; }
 .session-environment-row small { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; }
@@ -5973,6 +5974,14 @@ select:focus-visible {
   color: color-mix(in srgb, var(--color-text) 72%, var(--color-brand));
   background: color-mix(in srgb, var(--color-brand) 18%, transparent);
   outline: 1px solid color-mix(in srgb, var(--color-brand) 36%, transparent);
+  border-radius: 4px;
+  font-weight: inherit;
+}
+
+.composer-variable-reference {
+  color: color-mix(in srgb, var(--color-text) 76%, var(--color-success));
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  outline: 1px solid color-mix(in srgb, var(--color-success) 34%, transparent);
   border-radius: 4px;
   font-weight: inherit;
 }

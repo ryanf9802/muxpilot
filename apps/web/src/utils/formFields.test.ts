@@ -47,7 +47,11 @@ describe("form field browser hints", () => {
       autoComplete: "off",
       autoCorrect: "off",
       autoCapitalize: "none",
-      spellCheck: false
+      spellCheck: false,
+      "data-1p-ignore": "true",
+      "data-bwignore": "true",
+      "data-lpignore": "true",
+      "data-form-type": "other"
     });
   });
 });

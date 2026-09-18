@@ -205,6 +205,8 @@ export const api = {
     json<SessionDocumentsResponse>(`/api/sessions/${encodeURIComponent(id)}/documents`),
   sessionEnvironment: (id: string) =>
     json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment`),
+  reconcileSessionEnvironment: (id: string) =>
+    json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment/reconcile`, { method: "POST" }),
   setSessionEnvironment: (id: string, name: string, value: string) =>
     json<SessionEnvironmentResponse>(`/api/sessions/${encodeURIComponent(id)}/environment`, { method: "PUT", body: JSON.stringify({ name, value }) }),
   deleteSessionEnvironment: (id: string, name: string) =>

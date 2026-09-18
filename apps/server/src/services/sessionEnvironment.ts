@@ -22,6 +22,7 @@ export class SessionEnvironmentService {
   private key: Buffer | null = null;
   private store: StoreFile = { version: 1, revisions: {}, applied: {}, parents: {}, keys: {}, entries: {} };
   private mutationTail: Promise<void> = Promise.resolve();
+  private readonly lifecycle = new Map<string, { revision: number; state: "applying" | "error"; error?: string }>();
 
   constructor(private readonly db: AppDatabase, dataDir: string) {
     this.keyPath = join(dataDir, "secrets", "session-environment.key");
@@ -58,7 +59,19 @@ export class SessionEnvironmentService {
     }
     const desiredRevision = this.effectiveRevision(chain);
     const appliedRevision = this.store.applied[sessionId] ?? 0;
-    return { variables: variables.sort((a, b) => a.name.localeCompare(b.name)), desiredRevision, appliedRevision, state: desiredRevision === appliedRevision ? "applied" : "pending" };
+    const sortedVariables = variables.sort((a, b) => a.name.localeCompare(b.name));
+    const lifecycle = this.lifecycle.get(sessionId);
+    if (desiredRevision === appliedRevision) {
+      this.lifecycle.delete(sessionId);
+      return { variables: sortedVariables, desiredRevision, appliedRevision, state: "applied" };
+    }
+    return {
+      variables: sortedVariables,
+      desiredRevision,
+      appliedRevision,
+      state: lifecycle?.revision === desiredRevision ? lifecycle.state : "pending",
+      error: lifecycle?.revision === desiredRevision ? lifecycle.error ?? null : null
+    };
   }
 
   async set(sessionId: string, name: string, value: string): Promise<SessionEnvironmentResponse> {
@@ -106,7 +119,26 @@ export class SessionEnvironmentService {
     await this.mutate(async () => {
       this.store.applied[sessionId] = revision ?? this.effectiveRevision(await this.ownerChain(sessionId));
       await this.persist();
+      this.lifecycle.delete(sessionId);
     });
+  }
+
+  async affectedSessionIds(ownerSessionId: string): Promise<string[]> {
+    const affected: string[] = [];
+    for (const session of await this.db.listSessions(false, false)) {
+      if ((await this.ownerChain(session.id)).includes(ownerSessionId)) affected.push(session.id);
+    }
+    return affected;
+  }
+
+  async markApplying(sessionId: string): Promise<void> {
+    const { desiredRevision } = await this.describe(sessionId);
+    this.lifecycle.set(sessionId, { revision: desiredRevision, state: "applying" });
+  }
+
+  async markError(sessionId: string, error: string): Promise<void> {
+    const { desiredRevision } = await this.describe(sessionId);
+    this.lifecycle.set(sessionId, { revision: desiredRevision, state: "error", error });
   }
 
   async exportOwned(sessionId: string): Promise<Record<string, string>> {

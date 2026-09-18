@@ -93,6 +93,7 @@ import type {
   SessionEvent,
   SessionDocumentSummary,
   SessionEnvironmentResponse,
+  SessionEnvironmentVariable,
   SessionModelSettings,
   SessionAction,
   SessionActionResponse,
@@ -153,7 +154,7 @@ import {
   resolveDocumentHeading,
   type DocumentHeadingEntry
 } from "../utils/documentMarkdown.js";
-import { codeMirrorComposerFieldAttributes, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
+import { codeMirrorComposerFieldAttributes, credentialSuppressedField, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
@@ -1387,43 +1388,64 @@ export function DocumentsButton({ open, onOpen }: { open: boolean; onOpen: () =>
   );
 }
 
-function SessionEnvironmentModal({ open, sessionId, sessions, onClose }: { open: boolean; sessionId: string; sessions: ManagedSession[]; onClose: () => void }) {
+function SessionEnvironmentModal({ open, sessionId, sessions, onChange, onClose }: { open: boolean; sessionId: string; sessions: ManagedSession[]; onChange?: (environment: SessionEnvironmentResponse) => void; onClose: () => void }) {
   const [environment, setEnvironment] = useState<SessionEnvironmentResponse | null>(null);
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const load = useCallback(async () => {
-    setError("");
-    try { setEnvironment(await api.sessionEnvironment(sessionId)); }
+    try { const next = await api.sessionEnvironment(sessionId); setEnvironment(next); onChange?.(next); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-  }, [sessionId]);
-  useEffect(() => { if (open) void load(); }, [open, load]);
+  }, [onChange, sessionId]);
+  useEffect(() => {
+    if (!open) { setName(""); setValue(""); return undefined; }
+    setEnvironment(null);
+    setError("");
+    void load();
+    const interval = window.setInterval(() => void load(), 1_000);
+    return () => window.clearInterval(interval);
+  }, [open, load, sessionId]);
   async function save() {
     setBusy(true); setError("");
-    try { setEnvironment(await api.setSessionEnvironment(sessionId, name.trim(), value)); setName(""); setValue(""); }
+    try { const next = await api.setSessionEnvironment(sessionId, name.trim(), value); setEnvironment(next); onChange?.(next); setName(""); setValue(""); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
   async function remove(variableName: string) {
     setBusy(true); setError("");
-    try { setEnvironment(await api.deleteSessionEnvironment(sessionId, variableName)); }
+    try { const next = await api.deleteSessionEnvironment(sessionId, variableName); setEnvironment(next); onChange?.(next); }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(false); }
   }
+  async function retry() {
+    setBusy(true); setError("");
+    try { const next = await api.reconcileSessionEnvironment(sessionId); setEnvironment(next); onChange?.(next); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setBusy(false); }
+  }
+  const currentSession = sessions.find((session) => session.id === sessionId);
+  const environmentStatus = environment?.state === "applied" ? "Applied"
+    : environment?.state === "applying" ? "Applying"
+    : environment?.state === "error" ? "Needs attention"
+    : "Waiting for current work";
+  const pendingDetail = currentSession?.runtime?.state === "hibernated" || currentSession?.runtime?.state === "stopped"
+    ? " · applies when this session resumes"
+    : " · reloads at its next safe boundary";
   return <Modal open={open} onClose={onClose} title={<><KeyRound size={18} /> Variables &amp; secrets</>} panelClassName="session-environment-modal" dismissible={!busy}>
     <p className="session-git-probe-note">Values are encrypted locally and cannot be read back here. They become available before the next safe turn. Programs can still print environment values, so reference names instead of asking the agent to display them.</p>
-    {environment ? <p className="session-git-probe-note"><strong>{environment.state === "applied" ? "Applied" : "Pending next turn"}</strong>{environment.state === "pending" ? " · this session will reload at its next safe boundary" : ""}</p> : null}
+    {environment ? <p className="session-git-probe-note"><strong>{environmentStatus}</strong>{environment.state === "pending" ? pendingDetail : ""}</p> : null}
     <div className="session-environment-list">
       {environment?.variables.map((variable) => <div className="session-environment-row" key={`${variable.ownerSessionId}:${variable.name}`}>
         <span><strong>{variable.name}</strong><small>{variable.inherited ? `Inherited from ${sessions.find((session) => session.id === variable.ownerSessionId)?.name ?? "Parent session"}` : "Saved in this session"}</small></span>
         {!variable.inherited ? <button type="button" className="icon-button" aria-label={`Delete ${variable.name}`} title={`Delete ${variable.name}`} disabled={busy} onClick={() => void remove(variable.name)}><Trash2 size={16} /></button> : null}
       </div>)}
-      {environment && environment.variables.length === 0 ? <p className="prompt-history-muted">No variables configured.</p> : null}
+      {environment && environment.variables.length === 0 ? <p className="session-environment-empty">No variables configured.</p> : null}
     </div>
-    <label className="rename-field"><span>Variable name</span><input {...noAutofillTextField} value={name} placeholder="PAYLOCITY_CLIENT_ID" onChange={(event) => setName(event.target.value.toUpperCase())} /></label>
-    <label className="rename-field"><span>Secret value</span><input type="password" autoComplete="new-password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
+    <label className="rename-field"><span>Variable name</span><input {...credentialSuppressedField} name="muxpilot-variable-name" value={name} placeholder="MY_VARIABLE" onChange={(event) => setName(event.target.value.toUpperCase())} /></label>
+    <label className="rename-field"><span>Secret value</span><input {...credentialSuppressedField} name="muxpilot-variable-value" type="password" value={value} onChange={(event) => setValue(event.target.value)} /></label>
     <p className="session-git-probe-note">Saving an existing name replaces its value. Saved values are never returned by the API.</p>
+    {environment?.state === "error" ? <p className="dialog-error" role="alert">{environment.error ?? "The session runtime could not reload."} <button type="button" className="inline-link-button" disabled={busy} onClick={() => void retry()}>Retry</button></p> : null}
     {error ? <p className="dialog-error" role="alert">{error}</p> : null}
     <div className="dialog-actions"><button type="button" className="secondary-button" disabled={busy} onClick={onClose}>Close</button><button type="button" className="primary-button" disabled={busy || !name.trim() || !value} onClick={() => void save()}>{busy ? "Saving…" : "Save variable"}</button></div>
   </Modal>;
@@ -1691,6 +1713,7 @@ export function SessionView() {
   const [imagePreview, setImagePreview] = useState<SessionImageTarget | null>(null);
   const [messageActionError, setMessageActionError] = useState("");
   const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [sessionVariables, setSessionVariables] = useState<SessionEnvironmentVariable[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
   const [vimEnabled, setVimEnabled] = useState(loadVimModePreference);
@@ -1850,6 +1873,24 @@ export function SessionView() {
     const interval = window.setInterval(() => void refreshCodexSkills(), SKILL_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [refreshCodexSkills]);
+
+  const refreshSessionVariables = useCallback(async () => {
+    if (!id) return;
+    try {
+      const response = await api.sessionEnvironment(id);
+      if (activeIdRef.current === id) setSessionVariables(response.variables);
+    } catch {
+      if (activeIdRef.current === id) setSessionVariables([]);
+    }
+  }, [id]);
+  const handleSessionEnvironmentChange = useCallback((environment: SessionEnvironmentResponse) => {
+    setSessionVariables(environment.variables);
+  }, []);
+
+  useEffect(() => {
+    setSessionVariables([]);
+    void refreshSessionVariables();
+  }, [refreshSessionVariables]);
 
   useEffect(() => registerPromptHistoryPrefill(() => promptHistoryPrefillTextRef.current), [registerPromptHistoryPrefill]);
 
@@ -3412,7 +3453,7 @@ export function SessionView() {
         onReturnToCurrent={() => showCurrentDocuments()}
         onClose={closeDocuments}
       />
-      <SessionEnvironmentModal open={environmentOpen} sessionId={readySession.id} sessions={shellSessions} onClose={() => setEnvironmentOpen(false)} />
+      <SessionEnvironmentModal open={environmentOpen} sessionId={readySession.id} sessions={shellSessions} onChange={handleSessionEnvironmentChange} onClose={() => setEnvironmentOpen(false)} />
       <BtwDrawer
         open={btwOpen}
         exchanges={btwExchanges}
@@ -3741,8 +3782,9 @@ export function SessionView() {
               sessionId={id}
               inputs={queuedInputs}
               skills={codexSkills}
+              variables={sessionVariables}
               vimEnabled={effectiveVimEnabled}
-              onSkillSearch={() => void refreshCodexSkills()}
+              onSkillSearch={() => { void refreshCodexSkills(); void refreshSessionVariables(); }}
               onUpdate={updateQueuedInput}
               onDelete={deleteQueuedInput}
               onOpenImage={setImagePreview}
@@ -3783,7 +3825,8 @@ export function SessionView() {
               onFocus={() => setComposerFocused(true)}
               onBlur={() => setComposerFocused(false)}
               skills={codexSkills}
-              onSkillSearch={() => void refreshCodexSkills()}
+              variables={sessionVariables}
+              onSkillSearch={() => { void refreshCodexSkills(); void refreshSessionVariables(); }}
               placeholder={
                 composerLock ??
                 (shouldQueueComposerInput(readySession, queuedInputs)
@@ -4196,6 +4239,18 @@ export function activeSkillToken(text: string, caret: number): ActiveSkillToken 
   return { start, end, query: token.slice(1) };
 }
 
+export function activeVariableToken(text: string, caret: number): ActiveSkillToken | null {
+  const boundedCaret = Math.max(0, Math.min(caret, text.length));
+  let start = boundedCaret;
+  while (start > 0 && !/\s/.test(text[start - 1] ?? "")) start -= 1;
+  const token = text.slice(start, boundedCaret);
+  if (!/^#[A-Za-z_][A-Za-z0-9_]*$/.test(token) && token !== "#") return null;
+  if (token === "#" && /\s/.test(text[boundedCaret] ?? "")) return null;
+  let end = boundedCaret;
+  while (end < text.length && /[A-Za-z0-9_]/.test(text[end] ?? "")) end += 1;
+  return { start, end, query: token.slice(1) };
+}
+
 export function skillSuggestions(skills: CodexSkill[], query: string, limit = 8): CodexSkill[] {
   const normalizedQuery = query.toLowerCase();
   return skills
@@ -4235,6 +4290,21 @@ function isSkillWordBoundary(value: string, index: number): boolean {
 
 export function replaceSkillToken(text: string, token: ActiveSkillToken, skillName: string): { text: string; caret: number } {
   const replacement = `$${skillName} `;
+  const nextText = `${text.slice(0, token.start)}${replacement}${text.slice(token.end).replace(/^\s/, "")}`;
+  return { text: nextText, caret: token.start + replacement.length };
+}
+
+export function variableSuggestions(variables: SessionEnvironmentVariable[], query: string, limit = 8): SessionEnvironmentVariable[] {
+  return variables
+    .map((variable) => ({ variable, score: skillSuggestionScore(variable.name, query.toLowerCase()) }))
+    .filter((match): match is { variable: SessionEnvironmentVariable; score: number } => match.score !== null)
+    .sort((a, b) => a.score - b.score || a.variable.name.localeCompare(b.variable.name))
+    .map((match) => match.variable)
+    .slice(0, limit);
+}
+
+export function replaceVariableToken(text: string, token: ActiveSkillToken, variableName: string): { text: string; caret: number } {
+  const replacement = `#${variableName} `;
   const nextText = `${text.slice(0, token.start)}${replacement}${text.slice(token.end).replace(/^\s/, "")}`;
   return { text: nextText, caret: token.start + replacement.length };
 }
@@ -4303,12 +4373,14 @@ export function vimRelativeLineNumbers(): Extension {
   });
 }
 
-function codeMirrorSkillHighlightExtension(skillNames: Set<string>): Extension {
+function codeMirrorReferenceHighlightExtension(skillNames: Set<string>, variableNames: Set<string>): Extension {
   const matcher = new MatchDecorator({
-    regexp: /\$([A-Za-z0-9][A-Za-z0-9_:-]*)/g,
+    regexp: /(?<!\S)(?:\$([A-Za-z0-9][A-Za-z0-9_:-]*)|#([A-Za-z_][A-Za-z0-9_]*))/g,
     decoration: (match) => {
       const skillName = match[1];
-      return skillName && skillNames.has(skillName) ? Decoration.mark({ class: "composer-skill-reference" }) : null;
+      const variableName = match[2];
+      if (skillName && skillNames.has(skillName)) return Decoration.mark({ class: "composer-skill-reference" });
+      return variableName && variableNames.has(variableName) ? Decoration.mark({ class: "composer-variable-reference" }) : null;
     }
   });
 
@@ -4432,6 +4504,7 @@ function VimPromptEditor({
   onFocus,
   onBlur,
   skills,
+  variables,
   placeholder,
   disabled,
   vimEnabled,
@@ -4449,6 +4522,7 @@ function VimPromptEditor({
   onFocus?: () => void;
   onBlur?: () => void;
   skills: CodexSkill[];
+  variables: SessionEnvironmentVariable[];
   placeholder?: string;
   disabled?: boolean;
   vimEnabled: boolean;
@@ -4472,6 +4546,8 @@ function VimPromptEditor({
   const rebuildFocusedRef = useRef(false);
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
   const skillNamesKey = useMemo(() => [...skillNames].sort().join("\0"), [skillNames]);
+  const variableNames = useMemo(() => new Set(variables.map((variable) => variable.name)), [variables]);
+  const variableNamesKey = useMemo(() => [...variableNames].sort().join("\0"), [variableNames]);
   const skillHighlightCompartment = useMemo(() => new Compartment(), []);
   const placeholderCompartment = useMemo(() => new Compartment(), []);
   const previewsRef = useRef(new Map<string, string>());
@@ -4564,7 +4640,7 @@ function VimPromptEditor({
       minimalSetup,
       EditorView.lineWrapping,
       EditorView.contentAttributes.of(codeMirrorComposerFieldAttributes),
-      skillHighlightCompartment.of(codeMirrorSkillHighlightExtension(skillNames)),
+      skillHighlightCompartment.of(codeMirrorReferenceHighlightExtension(skillNames, variableNames)),
       placeholderCompartment.of(placeholder ? codeMirrorPlaceholder(placeholder) : []),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
@@ -4669,9 +4745,9 @@ function VimPromptEditor({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: skillHighlightCompartment.reconfigure(codeMirrorSkillHighlightExtension(skillNames))
+      effects: skillHighlightCompartment.reconfigure(codeMirrorReferenceHighlightExtension(skillNames, variableNames))
     });
-  }, [skillHighlightCompartment, skillNamesKey]);
+  }, [skillHighlightCompartment, skillNamesKey, variableNamesKey]);
 
   return (
     <div
@@ -4690,6 +4766,7 @@ export function SkillTextArea({
   onFocus,
   onBlur,
   skills,
+  variables = [],
   onSkillSearch,
   placeholder,
   focusRequestKey,
@@ -4705,6 +4782,7 @@ export function SkillTextArea({
   onFocus?: () => void;
   onBlur?: () => void;
   skills: CodexSkill[];
+  variables?: SessionEnvironmentVariable[];
   onSkillSearch?: () => void;
   placeholder?: string;
   focusRequestKey?: string | null;
@@ -4719,8 +4797,15 @@ export function SkillTextArea({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [vimSelectionRequest, setVimSelectionRequest] = useState<{ caret: number; nonce: number } | null>(null);
   const vimSelectionNonceRef = useRef(0);
-  const token = activeSkillToken(value, caret);
-  const suggestions = useMemo(() => (token && !disabled ? skillSuggestions(skills, token.query) : []), [disabled, skills, token?.query]);
+  const variableToken = activeVariableToken(value, caret);
+  const skillToken = variableToken ? null : activeSkillToken(value, caret);
+  const token = variableToken ?? skillToken;
+  const suggestions = useMemo(() => {
+    if (!token || disabled) return [];
+    return variableToken
+      ? variableSuggestions(variables, token.query).map((variable) => ({ kind: "variable" as const, variable }))
+      : skillSuggestions(skills, token.query).map((skill) => ({ kind: "skill" as const, skill }));
+  }, [disabled, skillToken, skills, token?.query, variableToken, variables]);
   const open = focused && Boolean(token) && token?.start !== dismissedTokenStart && suggestions.length > 0;
   const skillNames = useMemo(() => new Set(skills.map((skill) => skill.name)), [skills]);
 
@@ -4733,9 +4818,11 @@ export function SkillTextArea({
     if (focused && token) onSkillSearch?.();
   }, [focused, onSkillSearch, token?.start, token?.query]);
 
-  function acceptSkill(skill: CodexSkill) {
+  function acceptSuggestion(suggestion: typeof suggestions[number]) {
     if (!token) return;
-    const next = replaceSkillToken(value, token, skill.name);
+    const next = suggestion.kind === "skill"
+      ? replaceSkillToken(value, token, suggestion.skill.name)
+      : replaceVariableToken(value, token, suggestion.variable.name);
     onChange(next.text);
     vimSelectionNonceRef.current += 1;
     setVimSelectionRequest({ caret: next.caret, nonce: vimSelectionNonceRef.current });
@@ -4753,8 +4840,8 @@ export function SkillTextArea({
       return true;
     }
     if (command === "accept") {
-      const selectedSkill = suggestions[selectedIndex] ?? suggestions[0];
-      if (selectedSkill) acceptSkill(selectedSkill);
+      const selectedSuggestion = suggestions[selectedIndex] ?? suggestions[0];
+      if (selectedSuggestion) acceptSuggestion(selectedSuggestion);
       return true;
     }
     setDismissedTokenStart(token?.start ?? null);
@@ -4777,6 +4864,7 @@ export function SkillTextArea({
             onBlur?.();
           }}
           skills={skills}
+          variables={variables}
           placeholder={placeholder}
           disabled={disabled}
           vimEnabled={Boolean(vimEnabled)}
@@ -4788,21 +4876,26 @@ export function SkillTextArea({
           onUploadingChange={onUploadingChange}
         />
       {open ? (
-        <div className="skill-suggestions" role="listbox" aria-label="Codex skills">
-          {suggestions.map((skill, index) => (
+        <div className="skill-suggestions" role="listbox" aria-label={variableToken ? "Session variables" : "Codex skills"}>
+          {suggestions.map((suggestion, index) => (
             <button
-              key={skill.name}
+              key={suggestion.kind === "skill" ? suggestion.skill.name : suggestion.variable.name}
               type="button"
               role="option"
               aria-selected={index === selectedIndex}
               className={index === selectedIndex ? "skill-suggestion-selected" : undefined}
               onMouseDown={(event) => {
                 event.preventDefault();
-                acceptSkill(skill);
+                acceptSuggestion(suggestion);
               }}
             >
-              <span className="skill-suggestion-name">${skill.name}</span>
-              {skill.description ? <span className="skill-suggestion-description">{skill.description}</span> : null}
+              {suggestion.kind === "skill" ? <>
+                <span className="skill-suggestion-name">${suggestion.skill.name}</span>
+                {suggestion.skill.description ? <span className="skill-suggestion-description">{suggestion.skill.description}</span> : null}
+              </> : <>
+                <span className="skill-suggestion-name">#{suggestion.variable.name}</span>
+                <span className="skill-suggestion-description">{suggestion.variable.inherited ? "Inherited variable" : "Session variable"}</span>
+              </>}
             </button>
           ))}
         </div>
@@ -5278,6 +5371,7 @@ function QueuedInputList({
   sessionId,
   inputs,
   skills,
+  variables,
   vimEnabled,
   onSkillSearch,
   onUpdate,
@@ -5288,6 +5382,7 @@ function QueuedInputList({
   sessionId: string;
   inputs: QueuedInput[];
   skills: CodexSkill[];
+  variables: SessionEnvironmentVariable[];
   vimEnabled: boolean;
   onSkillSearch: () => void;
   onUpdate: (inputId: string, text: string, mode: CollaborationMode) => Promise<void>;
@@ -5357,6 +5452,7 @@ function QueuedInputList({
                     onChange={setDraft}
                     vimEnabled={vimEnabled}
                     skills={skills}
+                    variables={variables}
                     onSkillSearch={onSkillSearch}
                     disabled={busy}
                     sessionId={sessionId}

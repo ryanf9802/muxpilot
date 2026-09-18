@@ -1430,6 +1430,80 @@ describe("SessionManager Codex authentication runtime safety", () => {
   });
 });
 
+describe("SessionManager session environment reconciliation", () => {
+  it("reloads an idle runtime immediately and marks the revision as applying", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "idle" });
+    const environment = {
+      describe: vi.fn(async () => ({ variables: [], desiredRevision: 2, appliedRevision: 1, state: "pending" as const })),
+      markApplying: vi.fn(async () => undefined),
+      markError: vi.fn(async () => undefined)
+    };
+    Object.assign(harness.manager, { sessionEnvironment: environment });
+
+    await harness.manager.reconcileSessionEnvironment("session-1");
+
+    expect(environment.markApplying).toHaveBeenCalledWith("session-1");
+    expect(harness.driver.kill).toHaveBeenCalledOnce();
+    expect(harness.resumeAppServerSession).toHaveBeenCalledWith(expect.objectContaining({
+      runtime: expect.objectContaining({ state: "stopped" })
+    }));
+  });
+
+  it("leaves an active runtime pending", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "executing" });
+    const environment = {
+      describe: vi.fn(async () => ({ variables: [], desiredRevision: 2, appliedRevision: 1, state: "pending" as const })),
+      markApplying: vi.fn(async () => undefined),
+      markError: vi.fn(async () => undefined)
+    };
+    Object.assign(harness.manager, { sessionEnvironment: environment });
+
+    await harness.manager.reconcileSessionEnvironment("session-1");
+
+    expect(environment.markApplying).not.toHaveBeenCalled();
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("does not reload while an idle projection still has uncertain input delivery", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "idle" });
+    harness.db.latestUserMessage.mockResolvedValue({ payload: { muxpilotSubmission: { state: "pending" } } });
+    const environment = {
+      describe: vi.fn(async () => ({ variables: [], desiredRevision: 2, appliedRevision: 1, state: "pending" as const })),
+      markApplying: vi.fn(async () => undefined),
+      markError: vi.fn(async () => undefined)
+    };
+    Object.assign(harness.manager, { sessionEnvironment: environment });
+
+    await harness.manager.reconcileSessionEnvironment("session-1");
+
+    expect(environment.markApplying).not.toHaveBeenCalled();
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("retries a failed reload from its stopped runtime", async () => {
+    const session = managedSession();
+    const harness = authenticationManager({
+      ...session,
+      status: "startup_failed",
+      runtime: { ...session.runtime!, state: "stopped" }
+    });
+    const environment = {
+      describe: vi.fn(async () => ({ variables: [], desiredRevision: 2, appliedRevision: 1, state: "error" as const, error: "synthetic failure" })),
+      markApplying: vi.fn(async () => undefined),
+      markError: vi.fn(async () => undefined)
+    };
+    Object.assign(harness.manager, { sessionEnvironment: environment });
+
+    await harness.manager.reconcileSessionEnvironment("session-1");
+
+    expect(environment.markApplying).toHaveBeenCalledWith("session-1");
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.resumeAppServerSession).toHaveBeenCalledWith(expect.objectContaining({
+      runtime: expect.objectContaining({ state: "stopped" })
+    }));
+  });
+});
+
 function gitWorkspace(targetBranch: string, id: string): NonNullable<ManagedSession["gitWorkspace"]> {
   return {
     workflowVersion: 1,
@@ -1487,7 +1561,11 @@ function authenticationManager(
     getSession: vi.fn(async () => current),
     setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
     upsertSession: vi.fn(async (session: ManagedSession) => { current = session; }),
-    addAudit: vi.fn(async () => undefined)
+    addAudit: vi.fn(async () => undefined),
+    listQueuedInputs: vi.fn(async () => []),
+    latestUserMessage: vi.fn(async () => null),
+    activeBtwExchange: vi.fn(async () => null),
+    listAgentWaits: vi.fn(async () => [])
   };
   const resumeAppServerSession = vi.fn(async (session: ManagedSession) => session);
   const manager = Object.assign(Object.create(SessionManager.prototype), {

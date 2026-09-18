@@ -19,6 +19,7 @@ describe("SessionEnvironmentService", () => {
     const service = new SessionEnvironmentService(database(sessions), root);
     await service.initialize();
     await service.set("parent", "PAYLOCITY_SECRET", "parent-secret-value");
+    expect(await service.affectedSessionIds("parent")).toEqual(["parent", "child"]);
     const inherited = await service.describe("child");
     expect(inherited.variables).toEqual([expect.objectContaining({ name: "PAYLOCITY_SECRET", ownerSessionId: "parent", inherited: true })]);
     expect(JSON.stringify(inherited)).not.toContain("parent-secret-value");
@@ -26,6 +27,10 @@ describe("SessionEnvironmentService", () => {
 
     await service.set("child", "PAYLOCITY_SECRET", "child-secret-value");
     expect(await service.resolve("child")).toEqual({ PAYLOCITY_SECRET: "child-secret-value" });
+    await service.markApplying("child");
+    expect((await service.describe("child")).state).toBe("applying");
+    await service.markError("child", "synthetic reload failure");
+    expect(await service.describe("child")).toEqual(expect.objectContaining({ state: "error", error: "synthetic reload failure" }));
     const persisted = await readFile(join(root, "secrets", "session-environment.json"), "utf8");
     expect(persisted).not.toContain("parent-secret-value");
     expect(persisted).not.toContain("child-secret-value");
@@ -44,7 +49,10 @@ describe("SessionEnvironmentService", () => {
 });
 
 function database(sessions: Map<string, ManagedSession>): AppDatabase {
-  return { getSession: async (id: string) => sessions.get(id) ?? null } as AppDatabase;
+  return {
+    getSession: async (id: string) => sessions.get(id) ?? null,
+    listSessions: async () => [...sessions.values()]
+  } as AppDatabase;
 }
 
 function session(id: string, parentSessionId: string | null = null): ManagedSession {

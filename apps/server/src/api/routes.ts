@@ -546,16 +546,28 @@ export function registerRoutes(
       try { return await sessionEnvironment.describe((request.params as { id: string }).id); }
       catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
     });
+    app.post("/api/sessions/:id/environment/reconcile", { preHandler: access.requireAccess }, async (request, reply) => {
+      try {
+        const sessionId = (request.params as { id: string }).id;
+        await manager.reconcileSessionEnvironment(sessionId);
+        return await sessionEnvironment.describe(sessionId);
+      } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
+    });
     app.put("/api/sessions/:id/environment", { preHandler: access.requireAccess }, async (request, reply) => {
       try {
+        const sessionId = (request.params as { id: string }).id;
         const { name, value } = sessionEnvironmentSchema.parse(request.body);
-        return await sessionEnvironment.set((request.params as { id: string }).id, name, value);
+        await sessionEnvironment.set(sessionId, name, value);
+        await manager.sessionEnvironmentChanged(sessionId);
+        return await sessionEnvironment.describe(sessionId);
       } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
     });
     app.delete("/api/sessions/:id/environment/:name", { preHandler: access.requireAccess }, async (request, reply) => {
       try {
         const { id, name } = request.params as { id: string; name: string };
-        return await sessionEnvironment.delete(id, name);
+        await sessionEnvironment.delete(id, name);
+        await manager.sessionEnvironmentChanged(id);
+        return await sessionEnvironment.describe(id);
       } catch (error) { if (error instanceof SessionEnvironmentError) return reply.code(error.statusCode).send({ error: error.message }); throw error; }
     });
   }

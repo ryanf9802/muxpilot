@@ -214,6 +214,7 @@ export class SessionManager {
       const status = recordValue(event.payload)?.status;
       if (status !== "waiting" && status !== "idle") return;
       this.runBackgroundTask("queued input", () => this.processQueuedInputs(event.sessionId));
+      this.runBackgroundTask("session environment", () => this.reconcileSessionEnvironment(event.sessionId));
     });
     this.unsubscribeNotLoadedRecovery = this.events.subscribe((event) => {
       if (event.type !== "status.changed" || recordValue(event.payload)?.status !== "unknown") return;
@@ -251,6 +252,56 @@ export class SessionManager {
   async reconcileNow(): Promise<void> {
     await this.runDiscoverTick();
     await this.runIngestTick();
+  }
+
+  async sessionEnvironmentChanged(ownerSessionId: string): Promise<void> {
+    if (!this.sessionEnvironment) return;
+    const affected = await this.sessionEnvironment.affectedSessionIds(ownerSessionId);
+    await Promise.all(affected.map((sessionId) => this.reconcileSessionEnvironment(sessionId)));
+  }
+
+  async reconcileSessionEnvironment(sessionId: string): Promise<void> {
+    if (!this.sessionEnvironment) return;
+    await this.serializeRuntimeOperation(sessionId, async () => {
+      const session = await this.db.getSession(sessionId);
+      if (!session || session.archived || session.runtime?.kind !== "systemd_service") return;
+      const environment = await this.sessionEnvironment!.describe(sessionId);
+      if (environment.state === "applied" || session.runtime.state === "hibernated") return;
+      if (environment.state === "error" && session.runtime.state !== "connected") {
+        await this.sessionEnvironment!.markApplying(sessionId);
+        try { await this.resumeAppServerSession(session); }
+        catch (error) { await this.sessionEnvironment!.markError(sessionId, error instanceof Error ? error.message : String(error)); }
+        return;
+      }
+      if ((await this.sessionEnvironmentRestartBlockers(session)).length > 0) return;
+      await this.sessionEnvironment!.markApplying(sessionId);
+      try {
+        await this.requireAppServerDriver().kill(session);
+        const stopped = { ...session, runtime: { ...session.runtime, state: "stopped" as const } };
+        await this.db.upsertSession(stopped, nowIso());
+        await this.resumeAppServerSession(stopped);
+      } catch (error) {
+        await this.sessionEnvironment!.markError(sessionId, error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
+
+  private async sessionEnvironmentRestartBlockers(session: ManagedSession): Promise<string[]> {
+    const blockers: string[] = [];
+    if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") blockers.push(`runtime_${session.runtime?.state ?? "unavailable"}`);
+    if (session.initializing) blockers.push("initializing");
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status) && session.status !== "input_failed") blockers.push(`status_${session.status}`);
+    if (this.deliveringInputSessionIds.has(session.id) || this.processingQueuedSessionIds.has(session.id)) blockers.push("input_delivery");
+    if ((await this.db.listQueuedInputs(session.id)).length > 0) blockers.push("queued_input");
+    if (inputDeliveryState(await this.db.latestUserMessage(session.id)) === "pending") blockers.push("uncertain_input");
+    if (await this.db.activeBtwExchange(session.id)) blockers.push("btw_handoff");
+    if ((await this.db.listAgentWaits()).some((wait) => wait.actorSessionId === session.id)) blockers.push("orchestration_continuation");
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) blockers.push("heavy_command");
+    if (blockers.length === 0) {
+      try { blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session)); }
+      catch { blockers.push("runtime_evidence_unavailable"); }
+    }
+    return [...new Set(blockers)];
   }
 
   async recoverAppServerSessions(): Promise<void> {
@@ -608,7 +659,8 @@ export class SessionManager {
       "Plan-mode document permission does not authorize repository changes, writes outside $MUXPILOT_DOCUMENTS_DIR, or other implementation side effects.",
       "A muxpilot BTW document notice inside <environment_context> is internal additive context, not a replacement operator request: read the named documents, reconcile them with newer user instructions, maintain INDEX.md, continue unfinished work, and do not emit a standalone acknowledgement.",
       "Document scopes are private: agent-created muxpilot child sessions keep notes in their own $MUXPILOT_DOCUMENTS_DIR and return structured proposed updates; built-in Codex subagents share this session's scope and must not edit documents; only the main parent agent verifies and updates canonical documents, and cross-session document writes are forbidden.",
-      "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; check these limits after maintenance and do not store secrets or raw transcripts."
+      "Documents must be flat UTF-8 Markdown files with safe names, at most 100 files, 256 KiB each, and 10 MiB total; check these limits after maintenance and do not store secrets or raw transcripts.",
+      "In operator messages, #NAME refers to the session environment variable named NAME. Use the variable by name in programs or commands without asking for, echoing, or substituting its value into the conversation."
     ].join(" ");
     return {
       ...options,
@@ -996,7 +1048,7 @@ export class SessionManager {
     }
   }
 
-  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation" | "queued input", task: () => Promise<void>): void {
+  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation" | "queued input" | "session environment", task: () => Promise<void>): void {
     void task().catch((error) => {
       console.error(`Muxpilot ${name} background task failed`, error);
     });
