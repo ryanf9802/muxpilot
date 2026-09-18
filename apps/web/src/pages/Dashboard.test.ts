@@ -38,7 +38,7 @@ describe("DASHBOARD_STATUSES", () => {
 
 describe("dashboard data ownership", () => {
   it("keeps only the independent usage fallback poll", () => {
-    expect(DASHBOARD_USAGE_RECONCILE_INTERVAL_MS).toBe(60_000);
+    expect(DASHBOARD_USAGE_RECONCILE_INTERVAL_MS).toBe(10_000);
   });
 
   it("filters the shell-owned session list without another API request", () => {
@@ -639,6 +639,7 @@ describe("CodexUsagePanel", () => {
   it("renders the account and Codex limit usage", () => {
     const html = renderToStaticMarkup(
       createElement(CodexUsagePanel, {
+        usageMonitor: staticUsageMonitor,
         summary: {
           available: true,
           error: null,
@@ -694,6 +695,7 @@ describe("CodexUsagePanel", () => {
   it("keeps the panel visible when Codex usage is unavailable", () => {
     const html = renderToStaticMarkup(
       createElement(CodexUsagePanel, {
+        usageMonitor: staticUsageMonitor,
         summary: {
           available: false,
           error: "Codex account authentication required.",
@@ -710,6 +712,16 @@ describe("CodexUsagePanel", () => {
     expect(html).toContain("unavailable");
   });
 });
+
+const staticUsageMonitor = {
+  pendingAttempt: null,
+  resetAction: null,
+  resetError: null,
+  resetOutcome: null,
+  resetRevision: 0,
+  refreshError: null,
+  consumeReset: async () => undefined
+};
 
 describe("repo collapsed state storage", () => {
   it("ignores invalid stored order payloads", () => {

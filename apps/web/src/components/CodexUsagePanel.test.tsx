@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexUsageSummaryResponse } from "@muxpilot/core";
 
 const apiMocks = vi.hoisted(() => ({
+  codexUsageSummary: vi.fn(),
   codexUsageHistory: vi.fn(),
   consumeCodexResetCredit: vi.fn()
 }));
@@ -13,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../api/client.js", () => ({ api: apiMocks }));
 
 import { CodexUsagePanel } from "./CodexUsagePanel.js";
+import { useCodexUsageMonitor } from "../hooks/useCodexUsageMonitor.js";
 
 const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
 const summary: CodexUsageSummaryResponse = {
@@ -62,6 +64,7 @@ describe("CodexUsagePanel interactions", () => {
       summary: { lifetimeTokens: 30, peakDailyTokens: 20, longestRunningTurnSec: 10, currentStreakDays: 2, longestStreakDays: 3 },
       points: [{ date: "2026-09-08", tokens: 10 }, { date: "2026-09-09", tokens: 20 }]
     });
+    apiMocks.codexUsageSummary.mockReset().mockResolvedValue(summary);
     apiMocks.consumeCodexResetCredit.mockReset();
     container = document.createElement("div");
     document.body.append(container);
@@ -87,7 +90,8 @@ describe("CodexUsagePanel interactions", () => {
     expect(apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0]).toMatchObject({ creditId: "reset-1" });
     expect(apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0].idempotencyKey).toMatch(/^[0-9a-f-]{36}$/);
     expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
-    expect(container.textContent).toContain("Usage limit reset");
+    expect(container.textContent).toContain("Reset token redeemed. Confirming updated account limits");
+    expect(container.querySelector('[aria-label="Refresh Codex usage"]')).toBeNull();
   });
 
   it("always loads 30 days without a range selector", () => {
@@ -208,7 +212,7 @@ describe("CodexUsagePanel interactions", () => {
 
   async function renderPanel() {
     await act(async () => {
-      root.render(<CodexUsagePanel summary={summary} />);
+      root.render(<TestPanel />);
       await Promise.resolve();
     });
   }
@@ -232,3 +236,8 @@ describe("CodexUsagePanel interactions", () => {
     });
   }
 });
+
+function TestPanel() {
+  const usageMonitor = useCodexUsageMonitor();
+  return <CodexUsagePanel summary={usageMonitor.summary ?? summary} usageMonitor={usageMonitor} />;
+}

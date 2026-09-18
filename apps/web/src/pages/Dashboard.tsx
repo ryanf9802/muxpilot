@@ -12,7 +12,6 @@ import {
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
-  CodexUsageSummaryResponse,
   CodexModelCatalogResponse,
   ApprovalReviewerSettings,
   CollaborationMode,
@@ -44,6 +43,7 @@ import {
 } from "../utils/sessionStatus.js";
 
 export { CodexUsagePanel };
+export { CODEX_USAGE_POLL_INTERVAL_MS as DASHBOARD_USAGE_RECONCILE_INTERVAL_MS } from "../hooks/useCodexUsageMonitor.js";
 
 const ACTION_MENU_WIDTH = 220;
 const ACTION_MENU_HEIGHT = 312;
@@ -51,7 +51,6 @@ const NOTIFICATION_MENU_WIDTH = 220;
 const NOTIFICATION_RING_MS = 2800;
 const ACTION_MENU_EDGE = 8;
 const DASHBOARD_COLLAPSED_REPOS_STORAGE_KEY = "muxpilot.dashboard.collapsed-repos.v1";
-export const DASHBOARD_USAGE_RECONCILE_INTERVAL_MS = 60_000;
 export const DASHBOARD_SEARCH_DEBOUNCE_MS = 150;
 export const DASHBOARD_STATUSES = ["", "working", "running", "planning", "queued", "waiting", "question", "plan_ready", "approval", "blocked", "input_failed", "startup_failed", "unknown", "missing", "completed"];
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
@@ -64,11 +63,9 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode } =
+  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode, codexUsageMonitor } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
-  const [codexUsageSummary, setCodexUsageSummary] = useState<CodexUsageSummaryResponse | null>(null);
-  const [codexUsageSummaryInitialLoading, setCodexUsageSummaryInitialLoading] = useState(true);
   const [q, setQ] = useState("");
   const [serverSearch, setServerSearch] = useState<{ query: string; sessions: ManagedSession[] } | null>(null);
   const [menu, setMenu] = useState<{ session: ManagedSession; x: number; y: number } | null>(null);
@@ -91,7 +88,6 @@ export function Dashboard() {
   const [collapsedRepoKeys, setCollapsedRepoKeys] = useState<Set<string>>(() => new Set(loadStoredCollapsedRepoKeys()));
   const menuRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const codexUsageRequestIdRef = useRef(0);
   const [optimisticallyRemovedSessionIds, setOptimisticallyRemovedSessionIds] = useState<Set<string>>(() => new Set());
   const queryStatusFilter = useMemo(() => dashboardStatusFilterFromSearchParams(searchParams), [searchParams]);
   const statusFilter = useMemo<DashboardStatusFilter>(
@@ -135,22 +131,6 @@ export function Dashboard() {
     };
   }, [normalizedQuery]);
 
-  const loadCodexUsageSummary = useCallback(async (refresh = false) => {
-    const requestId = ++codexUsageRequestIdRef.current;
-    try {
-      const summary = await api.codexUsageSummary(refresh);
-      if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummary(summary);
-    } finally {
-      if (requestId === codexUsageRequestIdRef.current) setCodexUsageSummaryInitialLoading(false);
-    }
-  }, []);
-
-  const acceptCodexUsageSummary = useCallback((summary: CodexUsageSummaryResponse) => {
-    codexUsageRequestIdRef.current += 1;
-    setCodexUsageSummary(summary);
-    setCodexUsageSummaryInitialLoading(false);
-  }, []);
-
   useEffect(() => {
     const optimisticallyRemovedSessionId = dashboardLocationState(location.state).optimisticallyRemovedSessionId;
     if (!optimisticallyRemovedSessionId) return;
@@ -177,14 +157,6 @@ export function Dashboard() {
       for (const timer of timers) window.clearTimeout(timer);
     };
   }, [subscribeSessionEvents]);
-
-  useEffect(() => {
-    void loadCodexUsageSummary().catch(() => undefined);
-    const interval = setInterval(() => {
-      void loadCodexUsageSummary().catch(() => undefined);
-    }, DASHBOARD_USAGE_RECONCILE_INTERVAL_MS);
-    return () => clearInterval(interval);
-  }, [loadCodexUsageSummary]);
 
   useDismissableContextMenu(Boolean(menu), menuRef, () => setMenu(null));
 
@@ -659,13 +631,12 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      {codexUsageSummaryInitialLoading && !codexUsageSummary ? (
+      {codexUsageMonitor.initialLoading && !codexUsageMonitor.summary ? (
         <UsagePanelSkeleton />
-      ) : codexUsageSummary ? (
+      ) : codexUsageMonitor.summary ? (
         <CodexUsagePanel
-          summary={codexUsageSummary}
-          onSummaryChange={acceptCodexUsageSummary}
-          onRefreshSummary={() => loadCodexUsageSummary(true)}
+          summary={codexUsageMonitor.summary}
+          usageMonitor={codexUsageMonitor}
         />
       ) : (
         <UsageUnavailablePanel title="Codex usage" />

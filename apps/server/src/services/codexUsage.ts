@@ -16,9 +16,9 @@ const FIVE_HOUR_WINDOW_MINS = 5 * 60;
 const WEEKLY_WINDOW_MINS = 7 * 24 * 60;
 const MODEL_CACHE_TTL_MS = 60_000;
 const MODEL_FAILURE_CACHE_TTL_MS = 10_000;
-const USAGE_CACHE_TTL_MS = 60_000;
+const USAGE_CACHE_TTL_MS = 10_000;
 const USAGE_FAILURE_CACHE_TTL_MS = 10_000;
-const TOKEN_USAGE_CACHE_TTL_MS = 60_000;
+const TOKEN_USAGE_CACHE_TTL_MS = 10_000;
 
 interface JsonRpcSuccess {
   id: string | number;

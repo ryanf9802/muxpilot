@@ -59,6 +59,7 @@ import {
   playNotificationBell
 } from "../utils/notifications.js";
 import { installVisibleViewportVariables } from "../utils/visualViewport.js";
+import { useCodexUsageMonitor, type CodexUsageMonitor } from "../hooks/useCodexUsageMonitor.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -85,6 +86,7 @@ export function foregroundConnectionDisplayState(
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
+  const codexUsageMonitor = useCodexUsageMonitor();
   const [connectionState, setConnectionState] = useState<ShellConnectionState>("connecting");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -1220,7 +1222,8 @@ export function AppShell() {
               connectionEpoch,
               accessMode,
               notificationSettings,
-              setNotificationSettings
+              setNotificationSettings,
+              codexUsageMonitor
             } satisfies AppShellOutletContext
           }
         />
@@ -1538,6 +1541,7 @@ export interface AppShellOutletContext {
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
   setNotificationSettings: (settings: NotificationSettings) => void;
+  codexUsageMonitor: CodexUsageMonitor;
 }
 
 export function defaultForkSessionName(session: ManagedSession): string {

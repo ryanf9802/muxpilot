@@ -1,4 +1,3 @@
-import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CodexRateLimitResetCredit,
@@ -6,77 +5,104 @@ import type {
   CodexTokenUsageResponse,
   CodexUsageLimit,
   CodexUsageSummaryResponse,
-  ConsumeCodexResetCreditOutcome,
-  ConsumeCodexResetCreditResponse
+  ConsumeCodexResetCreditOutcome
 } from "@muxpilot/core";
 import { api } from "../api/client.js";
+import type { CodexUsageMonitor } from "../hooks/useCodexUsageMonitor.js";
 import { Button, DialogActions } from "./Button.js";
 import { Modal } from "./Modal.js";
 
-const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
-const CODEX_USAGE_RECONCILE_INTERVAL_MS = 60_000;
+const CODEX_USAGE_RECONCILE_INTERVAL_MS = 10_000;
 const CODEX_USAGE_HISTORY_DAYS = 30;
-
-interface PendingResetAttempt {
-  idempotencyKey: string;
-  creditId: string | null;
-  recoveryAttempted: boolean;
-}
-
-type ResetAction = "using" | "confirming" | "retrying";
-
-const resetRequests = new Map<string, Promise<ConsumeCodexResetCreditResponse>>();
 
 export function CodexUsagePanel({
   summary,
-  onSummaryChange,
-  onRefreshSummary
+  usageMonitor
 }: {
   summary: CodexUsageSummaryResponse | null;
-  onSummaryChange?: (summary: CodexUsageSummaryResponse) => void;
-  onRefreshSummary?: () => Promise<void>;
+  usageMonitor: Pick<CodexUsageMonitor, "pendingAttempt" | "resetAction" | "resetError" | "resetOutcome" | "resetRevision" | "consumeReset" | "refreshError">;
 }) {
   const [history, setHistory] = useState<CodexTokenUsageResponse | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [historyRefreshError, setHistoryRefreshError] = useState<string | null>(null);
   const [selectedCredit, setSelectedCredit] = useState<CodexRateLimitResetCredit | null | undefined>(undefined);
-  const [pendingAttempt, setPendingAttempt] = useState<PendingResetAttempt | null>(() => loadPendingResetAttempt());
-  const [resetAction, setResetAction] = useState<ResetAction | null>(null);
-  const [resetError, setResetError] = useState<string | null>(null);
-  const [resetOutcome, setResetOutcome] = useState<ConsumeCodexResetCreditOutcome | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const historyRequestIdRef = useRef(0);
+  const historyInFlightRef = useRef<Promise<void> | null>(null);
   const accountLabel = summary ? formatCodexAccount(summary) : "loading";
   const planLabel = summary?.account?.planType ? summary.account.planType : null;
+  const { pendingAttempt, resetAction, resetError, resetOutcome, resetRevision, consumeReset, refreshError } = usageMonitor;
 
-  const loadHistory = useCallback(async (refresh = false) => {
+  const loadHistory = useCallback((refresh = false): Promise<void> => {
+    if (historyInFlightRef.current) {
+      return refresh
+        ? historyInFlightRef.current.catch(() => undefined).then(() => loadHistory(true))
+        : historyInFlightRef.current;
+    }
     const requestId = ++historyRequestIdRef.current;
     setHistoryLoading(true);
-    try {
-      const nextHistory = await api.codexUsageHistory(CODEX_USAGE_HISTORY_DAYS, refresh);
-      if (requestId === historyRequestIdRef.current) setHistory(nextHistory);
-    } catch (error) {
-      if (requestId === historyRequestIdRef.current) {
-        setHistory({
-          available: false,
-          error: error instanceof Error ? error.message : "Codex token usage is unavailable.",
-          refreshedAt: new Date().toISOString(),
-          days: CODEX_USAGE_HISTORY_DAYS,
-          summary: null,
-          points: null
-        });
+    const request = (async () => {
+      try {
+        const nextHistory = await api.codexUsageHistory(CODEX_USAGE_HISTORY_DAYS, refresh);
+        if (!nextHistory.available) throw new Error(nextHistory.error ?? "Codex token usage is unavailable.");
+        if (requestId === historyRequestIdRef.current) {
+          setHistory(nextHistory);
+          setHistoryRefreshError(null);
+        }
+      } catch (error) {
+        if (requestId === historyRequestIdRef.current) {
+          const message = error instanceof Error ? error.message : "Codex token usage is unavailable.";
+          setHistoryRefreshError(message);
+          setHistory((current) => current ?? {
+            available: false,
+            error: message,
+            refreshedAt: new Date().toISOString(),
+            days: CODEX_USAGE_HISTORY_DAYS,
+            summary: null,
+            points: null
+          });
+        }
+        throw error;
+      } finally {
+        if (requestId === historyRequestIdRef.current) setHistoryLoading(false);
       }
-    } finally {
-      if (requestId === historyRequestIdRef.current) setHistoryLoading(false);
-    }
+    })();
+    historyInFlightRef.current = request;
+    void request.finally(() => {
+      if (historyInFlightRef.current === request) historyInFlightRef.current = null;
+    }).catch(() => undefined);
+    return request;
   }, []);
 
   useEffect(() => {
-    void loadHistory();
-    const timer = window.setInterval(() => void loadHistory(), CODEX_USAGE_RECONCILE_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    let stopped = false;
+    let failureCount = 0;
+    const poll = async () => {
+      if (document.visibilityState !== "visible") return;
+      await loadHistory().then(() => { failureCount = 0; }).catch(() => { failureCount += 1; });
+      if (!stopped) timer = window.setTimeout(() => void poll(), failureCount ? Math.min(60_000, 10_000 * 2 ** failureCount) : CODEX_USAGE_RECONCILE_INTERVAL_MS);
+    };
+    const onVisibilityChange = () => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      if (document.visibilityState === "visible") void poll();
+    };
+    void poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [loadHistory]);
+
+  const previousResetRevision = useRef(resetRevision);
+  useEffect(() => {
+    if (resetRevision === previousResetRevision.current) return;
+    previousResetRevision.current = resetRevision;
+    void loadHistory(true).catch(() => undefined);
+  }, [loadHistory, resetRevision]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -85,78 +111,13 @@ export function CodexUsagePanel({
 
   const resetBusy = resetAction !== null;
 
-  useEffect(() => {
-    const restoredAttempt = loadPendingResetAttempt();
-    if (!restoredAttempt || restoredAttempt.recoveryAttempted) return;
-    const recoveryAttempt = { ...restoredAttempt, recoveryAttempted: true };
-    if (!replacePendingResetAttempt(restoredAttempt, recoveryAttempt)) {
-      setPendingAttempt(loadPendingResetAttempt());
-      return;
-    }
-    setPendingAttempt(recoveryAttempt);
-    void consumeReset(recoveryAttempt, "confirming", false);
-    // Recovery runs once for the attempt restored by this mount. Further retries are manual.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (pendingAttempt && !resetBusy) {
-      setResetError((current) => current ?? "A previous reset attempt did not receive a confirmed result.");
-    }
-  }, [pendingAttempt, resetBusy]);
-
-  useEffect(() => {
-    function handleStorage(event: StorageEvent) {
-      if (event.key !== PENDING_RESET_KEY) return;
-      const nextAttempt = loadPendingResetAttempt();
-      setPendingAttempt(nextAttempt);
-      if (!nextAttempt) setResetError(null);
-    }
-    window.addEventListener("storage", handleStorage);
-    return () => window.removeEventListener("storage", handleStorage);
-  }, []);
-
-  async function refreshAll() {
-    setRefreshing(true);
-    setRefreshError(null);
-    try {
-      await Promise.all([onRefreshSummary?.(), loadHistory(true)]);
-    } catch (error) {
-      setRefreshError(error instanceof Error ? error.message : "Codex usage could not be refreshed.");
-    } finally {
-      setRefreshing(false);
-    }
-  }
-
-  async function consumeReset(attempt: PendingResetAttempt, action: ResetAction, persist = true) {
-    setResetAction(action);
-    setResetError(null);
-    setResetOutcome(null);
-    setPendingAttempt(attempt);
-    if (persist) savePendingResetAttempt(attempt);
-    try {
-      const response = await requestReset(attempt);
-      clearPendingResetAttempt(attempt);
-      const nextAttempt = loadPendingResetAttempt();
-      setPendingAttempt(nextAttempt);
-      setSelectedCredit(undefined);
-      if (!nextAttempt) setResetOutcome(response.outcome);
-      onSummaryChange?.(response.summary);
-      await loadHistory(true);
-    } catch (error) {
-      setSelectedCredit(undefined);
-      setResetError(error instanceof Error ? error.message : "The reset attempt could not be confirmed.");
-    } finally {
-      setResetAction(null);
-    }
-  }
-
   function confirmReset() {
     const attempt = {
       idempotencyKey: createIdempotencyKey(),
       creditId: selectedCredit?.id ?? null,
       recoveryAttempted: false
     };
+    setSelectedCredit(undefined);
     void consumeReset(attempt, "using");
   }
 
@@ -174,9 +135,6 @@ export function CodexUsagePanel({
           <p>{summary?.available ? "Account limits" : summary?.error ?? "Account limits"}</p>
         </div>
         <div className="usage-panel-controls">
-          <button className="usage-refresh-button" type="button" onClick={() => void refreshAll()} disabled={refreshing} aria-label="Refresh Codex usage" title="Refresh Codex usage">
-            <RefreshCw size={15} className={refreshing ? "spin" : undefined} />
-          </button>
           <div className="usage-total">
             <strong>{accountLabel}</strong>
             <span>{planLabel ?? (summary ? formatCodexRefresh(summary.refreshedAt) : "loading")}</span>
@@ -244,7 +202,7 @@ export function CodexUsagePanel({
           {summary.available ? null : <span>Unavailable</span>}
         </div>
       ) : null}
-      {refreshError ? <p className="usage-note usage-error" role="alert">{refreshError}</p> : null}
+      {refreshError || historyRefreshError ? <p className="usage-note usage-error" role="alert">{refreshError ?? historyRefreshError}</p> : null}
 
       {selectedCredit !== undefined ? (
         <Modal open title="Use usage reset token?" onClose={() => setSelectedCredit(undefined)} dismissible={!resetBusy} panelClassName="codex-reset-dialog">
@@ -328,8 +286,8 @@ function resetCreditsDescription(summary: CodexUsageSummaryResponse | null, deta
 }
 
 function resetOutcomeMessage(outcome: ConsumeCodexResetCreditOutcome): string {
-  if (outcome === "reset") return "Usage limit reset. Account limits and reset tokens have been refreshed.";
-  if (outcome === "alreadyRedeemed") return "This reset attempt was already completed. Account limits have been refreshed.";
+  if (outcome === "reset") return "Reset token redeemed. Confirming updated account limits…";
+  if (outcome === "alreadyRedeemed") return "This reset attempt was already completed. Confirming updated account limits…";
   if (outcome === "nothingToReset") return "No eligible usage limit currently needs resetting.";
   return "No reset token is available for this account.";
 }
@@ -387,84 +345,4 @@ function createIdempotencyKey(): string {
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function loadPendingResetAttempt(): PendingResetAttempt | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = JSON.parse(window.localStorage.getItem(PENDING_RESET_KEY) ?? "null") as Partial<PendingResetAttempt> | null;
-    if (
-      !value
-      || typeof value.idempotencyKey !== "string"
-      || value.idempotencyKey.length === 0
-      || (typeof value.creditId !== "string" && value.creditId !== null)
-      || value.creditId === ""
-    ) {
-      removePendingResetAttempt();
-      return null;
-    }
-    return {
-      idempotencyKey: value.idempotencyKey,
-      creditId: value.creditId,
-      recoveryAttempted: value.recoveryAttempted === true
-    };
-  } catch {
-    removePendingResetAttempt();
-    return null;
-  }
-}
-
-function savePendingResetAttempt(attempt: PendingResetAttempt): boolean {
-  try {
-    window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify(attempt));
-    return true;
-  } catch {
-    // Redemption remains safe in-memory when storage is unavailable.
-    return false;
-  }
-}
-
-function replacePendingResetAttempt(expected: PendingResetAttempt, replacement: PendingResetAttempt): boolean {
-  try {
-    const current = loadPendingResetAttempt();
-    if (!sameResetAttempt(current, expected)) return false;
-    return savePendingResetAttempt(replacement);
-  } catch {
-    return false;
-  }
-}
-
-function clearPendingResetAttempt(attempt: PendingResetAttempt): void {
-  try {
-    if (sameResetAttempt(loadPendingResetAttempt(), attempt)) removePendingResetAttempt();
-  } catch {
-    // Nothing else is required when storage is unavailable.
-  }
-}
-
-function removePendingResetAttempt(): void {
-  try {
-    window.localStorage.removeItem(PENDING_RESET_KEY);
-  } catch {
-    // Nothing else is required when storage is unavailable.
-  }
-}
-
-function sameResetAttempt(left: PendingResetAttempt | null, right: PendingResetAttempt): boolean {
-  return left?.idempotencyKey === right.idempotencyKey && left.creditId === right.creditId;
-}
-
-function requestReset(attempt: PendingResetAttempt): Promise<ConsumeCodexResetCreditResponse> {
-  const key = `${attempt.idempotencyKey}\u0000${attempt.creditId ?? ""}`;
-  const existing = resetRequests.get(key);
-  if (existing) return existing;
-  const request = api.consumeCodexResetCredit({
-    idempotencyKey: attempt.idempotencyKey,
-    creditId: attempt.creditId
-  });
-  resetRequests.set(key, request);
-  void request.finally(() => {
-    if (resetRequests.get(key) === request) resetRequests.delete(key);
-  }).catch(() => undefined);
-  return request;
 }

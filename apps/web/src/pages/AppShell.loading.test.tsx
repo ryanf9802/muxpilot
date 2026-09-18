@@ -118,6 +118,14 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
   });
   vi.spyOn(client.api, "sessionSummaries").mockImplementation(summaries);
   vi.spyOn(client.api, "notificationSettings").mockResolvedValue({} as never);
+  vi.spyOn(client.api, "codexUsageSummary").mockResolvedValue({
+    available: true,
+    error: null,
+    refreshedAt: "2026-09-10T12:00:00.000Z",
+    account: null,
+    limits: { fiveHour: null, weekly: null },
+    resetCredits: null
+  });
   vi.spyOn(client.api, "sessionRecovery").mockResolvedValue({ incident: null });
   vi.spyOn(client.api, "appServerCompatibility").mockResolvedValue({
     status: "available",
