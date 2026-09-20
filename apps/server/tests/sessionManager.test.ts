@@ -264,7 +264,7 @@ describe("SessionManager app-server helpers", () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
     const manager = new SessionManager(
-      {} as never,
+      { latestApprovalMessage: vi.fn(async () => null) } as never,
       codexStore as never,
       events,
       60_000,
@@ -811,7 +811,7 @@ describe("SessionManager app-server helpers", () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
     const manager = new SessionManager(
-      {} as never,
+      { latestApprovalMessage: vi.fn(async () => null) } as never,
       codexStore as never,
       events,
       1_000,
@@ -1131,6 +1131,58 @@ describe("SessionManager app-server helpers", () => {
     );
   });
 
+  it("persists and resumes a scoped Muxpilot guard approval", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-native-approval-"));
+    temporaryRoots.push(directory);
+    const db = new AppDatabase(join(directory, "test.db"));
+    const session = { ...managedSession(), status: "executing" as const };
+    await db.upsertSession(session, "2026-09-20T00:00:00.000Z");
+    const sendMessage = vi.fn(async (_session, _text, clientMessageId: string) => ({
+      clientMessageId,
+      threadId: "thread-1",
+      turnId: "approval-continuation",
+      acceptedAt: "2026-09-20T00:00:02.000Z"
+    }));
+    const driver = { reconcileInput: vi.fn(async () => null), sendMessage };
+    const publish = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db,
+      deliveringInputSessionIds: new Set<string>(),
+      processingQueuedSessionIds: new Set<string>(),
+      automatedApprovalMessageIds: new Set<string>(),
+      approvalAutomationGenerations: new Map<string, number>(),
+      heavyCommandQueue: null,
+      sessionDrivers: { has: vi.fn(() => true), require: vi.fn(() => driver) },
+      publish
+    }) as SessionManager;
+
+    const request = {
+      guards: ["fixed-target" as const],
+      action: "Retarget future work to feature/native-approvals",
+      consequences: "Future task commits integrate into feature/native-approvals.",
+      reason: "The operator selected a new implementation branch."
+    };
+    const approval = await manager.requestMuxpilotApproval(session.id, request);
+    expect(approval).toMatchObject({ source: "muxpilot", guards: ["fixed-target"], action: request.action });
+    expect((await manager.requestMuxpilotApproval(session.id, request)).messageId).toBe(approval.messageId);
+
+    await db.setSessionStatus(session.id, "approval", "2026-09-20T00:00:01.000Z");
+    await manager.resolveApproval(session.id, { decision: "approve_once", messageId: approval.messageId });
+
+    expect(sendMessage).toHaveBeenCalledOnce();
+    expect(sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id }),
+      expect.stringContaining('"decision":"approved"'),
+      `muxpilot-approval-${approval.messageId}`
+    );
+    const stored = await db.getMessage(session.id, approval.messageId);
+    expect(stored?.payload).toMatchObject({
+      interactionOutcome: { kind: "approval", status: "answered", decision: "approve_once" },
+      muxpilotDecision: { decision: "approve_once", state: "delivered" }
+    });
+    expect((await db.getSession(session.id))?.status).toBe("working");
+  });
+
   it("rejects approval mode overrides on agent-managed children", async () => {
     const session = {
       ...managedSession(),
@@ -1438,7 +1490,11 @@ describe("SessionManager app-server helpers", () => {
     const approval = pendingApproval(automatic.id);
     const handleAutomatedApproval = vi.fn(async () => undefined);
     const manager = Object.assign(Object.create(SessionManager.prototype), {
-      db: { listSessions: vi.fn(async () => [automatic, manual]) },
+      db: {
+        listSessions: vi.fn(async () => [automatic, manual]),
+        latestApprovalMessage: vi.fn(async () => null)
+      },
+      deliverPendingMuxpilotApprovalDecision: vi.fn(async () => undefined),
       getPendingApproval: vi.fn(async () => approval),
       handleAutomatedApproval
     }) as SessionManager;

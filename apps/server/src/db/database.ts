@@ -3152,11 +3152,20 @@ export class SyncAppDatabase {
       : null;
     const matchedSubmissionState = recordValue(matchedTurnSubmission?.payload.muxpilotSubmission)?.state;
     const failedSubmissionCandidate = matchedSubmissionState === "dismissed" ? null : matchedTurnSubmission;
+    const pendingMuxpilotApproval = this.db.prepare(
+      `SELECT 1 FROM messages
+       WHERE session_id = ? AND type = 'approval_request'
+         AND json_extract(payload_json, '$.source') = 'muxpilot'
+         AND json_extract(payload_json, '$.interactionOutcome') IS NULL
+       ORDER BY sequence DESC LIMIT 1`
+    ).get(projection.sessionId) !== undefined;
     const targetStatus = failedSubmissionCandidate
       ? "input_failed"
       : matchedSubmissionState === "dismissed"
         ? null
-        : projection.status;
+        : pendingMuxpilotApproval && projection.status !== "startup_failed" && projection.status !== "missing"
+          ? "approval"
+          : projection.status;
     const statusChanged = targetStatus !== null && existingSession.status !== targetStatus;
 
     this.db.exec("BEGIN IMMEDIATE");

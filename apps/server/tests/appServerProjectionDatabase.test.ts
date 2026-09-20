@@ -6,6 +6,45 @@ import { describe, expect, it } from "vitest";
 import { AppDatabase } from "../src/db/database.js";
 
 describe("app-server projection persistence", () => {
+  it("keeps an unresolved Muxpilot guard request actionable when its turn completes", async () => {
+    const { db, sessionId } = await projectionDb();
+    await db.appendMessage({
+      id: "muxpilot-approval",
+      sessionId,
+      sequence: 1,
+      type: "approval_request",
+      role: "system",
+      timestamp: "2026-09-20T00:00:00.000Z",
+      text: "Muxpilot approval required",
+      payload: {
+        source: "muxpilot",
+        approval: {
+          id: "gate-1",
+          source: "muxpilot",
+          kind: "permissions",
+          title: "Muxpilot approval required",
+          guards: ["fixed-target"],
+          action: "Retarget to feature/native-approvals",
+          consequences: "Future commits integrate into the selected branch.",
+          reason: "The requested target differs from the fixed target.",
+          options: []
+        }
+      }
+    });
+
+    const result = await db.applyAppServerProjection({
+      ...projectionInput(sessionId),
+      method: "turn/completed",
+      status: "waiting",
+      message: null,
+      observedAt: "2026-09-20T00:00:01.000Z"
+    });
+
+    expect(result).toMatchObject({ statusChanged: true, state: { status: "approval" } });
+    expect((await db.getSession(sessionId))?.status).toBe("approval");
+    await db.close();
+  });
+
   it("loads durable intentional interruption kinds by exact thread and turn", async () => {
     const { db, sessionId } = await projectionDb();
     expect(await db.getAppServerTurnInterruptionKind(sessionId, "thread-1", "turn-1")).toBeNull();

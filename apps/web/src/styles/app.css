@@ -4786,6 +4786,15 @@ select:focus-visible {
   min-width: 0;
 }
 
+.approval-source {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .approval-title strong,
 .approval-title p,
 .approval-error {

@@ -4,6 +4,7 @@ import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
+import type { MuxpilotGuard } from "@muxpilot/core";
 import { liveSessionSubtree, serializeSessionWaitEvent, sessionStatusPresentation, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
@@ -165,6 +166,21 @@ export class SessionOrchestrationBroker {
           messageId: question.messageId
         } as QuestionAnswerRequest);
         return { ok: true, sessionId: target };
+      }
+      case "request_muxpilot_approval": {
+        const guards = muxpilotGuards(args.guards);
+        const approval = await this.manager.requestMuxpilotApproval(actorId, {
+          guards,
+          action: requiredString(args.action, "action"),
+          consequences: requiredString(args.consequences, "consequences"),
+          reason: requiredString(args.reason, "reason")
+        });
+        return {
+          requested: true,
+          approvalId: approval.id,
+          messageId: approval.messageId,
+          instruction: "End this turn immediately. Muxpilot will apply the session approval mode and resume this session with the decision; do not ask for the same confirmation in chat."
+        };
       }
       case "choose_plan_action": {
         const target = requiredString(args.sessionId, "sessionId");
@@ -422,4 +438,16 @@ function collaborationMode(value: unknown): "default" | "plan" | undefined {
 function planAction(value: unknown): "implement" | "clear_context_implement" | "stay_in_plan" {
   if (value === "implement" || value === "clear_context_implement" || value === "stay_in_plan") return value;
   throw new Error("Invalid plan action");
+}
+
+const MUXPILOT_GUARDS = new Set<MuxpilotGuard>([
+  "worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target",
+  "fixed-target", "local-target-only", "automatic-cleanup", "no-pull-push"
+]);
+
+function muxpilotGuards(value: unknown): MuxpilotGuard[] {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((guard) => typeof guard === "string" && MUXPILOT_GUARDS.has(guard as MuxpilotGuard))) {
+    throw new Error("guards must contain one or more valid Muxpilot guards");
+  }
+  return [...new Set(value as MuxpilotGuard[])];
 }

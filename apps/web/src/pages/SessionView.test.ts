@@ -672,6 +672,37 @@ describe("ApprovalBanner", () => {
     expect(html).toContain("Auto review escalated to you");
     expect(html).toContain("requested host is unrelated");
   });
+
+  it("renders the scoped operation and guards for a Muxpilot approval", () => {
+    const approval: ApprovalRequest = {
+      id: "muxpilot-approval",
+      sessionId: "session-a",
+      messageId: "message-muxpilot",
+      kind: "permissions",
+      source: "muxpilot",
+      title: "Muxpilot approval required",
+      command: null,
+      toolName: "muxpilot guard override",
+      cwd: "/repo",
+      reason: "The requested target differs from the fixed session target.",
+      prefixRule: null,
+      guards: ["fixed-target"],
+      action: "Retarget future work to feature/native-approvals",
+      consequences: "Future task commits integrate into feature/native-approvals.",
+      options: [
+        { decision: "approve_once", label: "Approve once", description: "Authorize this operation." },
+        { decision: "deny", label: "Deny", description: "Keep the guard active." }
+      ],
+      createdAt: "2026-09-20T00:00:00.000Z"
+    };
+    const html = renderToStaticMarkup(
+      createElement(ApprovalBanner, { approval, automationMode: "ask", busy: null, error: "", onDecision: () => undefined })
+    );
+    expect(html).toContain("Muxpilot approval");
+    expect(html).toContain("fixed-target");
+    expect(html).toContain("Retarget future work");
+    expect(html).toContain("Future task commits integrate");
+  });
 });
 
 describe("shouldSubmitComposer", () => {

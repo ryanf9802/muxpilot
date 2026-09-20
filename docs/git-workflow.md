@@ -32,7 +32,7 @@ When a request names a new destination branch for implementation, that destinati
 
 1. Name the `fixed-target` guard.
 2. Explain that current and future task commits will integrate into the new branch.
-3. Obtain separate, explicit operator confirmation unless the direct skill-invocation authorization below applies.
+3. Request a structured Muxpilot approval unless the direct skill-invocation authorization below applies. The session's Ask, Auto, or Full setting resolves it.
 4. Create the local branch when requested, then retarget with `muxpilot-git-target.mjs`.
 
 Retargeting an active worktree invalidates its prior checks and review. They must be repeated before integration.
@@ -114,10 +114,11 @@ pausing for redundant confirmation. Automatic skill selection, broad
 capability descriptions, undeclared actions, and later operations do not
 qualify.
 
-For all other conflicts, an operator can approve a specific guard bypass for a
-specific operation only after the agent names the guard and consequence. There
-is no blanket force option. Platform safety, sandbox, permission, and security
-approvals are separate and cannot be bypassed through workflow guards.
+For all other conflicts, the agent submits a structured Muxpilot approval with
+the exact guards, operation, consequences, and reason. The session's approval
+mode resolves that request; approval remains scoped to that one operation.
+There is no blanket force option. Platform safety, sandbox, permission, and
+security approvals are separate and cannot be bypassed through workflow guards.
 
 ## Integration Boundaries and Recovery
 

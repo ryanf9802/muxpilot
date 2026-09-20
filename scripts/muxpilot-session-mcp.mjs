@@ -86,6 +86,12 @@ function toolDefinitions() {
     { name: "release_session", description: "Release a managed descendant back to the top level without stopping it.", inputSchema: object({ sessionId }, ["sessionId"]) },
     { name: "send_message", description: "Send a message to any live muxpilot session. Descendant work-token budgets apply.", inputSchema: object({ sessionId, text: { type: "string", maxLength: 200000 }, mode: { type: "string", enum: ["default", "plan"] } }, ["sessionId", "text"]) },
     { name: "answer_question", description: "Answer a pending structured question in a managed descendant. Security approvals are not supported.", inputSchema: object({ sessionId, answers: { type: "object" } }, ["sessionId", "answers"]) },
+    { name: "request_muxpilot_approval", description: "Request operation-scoped approval to bypass one or more Muxpilot guards for this session. After it succeeds, end the turn immediately; Muxpilot applies the session's Ask, Auto, or Full approval mode and resumes with the decision.", inputSchema: object({
+      guards: { type: "array", minItems: 1, uniqueItems: true, items: { type: "string", enum: ["worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target", "fixed-target", "local-target-only", "automatic-cleanup", "no-pull-push"] } },
+      action: { type: "string", minLength: 1, maxLength: 2000 },
+      consequences: { type: "string", minLength: 1, maxLength: 4000 },
+      reason: { type: "string", minLength: 1, maxLength: 4000 }
+    }, ["guards", "action", "consequences", "reason"]) },
     { name: "choose_plan_action", description: "Choose a pending plan action in a managed descendant.", inputSchema: object({ sessionId, action: { type: "string", enum: ["implement", "clear_context_implement", "stay_in_plan"] } }, ["sessionId", "action"]) },
     { name: "interrupt_session", description: "Interrupt a managed descendant.", inputSchema: object({ sessionId }, ["sessionId"]) },
     { name: "finish_session", description: "Stop a managed descendant and free its root-tree concurrency slot while retaining history.", inputSchema: object({ sessionId }, ["sessionId"]) },

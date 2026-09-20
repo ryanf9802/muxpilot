@@ -60,7 +60,7 @@ Treat `muxpilot-git-status.mjs` as authoritative for the current target. The lau
 
 Infer target intent before beginning a change task. When a user asks to create or select a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the muxpilot target. In a request to create `feature` from `origin/dev`, `feature` is the intended target and `origin/dev` is only its start point.
 
-If the intended target differs from workflow status, changing it is a `fixed-target` guard bypass. When "Skill-declared authorization" below does not apply, the original request is not itself confirmation. Before creating the requested branch or beginning implementation, name the `fixed-target` guard, explain that current and future task commits will integrate into the new branch, and obtain separate explicit confirmation. If confirmation is declined, leave the branch and workflow state unchanged.
+If the intended target differs from workflow status, changing it is a `fixed-target` guard bypass. When "Skill-declared authorization" below does not apply, the original request is not itself confirmation. Before creating the requested branch or beginning implementation, request a structured Muxpilot approval for the `fixed-target` guard, action, consequences, and reason, then end the turn. If structured Muxpilot approvals are unavailable, obtain separate explicit conversational confirmation. If approval is declined, leave the branch and workflow state unchanged.
 
 After authorization, create a requested local branch from the supplied locally available start point without checking it out, fetching, pulling, or pushing. Then run `node <helper-dir>/muxpilot-git-target.mjs <existing-local-branch> --bypass=fixed-target`. If the start point is unavailable locally, report the blocker rather than fetching implicitly. If the intended branch is already the current target, no bypass or additional authorization is required.
 
@@ -98,7 +98,7 @@ When skill-declared authorization does not apply and a user instruction
 conflicts with one or more guards:
 
 1. Name each conflicting guard and explain the concrete consequence of bypassing it.
-2. Obtain explicit confirmation for those exact guards before acting. Do not infer confirmation from the original conflicting request.
+2. Call `request_muxpilot_approval` with those exact guards, the proposed action, concrete consequences, and reason, then end the turn immediately. Do not ask for the same approval in chat. When that tool is unavailable, obtain explicit conversational confirmation. Do not infer confirmation from the original conflicting request.
 3. Scope confirmation to that operation only; every unrelated guard remains active.
 4. Pass an exact `--bypass=<guard>` option when a helper supports the confirmed exception. There is no blanket force option.
 

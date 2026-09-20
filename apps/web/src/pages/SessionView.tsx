@@ -5333,11 +5333,30 @@ export function ApprovalBanner({
       <div className="approval-title">
         <AlertTriangle size={18} />
         <div>
+          {approval.source === "muxpilot" ? <span className="approval-source">Muxpilot approval</span> : null}
           <strong>{approval.title}</strong>
           <p>{subject}</p>
         </div>
       </div>
       <dl className="approval-details">
+        {approval.guards?.length ? (
+          <>
+            <dt>guards</dt>
+            <dd>{approval.guards.join(", ")}</dd>
+          </>
+        ) : null}
+        {approval.action ? (
+          <>
+            <dt>action</dt>
+            <dd>{approval.action}</dd>
+          </>
+        ) : null}
+        {approval.consequences ? (
+          <>
+            <dt>consequence</dt>
+            <dd>{approval.consequences}</dd>
+          </>
+        ) : null}
         {approval.cwd ? (
           <>
             <dt>cwd</dt>
@@ -6650,7 +6669,11 @@ function ResolvedInteractionCard({ message, outcome }: { message: ChatMessage; o
         </dl>
       ) : outcome.kind === "approval" && approval ? (
         <dl className="interaction-history-answers">
+          {approval.source === "muxpilot" ? <div><dt>Source</dt><dd>Muxpilot guard</dd></div> : null}
           <div><dt>Request</dt><dd>{approval.command ?? approval.toolName ?? approval.title}</dd></div>
+          {approval.guards?.length ? <div><dt>Guards</dt><dd>{approval.guards.join(", ")}</dd></div> : null}
+          {approval.action ? <div><dt>Action</dt><dd>{approval.action}</dd></div> : null}
+          {approval.consequences ? <div><dt>Consequence</dt><dd>{approval.consequences}</dd></div> : null}
           {approval.reason ? <div><dt>Reason</dt><dd>{approval.reason}</dd></div> : null}
           {approval.cwd ? <div><dt>Working directory</dt><dd>{approval.cwd}</dd></div> : null}
           {approval.prefixRule?.length ? <div><dt>Approved prefix</dt><dd>{approval.prefixRule.join(" ")}</dd></div> : null}

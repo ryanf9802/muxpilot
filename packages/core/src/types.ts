@@ -433,6 +433,17 @@ export type MessageContentPart =
   | { type: "image"; id: string; mimeType: "image/png" | "image/jpeg" | "image/webp" };
 
 export type ApprovalKind = "command" | "tool" | "patch" | "permissions";
+export type ApprovalSource = "runtime" | "muxpilot";
+export type MuxpilotGuard =
+  | "worktree-isolation"
+  | "same-agent-review"
+  | "focused-validation"
+  | "atomic-commits"
+  | "clean-target"
+  | "fixed-target"
+  | "local-target-only"
+  | "automatic-cleanup"
+  | "no-pull-push";
 
 export type ApprovalDecision =
   | "approve_once"
@@ -454,12 +465,16 @@ export interface ApprovalRequest {
   sessionId: string;
   messageId: string;
   kind: ApprovalKind;
+  source?: ApprovalSource;
   title: string;
   command: string | null;
   toolName: string | null;
   cwd: string | null;
   reason: string | null;
   prefixRule: string[] | null;
+  guards?: MuxpilotGuard[];
+  action?: string;
+  consequences?: string;
   options: ApprovalOption[];
   createdAt: string;
   reviewStatus?: "reviewing" | "escalated";

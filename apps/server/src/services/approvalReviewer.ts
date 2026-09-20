@@ -151,7 +151,11 @@ function reviewPrompt(session: ManagedSession, approval: ApprovalRequest): strin
     toolName: approval.toolName,
     cwd: approval.cwd,
     reason: approval.reason,
-    prefixRule: approval.prefixRule
+    prefixRule: approval.prefixRule,
+    source: approval.source,
+    guards: approval.guards,
+    action: approval.action,
+    consequences: approval.consequences
   })}`;
 }
 

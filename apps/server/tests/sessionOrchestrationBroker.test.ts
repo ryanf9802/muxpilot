@@ -12,6 +12,48 @@ import { SessionOrchestrationBroker } from "../src/services/sessionOrchestration
 import type { RawSessionEvidence } from "../src/services/rawSessionEvidence.js";
 
 describe("SessionOrchestrationBroker raw evidence", () => {
+  it("binds Muxpilot guard approvals to the authenticated calling session", async () => {
+    const actor = { ...managedSession(), id: "actor" };
+    const db = { getSession: vi.fn(async () => actor) } as unknown as AppDatabase;
+    const requestMuxpilotApproval = vi.fn(async (sessionId: string, request: Record<string, unknown>) => ({
+      id: "approval-1",
+      messageId: "message-1",
+      sessionId,
+      ...request
+    }));
+    const manager = { requestMuxpilotApproval } as unknown as SessionManager;
+    const broker = new SessionOrchestrationBroker(
+      db,
+      manager,
+      "/tmp/unused.sock",
+      "/tmp/unused-capabilities",
+      { info: vi.fn(), warn: vi.fn() },
+      {} as RawSessionEvidence
+    );
+    (broker as unknown as { capabilities: Map<string, object> }).capabilities.set("token", {
+      version: 1,
+      id: "capability",
+      token: "token",
+      socketPath: "/tmp/unused.sock",
+      actorSessionId: actor.id
+    });
+
+    const result = await (broker as unknown as { handle(raw: string): Promise<Record<string, unknown>> }).handle(JSON.stringify({
+      version: 1,
+      token: "token",
+      action: "request_muxpilot_approval",
+      args: {
+        guards: ["fixed-target"],
+        action: "Retarget to feature/native-approvals",
+        consequences: "Future commits integrate into the selected branch.",
+        reason: "The requested target differs from the fixed target."
+      }
+    }));
+
+    expect(requestMuxpilotApproval).toHaveBeenCalledWith(actor.id, expect.objectContaining({ guards: ["fixed-target"] }));
+    expect(result).toMatchObject({ requested: true, approvalId: "approval-1", messageId: "message-1" });
+  });
+
   it("keeps context pressure informational while a child is working", async () => {
     const child: ManagedSession = {
       ...managedSession(),

@@ -13,6 +13,7 @@ import type {
   CreateSessionRequest,
   GitWorkspaceSummary,
   ManagedSession,
+  MuxpilotGuard,
   PlanActionChoice,
   QuestionAnswerRequest,
   QuestionRequest,
@@ -214,9 +215,16 @@ export class SessionManager {
     this.unsubscribeQueueReadiness = this.events.subscribe((event) => {
       if (event.type !== "status.changed") return;
       const status = recordValue(event.payload)?.status;
+      if (status === "approval") {
+        this.runBackgroundTask("approval automation", async () => {
+          const approval = await this.getPendingApproval(event.sessionId);
+          if (approval) await this.handleAutomatedApproval(event.sessionId, approval.messageId);
+        });
+      }
       if (status !== "waiting" && status !== "idle") return;
       this.runBackgroundTask("queued input", () => this.processQueuedInputs(event.sessionId));
       this.runBackgroundTask("session environment", () => this.reconcileSessionEnvironment(event.sessionId));
+      this.runBackgroundTask("muxpilot approval decision", () => this.deliverPendingMuxpilotApprovalDecision(event.sessionId));
     });
     this.unsubscribeNotLoadedRecovery = this.events.subscribe((event) => {
       if (event.type !== "status.changed" || recordValue(event.payload)?.status !== "unknown") return;
@@ -677,7 +685,7 @@ export class SessionManager {
   private async prepareOrchestratedLaunch(options: AgentSessionLaunchOptions): Promise<{ options: AgentSessionLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
-    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Muxpilot resolves runtime approvals according to the operator-selected per-session mode; agents cannot change that mode.";
+    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Muxpilot resolves runtime and Muxpilot guard approvals according to the operator-selected per-session mode; agents cannot change that mode. When a Muxpilot guard requires confirmation and no direct skill authorization applies, call request_muxpilot_approval with the exact guards, action, consequences, and reason, then end the turn immediately. Do not ask for that approval as an ordinary chat response.";
     return {
       capabilityId: capability.capabilityId,
       options: {
@@ -1052,7 +1060,11 @@ export class SessionManager {
     }
   }
 
-  private runBackgroundTask(name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation" | "queued input" | "session environment", task: () => Promise<void>): void {
+  private runBackgroundTask(
+    name: "discovery" | "ingest" | "app-server recovery" | "app-server hibernation" | "queued input" |
+      "session environment" | "approval automation" | "muxpilot approval decision",
+    task: () => Promise<void>
+  ): void {
     void task().catch((error) => {
       console.error(`Muxpilot ${name} background task failed`, error);
     });
@@ -1599,8 +1611,67 @@ export class SessionManager {
     if (!session || session.status === "missing") return null;
     if (session.status !== "approval") return null;
     const message = await this.db.latestApprovalMessage(sessionId);
+    if (message?.payload.interactionOutcome) return null;
     const approval = message ? materializeApproval(message) : null;
     return approval ? this.repositoryScopedApproval(sessionId, approval) : null;
+  }
+
+  async requestMuxpilotApproval(
+    sessionId: string,
+    request: { guards: MuxpilotGuard[]; action: string; consequences: string; reason: string }
+  ): Promise<ApprovalRequest> {
+    const session = requireSession(await this.db.getSession(sessionId));
+    if (session.archived || session.status === "missing") throw new ApprovalResolutionError("This session is unavailable");
+    const latest = await this.db.latestApprovalMessage(sessionId);
+    if (latest && !latest.payload.interactionOutcome) {
+      const pending = materializeApproval(latest);
+      if (
+        pending?.source === "muxpilot" &&
+        JSON.stringify(pending.guards) === JSON.stringify(request.guards) &&
+        pending.action === request.action &&
+        pending.consequences === request.consequences &&
+        pending.reason === request.reason
+      ) return pending;
+      throw new ApprovalResolutionError("Another approval request is already pending for this session");
+    }
+    const createdAt = nowIso();
+    const id = eventId();
+    const message = await this.db.appendMessageWithNextSequence({
+      id: stableId(`${sessionId}:muxpilot-approval:${id}`),
+      sessionId,
+      type: "approval_request",
+      role: "system",
+      timestamp: createdAt,
+      text: "Muxpilot approval required",
+      payload: {
+        source: "muxpilot",
+        approval: {
+          id,
+          source: "muxpilot",
+          kind: "permissions",
+          title: "Muxpilot approval required",
+          toolName: "muxpilot guard override",
+          command: null,
+          cwd: session.cwd,
+          reason: request.reason,
+          prefixRule: null,
+          guards: request.guards,
+          action: request.action,
+          consequences: request.consequences,
+          options: [
+            { decision: "approve_once", label: "Approve once", description: "Authorize only this operation and these guards." },
+            { decision: "deny", label: "Deny", description: "Keep the listed Muxpilot guards in effect." }
+          ],
+          createdAt
+        }
+      }
+    });
+    if (!message) throw new ApprovalResolutionError("Could not persist the Muxpilot approval request");
+    this.publish("message.appended", sessionId, message);
+    await this.db.addAudit("session:" + sessionId, "request_muxpilot_approval", sessionId, JSON.stringify({
+      messageId: message.id, guards: request.guards, action: request.action
+    }), createdAt);
+    return materializeApproval(message)!;
   }
 
   private async repositoryScopedApproval(sessionId: string, approval: ApprovalRequest): Promise<ApprovalRequest> {
@@ -2332,6 +2403,29 @@ export class SessionManager {
     if (request.decision === "approve_for_prefix" && !approval.prefixRule?.length) throw new ApprovalResolutionError("This approval request does not include a persistent prefix rule");
     const workspace = await this.db.getGitWorkspaceBySession(sessionId);
     const decision = request.decision === "approve_for_prefix" && workspace ? "approve_once" : request.decision;
+    if (approval.source === "muxpilot") {
+      if (request.decision !== "approve_once" && request.decision !== "deny") {
+        throw new ApprovalResolutionError("Muxpilot guard requests can only be approved once or denied");
+      }
+      const message = await this.db.getMessage(sessionId, approval.messageId);
+      if (!message || message.payload.interactionOutcome) throw new ApprovalResolutionError("This Muxpilot approval is no longer pending");
+      const now = nowIso();
+      const outcome: TranscriptInteractionOutcome = {
+        kind: "approval", status: "answered", decision: request.decision, submittedAt: now, ...automation
+      };
+      const updated = await this.db.updateMessagePayload(message, {
+        ...message.payload,
+        interactionOutcome: outcome,
+        muxpilotDecision: { decision: request.decision, state: "pending", decidedAt: now }
+      });
+      if (updated) this.publish("message.appended", sessionId, updated);
+      await this.db.setSessionStatus(sessionId, "waiting", now);
+      await this.db.addAudit("local", "muxpilot_approval:" + request.decision, sessionId, "ok", now);
+      this.publish("status.changed", sessionId, { status: "waiting" });
+      this.publish("session.updated", sessionId, await this.db.getSession(sessionId));
+      await this.deliverPendingMuxpilotApprovalDecision(sessionId);
+      return;
+    }
     try {
       await this.requireAppServerDriver().answerApproval(session, approval.requestId ?? approval.id, decision);
     } catch (error) {
@@ -2424,9 +2518,57 @@ export class SessionManager {
 
   async recoverAutomatedApprovals(): Promise<void> {
     for (const session of await this.db.listSessions(true)) {
-      if (session.status !== "approval" || session.approvalMode === "ask") continue;
+      await this.deliverPendingMuxpilotApprovalDecision(session.id);
+      const latest = await this.db.latestApprovalMessage(session.id);
+      const pendingMuxpilot = latest?.payload.source === "muxpilot" && !latest.payload.interactionOutcome;
+      if (pendingMuxpilot && session.status !== "approval") {
+        const now = nowIso();
+        await this.db.setSessionStatus(session.id, "approval", now);
+        this.publish("status.changed", session.id, { status: "approval" });
+      }
+      if ((!pendingMuxpilot && session.status !== "approval") || session.approvalMode === "ask") continue;
       const approval = await this.getPendingApproval(session.id);
       if (approval) void this.handleAutomatedApproval(session.id, approval.messageId);
+    }
+  }
+
+  private async deliverPendingMuxpilotApprovalDecision(sessionId: string): Promise<void> {
+    const message = await this.db.latestApprovalMessage(sessionId);
+    if (!message || message.payload.source !== "muxpilot") return;
+    const decision = recordValue(message.payload.muxpilotDecision);
+    if (!decision || decision.state !== "pending" || (decision.decision !== "approve_once" && decision.decision !== "deny")) return;
+    const session = await this.db.getSession(sessionId);
+    if (!session || session.archived || !readyAppServerInputSession(session)) return;
+    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return;
+    if ((await this.db.listQueuedInputs(sessionId)).length > 0) return;
+    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return;
+    const approval = materializeApproval(message);
+    if (!approval) return;
+    const clientMessageId = `muxpilot-approval-${message.id}`;
+    const text = muxpilotApprovalDecisionMessage(approval, decision.decision);
+    const driver = this.appServerDriver(session);
+    if (!driver) return;
+    this.deliveringInputSessionIds.add(sessionId);
+    try {
+      const existing = await driver.reconcileInput(session, clientMessageId);
+      if (!existing) await driver.sendMessage(session, text, clientMessageId);
+      const deliveredAt = nowIso();
+      const current = await this.db.getMessage(sessionId, message.id);
+      if (current) {
+        const delivered = await this.db.updateMessagePayload(current, {
+          ...current.payload,
+          muxpilotDecision: { ...decision, state: "delivered", deliveredAt }
+        });
+        if (delivered) this.publish("message.appended", sessionId, delivered);
+      }
+      const status = activeInputStatus(session.inputMode);
+      await this.db.setSessionStatus(sessionId, status, deliveredAt);
+      await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, "ok", deliveredAt);
+      this.publish("status.changed", sessionId, { status });
+    } catch (error) {
+      await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, error instanceof Error ? error.message : String(error), nowIso());
+    } finally {
+      this.deliveringInputSessionIds.delete(sessionId);
     }
   }
 
@@ -4110,8 +4252,8 @@ export function managedCodexLaunchOptions(
       "Treat a command as heavyweight if it covers an entire repository, workspace, application, package, or multi-project configuration; performs static-analysis, security, dependency, or container-image scanning such as Semgrep, CodeQL, or Trivy; starts Docker or Docker Compose; launches multiple workers, shards, or projects; produces a production bundle; or is reasonably expected to run longer than one minute, use more than about 1 GiB of memory, or sustain multiple CPU cores. Selected-file lint, syntax-only checks, and one explicitly selected test file or test case without parallel workers are normally not heavyweight. When uncertain, treat the command as heavyweight. Run every heavyweight command through muxpilot-git-run.mjs --heavy -- <command>. The wrapper schedules an already-authorized command; it does not authorize repository-wide validation, and its availability is not a reason to broaden a focused check.",
       "If the heavyweight wrapper reports QUEUED_NOT_RUN, use $muxpilot-heavy-command-queue. The command did not run; do not poll or retry it.",
       "If the heavyweight wrapper reports RUNNING_DEFERRED, use $muxpilot-heavy-command-queue, preserve its run_released event, end the turn immediately, and wait for muxpilot's run_completed continuation. Do not poll or overlap repository work.",
-      "User instructions take priority over muxpilot guardrails. A direct invocation names a skill with $skill-name or unambiguous wording such as 'use the review skill'; automatic skill selection is not direct invocation. When a directly invoked skill's instruction body explicitly directs an action that conflicts with a muxpilot guard, treat the invocation itself as operation-scoped authorization for that action even if the skill asks for separate authorization. The skill need not name the guard. Map the action to every affected guard, name each exact guard and consequence, announce that the skill invocation supplies authorization, and proceed without pausing for redundant confirmation. This authorization covers only the named skill's current invocation and its explicitly directed actions; broad capability descriptions, undeclared actions, later operations, and automatically selected skills do not qualify. For every other guard conflict, obtain explicit confirmation for the exact guards before bypassing them. Platform safety, sandbox, permission, and security approval requirements are not muxpilot guards and cannot be bypassed this way.",
-      "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation name the fixed-target guard and explain that current and future task commits will integrate there. Obtain separate explicit confirmation for the fixed-target bypass unless a directly invoked skill explicitly directs that retarget, in which case its invocation supplies operation-scoped authorization. An active worktree must repeat focused checks and self-review after retargeting before integration.",
+      "User instructions take priority over muxpilot guardrails. A direct invocation names a skill with $skill-name or unambiguous wording such as 'use the review skill'; automatic skill selection is not direct invocation. When a directly invoked skill's instruction body explicitly directs an action that conflicts with a muxpilot guard, treat the invocation itself as operation-scoped authorization for that action even if the skill asks for separate authorization. The skill need not name the guard. Map the action to every affected guard, name each exact guard and consequence, announce that the skill invocation supplies authorization, and proceed without pausing for redundant confirmation. This authorization covers only the named skill's current invocation and its explicitly directed actions; broad capability descriptions, undeclared actions, later operations, and automatically selected skills do not qualify. For every other guard conflict, call request_muxpilot_approval with the exact guards, action, consequences, and reason, then end the turn immediately; do not ask for the same approval in chat. Platform safety, sandbox, permission, and security approval requirements are not muxpilot guards and cannot be bypassed this way.",
+      "When a change request creates or selects a local branch for implementation, treat that destination branch as the intended session target even if the user does not explicitly say to change the target; a source ref such as origin/dev is only the start point. If it differs from workflow status, before creating the branch or beginning implementation request approval for the fixed-target guard and explain that current and future task commits will integrate there. Use request_muxpilot_approval unless a directly invoked skill explicitly directs that retarget, in which case its invocation supplies operation-scoped authorization. An active worktree must repeat focused checks and self-review after retargeting before integration.",
       "Never use an implementation worktree's state to claim that another checkout is clean or dirty; inspect the actual checkout before reporting its working-copy state.",
       "If a requested write is outside the sandbox's writable roots, use normal approval or escalation instead of refusing it as out of scope.",
       "Shared dependency links are writable for test caches. Before installing or changing dependencies, localize the relevant link with the dependency helper.",
@@ -4884,18 +5026,51 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
     sessionId: message.sessionId,
     messageId: message.id,
     kind,
+    source: approval.source === "muxpilot" || message.payload.source === "muxpilot" ? "muxpilot" : "runtime",
     title,
     command: stringValue(approval.command),
     toolName: stringValue(approval.toolName),
     cwd: stringValue(approval.cwd),
     reason: stringValue(approval.reason),
     prefixRule,
+    guards: muxpilotGuardArray(approval.guards),
+    action: stringValue(approval.action) ?? undefined,
+    consequences: stringValue(approval.consequences) ?? undefined,
     options: approvalOptions(approval.options, prefixRule),
     createdAt: stringValue(approval.createdAt) ?? message.timestamp,
     reviewStatus: approval.reviewStatus === "reviewing" || approval.reviewStatus === "escalated" ? approval.reviewStatus : undefined,
     reviewerModel: stringValue(approval.reviewerModel) ?? undefined,
     reviewerExplanation: stringValue(approval.reviewerExplanation) ?? undefined
   };
+}
+
+function muxpilotApprovalDecisionMessage(approval: ApprovalRequest, decision: "approve_once" | "deny"): string {
+  return [
+    "<muxpilot_approval_decision>",
+    JSON.stringify({
+      version: 1,
+      approvalId: approval.id,
+      decision: decision === "approve_once" ? "approved" : "denied",
+      guards: approval.guards ?? [],
+      action: approval.action,
+      consequences: approval.consequences
+    }),
+    "</muxpilot_approval_decision>",
+    decision === "approve_once"
+      ? "The operator or session approval mode authorized only the stated operation and guard exceptions. Continue from the approval boundary."
+      : "The stated guard exceptions were denied. Keep those guards in effect, do not perform the proposed action, and continue safely or report the blocker."
+  ].join("\n");
+}
+
+const MUXPILOT_GUARD_VALUES = new Set<MuxpilotGuard>([
+  "worktree-isolation", "same-agent-review", "focused-validation", "atomic-commits", "clean-target",
+  "fixed-target", "local-target-only", "automatic-cleanup", "no-pull-push"
+]);
+
+function muxpilotGuardArray(value: unknown): MuxpilotGuard[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const guards = value.filter((guard): guard is MuxpilotGuard => typeof guard === "string" && MUXPILOT_GUARD_VALUES.has(guard as MuxpilotGuard));
+  return guards.length > 0 ? [...new Set(guards)] : undefined;
 }
 
 function approvalOptions(value: unknown, prefixRule: string[] | null): ApprovalRequest["options"] {
