@@ -3408,8 +3408,15 @@ export class SessionManager {
     const driver = this.requireAppServerDriver();
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     if (action.type === "resumeAfterAuthentication") {
-      this.authenticationGuard?.();
-      await this.db.upsertSession({ ...session, authenticationError: null, authenticationResumeRequired: false }, nowIso());
+      await this.serializeRuntimeOperation(sessionId, async () => {
+        this.authenticationGuard?.();
+        const current = requireSession(await this.db.getSession(sessionId));
+        if (current.runtime?.kind === "systemd_service" && current.runtime.state === "stopped") {
+          await this.resumeAppServerSession(current);
+        }
+        const resumed = requireSession(await this.db.getSession(sessionId));
+        await this.db.upsertSession({ ...resumed, authenticationError: null, authenticationResumeRequired: false }, nowIso());
+      });
       this.runBackgroundTask("queued input", () => this.processQueuedInputs(sessionId));
     }
     if (action.type === "interrupt") {

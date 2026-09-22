@@ -1656,6 +1656,47 @@ describe("SessionManager app-server helpers", () => {
 });
 
 describe("SessionManager Codex authentication runtime safety", () => {
+  it("resumes an authentication-stopped runtime before clearing its recovery flag", async () => {
+    const session = {
+      ...managedSession(),
+      runtime: { ...managedSession().runtime!, state: "stopped" as const },
+      authenticationResumeRequired: true,
+      authenticationError: "Sign in required"
+    };
+    const harness = authenticationManager(session);
+    Object.assign(harness.manager, { runBackgroundTask: vi.fn() });
+    harness.resumeAppServerSession.mockImplementation(async (current) => {
+      const resumed = { ...current, runtime: { ...current.runtime!, state: "connected" as const } };
+      await harness.db.upsertSession(resumed);
+      return resumed;
+    });
+
+    const result = await harness.manager.act(session.id, { type: "resumeAfterAuthentication" });
+
+    expect(harness.resumeAppServerSession).toHaveBeenCalledWith(session);
+    expect(result).toMatchObject({
+      runtime: { state: "connected" },
+      authenticationResumeRequired: false,
+      authenticationError: null
+    });
+  });
+
+  it("keeps authentication recovery required when runtime resume fails", async () => {
+    const session = {
+      ...managedSession(),
+      runtime: { ...managedSession().runtime!, state: "stopped" as const },
+      authenticationResumeRequired: true,
+      authenticationError: "Sign in required"
+    };
+    const harness = authenticationManager(session);
+    harness.resumeAppServerSession.mockRejectedValueOnce(new Error("resume failed"));
+
+    await expect(harness.manager.act(session.id, { type: "resumeAfterAuthentication" })).rejects.toThrow("resume failed");
+
+    expect(await harness.db.getSession(session.id)).toMatchObject({ authenticationResumeRequired: true });
+    expect(harness.db.addAudit).not.toHaveBeenCalled();
+  });
+
   it("retries a failed startup on the existing thread", async () => {
     const session = managedSession();
     const harness = authenticationManager({
