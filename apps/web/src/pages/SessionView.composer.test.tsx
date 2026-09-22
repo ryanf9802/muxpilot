@@ -49,7 +49,46 @@ describe("composer lifecycle", () => {
     expect(view.hasFocus).toBe(true);
     expect(view.state.selection.main.head).toBe(3);
     expect(view.contentDOM.getAttribute("autocomplete")).toBe("off");
+    expect(view.contentDOM.getAttribute("autocorrect")).toBe("on");
+    expect(view.contentDOM.getAttribute("autocapitalize")).toBe("sentences");
+    expect(view.contentDOM.getAttribute("spellcheck")).toBe("true");
     expect(getCM(view)).toBeNull();
+  });
+
+  it("ignores stale controlled echoes without losing an autocorrect replacement", () => {
+    const onChange = vi.fn();
+    renderComposer({ placeholder: "Message Codex", skills, value: "", onChange });
+    const view = requireView(requireEditor());
+
+    act(() => {
+      view.focus();
+      view.dispatch({ changes: { from: 0, insert: "isnt" }, selection: { anchor: 4 } });
+      view.dispatch({ changes: { from: 0, to: 4, insert: "isn't" }, selection: { anchor: 5 } });
+    });
+    expect(onChange).toHaveBeenNthCalledWith(1, "isnt");
+    expect(onChange).toHaveBeenNthCalledWith(2, "isn't");
+
+    renderComposer({ placeholder: "Message Codex", skills, value: "isnt", onChange });
+    expect(view.state.doc.toString()).toBe("isn't");
+    expect(view.state.selection.main.head).toBe(5);
+
+    renderComposer({ placeholder: "Message Codex", skills, value: "isn't", onChange });
+    renderComposer({ placeholder: "Message Codex", skills, value: "", onChange });
+    expect(view.state.doc.toString()).toBe("");
+    expect(onChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a session change as an authoritative draft replacement", () => {
+    const onChange = vi.fn();
+    renderComposer({ placeholder: "Message Codex", skills, value: "", onChange, sessionId: "one" });
+    const view = requireView(requireEditor());
+    act(() => {
+      view.dispatch({ changes: { from: 0, insert: "old draft" } });
+    });
+
+    renderComposer({ placeholder: "Message Codex", skills, value: "", onChange, sessionId: "two" });
+    expect(requireView(requireEditor()).state.doc.toString()).toBe("");
+    expect(onChange).toHaveBeenCalledOnce();
   });
 
   it("forwards edits and submits from Ctrl-Enter", () => {
@@ -124,13 +163,15 @@ function renderComposer({
   skills: nextSkills,
   value = "draft",
   onChange = vi.fn(),
-  onSubmitShortcut = vi.fn()
+  onSubmitShortcut = vi.fn(),
+  sessionId = ""
 }: {
   placeholder: string;
   skills: CodexSkill[];
   value?: string;
   onChange?: (value: string) => void;
   onSubmitShortcut?: () => void;
+  sessionId?: string;
 }) {
   if (!container) {
     container = document.createElement("div");
@@ -145,6 +186,7 @@ function renderComposer({
         onSubmitShortcut={onSubmitShortcut}
         skills={nextSkills}
         placeholder={placeholder}
+        sessionId={sessionId}
       />
     );
   });

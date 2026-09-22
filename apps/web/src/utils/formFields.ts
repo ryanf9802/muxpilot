@@ -7,7 +7,7 @@ export const noAutofillTextField = {
 
 export const freeformComposerField = {
   autoComplete: "off",
-  autoCorrect: "off",
+  autoCorrect: "on",
   autoCapitalize: "sentences",
   spellCheck: true,
   inputMode: "text"
@@ -35,7 +35,7 @@ export const credentialSuppressedField = {
 
 export const codeMirrorComposerFieldAttributes = {
   autocomplete: "off",
-  autocorrect: "off",
+  autocorrect: "on",
   autocapitalize: "sentences",
   spellcheck: "true",
   inputmode: "text"

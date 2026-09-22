@@ -17,17 +17,17 @@ describe("form field browser hints", () => {
     });
   });
 
-  it("allows spelling help but disables autocomplete for composer text", () => {
+  it("allows keyboard writing assistance but disables autocomplete for composer text", () => {
     expect(freeformComposerField).toMatchObject({
       autoComplete: "off",
-      autoCorrect: "off",
+      autoCorrect: "on",
       autoCapitalize: "sentences",
       spellCheck: true,
       inputMode: "text"
     });
     expect(codeMirrorComposerFieldAttributes).toMatchObject({
       autocomplete: "off",
-      autocorrect: "off",
+      autocorrect: "on",
       autocapitalize: "sentences",
       spellcheck: "true",
       inputmode: "text"

@@ -296,7 +296,7 @@ export const VIM_MODE_STORAGE_KEY = "muxpilot.vim-mode.v1";
 export const DESKTOP_VIM_MEDIA_QUERY = "(min-width: 560px) and (any-hover: hover) and (any-pointer: fine)";
 const composerRootInputHints: Record<string, string | boolean> = {
   autoComplete: "off",
-  autoCorrect: "off",
+  autoCorrect: "on",
   autoCapitalize: "sentences",
   spellCheck: true,
   inputMode: "text"
@@ -4561,6 +4561,9 @@ function VimPromptEditor({
   const rootRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const valueRef = useRef(value);
+  const valueSessionIdRef = useRef(sessionId);
+  const pendingLocalValuesRef = useRef<string[]>([]);
+  const applyingExternalValueRef = useRef(false);
   const onChangeRef = useRef(onChange);
   const onSubmitShortcutRef = useRef(onSubmitShortcut);
   const onSuggestionCommandRef = useRef(onSuggestionCommand);
@@ -4578,7 +4581,7 @@ function VimPromptEditor({
   const previewsRef = useRef(new Map<string, string>());
   const uploadCountRef = useRef(0);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     onChangeRef.current = onChange;
     onSubmitShortcutRef.current = onSubmitShortcut;
     onSuggestionCommandRef.current = onSuggestionCommand;
@@ -4587,16 +4590,39 @@ function VimPromptEditor({
     onCaretChangeRef.current = onCaretChange;
   }, [onBlur, onCaretChange, onChange, onFocus, onSubmitShortcut, onSuggestionCommand]);
 
-  useEffect(() => {
-    valueRef.current = value;
+  useLayoutEffect(() => {
     const view = viewRef.current;
-    if (!view || view.state.doc.toString() === value) return;
+    const sessionChanged = valueSessionIdRef.current !== sessionId;
+    valueSessionIdRef.current = sessionId;
+    if (!view) {
+      valueRef.current = value;
+      if (sessionChanged) pendingLocalValuesRef.current = [];
+      return;
+    }
+    const currentValue = view.state.doc.toString();
+    if (currentValue === value) {
+      valueRef.current = value;
+      pendingLocalValuesRef.current = [];
+      return;
+    }
+    const pendingIndex = sessionChanged ? -1 : pendingLocalValuesRef.current.indexOf(value);
+    if (pendingIndex >= 0) {
+      pendingLocalValuesRef.current = pendingLocalValuesRef.current.slice(pendingIndex + 1);
+      return;
+    }
     const head = Math.min(view.state.selection.main.head, value.length);
-    view.dispatch({
-      changes: { from: 0, to: view.state.doc.length, insert: value },
-      selection: { anchor: head }
-    });
-  }, [value]);
+    pendingLocalValuesRef.current = [];
+    applyingExternalValueRef.current = true;
+    try {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: value },
+        selection: { anchor: head }
+      });
+    } finally {
+      applyingExternalValueRef.current = false;
+    }
+    valueRef.current = value;
+  }, [sessionId, value]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -4691,7 +4717,11 @@ function VimPromptEditor({
         if (update.docChanged) {
           const nextValue = update.state.doc.toString();
           valueRef.current = nextValue;
-          onChangeRef.current(nextValue);
+          if (!applyingExternalValueRef.current) {
+            const pendingValues = pendingLocalValuesRef.current;
+            if (pendingValues[pendingValues.length - 1] !== nextValue) pendingValues.push(nextValue);
+            onChangeRef.current(nextValue);
+          }
         }
         if (update.docChanged || update.selectionSet) {
           onCaretChangeRef.current(update.state.selection.main.head);
