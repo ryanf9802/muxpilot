@@ -88,7 +88,7 @@ export class CodexAuthLifecycle {
   async start(): Promise<void> {
     await this.removeLegacyAccountData();
     this.reconciledPrincipal = await this.db.getCodexAuthReconciledPrincipal();
-    await this.observeAndReconcile("startup", false, true, true);
+    await this.observeAndReconcile("startup", true, true);
     if (this.watchCredentials) {
       this.watcher = watch(dirname(this.authPath), { persistent: false }, (_event, filename) => {
         if (filename?.toString() !== "auth.json") return;
@@ -96,13 +96,13 @@ export class CodexAuthLifecycle {
         if (this.watchTimer) clearTimeout(this.watchTimer);
         this.watchTimer = setTimeout(() => {
           this.watchTimer = null;
-          void this.serialize(() => this.observeAndReconcile("external credential change", true));
+          void this.serialize(() => this.observeAndReconcile("external credential change"));
         }, WATCH_DEBOUNCE_MS);
       });
     }
     if (this.reconcileIntervalMs !== null) {
       this.interval = setInterval(
-        () => void this.serialize(() => this.observeAndReconcile("periodic reconciliation", false)),
+        () => void this.serialize(() => this.observeAndReconcile("periodic reconciliation")),
         this.reconcileIntervalMs
       );
     }
@@ -130,7 +130,7 @@ export class CodexAuthLifecycle {
   }
 
   async refresh(): Promise<CodexAuthState> {
-    await this.serialize(() => this.observeAndReconcile("manual refresh", true));
+    await this.serialize(() => this.observeAndReconcile("manual refresh"));
     return this.state();
   }
 
@@ -155,12 +155,12 @@ export class CodexAuthLifecycle {
     this.reconciliationPending = true;
     this.update({ status: "authentication_required", admissionHeld: true, error: cliRecoveryMessage(message) });
     this.hooks?.invalidateConsumers();
-    void this.serialize(() => this.observeAndReconcile("runtime authentication failure", true));
+    void this.serialize(() => this.observeAndReconcile("runtime authentication failure"));
   }
 
   reportAccountUpdated(): void {
     this.signalExternalChange();
-    void this.serialize(() => this.observeAndReconcile("Codex account update notification", true));
+    void this.serialize(() => this.observeAndReconcile("Codex account update notification"));
   }
 
   private serialize(operation: () => Promise<void>): Promise<void> {
@@ -173,7 +173,6 @@ export class CodexAuthLifecycle {
 
   private async observeAndReconcile(
     reason: string,
-    forceTokenRefresh: boolean,
     deferReconciliation = false,
     startup = false
   ): Promise<void> {
@@ -187,7 +186,9 @@ export class CodexAuthLifecycle {
     let status: CodexAuthState["status"];
     let error: string | null = null;
     try {
-      const response = await this.client.request<AccountReadResponse>("account/read", { refreshToken: forceTokenRefresh });
+      // Codex CLI 0.156 can report a valid ChatGPT login as signed out when this
+      // observer forces token refresh. Credential changes are detected separately.
+      const response = await this.client.request<AccountReadResponse>("account/read", { refreshToken: false });
       account = normalizeAccount(response.account);
       requiresOpenaiAuth = response.requiresOpenaiAuth;
       status = account || !response.requiresOpenaiAuth ? "ready" : "signed_out";

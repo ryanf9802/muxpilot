@@ -125,6 +125,26 @@ describe("CodexAuthLifecycle", () => {
     await fixture.lifecycle.stop();
   });
 
+  it("reads account changes without forcing a token refresh that can falsely report sign-out", async () => {
+    const fixture = await createFixture([
+      account("operator@example.com"),
+      account("operator@example.com"),
+      account("operator@example.com")
+    ]);
+    await fixture.lifecycle.start();
+    await fixture.lifecycle.reconcileAfterStartup();
+
+    fixture.lifecycle.reportAccountUpdated();
+    await vi.waitFor(() => expect(fixture.client.request).toHaveBeenCalledTimes(2));
+    await fixture.lifecycle.refresh();
+
+    expect(fixture.client.request).toHaveBeenNthCalledWith(2, "account/read", { refreshToken: false });
+    expect(fixture.client.request).toHaveBeenNthCalledWith(3, "account/read", { refreshToken: false });
+    expect(fixture.lifecycle.state()).toMatchObject({ status: "ready", admissionHeld: false });
+    expect(fixture.hooks.suspend).not.toHaveBeenCalled();
+    await fixture.lifecycle.stop();
+  });
+
   it("periodically detects a credential change missed by the file watcher", async () => {
     const fixture = await createFixture(
       [account("same@example.com"), account("different@example.com"), account("different@example.com")],
