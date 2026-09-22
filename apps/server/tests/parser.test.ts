@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
+import { serializeApprovalDecisionEvent, serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
 import { parseCodexJsonl } from "../src/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
@@ -54,6 +54,33 @@ describe("parseCodexJsonl", () => {
 
     expect(result.messages).toHaveLength(1);
     expect(result.messages[0]).toMatchObject({ type: "status", role: "system", text: "Agent session wait resumed" });
+  });
+
+  it("renders an approval decision as a system status", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-parser-"));
+    const path = join(dir, "session.jsonl");
+    const marker = serializeApprovalDecisionEvent({
+      version: 1,
+      approvalId: "approval-1",
+      decision: "approved",
+      guards: ["fixed-target"],
+      action: "Retarget the session.",
+      consequences: "Future commits integrate into the new target."
+    });
+    await writeFile(path, `${JSON.stringify({
+      timestamp: "2026-08-25T00:00:00Z",
+      type: "event_msg",
+      payload: { type: "user_message", message: marker }
+    })}\n`);
+
+    const result = await parseCodexJsonl(path, 0);
+
+    expect(result.messages[0]).toMatchObject({
+      type: "status",
+      role: "system",
+      text: "Muxpilot gate approved",
+      payload: { muxpilotApprovalDecision: { approvalId: "approval-1", decision: "approved" } }
+    });
   });
 
   it("normalizes and deduplicates orchestration wake response-item echoes", async () => {

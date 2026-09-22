@@ -30,10 +30,13 @@ import type {
   TranscriptSearchResponse
 } from "@muxpilot/core";
 import {
+  approvalDecisionEventFromPayload,
+  approvalDecisionEventSummary,
   buildExpandedTranscriptItems,
   buildTranscriptItems,
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
+  normalizeApprovalDecisionEvent,
   normalizeGitWorkspaceSummary,
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
@@ -41,6 +44,7 @@ import {
   sessionHistoryIdentity,
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
+  withApprovalDecisionEventPayload,
   withSessionWaitEventPayload
 } from "@muxpilot/core";
 import { codexTurnFailure, type CodexTurnFailure } from "../utils/codexTurnFailure.js";
@@ -1595,6 +1599,7 @@ export class SyncAppDatabase {
     if (!isMuxpilotSubmissionMessage(message) && this.isDuplicateUserEcho(message)) {
       return { message: null, inserted: false, changed: false };
     }
+    if (this.isDuplicateApprovalDecisionEvent(message)) return { message: null, inserted: false, changed: false };
     if (this.isDuplicateSessionWaitEvent(message)) return { message: null, inserted: false, changed: false };
 
     const itemIdentity = this.codexItemMessageIdentity(message);
@@ -1842,6 +1847,28 @@ export class SyncAppDatabase {
       if (!timestampsAreNear(row.timestamp, message.timestamp)) return false;
       try {
         const candidate = sessionWaitEventFromPayload(JSON.parse(row.payload_json) as Record<string, unknown>);
+        return candidate !== null && JSON.stringify(candidate) === JSON.stringify(event);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  private isDuplicateApprovalDecisionEvent(message: ChatMessage): boolean {
+    const event = approvalDecisionEventFromPayload(message.payload);
+    if (message.role !== "system" || message.type !== "status" || !event) return false;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE session_id = ? AND role = 'system' AND type = 'status'
+         ORDER BY sequence DESC
+         LIMIT 20`
+      )
+      .all(message.sessionId) as unknown as MessageRow[];
+    return rows.some((row) => {
+      if (!timestampsAreNear(row.timestamp, message.timestamp)) return false;
+      try {
+        const candidate = approvalDecisionEventFromPayload(JSON.parse(row.payload_json) as Record<string, unknown>);
         return candidate !== null && JSON.stringify(candidate) === JSON.stringify(event);
       } catch {
         return false;
@@ -3947,6 +3974,7 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("btw_exchanges", "document_warning", "TEXT");
     this.addColumnIfMissing("notification_device_settings", "usage_limit_thresholds_json", "TEXT NOT NULL DEFAULT '[75,50,25,10,0]'");
     this.removePersistedContextGuards();
+    this.normalizePersistedApprovalDecisionMessages();
     this.normalizePersistedSessionWaitMessages();
     this.removeDuplicateAppServerQuestionMessages();
     this.removeDuplicateAppServerPlanMessages();
@@ -4039,6 +4067,70 @@ export class SyncAppDatabase {
           role: "system",
           text: sessionWaitEventSummary(normalized.event),
           payload_json: JSON.stringify(withSessionWaitEventPayload(payload, normalized))
+        });
+      }
+      for (const [sessionId, deleted] of deletedBySession) {
+        this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?").run(deleted, sessionId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private normalizePersistedApprovalDecisionMessages(): void {
+    const queuedRows = this.db
+      .prepare("SELECT id, text FROM queued_inputs WHERE LTRIM(text) LIKE '<muxpilot_approval_decision>%'")
+      .all() as unknown as Array<{ id: string; text: string }>;
+    const rawRows = this.db
+      .prepare(
+        `SELECT * FROM messages
+         WHERE role = 'user' AND LTRIM(text) LIKE '<muxpilot_approval_decision>%'
+         ORDER BY session_id, sequence`
+      )
+      .all() as unknown as MessageRow[];
+    if (queuedRows.length === 0 && rawRows.length === 0) return;
+    const systemRows = this.db
+      .prepare("SELECT * FROM messages WHERE role = 'system' AND type = 'status'")
+      .all() as unknown as MessageRow[];
+    const deletedBySession = new Map<string, number>();
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of queuedRows) {
+        if (normalizeApprovalDecisionEvent(row.text)) this.db.prepare("DELETE FROM queued_inputs WHERE id = ?").run(row.id);
+      }
+      for (const row of rawRows) {
+        const normalized = normalizeApprovalDecisionEvent(row.text);
+        if (!normalized) continue;
+        const duplicate = systemRows.some((candidate) => {
+          if (candidate.session_id !== row.session_id || !timestampsAreNear(candidate.timestamp, row.timestamp)) return false;
+          try {
+            const event = approvalDecisionEventFromPayload(JSON.parse(candidate.payload_json) as Record<string, unknown>);
+            return event !== null && JSON.stringify(event) === JSON.stringify(normalized.event);
+          } catch {
+            return false;
+          }
+        });
+        this.deletePromptIndexMessage(row.id);
+        if (duplicate) {
+          this.db.prepare("DELETE FROM messages WHERE id = ?").run(row.id);
+          deletedBySession.set(row.session_id, (deletedBySession.get(row.session_id) ?? 0) + 1);
+          continue;
+        }
+        let payload: Record<string, unknown> = {};
+        try { payload = JSON.parse(row.payload_json) as Record<string, unknown>; } catch { /* Preserve a valid event even if its old wrapper payload is malformed. */ }
+        const normalizedPayload = withApprovalDecisionEventPayload(payload, normalized);
+        this.db
+          .prepare("UPDATE messages SET type = 'status', role = 'system', text = ?, payload_json = ? WHERE id = ?")
+          .run(approvalDecisionEventSummary(normalized.event), JSON.stringify(normalizedPayload), row.id);
+        systemRows.push({
+          ...row,
+          type: "status",
+          role: "system",
+          text: approvalDecisionEventSummary(normalized.event),
+          payload_json: JSON.stringify(normalizedPayload)
         });
       }
       for (const [sessionId, deleted] of deletedBySession) {

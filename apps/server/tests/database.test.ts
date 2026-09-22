@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type QueuedInput, type SessionHistoryResult, type TranscriptPageResponse } from "@muxpilot/core";
+import { serializeApprovalDecisionEvent, serializeSessionWaitEvent, type ChatMessage, type ManagedSession, type QueuedInput, type SessionHistoryResult, type TranscriptPageResponse } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 
 describe("AppDatabase session visibility", () => {
@@ -175,6 +175,57 @@ describe("AppDatabase session visibility", () => {
     ]);
     expect(await restarted.listPromptHistory("muxpilot_session_wait", 10)).toEqual([]);
     await restarted.close();
+  });
+
+  it("repairs persisted approval decisions and excludes them from prompt history", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const session = testSession("approval-decision-repair");
+    const marker = serializeApprovalDecisionEvent({
+      version: 1,
+      approvalId: "approval-1",
+      decision: "approved",
+      guards: ["fixed-target", "no-pull-push"],
+      action: "Fetch and retarget the session.",
+      consequences: "The target changes and no branch is pushed."
+    });
+    const db = new AppDatabase(path);
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    await db.appendMessage(testMessage(session.id, 1, "user", marker, "2026-08-25T00:00:01.000Z"));
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listMessages(session.id, 0)).toMatchObject([
+      {
+        role: "system",
+        type: "status",
+        text: "Muxpilot gate approved",
+        payload: { muxpilotApprovalDecision: { approvalId: "approval-1", decision: "approved" } }
+      }
+    ]);
+    expect(await restarted.listPromptHistory("Fetch and retarget", 10)).toEqual([]);
+    await restarted.close();
+  });
+
+  it("deduplicates normalized approval decisions across parser batches", async () => {
+    const db = await tempDb();
+    const session = testSession("approval-decision-deduped");
+    const event = {
+      version: 1 as const,
+      approvalId: "approval-1",
+      decision: "approved" as const,
+      guards: ["fixed-target"] as const,
+      action: "Retarget the session.",
+      consequences: "Future commits integrate into the new target."
+    };
+    await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    const first = {
+      ...testMessage(session.id, 1, "system", "Muxpilot gate approved", "2026-08-25T00:00:01.000Z", "status"),
+      payload: { muxpilotApprovalDecision: { ...event, guards: [...event.guards] } }
+    };
+    expect(await db.appendMessage(first)).toBe(true);
+    expect(await db.appendMessage({ ...first, id: `${session.id}-2`, sequence: 2, timestamp: "2026-08-25T00:00:01.100Z" })).toBe(false);
+    await db.close();
   });
 
   it("deduplicates normalized orchestration wakes across parser batches", async () => {

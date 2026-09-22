@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  approvalDecisionEventSummary,
+  normalizeApprovalDecisionEvent,
   normalizeSessionWaitEvent,
   sessionWaitEventSummary,
   withSessionWaitEventPayload,
+  withApprovalDecisionEventPayload,
   type ChatMessage,
   type SessionStatus
 } from "@muxpilot/core";
@@ -277,26 +280,27 @@ function completedItemMessage(
   const mapped = completedItemContent(type, item);
   if (!mapped || !mapped.text) return null;
   const identityPayload = { ...eventIdentity };
+  const approvalDecision = mapped.role === "user" ? normalizeApprovalDecisionEvent(mapped.text) : null;
   const waitEvent = mapped.role === "user" ? normalizeSessionWaitEvent(mapped.text) : null;
+  const automationEvent = approvalDecision ?? waitEvent;
+  const payload = {
+    source: "codex_app_server",
+    method: notification.method,
+    codexItemIdentity: identityPayload,
+    appServerIdentity: identityPayload,
+    item
+  };
   return {
     id: stableProjectionId(eventIdentity, type ?? "unknown"),
-    type: waitEvent ? "status" : mapped.type,
-    role: waitEvent ? "system" : mapped.role,
+    type: automationEvent ? "status" : mapped.type,
+    role: automationEvent ? "system" : mapped.role,
     timestamp,
-    text: waitEvent ? sessionWaitEventSummary(waitEvent.event) : mapped.text,
-    payload: waitEvent ? withSessionWaitEventPayload({
-      source: "codex_app_server",
-      method: notification.method,
-      codexItemIdentity: identityPayload,
-      appServerIdentity: identityPayload,
-      item
-    }, waitEvent) : {
-      source: "codex_app_server",
-      method: notification.method,
-      codexItemIdentity: identityPayload,
-      appServerIdentity: identityPayload,
-      item
-    }
+    text: approvalDecision
+      ? approvalDecisionEventSummary(approvalDecision.event)
+      : waitEvent ? sessionWaitEventSummary(waitEvent.event) : mapped.text,
+    payload: approvalDecision
+      ? withApprovalDecisionEventPayload(payload, approvalDecision)
+      : waitEvent ? withSessionWaitEventPayload(payload, waitEvent) : payload
   };
 }
 

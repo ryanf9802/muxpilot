@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectAppServerEvent } from "../src/services/sessionDrivers/codexAppServerEvents.js";
-import { serializeSessionWaitEvent } from "@muxpilot/core";
+import { serializeApprovalDecisionEvent, serializeSessionWaitEvent } from "@muxpilot/core";
 
 const receivedAt = "2026-09-01T12:00:00.000Z";
 
@@ -137,6 +137,32 @@ describe("projectAppServerEvent", () => {
         role: "system",
         text: "Agent session wait resumed",
         payload: { agentSessionWait: { kind: "resume_requested" } }
+      }
+    });
+  });
+
+  it("projects approval decision inputs as system status events", () => {
+    const marker = serializeApprovalDecisionEvent({
+      version: 1,
+      approvalId: "approval-1",
+      decision: "denied",
+      guards: ["no-pull-push"],
+      action: "Push a branch.",
+      consequences: "The branch would be published."
+    });
+    expect(projectAppServerEvent({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "approval-1", type: "userMessage", content: [{ type: "text", text: marker }] }
+      }
+    }, receivedAt)).toMatchObject({
+      message: {
+        type: "status",
+        role: "system",
+        text: "Muxpilot gate denied",
+        payload: { muxpilotApprovalDecision: { approvalId: "approval-1", decision: "denied" } }
       }
     });
   });

@@ -4,11 +4,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ApprovalRequest, ChatMessage, GitWorkspaceSummary, HeavyCommand, ManagedSession, QuestionRequest, QueuedInput, RepoMetadata, TranscriptItem } from "@muxpilot/core";
 import {
+  serializeApprovalDecisionEvent,
   normalizeGitWorkflowEvent,
   normalizeHeavyCommandQueueEvent,
   serializeGitWorkflowEvent,
   serializeHeavyCommandQueueEvent,
   serializeSessionWaitEvent,
+  withApprovalDecisionEventPayload,
   withSessionWaitEventPayload,
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload
@@ -2723,6 +2725,35 @@ describe("session wait automation events", () => {
     expect(html).toContain("idle");
     expect(html).toContain("Raw automation payload");
     expect(copyableMessageText(waitMessage)).toContain("<muxpilot_session_wait>");
+  });
+});
+
+describe("approval decision automation events", () => {
+  it("renders a compact full-width decision panel with guard details", () => {
+    const event = {
+      version: 1 as const,
+      approvalId: "approval-1",
+      decision: "approved" as const,
+      guards: ["fixed-target", "no-pull-push"] as const,
+      action: "Fetch and retarget the session.",
+      consequences: "The target changes and no branch is pushed."
+    };
+    const decisionMessage = {
+      ...message("session-a", 1, "Muxpilot gate approved", "system", "status"),
+      payload: withApprovalDecisionEventPayload({}, {
+        event: { ...event, guards: [...event.guards] },
+        rawText: serializeApprovalDecisionEvent({ ...event, guards: [...event.guards] })
+      })
+    };
+    const html = renderToStaticMarkup(createElement(UserAction, { message: decisionMessage }));
+
+    expect(html).toContain("approval-decision-event");
+    expect(html).toContain('data-tone="success"');
+    expect(html).toContain("Approved");
+    expect(html).toContain("fixed-target, no-pull-push");
+    expect(html).toContain("Fetch and retarget the session.");
+    expect(html).toContain("The target changes and no branch is pushed.");
+    expect(copyableMessageText(decisionMessage)).toContain("<muxpilot_approval_decision>");
   });
 });
 

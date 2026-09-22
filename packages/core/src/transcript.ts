@@ -1,5 +1,11 @@
 import type { ChatMessage, TranscriptItem } from "./types.js";
 import {
+  approvalDecisionEventFromPayload,
+  approvalDecisionEventSummary,
+  normalizeApprovalDecisionEvent,
+  withApprovalDecisionEventPayload
+} from "./approvalDecisionEvent.js";
+import {
   heavyCommandQueueEventFromPayload,
   heavyCommandQueueEventSummary,
   normalizeHeavyCommandQueueEvent,
@@ -240,6 +246,20 @@ function replaceDuplicateAssistantUpdateResponse(messages: ChatMessage[], messag
 }
 
 function displayMessage(message: ChatMessage): ChatMessage | null {
+  const embeddedApprovalDecision = approvalDecisionEventFromPayload(message.payload);
+  const normalizedApprovalDecision = embeddedApprovalDecision ? null : normalizeApprovalDecisionEvent(message.text);
+  const approvalDecision = embeddedApprovalDecision ?? normalizedApprovalDecision?.event;
+  if (approvalDecision) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: approvalDecisionEventSummary(approvalDecision),
+      payload: normalizedApprovalDecision
+        ? withApprovalDecisionEventPayload(message.payload, normalizedApprovalDecision)
+        : message.payload
+    };
+  }
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload) ?? normalizeHeavyCommandQueueEvent(message.text);
   if (queueEvent) {
     return {
@@ -344,7 +364,8 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return Boolean(heavyCommandQueueEventFromPayload(message.payload))
+  return Boolean(approvalDecisionEventFromPayload(message.payload))
+    || Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
     || Boolean(sessionWaitEventFromPayload(message.payload))
     || isTurnAbortedStatus(message)

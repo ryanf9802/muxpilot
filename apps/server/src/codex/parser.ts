@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { open } from "node:fs/promises";
 import {
+  approvalDecisionEventSummary,
   appendSkillNamesToText,
   extractGitWorkflowEvents,
   gitWorkflowEventFromPayload,
   gitWorkflowEventSummary,
   heavyCommandQueueEventFromPayload,
   heavyCommandQueueEventSummary,
+  normalizeApprovalDecisionEvent,
   normalizeHeavyCommandQueueEvent,
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
@@ -14,6 +16,7 @@ import {
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
   withGitWorkflowEventPayload,
+  withApprovalDecisionEventPayload,
   withHeavyCommandQueueEventPayload,
   withSessionWaitEventPayload
 } from "@muxpilot/core";
@@ -261,6 +264,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
 
   if (topType === "event_msg" && payloadType === "user_message") {
     const rawMessage = String(event.payload?.message ?? "");
+    const approvalDecisionMessage = muxpilotApprovalDecisionMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (approvalDecisionMessage) return approvalDecisionMessage;
     const sessionWaitMessage = muxpilotSessionWaitMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
     if (sessionWaitMessage) return sessionWaitMessage;
     const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
@@ -281,6 +286,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
 
   if (topType === "event_msg" && payloadType === "agent_message") {
     const rawMessage = String(event.payload?.message ?? "");
+    const approvalDecisionMessage = muxpilotApprovalDecisionMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+    if (approvalDecisionMessage) return approvalDecisionMessage;
     const sessionWaitMessage = muxpilotSessionWaitMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
     if (sessionWaitMessage) return sessionWaitMessage;
     const queueMessage = heavyCommandQueueMessage(rawMessage, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
@@ -323,6 +330,8 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
     if (role === "assistant" || role === "user") {
       const text = contentToText(event.payload?.content);
       if (!text) return null;
+      const approvalDecisionMessage = muxpilotApprovalDecisionMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
+      if (approvalDecisionMessage) return approvalDecisionMessage;
       const sessionWaitMessage = muxpilotSessionWaitMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
       if (sessionWaitMessage) return sessionWaitMessage;
       const queueMessage = heavyCommandQueueMessage(text, timestamp, event as unknown as Record<string, unknown>, collaborationMode);
@@ -333,6 +342,24 @@ function mapEvent(line: string, collaborationMode: CollaborationMode | null): Om
   }
 
   return null;
+}
+
+function muxpilotApprovalDecisionMessage(
+  text: string,
+  timestamp: string,
+  payload: Record<string, unknown>,
+  collaborationMode: CollaborationMode | null
+): Omit<ChatMessage, "sessionId" | "sequence"> | null {
+  const normalized = normalizeApprovalDecisionEvent(text);
+  if (!normalized) return null;
+  return message(
+    "status",
+    "system",
+    timestamp,
+    approvalDecisionEventSummary(normalized.event),
+    withApprovalDecisionEventPayload(payload, normalized),
+    collaborationMode
+  );
 }
 
 function muxpilotSessionWaitMessage(

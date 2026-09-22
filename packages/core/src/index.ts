@@ -1,4 +1,5 @@
 export * from "./proposedPlan.js";
+export * from "./approvalDecisionEvent.js";
 export * from "./gitName.js";
 export * from "./heavyCommandQueueEvent.js";
 export * from "./gitWorkflowEvent.js";

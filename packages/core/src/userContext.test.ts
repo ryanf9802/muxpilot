@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
+import { serializeApprovalDecisionEvent } from "./approvalDecisionEvent.js";
 import { isDisplayableUserPromptText, normalizeUserContextText } from "./userContext.js";
 
 describe("user context normalization", () => {
@@ -33,6 +34,23 @@ describe("user context normalization", () => {
     expect(normalizeUserContextText(text)).toEqual({
       kind: "action",
       text: "Heavyweight command queued · session released while waiting",
+      skillNames: []
+    });
+  });
+
+  it("classifies approval decisions as actions instead of prompt history", () => {
+    const text = serializeApprovalDecisionEvent({
+      version: 1,
+      approvalId: "approval-1",
+      decision: "approved",
+      guards: ["fixed-target"],
+      action: "Retarget the session.",
+      consequences: "Future commits integrate into the new target."
+    });
+    expect(isDisplayableUserPromptText(text)).toBe(false);
+    expect(normalizeUserContextText(text)).toEqual({
+      kind: "action",
+      text: "Muxpilot gate approved",
       skillNames: []
     });
   });

@@ -1,4 +1,5 @@
 import { heavyCommandQueueEventSummary, normalizeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
+import { approvalDecisionEventSummary, normalizeApprovalDecisionEvent } from "./approvalDecisionEvent.js";
 
 export type NormalizedUserContext =
   | { kind: "action"; text: string; skillNames: string[] }
@@ -28,6 +29,9 @@ const COMPACTED_SKILLS_PATTERN = /\n\nSkills:\s*([^\n]+)\s*$/;
 const SUBAGENT_NOTIFICATION_PATTERN = /^<subagent_notification>\s*([\s\S]*?)\s*<\/subagent_notification>$/i;
 
 export function normalizeUserContextText(text: string): NormalizedUserContext {
+  const approvalDecision = normalizeApprovalDecisionEvent(text);
+  if (approvalDecision) return { kind: "action", text: approvalDecisionEventSummary(approvalDecision.event), skillNames: [] };
+
   const queueEvent = normalizeHeavyCommandQueueEvent(text);
   if (queueEvent) return { kind: "action", text: heavyCommandQueueEventSummary(queueEvent.event), skillNames: [] };
 

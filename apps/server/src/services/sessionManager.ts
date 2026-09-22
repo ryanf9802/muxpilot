@@ -40,6 +40,7 @@ import type {
   TranscriptSearchResponse
 } from "@muxpilot/core";
 import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { serializeApprovalDecisionEvent } from "@muxpilot/core";
 import type { AppDatabase, AppServerReconciliationState, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
 import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
@@ -5045,21 +5046,14 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
 }
 
 function muxpilotApprovalDecisionMessage(approval: ApprovalRequest, decision: "approve_once" | "deny"): string {
-  return [
-    "<muxpilot_approval_decision>",
-    JSON.stringify({
-      version: 1,
-      approvalId: approval.id,
-      decision: decision === "approve_once" ? "approved" : "denied",
-      guards: approval.guards ?? [],
-      action: approval.action,
-      consequences: approval.consequences
-    }),
-    "</muxpilot_approval_decision>",
-    decision === "approve_once"
-      ? "The operator or session approval mode authorized only the stated operation and guard exceptions. Continue from the approval boundary."
-      : "The stated guard exceptions were denied. Keep those guards in effect, do not perform the proposed action, and continue safely or report the blocker."
-  ].join("\n");
+  return serializeApprovalDecisionEvent({
+    version: 1,
+    approvalId: approval.id,
+    decision: decision === "approve_once" ? "approved" : "denied",
+    guards: approval.guards ?? [],
+    action: approval.action ?? "Perform the requested operation.",
+    consequences: approval.consequences ?? "The requested operation may change session or repository state."
+  });
 }
 
 const MUXPILOT_GUARD_VALUES = new Set<MuxpilotGuard>([

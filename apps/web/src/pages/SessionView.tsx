@@ -102,6 +102,8 @@ import type {
   TranscriptItem as CoreTranscriptItem
 } from "@muxpilot/core";
 import {
+  approvalDecisionEventFromPayload,
+  approvalDecisionEventSummary,
   appendSkillNamesToText,
   canToggleFastMode,
   gitWorkflowEventContext,
@@ -118,13 +120,16 @@ import {
   normalizeGitWorkspaceSummary,
   normalizeGitWorkflowEvent,
   normalizeHeavyCommandQueueEvent,
+  normalizeApprovalDecisionEvent,
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
+  serializeApprovalDecisionEvent,
   serializeSessionWaitEvent,
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
   transcriptMessages,
+  withApprovalDecisionEventPayload,
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload,
   withSessionWaitEventPayload
@@ -6073,6 +6078,38 @@ export function UserAction({
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
+  const approvalDecision = approvalDecisionEventFromPayload(message.payload);
+  if (approvalDecision) {
+    return (
+      <details
+        className={`queue-automation-event approval-decision-event${onOpenMenu ? " user-action-copyable" : ""}`}
+        data-tone={approvalDecision.decision === "approved" ? "success" : "warning"}
+        data-transcript-item-id={itemId}
+        {...menuTrigger.triggerProps}
+      >
+        <summary>
+          <span className="queue-automation-main">
+            <span className="session-wait-badge">{approvalDecision.decision === "approved" ? "Approved" : "Denied"}</span>
+            <strong>{approvalDecisionEventSummary(approvalDecision)}</strong>
+            <span className="queue-automation-command">{approvalDecision.guards.join(", ") || "No guard exceptions"}</span>
+          </span>
+          <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
+        </summary>
+        <div className="queue-automation-details">
+          <dl>
+            <div><dt>Approval</dt><dd>{approvalDecision.approvalId}</dd></div>
+            <div><dt>Guards</dt><dd>{approvalDecision.guards.join(", ") || "None"}</dd></div>
+            <div><dt>Action</dt><dd>{approvalDecision.action}</dd></div>
+            <div><dt>Consequences</dt><dd>{approvalDecision.consequences}</dd></div>
+          </dl>
+          <details className="queue-automation-payload">
+            <summary>Raw automation payload</summary>
+            <pre>{serializeApprovalDecisionEvent(approvalDecision)}</pre>
+          </details>
+        </div>
+      </details>
+    );
+  }
   const waitEvent = sessionWaitEventFromPayload(message.payload);
   if (waitEvent) {
     const tone = waitEvent.kind === "timeout" ? "warning" : "success";
@@ -6223,6 +6260,7 @@ function TranscriptRange({
 }
 
 function label(message: ChatMessage): string {
+  if (approvalDecisionEventFromPayload(message.payload)) return "Muxpilot approval";
   if (sessionWaitEventFromPayload(message.payload)) return "Session wait";
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
   if (gitWorkflowEventFromPayload(message.payload)) return "Git workflow";
@@ -6314,6 +6352,8 @@ function displayText(message: ChatMessage): string | null {
 }
 
 export function copyableMessageText(message: ChatMessage): string {
+  const approvalDecision = approvalDecisionEventFromPayload(message.payload);
+  if (approvalDecision) return serializeApprovalDecisionEvent(approvalDecision);
   const waitEvent = sessionWaitEventFromPayload(message.payload);
   if (waitEvent) return serializeSessionWaitEvent(waitEvent);
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload);
@@ -7127,6 +7167,20 @@ function replaceDuplicateAssistantUpdateResponse(messages: ChatMessage[], messag
 }
 
 function displayMessage(message: ChatMessage): ChatMessage | null {
+  const embeddedApprovalDecision = approvalDecisionEventFromPayload(message.payload);
+  const normalizedApprovalDecision = embeddedApprovalDecision ? null : normalizeApprovalDecisionEvent(message.text);
+  const approvalDecision = embeddedApprovalDecision ?? normalizedApprovalDecision?.event;
+  if (approvalDecision) {
+    return {
+      ...message,
+      role: "system",
+      type: "status",
+      text: approvalDecisionEventSummary(approvalDecision),
+      payload: normalizedApprovalDecision
+        ? withApprovalDecisionEventPayload(message.payload, normalizedApprovalDecision)
+        : message.payload
+    };
+  }
   const queueEvent = heavyCommandQueueEventFromPayload(message.payload) ?? normalizeHeavyCommandQueueEvent(message.text);
   if (queueEvent) {
     return {
@@ -7255,7 +7309,8 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {
-  return Boolean(heavyCommandQueueEventFromPayload(message.payload))
+  return Boolean(approvalDecisionEventFromPayload(message.payload))
+    || Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
     || Boolean(sessionWaitEventFromPayload(message.payload))
     || isTurnAbortedStatus(message)

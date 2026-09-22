@@ -3,6 +3,7 @@ import { buildExpandedTranscriptItems, buildTranscriptItems } from "./transcript
 import { serializeHeavyCommandQueueEvent } from "./heavyCommandQueueEvent.js";
 import { serializeGitWorkflowEvent } from "./gitWorkflowEvent.js";
 import { serializeSessionWaitEvent } from "./sessionWaitEvent.js";
+import { serializeApprovalDecisionEvent } from "./approvalDecisionEvent.js";
 import type { ChatMessage } from "./types.js";
 
 describe("buildTranscriptItems", () => {
@@ -193,6 +194,31 @@ describe("buildTranscriptItems", () => {
           type: "status",
           text: "Agent session wait timed out",
           payload: expect.objectContaining({ agentSessionWait: expect.objectContaining({ kind: "timeout" }) })
+        })
+      })
+    ]);
+  });
+
+  it("renders approval decisions as standalone system actions", () => {
+    const items = buildTranscriptItems([
+      message(1, serializeApprovalDecisionEvent({
+        version: 1,
+        approvalId: "approval-1",
+        decision: "approved",
+        guards: ["fixed-target"],
+        action: "Retarget the session.",
+        consequences: "Future commits integrate into the new target."
+      }))
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        type: "user_action",
+        message: expect.objectContaining({
+          role: "system",
+          type: "status",
+          text: "Muxpilot gate approved",
+          payload: expect.objectContaining({ muxpilotApprovalDecision: expect.objectContaining({ approvalId: "approval-1" }) })
         })
       })
     ]);
