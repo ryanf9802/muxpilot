@@ -7,7 +7,17 @@ import { api } from "../api/client.js";
 import { DocumentsButton, DocumentsModal, MessageBubble } from "./SessionView.js";
 
 const copyTextMock = vi.hoisted(() => vi.fn(async () => undefined));
+const mermaidInitializeMock = vi.hoisted(() => vi.fn());
+const mermaidRenderMock = vi.hoisted(() => vi.fn(async (_id: string, source: string) => ({
+  svg: `<svg data-source="${source.split("\n", 1)[0]}"></svg>`
+})));
 vi.mock("../utils/clipboard.js", () => ({ copyText: copyTextMock }));
+vi.mock("mermaid", () => ({
+  default: {
+    initialize: mermaidInitializeMock,
+    render: mermaidRenderMock
+  }
+}));
 
 beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -16,6 +26,8 @@ beforeAll(() => {
 
 afterEach(() => {
   copyTextMock.mockClear();
+  mermaidInitializeMock.mockClear();
+  mermaidRenderMock.mockClear();
   vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
   vi.restoreAllMocks();
   vi.useRealTimers();
@@ -23,6 +35,36 @@ afterEach(() => {
 });
 
 describe("DocumentsModal", () => {
+  it("renders Mermaid fences as diagrams while preserving ordinary code blocks", async () => {
+    const documentSummary = { name: "INDEX.md", sizeBytes: 100, updatedAt: "2026-08-25T00:00:00.000Z" };
+    vi.spyOn(api, "sessionDocument").mockResolvedValue({
+      document: {
+        ...documentSummary,
+        content: "```mermaid\nflowchart LR\n  A --> B\n```\n\n```mermaid\nsequenceDiagram\n  A->>B: Hi\n```\n\n```ts\nconst answer = 42;\n```"
+      }
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(<DocumentsModal open sessionId="session-1" documents={[documentSummary]} listLoading={false} listError="" onClose={() => undefined} />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mermaidInitializeMock).toHaveBeenCalledWith(expect.objectContaining({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "dark"
+    }));
+    expect(mermaidRenderMock).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll(".mermaid-diagram-canvas svg")).toHaveLength(2);
+    expect(container.querySelector("code.language-ts")?.textContent).toContain("const answer = 42;");
+    act(() => root.unmount());
+  });
+
   it("opens a requested applied document instead of the default index", async () => {
     const documents = [
       { name: "INDEX.md", sizeBytes: 10, updatedAt: "2026-08-25T00:00:00.000Z" },

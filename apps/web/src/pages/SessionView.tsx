@@ -131,6 +131,7 @@ import {
 } from "@muxpilot/core";
 import { api, ApiError } from "../api/client.js";
 import { CodeBlock, codeBlockText } from "../components/CodeBlock.js";
+import { MermaidDiagram } from "../components/MermaidDiagram.js";
 import {
   ContextMenu,
   ContextMenuItem,
@@ -1071,7 +1072,7 @@ export function DocumentsModal({
   const selectedVersion = documents.find((document) => document.name === selected)?.updatedAt ?? "";
   const selectedDocumentKey = selected ? `${sessionId}\u0000${selected}` : null;
   const selectedContentKey = selectedDocumentKey ? `${selectedDocumentKey}\u0000${selectedVersion}` : null;
-  const documentMarkdownComponents = fileAwareMarkdownComponentsValue;
+  const documentMarkdownComponents = documentMarkdownComponentsValue;
   useEffect(() => {
     if (!open || !selected) {
       setContent("");
@@ -6540,6 +6541,21 @@ const fileAwareMarkdownComponentsValue: Components = {
   ...markdownComponents,
   a({ node: _node, ...props }) {
     return <FileAwareMarkdownAnchor {...props} />;
+  }
+};
+
+const documentMarkdownComponentsValue: Components = {
+  ...fileAwareMarkdownComponentsValue,
+  pre({ children }) {
+    const code = children && typeof children === "object" && "props" in children
+      ? children as { props: { children?: ReactNode; className?: string } }
+      : null;
+    const codeClassName = code?.props.className;
+    const text = codeBlockText(code?.props.children ?? children);
+    if (codeClassName?.split(/\s+/).includes("language-mermaid")) {
+      return <MermaidDiagram source={text} />;
+    }
+    return <CodeBlock text={text} codeClassName={codeClassName} />;
   }
 };
 
