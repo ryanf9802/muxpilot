@@ -3421,7 +3421,14 @@ export function SessionView() {
       </div>
 
       {readySession.startupError ? (
-        <p className="session-startup-error-banner" role="alert">{readySession.startupError}</p>
+        <div className="session-startup-error-banner" role="alert">
+          <span>{readySession.startupError}</span>
+          {readySession.status === "startup_failed" && readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "failed" ? (
+            <button className="secondary-button" disabled={Boolean(actionBusy)} onClick={() => void runAction({ type: "retryStartup" })}>
+              {actionBusy === "retryStartup" ? "Retrying…" : "Retry startup"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {readySession.runtimeUnavailableReason ? (
@@ -3444,18 +3451,23 @@ export function SessionView() {
       ) : null}
 
       {readySession.status === "input_failed" ? (
-        <InputDeliveryFailureBanner
-          busyAction={actionBusy}
-          detail={inputDeliveryFailure}
-          interrupted={inputDeliveryCode === "turn_interrupted"}
-          error={inputDeliveryError}
-          onRetry={() => inputDeliveryIdentity
-            ? void resolveInputDelivery({ type: "retryInputDelivery", ...inputDeliveryIdentity })
-            : setInputDeliveryError("The interrupted turn changed. Refresh and try again.")}
-          onDismiss={() => inputDeliveryIdentity
-            ? void resolveInputDelivery({ type: "dismissInputDeliveryFailure", ...inputDeliveryIdentity })
-            : setInputDeliveryError("The interrupted turn changed. Refresh and try again.")}
-        />
+        inputDeliveryIdentity ? (
+          <InputDeliveryFailureBanner
+            busyAction={actionBusy}
+            detail={inputDeliveryFailure}
+            interrupted={inputDeliveryCode === "turn_interrupted"}
+            error={inputDeliveryError}
+            onRetry={() => void resolveInputDelivery({ type: "retryInputDelivery", ...inputDeliveryIdentity })}
+            onDismiss={() => void resolveInputDelivery({ type: "dismissInputDeliveryFailure", ...inputDeliveryIdentity })}
+          />
+        ) : (
+          <div className="session-startup-error-banner" role="alert">
+            <span>An automatic Codex turn failed. Restart its runtime to recover the session.</span>
+            <button className="secondary-button" disabled={Boolean(actionBusy)} onClick={() => void runAction({ type: "restartRuntime" })}>
+              {actionBusy === "restartRuntime" ? "Restarting…" : "Restart Codex"}
+            </button>
+          </div>
+        )
       ) : null}
 
       <HeavyCommandsModal

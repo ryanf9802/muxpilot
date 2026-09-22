@@ -157,6 +157,14 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       }, recoveryGuard);
       return;
     }
+    if (codexTurnFailure({ turn: latestTurn })) {
+      await this.handleExclusive(sessionId, {
+        method: "turn/completed",
+        params: { threadId, turn: latestTurn },
+        receivedAt: restoredAt
+      }, recoveryGuard);
+      return;
+    }
     if (codexTurnInterruption(latestTurn)) {
       const applied = await this.handleExclusive(sessionId, {
         method: "turn/completed",

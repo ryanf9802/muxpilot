@@ -3192,6 +3192,8 @@ export class SyncAppDatabase {
         ? null
         : pendingMuxpilotApproval && projection.status !== "startup_failed" && projection.status !== "missing"
           ? "approval"
+          : projection.turnFailure && projection.status === "input_failed"
+            ? "waiting"
           : projection.status;
     const statusChanged = targetStatus !== null && existingSession.status !== targetStatus;
 

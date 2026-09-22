@@ -187,7 +187,10 @@ describe("projectAppServerEvent", () => {
     expect(projectAppServerEvent({
       method: "turn/completed",
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "failed" } }
-    }, receivedAt)?.status).toBe("input_failed");
+    }, receivedAt)).toMatchObject({
+      status: "input_failed",
+      message: { text: expect.stringContaining("Codex could not complete this turn") }
+    });
     expect(projectAppServerEvent({
       method: "turn/completed",
       params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }

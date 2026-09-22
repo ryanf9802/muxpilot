@@ -1006,6 +1006,8 @@ export type SessionAction =
   | { type: "detach" }
   | { type: "hibernate" }
   | { type: "wake" }
+  | { type: "restartRuntime" }
+  | { type: "retryStartup" }
   | { type: "kill" };
 
 export interface SessionActionResponse {

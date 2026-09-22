@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { chmod, lstat, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type {
@@ -303,7 +303,7 @@ function defaultDependencies(): SupervisorDependencies {
       return { stdout: typeof stdout === "string" ? stdout : stdout.toString() };
     },
     openProxy: (socketPath) => openUnixWebSocketJsonLineConnection(socketPath),
-    socketReady: async (socketPath) => lstat(socketPath).then((value) => value.isSocket()).catch(() => false),
+    socketReady: async (socketPath) => stat(socketPath).then((value) => value.isSocket()).catch(() => false),
     delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now()
   };

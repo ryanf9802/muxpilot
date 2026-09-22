@@ -10,6 +10,7 @@ import {
   type SessionStatus
 } from "@muxpilot/core";
 import type { JsonRpcNotification } from "./jsonRpcConnection.js";
+import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
 
 export interface AppServerEventIdentity {
   threadId: string;
@@ -74,12 +75,26 @@ export function projectAppServerEvent(
   if (notification.method === "turn/completed") {
     const eventIdentity = identity(threadId, turnId, null, null);
     const unexpectedInterruption = params.muxpilotUnexpectedInterruption === true;
+    const failure = codexTurnFailure(params);
     return projection(
       notification,
       eventIdentity,
       completedTurnStatus(turn),
       false,
-      unexpectedInterruption ? {
+      failure ? {
+        id: stableProjectionId(eventIdentity, "turnFailure"),
+        type: "status",
+        role: "system",
+        timestamp: receivedAt,
+        text: `Codex could not complete this turn: ${failure.failureReason}`,
+        payload: {
+          source: "codex_app_server",
+          method: notification.method,
+          codexItemIdentity: eventIdentity,
+          appServerIdentity: eventIdentity,
+          turnFailure: failure
+        }
+      } : unexpectedInterruption ? {
         id: stableProjectionId(eventIdentity, "unexpectedInterruption"),
         type: "status",
         role: "system",

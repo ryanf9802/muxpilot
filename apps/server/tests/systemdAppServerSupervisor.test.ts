@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +14,38 @@ import type { RuntimeProxyConnection, RuntimeStartSpec } from "../src/services/s
 const capabilityId = "0123456789abcdef01234567";
 
 describe("SystemdAppServerSupervisor", () => {
+  it("accepts a Codex socket symlink but rejects broken and non-socket targets", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-socket-link-"));
+    const socketPath = join(root, "codex.sock");
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, resolve);
+    });
+    try {
+      const supervisor = new SystemdAppServerSupervisor(root, {
+        run: vi.fn(async () => ({ stdout: "ActiveState=active\nSubState=running\nMainPID=4242\n" }))
+      });
+      const owned = runtimePaths(root, capabilityId).socketPath;
+      await mkdir(runtimePaths(root, capabilityId).directory);
+      await symlink(socketPath, owned);
+      const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: owned, state: "connected" as const, codexVersion: null };
+      expect((await supervisor.inspect({ ...runtime, socketPath: owned })).socketPresent).toBe(true);
+      await writeFile(join(root, "regular"), "not a socket");
+      const otherId = "fedcba9876543210fedcba98";
+      const other = runtimePaths(root, otherId).socketPath;
+      await mkdir(runtimePaths(root, otherId).directory);
+      await symlink(join(root, "regular"), other);
+      expect((await supervisor.inspect({ ...runtime, unit: appServerServiceUnit(otherId), socketPath: other })).socketPresent).toBe(false);
+      const brokenId = "aaaaaaaaaaaaaaaaaaaaaaaa";
+      const broken = runtimePaths(root, brokenId).socketPath;
+      await mkdir(runtimePaths(root, brokenId).directory);
+      await symlink(join(root, "missing"), broken);
+      expect((await supervisor.inspect({ ...runtime, unit: appServerServiceUnit(brokenId), socketPath: broken })).socketPresent).toBe(false);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
   it("keeps sockets short when durable runtime data has a long path", () => {
     const runtimeRoot = `/home/operator/${"long-checkout/".repeat(8)}data/runtime/app-server-sessions`;
     const socketRoot = "/run/user/1000/muxpilot/app-server-sessions";

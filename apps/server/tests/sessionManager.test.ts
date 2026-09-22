@@ -1656,6 +1656,43 @@ describe("SessionManager app-server helpers", () => {
 });
 
 describe("SessionManager Codex authentication runtime safety", () => {
+  it("retries a failed startup on the existing thread", async () => {
+    const session = managedSession();
+    const harness = authenticationManager({
+      ...session,
+      status: "startup_failed",
+      runtime: { ...session.runtime!, state: "failed" }
+    });
+    const retry = harness.manager as unknown as { retryAppServerStartup(id: string): Promise<void> };
+
+    await retry.retryAppServerStartup(session.id);
+
+    expect(harness.resumeAppServerSession).toHaveBeenCalledWith(expect.objectContaining({
+      id: session.id,
+      provider: session.provider,
+      runtime: expect.objectContaining({ state: "failed" })
+    }));
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("restarts a failed automatic turn only when runtime work is inactive", async () => {
+    const session = { ...managedSession(), status: "input_failed" as const };
+    const harness = authenticationManager(session);
+    const restart = harness.manager as unknown as { restartAppServerRuntime(id: string): Promise<void> };
+
+    await restart.restartAppServerRuntime(session.id);
+
+    expect(harness.driver.kill).toHaveBeenCalledWith(session);
+    expect(harness.resumeAppServerSession).toHaveBeenCalledWith(expect.objectContaining({
+      id: session.id,
+      provider: session.provider,
+      runtime: expect.objectContaining({ state: "stopped" })
+    }));
+
+    const busy = authenticationManager(session, ["active_turn"]);
+    await expect((busy.manager as unknown as typeof restart).restartAppServerRuntime(session.id)).rejects.toThrow("active_turn");
+    expect(busy.driver.kill).not.toHaveBeenCalled();
+  });
   it.each([
     "question",
     "approval",

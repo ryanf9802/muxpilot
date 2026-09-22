@@ -217,6 +217,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("detach") }),
   z.object({ type: z.literal("hibernate") }),
   z.object({ type: z.literal("wake") }),
+  z.object({ type: z.literal("restartRuntime") }),
+  z.object({ type: z.literal("retryStartup") }),
   z.object({ type: z.literal("kill") })
 ]);
 

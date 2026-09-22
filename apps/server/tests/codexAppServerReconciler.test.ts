@@ -344,6 +344,26 @@ describe("CodexAppServerReconciler", () => {
     ]);
   });
 
+  it("replays a terminal failed turn on restart so recovery can clear an orphaned input failure", async () => {
+    const store = projectionStore([]);
+    const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });
+
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "systemError" },
+      { id: "automatic-turn", status: "failed", error: { message: "Unsupported model" } },
+      "2026-09-01T12:05:00.000Z"
+    );
+
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      method: "turn/completed",
+      turnId: "automatic-turn",
+      turnFailure: expect.objectContaining({ failureCode: "turn_failed" })
+    }));
+    expect(store.applyAppServerProjection).toHaveBeenCalledTimes(1);
+  });
+
   it("restores an active Plan-mode thread as planning", async () => {
     const store = projectionStore([], "plan");
     const reconciler = new CodexAppServerReconciler(store as unknown as AppServerProjectionStore, { publish: vi.fn() });

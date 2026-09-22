@@ -2997,6 +2997,36 @@ export class SessionManager {
     return updated;
   }
 
+  private async retryAppServerStartup(sessionId: string): Promise<void> {
+    await this.serializeRuntimeOperation(sessionId, async () => {
+      const session = requireSession(await this.db.getSession(sessionId));
+      if (session.status !== "startup_failed" || session.runtime?.kind !== "systemd_service" ||
+        session.runtime.state !== "failed" || session.initializing || session.archived) {
+        throw new SessionRuntimeActionError("Session is not ready for startup retry");
+      }
+      if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId) ||
+        (await this.db.listQueuedInputs(sessionId)).length > 0 ||
+        (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id))) {
+        throw new SessionRuntimeActionError("Session has pending input or a heavyweight command");
+      }
+      await this.resumeAppServerSession(session);
+    });
+  }
+
+  private async restartAppServerRuntime(sessionId: string): Promise<void> {
+    await this.serializeRuntimeOperation(sessionId, async () => {
+      const session = requireSession(await this.db.getSession(sessionId));
+      const blockers = await this.sessionEnvironmentRestartBlockers(session);
+      if (session.archived || blockers.length > 0) {
+        throw new SessionRuntimeActionError(`Session runtime cannot be restarted: ${session.archived ? "archived" : blockers.join(", ")}`);
+      }
+      await this.requireAppServerDriver().kill(session);
+      const stopped = { ...session, runtime: { ...session.runtime!, state: "stopped" as const } };
+      await this.db.upsertSession(stopped, nowIso());
+      await this.resumeAppServerSession(stopped);
+    });
+  }
+
   private serializeRuntimeOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.runtimeOperationTails.get(sessionId) ?? Promise.resolve();
     const result = previous.catch(() => undefined).then(operation);
@@ -3410,6 +3440,8 @@ export class SessionManager {
     }
     if (action.type === "hibernate") await this.hibernateAppServerSession(session, false);
     if (action.type === "wake") await this.wakeAppServerSession(session, false);
+    if (action.type === "restartRuntime") await this.restartAppServerRuntime(sessionId);
+    if (action.type === "retryStartup") await this.retryAppServerStartup(sessionId);
     if (action.type === "choosePlanAction") {
       if (session.authenticationResumeRequired) throw new InputModeSwitchError("Resume this session after its authentication failure before continuing its plan.");
       const latestPlanMessage = await this.db.latestPlanReadyMessage(sessionId);
