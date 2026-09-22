@@ -207,6 +207,57 @@ describe("AppDatabase session visibility", () => {
     await restarted.close();
   });
 
+  it("deduplicates persisted approval decisions only within the same session and time window", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-"));
+    const path = join(dir, "test.db");
+    const paired = testSession("approval-decision-paired");
+    const outsideWindow = testSession("approval-decision-outside-window");
+    const otherSession = testSession("approval-decision-other-session");
+    const crossSession = testSession("approval-decision-cross-session");
+    const batched = testSession("approval-decision-batched");
+    const event = {
+      version: 1 as const,
+      approvalId: "approval-1",
+      decision: "approved" as const,
+      guards: ["fixed-target"] as const,
+      action: "Retarget the session.",
+      consequences: "Future commits integrate into the new target."
+    };
+    const marker = serializeApprovalDecisionEvent({ ...event, guards: [...event.guards] });
+    const db = new AppDatabase(path);
+    for (const session of [paired, outsideWindow, otherSession, crossSession, batched]) {
+      await db.upsertSession(session, "2026-08-25T00:00:00.000Z");
+    }
+    for (const [session, timestamp] of [
+      [paired, "2026-08-25T00:00:01.000Z"],
+      [outsideWindow, "2026-08-25T00:00:01.000Z"],
+      [otherSession, "2026-08-25T00:00:01.000Z"]
+    ] as const) {
+      await db.appendMessage({
+        ...testMessage(session.id, 1, "system", "Muxpilot gate approved", timestamp, "status"),
+        payload: { muxpilotApprovalDecision: { ...event, guards: [...event.guards] } }
+      });
+    }
+    await db.appendMessage(testMessage(paired.id, 2, "user", marker, "2026-08-25T00:00:01.100Z"));
+    await db.appendMessage(testMessage(outsideWindow.id, 2, "user", marker, "2026-08-25T00:00:07.000Z"));
+    await db.appendMessage(testMessage(crossSession.id, 1, "user", marker, "2026-08-25T00:00:01.100Z"));
+    await db.appendMessage(testMessage(batched.id, 1, "user", marker, "2026-08-25T00:00:01.000Z"));
+    await db.appendMessage(testMessage(batched.id, 2, "user", marker, "2026-08-25T00:00:01.100Z"));
+    await db.close();
+
+    const restarted = new AppDatabase(path);
+    expect(await restarted.listMessages(paired.id, 0)).toHaveLength(1);
+    expect(await restarted.listMessages(outsideWindow.id, 0)).toHaveLength(2);
+    expect(await restarted.listMessages(otherSession.id, 0)).toHaveLength(1);
+    expect(await restarted.listMessages(crossSession.id, 0)).toMatchObject([
+      { role: "system", type: "status", payload: { muxpilotApprovalDecision: { approvalId: "approval-1" } } }
+    ]);
+    expect(await restarted.listMessages(batched.id, 0)).toMatchObject([
+      { role: "system", type: "status", payload: { muxpilotApprovalDecision: { approvalId: "approval-1" } } }
+    ]);
+    await restarted.close();
+  });
+
   it("deduplicates normalized approval decisions across parser batches", async () => {
     const db = await tempDb();
     const session = testSession("approval-decision-deduped");

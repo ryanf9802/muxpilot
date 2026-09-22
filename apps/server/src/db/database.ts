@@ -4028,9 +4028,6 @@ export class SyncAppDatabase {
       )
       .all() as unknown as MessageRow[];
     if (queuedRows.length === 0 && rawRows.length === 0) return;
-    const systemRows = this.db
-      .prepare("SELECT * FROM messages WHERE role = 'system' AND type = 'status'")
-      .all() as unknown as MessageRow[];
     const deletedBySession = new Map<string, number>();
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -4041,15 +4038,7 @@ export class SyncAppDatabase {
       for (const row of rawRows) {
         const normalized = normalizeSessionWaitEvent(row.text);
         if (!normalized) continue;
-        const duplicate = systemRows.some((candidate) => {
-          if (candidate.session_id !== row.session_id || !timestampsAreNear(candidate.timestamp, row.timestamp)) return false;
-          try {
-            const event = sessionWaitEventFromPayload(JSON.parse(candidate.payload_json) as Record<string, unknown>);
-            return event !== null && JSON.stringify(event) === JSON.stringify(normalized.event);
-          } catch {
-            return false;
-          }
-        });
+        const duplicate = this.hasMatchingSystemEvent(row, normalized.event, sessionWaitEventFromPayload);
         this.deletePromptIndexMessage(row.id);
         if (duplicate) {
           this.db.prepare("DELETE FROM messages WHERE id = ?").run(row.id);
@@ -4061,13 +4050,6 @@ export class SyncAppDatabase {
         this.db
           .prepare("UPDATE messages SET type = 'status', role = 'system', text = ?, payload_json = ? WHERE id = ?")
           .run(sessionWaitEventSummary(normalized.event), JSON.stringify(withSessionWaitEventPayload(payload, normalized)), row.id);
-        systemRows.push({
-          ...row,
-          type: "status",
-          role: "system",
-          text: sessionWaitEventSummary(normalized.event),
-          payload_json: JSON.stringify(withSessionWaitEventPayload(payload, normalized))
-        });
       }
       for (const [sessionId, deleted] of deletedBySession) {
         this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?").run(deleted, sessionId);
@@ -4091,9 +4073,6 @@ export class SyncAppDatabase {
       )
       .all() as unknown as MessageRow[];
     if (queuedRows.length === 0 && rawRows.length === 0) return;
-    const systemRows = this.db
-      .prepare("SELECT * FROM messages WHERE role = 'system' AND type = 'status'")
-      .all() as unknown as MessageRow[];
     const deletedBySession = new Map<string, number>();
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -4104,15 +4083,7 @@ export class SyncAppDatabase {
       for (const row of rawRows) {
         const normalized = normalizeApprovalDecisionEvent(row.text);
         if (!normalized) continue;
-        const duplicate = systemRows.some((candidate) => {
-          if (candidate.session_id !== row.session_id || !timestampsAreNear(candidate.timestamp, row.timestamp)) return false;
-          try {
-            const event = approvalDecisionEventFromPayload(JSON.parse(candidate.payload_json) as Record<string, unknown>);
-            return event !== null && JSON.stringify(event) === JSON.stringify(normalized.event);
-          } catch {
-            return false;
-          }
-        });
+        const duplicate = this.hasMatchingSystemEvent(row, normalized.event, approvalDecisionEventFromPayload);
         this.deletePromptIndexMessage(row.id);
         if (duplicate) {
           this.db.prepare("DELETE FROM messages WHERE id = ?").run(row.id);
@@ -4125,13 +4096,6 @@ export class SyncAppDatabase {
         this.db
           .prepare("UPDATE messages SET type = 'status', role = 'system', text = ?, payload_json = ? WHERE id = ?")
           .run(approvalDecisionEventSummary(normalized.event), JSON.stringify(normalizedPayload), row.id);
-        systemRows.push({
-          ...row,
-          type: "status",
-          role: "system",
-          text: approvalDecisionEventSummary(normalized.event),
-          payload_json: JSON.stringify(normalizedPayload)
-        });
       }
       for (const [sessionId, deleted] of deletedBySession) {
         this.db.prepare("UPDATE managed_sessions SET unread_count = MAX(0, unread_count - ?) WHERE id = ?").run(deleted, sessionId);
@@ -4141,6 +4105,31 @@ export class SyncAppDatabase {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private hasMatchingSystemEvent<T>(
+    source: Pick<MessageRow, "session_id" | "timestamp">,
+    expected: T,
+    eventFromPayload: (payload: Record<string, unknown>) => T | null
+  ): boolean {
+    const candidates = this.db
+      .prepare(
+        `SELECT timestamp, payload_json FROM messages
+         WHERE session_id = ? AND role = 'system' AND type = 'status'
+         ORDER BY sequence`
+      )
+      .iterate(source.session_id) as unknown as Iterable<Pick<MessageRow, "timestamp" | "payload_json">>;
+    const expectedJson = JSON.stringify(expected);
+    for (const candidate of candidates) {
+      if (!timestampsAreNear(candidate.timestamp, source.timestamp)) continue;
+      try {
+        const event = eventFromPayload(JSON.parse(candidate.payload_json) as Record<string, unknown>);
+        if (event !== null && JSON.stringify(event) === expectedJson) return true;
+      } catch {
+        // Ignore malformed historical payloads and continue checking bounded candidates.
+      }
+    }
+    return false;
   }
 
   private removeDuplicateAppServerQuestionMessages(): void {
