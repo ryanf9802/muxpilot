@@ -36,6 +36,25 @@ describe("SessionEnvironmentService", () => {
     expect(persisted).not.toContain("child-secret-value");
   });
 
+  it("resolves a child parent reference before the child session is persisted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "muxpilot-session-env-prelaunch-")); roots.push(root);
+    const sessions = new Map<string, ManagedSession>([["parent", session("parent")]]);
+    const service = new SessionEnvironmentService(database(sessions), root);
+    await service.initialize();
+    await service.set("parent", "INHERITED_SAMPLE", "test-value");
+    await service.setReferenceParent("future-child", "parent");
+
+    const initial = await service.resolveForLaunch("future-child");
+    expect(initial.environment).toEqual({ INHERITED_SAMPLE: "test-value" });
+    await service.markApplied("future-child", initial.revision);
+    sessions.set("future-child", session("future-child", "parent"));
+    expect(await service.describe("future-child")).toMatchObject({
+      desiredRevision: initial.revision,
+      appliedRevision: initial.revision,
+      state: "applied"
+    });
+  });
+
   it("rejects reserved names and refuses to regenerate a missing key", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-session-env-")); roots.push(root);
     const sessions = new Map([["session", session("session")]]);

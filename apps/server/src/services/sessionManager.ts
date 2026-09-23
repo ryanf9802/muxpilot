@@ -2010,21 +2010,19 @@ export class SessionManager {
         : { cwd, name, workspace: { mode: "directory" } };
       const childMode = mode ?? "default";
       const inheritedSettings = { ...actor.models[childMode], fastMode: actor.fastMode };
-      const child = await this.createSession(request, inheritedSettings);
       const ownership: AgentSessionOwnership = {
         parentSessionId: actor.id,
         rootSessionId,
         origin: "created",
         createdAt: nowIso(),
-        workTokenBaseline: child.contextUsage?.lifetimeWorkTokens ?? 0,
+        workTokenBaseline: 0,
         workTokensUsed: 0,
-        workTokenLastObserved: child.contextUsage?.lifetimeWorkTokens,
-        workTokenLastSampledAt: child.contextUsage?.sampledAt ?? null,
+        workTokenLastSampledAt: null,
         workTokenBudget: DEFAULT_AGENT_WORK_TOKEN_BUDGET,
         completedAt: null,
         budgetExhaustedAt: null
       };
-      await this.db.setSessionAgentOwnership(child.id, ownership, nowIso());
+      const child = await this.createSession(request, inheritedSettings, ownership);
       for (const selection of ["default", "plan"] as const) {
         const settings = actor.models[selection];
         if (settings.model) await this.db.setSessionModelSettings(child.id, selection, settings.model, settings.reasoningEffort, nowIso());
@@ -2662,7 +2660,8 @@ export class SessionManager {
   async createSessionInDirectory(
     cwd: string,
     name: string,
-    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
+    agentOwnership?: AgentSessionOwnership
   ): Promise<ManagedSession> {
     this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(cwd);
@@ -2690,7 +2689,8 @@ export class SessionManager {
       options: prepared.options,
       orchestrationCapabilityId: prepared.capabilityId,
       preferences,
-      documentScopeId
+      documentScopeId,
+      agentOwnership
     });
     await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
     this.publish("session.updated", session.id, session);
@@ -2699,7 +2699,8 @@ export class SessionManager {
 
   async createSession(
     request: CreateSessionRequest,
-    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null }
+    launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
+    agentOwnership?: AgentSessionOwnership
   ): Promise<ManagedSession> {
     this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(request.cwd);
@@ -2710,7 +2711,7 @@ export class SessionManager {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
     if (request.workspace?.mode !== "git") {
-      return this.createSessionInDirectory(directory, sessionName, launchSettings);
+      return this.createSessionInDirectory(directory, sessionName, launchSettings, agentOwnership);
     }
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
@@ -2745,7 +2746,8 @@ export class SessionManager {
       gitWorkspace: workspace.summary,
       gitWorkspaceId: workspace.id,
       preferences,
-      documentScopeId: workspace.id
+      documentScopeId: workspace.id,
+      agentOwnership
     });
     await this.db.addAudit("local", "create_git_session", session.id, workspace.id, nowIso());
     this.publish("session.updated", session.id, session);
@@ -2850,50 +2852,64 @@ export class SessionManager {
     forkedFrom?: SessionForkOrigin | null;
     preferences?: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">;
     documentScopeId: string;
+    agentOwnership?: AgentSessionOwnership;
   }): Promise<ManagedSession> {
     const driver = this.requireAppServerDriver();
     const sessionId = `app-${eventId()}`;
-    const launch = await driver[input.operation]({
-      sessionId,
-      name: input.sessionName,
-      cwd: input.directory,
-      options: input.options,
-      sourceThreadId: input.sourceThreadId
-    });
-    if (launch.sessionId !== sessionId) {
-      await driver.kill(appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
-      throw new Error(`App-server driver returned the wrong session id: expected ${sessionId}, received ${launch.sessionId}`);
+    if (input.agentOwnership) {
+      await this.sessionEnvironment?.setReferenceParent(sessionId, input.agentOwnership.parentSessionId);
     }
-    let session: ManagedSession | null = null;
+    let launched = false;
     try {
-      session = await this.persistInitializingAppServerSession(
-        launch,
-        input.sessionName,
-        input.directory,
-        input.repoPath,
-        input.gitWorkspace ?? null,
-        input.forkedFrom ?? null,
-        input.preferences,
-        input.documentScopeId
-      );
-      if (input.gitWorkspaceId) {
-        if (!this.gitWorkspaces) throw new Error("Managed Git workspaces disappeared during app-server launch");
-        await this.gitWorkspaces.bind(input.gitWorkspaceId, session.id);
+      const launch = await driver[input.operation]({
+        sessionId,
+        name: input.sessionName,
+        cwd: input.directory,
+        options: input.options,
+        sourceThreadId: input.sourceThreadId
+      });
+      if (launch.sessionId !== sessionId) {
+        await driver.kill(appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
+        throw new Error(`App-server driver returned the wrong session id: expected ${sessionId}, received ${launch.sessionId}`);
       }
-      session = await this.bindOrchestratedLaunch(input.orchestrationCapabilityId, session.id);
-      this.finishSessionInitialization(session.id, launch.ready);
-      return session;
-    } catch (error) {
-      await driver.kill(session ?? appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
-      if (session) {
-        const startupError = error instanceof Error ? error.message : "App-server session initialization failed";
-        try {
-          await this.db.setSessionInitializationResult(session.id, "startup_failed", startupError, nowIso());
-        } catch {
-          // Preserve the original launch/binding failure after best-effort failure-state persistence.
+      let session: ManagedSession | null = null;
+      try {
+        session = await this.persistInitializingAppServerSession(
+          launch,
+          input.sessionName,
+          input.directory,
+          input.repoPath,
+          input.gitWorkspace ?? null,
+          input.forkedFrom ?? null,
+          input.preferences,
+          input.documentScopeId,
+          input.agentOwnership
+        );
+        if (input.gitWorkspaceId) {
+          if (!this.gitWorkspaces) throw new Error("Managed Git workspaces disappeared during app-server launch");
+          await this.gitWorkspaces.bind(input.gitWorkspaceId, session.id);
         }
+        session = await this.bindOrchestratedLaunch(input.orchestrationCapabilityId, session.id);
+        this.finishSessionInitialization(session.id, launch.ready);
+        launched = true;
+        return session;
+      } catch (error) {
+        await driver.kill(session ?? appServerLaunchSession(launch, input.sessionName, input.directory)).catch(() => undefined);
+        if (session) {
+          const startupError = error instanceof Error ? error.message : "App-server session initialization failed";
+          try {
+            await this.db.setSessionInitializationResult(session.id, "startup_failed", startupError, nowIso());
+          } catch {
+            // Preserve the original launch/binding failure after best-effort failure-state persistence.
+          }
+          if (input.agentOwnership) await this.db.setSessionAgentOwnership(session.id, null, nowIso());
+        }
+        throw error;
       }
-      throw error;
+    } finally {
+      if (!launched && input.agentOwnership) {
+        await this.sessionEnvironment?.setReferenceParent(sessionId, null);
+      }
     }
   }
 
@@ -3177,7 +3193,7 @@ export class SessionManager {
   }
 
   private async performAppServerResume(session: ManagedSession): Promise<ManagedSession> {
-    const startFreshThread = isDisposableEmptyAppServerThread(session);
+    const startFreshThread = await isDisposableEmptyAppServerThread(session, await this.db.latestUserMessage(session.id));
     const sourceThreadId = session.provider?.threadId ?? session.codexSessionId;
     if (!startFreshThread && !sourceThreadId) throw new Error("App-server session does not have a Codex thread id to resume");
     const driver = this.requireAppServerDriver();
@@ -3240,7 +3256,9 @@ export class SessionManager {
       await launch.ready;
       const current = requireSession(await this.db.getSession(session.id));
       const currentActiveModel = current.models[current.inputMode];
-      const rolloutPath = launch.provider.rolloutPath ?? current.provider?.rolloutPath ?? current.codexJsonlPath;
+      const rolloutPath = startFreshThread
+        ? launch.provider.rolloutPath
+        : launch.provider.rolloutPath ?? current.provider?.rolloutPath ?? current.codexJsonlPath;
       const resumedSession: ManagedSession = {
         ...current,
         name: session.name ?? sessionName(session),
@@ -3312,7 +3330,8 @@ export class SessionManager {
     gitWorkspace: GitWorkspaceSummary | null,
     forkedFrom: SessionForkOrigin | null,
     preferences: Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable"> | undefined,
-    documentScopeId: string
+    documentScopeId: string,
+    agentOwnership?: AgentSessionOwnership
   ): Promise<ManagedSession> {
     const now = nowIso();
     const session: ManagedSession = {
@@ -3345,7 +3364,8 @@ export class SessionManager {
       forkedFrom,
       gitWorkspace,
       resourceUnit: launch.runtime.unit,
-      documentScopeId
+      documentScopeId,
+      agentOwnership: agentOwnership ?? null
     };
     await this.db.upsertSession(session, now);
     const persisted = requireSession(await this.db.setSessionInitializing(session.id, true, now));
@@ -5234,11 +5254,18 @@ function notLoadedProjectionAt(state: AppServerReconciliationState | null, obser
   return recordValue(recordValue(state.evidence)?.status)?.type === "notLoaded";
 }
 
-function isDisposableEmptyAppServerThread(session: ManagedSession): boolean {
-  return session.transcriptSize === 0
-    && session.lastActivityAt === null
-    && !session.provider?.rolloutPath
-    && !session.codexJsonlPath;
+async function isDisposableEmptyAppServerThread(session: ManagedSession, latestUserMessage: ChatMessage | null): Promise<boolean> {
+  if (latestUserMessage) return false;
+  const paths = new Set([session.provider?.rolloutPath, session.codexJsonlPath].filter((path): path is string => Boolean(path)));
+  for (const path of paths) {
+    try {
+      await stat(path);
+      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return true;
 }
 
 function stringValue(value: unknown): string | null {

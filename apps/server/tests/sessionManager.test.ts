@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessage, ManagedSession } from "@muxpilot/core";
+import type { AgentSessionOwnership, ChatMessage, ManagedSession } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { AppServerLaunchAttemptError } from "../src/services/sessionDrivers/codexAppServerDriver.js";
@@ -258,6 +258,123 @@ describe("SessionManager app-server helpers", () => {
     expect(available).toHaveBeenCalledTimes(2);
     expect(launch).not.toHaveBeenCalled();
     manager.stop();
+  });
+
+  it("binds child inheritance before runtime start and persists ownership before readiness", async () => {
+    const calls: string[] = [];
+    const ownership = managedChild("child", "parent", "parent").agentOwnership!;
+    const child = { ...managedSession(), agentOwnership: ownership };
+    const environment = {
+      setReferenceParent: vi.fn(async (_id: string, parent: string | null) => { calls.push(`inherit:${parent}`); })
+    };
+    const driver = {
+      start: vi.fn(async (spec: { sessionId: string }) => {
+        calls.push("start");
+        expect(environment.setReferenceParent).toHaveBeenCalledWith(spec.sessionId, "parent");
+        return { sessionId: spec.sessionId, provider: child.provider, runtime: child.runtime, capabilities: child.capabilities, ready: Promise.resolve() };
+      }),
+      kill: vi.fn(async () => undefined)
+    };
+    const persist = vi.fn(async (...args: unknown[]) => {
+      calls.push("persist");
+      expect(args.at(-1)).toBe(ownership);
+      return child;
+    });
+    const ready = vi.fn(() => { calls.push("ready"); });
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      sessionEnvironment: environment,
+      requireAppServerDriver: () => driver,
+      persistInitializingAppServerSession: persist,
+      bindOrchestratedLaunch: vi.fn(async () => child),
+      finishSessionInitialization: ready
+    }) as SessionManager;
+
+    await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
+      .launchAppServerSession({
+        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
+      })).resolves.toBe(child);
+    expect(calls).toEqual(["inherit:parent", "start", "persist", "ready"]);
+    expect(driver.kill).not.toHaveBeenCalled();
+  });
+
+  it("clears prelaunch child inheritance if runtime start fails", async () => {
+    const ownership = managedChild("child", "parent", "parent").agentOwnership!;
+    const setReferenceParent = vi.fn(async () => undefined);
+    const failure = new Error("start failed");
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      sessionEnvironment: { setReferenceParent },
+      requireAppServerDriver: () => ({ start: vi.fn(async () => { throw failure; }) })
+    }) as SessionManager;
+
+    await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
+      .launchAppServerSession({
+        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
+      })).rejects.toBe(failure);
+    expect(setReferenceParent).toHaveBeenNthCalledWith(1, expect.stringMatching(/^app-/), "parent");
+    expect(setReferenceParent).toHaveBeenNthCalledWith(2, expect.stringMatching(/^app-/), null);
+    expect(setReferenceParent.mock.calls[1]?.[0]).toBe(setReferenceParent.mock.calls[0]?.[0]);
+  });
+
+  it("clears persisted child ownership when launch binding fails", async () => {
+    const ownership = managedChild("child", "parent", "parent").agentOwnership!;
+    const child = { ...managedSession(), agentOwnership: ownership };
+    const failure = new Error("binding failed");
+    const setReferenceParent = vi.fn(async () => undefined);
+    const setSessionAgentOwnership = vi.fn(async () => child);
+    const driver = {
+      start: vi.fn(async (spec: { sessionId: string }) => ({
+        sessionId: spec.sessionId, provider: child.provider, runtime: child.runtime,
+        capabilities: child.capabilities, ready: Promise.resolve()
+      })),
+      kill: vi.fn(async () => undefined)
+    };
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      sessionEnvironment: { setReferenceParent },
+      requireAppServerDriver: () => driver,
+      persistInitializingAppServerSession: vi.fn(async () => child),
+      bindOrchestratedLaunch: vi.fn(async () => { throw failure; }),
+      db: { setSessionInitializationResult: vi.fn(async () => child), setSessionAgentOwnership }
+    }) as SessionManager;
+
+    await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
+      .launchAppServerSession({
+        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
+      })).rejects.toBe(failure);
+    expect(driver.kill).toHaveBeenCalledOnce();
+    expect(setSessionAgentOwnership).toHaveBeenCalledWith(child.id, null, expect.any(String));
+    expect(setReferenceParent).toHaveBeenLastCalledWith(expect.stringMatching(/^app-/), null);
+  });
+
+  it("passes child ownership into creation before sending the task", async () => {
+    const parent = { ...managedSession(), id: "parent" };
+    const child = managedChild("child", "parent", "parent");
+    const calls: string[] = [];
+    const createSession = vi.fn(async (_request: unknown, _settings: unknown, ownership: AgentSessionOwnership) => {
+      calls.push("create");
+      expect(ownership).toMatchObject({ parentSessionId: parent.id, rootSessionId: parent.id });
+      return child;
+    });
+    const sendInput = vi.fn(async () => { calls.push("task"); });
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async (id: string) => id === parent.id ? parent : child),
+        listSessions: vi.fn(async () => [parent]),
+        setSessionModelSettings: vi.fn()
+      },
+      agentMutationQueue: Promise.resolve(),
+      managedEnvironment: { MUXPILOT_SESSION_SCOPES_AVAILABLE: "1" },
+      createSession,
+      waitForAgentChildReady: vi.fn(async () => undefined),
+      sendInput,
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect(manager.agentCreateChild(parent.id, "child", "task")).resolves.toBe(child);
+    expect(calls).toEqual(["create", "task"]);
+    expect(sendInput).toHaveBeenCalledWith(child.id, "task", "default", parent.id);
   });
 
   it("can start periodic management without scheduling duplicate app-server recovery", () => {
@@ -558,6 +675,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const db = {
       getSession: vi.fn(async () => current),
+      latestUserMessage: vi.fn(async () => ({ id: "existing-input" } as ChatMessage)),
       setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
       setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
       upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
@@ -591,16 +709,19 @@ describe("SessionManager app-server helpers", () => {
     );
   });
 
-  it("replaces an empty unpersisted Codex thread instead of trying to resume it", async () => {
+  it("replaces an empty thread with an advertised but nonexistent rollout path", async () => {
     const directory = await mkdtemp(join(tmpdir(), "muxpilot-empty-thread-reload-"));
     temporaryRoots.push(directory);
+    const missingRollout = join(directory, "advertised-rollout.jsonl");
     let current = {
       ...managedSession(),
       cwd: directory,
       status: "idle" as const,
-      provider: { kind: "codex" as const, threadId: "thread-unpersisted", rolloutPath: null },
+      provider: { kind: "codex" as const, threadId: "thread-unpersisted", rolloutPath: missingRollout },
       codexSessionId: "thread-unpersisted",
-      codexJsonlPath: null,
+      codexJsonlPath: missingRollout,
+      transcriptSize: 27,
+      lastActivityAt: "2026-09-23T16:50:38.000Z",
       documentScopeId: "scope-1"
     };
     const replacementProvider = { kind: "codex" as const, threadId: "thread-replacement", rolloutPath: null };
@@ -621,6 +742,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const db = {
       getSession: vi.fn(async () => current),
+      latestUserMessage: vi.fn(async () => null),
       setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
       setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
       upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
@@ -681,6 +803,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const db = {
       getSession: vi.fn(async () => current),
+      latestUserMessage: vi.fn(async () => ({ id: "existing-input" } as ChatMessage)),
       setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
       setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; })
     };
@@ -729,6 +852,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const db = {
       getSession: vi.fn(async () => current),
+      latestUserMessage: vi.fn(async () => ({ id: "existing-input" } as ChatMessage)),
       setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
       setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
       upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
@@ -777,6 +901,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const db = {
       getSession: vi.fn(async () => current),
+      latestUserMessage: vi.fn(async () => ({ id: "existing-input" } as ChatMessage)),
       setSessionStatus: vi.fn(async (_id: string, status: ManagedSession["status"]) => { current = { ...current, status }; }),
       setSessionInitializing: vi.fn(async (_id: string, initializing: boolean) => { current = { ...current, initializing }; return current; }),
       upsertSession: vi.fn(async (session: ManagedSession) => { current = session as typeof current; }),
