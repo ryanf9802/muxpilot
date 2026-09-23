@@ -86,12 +86,12 @@ describe("CodexUsageService", () => {
   });
 
   it("consumes a selected reset token and refreshes the account snapshot", async () => {
-    const requests: Array<{ method: string; params?: unknown }> = [];
+    const requests: Array<{ method: string; params?: unknown; timeoutMs?: number }> = [];
     const service = new CodexUsageService({
       codexHome: "/tmp/codex",
       client: {
-        request: async <T>(method: string, params?: unknown): Promise<T> => {
-          requests.push({ method, params });
+        request: async <T>(method: string, params?: unknown, timeoutMs?: number): Promise<T> => {
+          requests.push({ method, params, timeoutMs });
           if (method === "account/rateLimitResetCredit/consume") return { outcome: "reset" } as T;
           if (method === "account/read") return account({ email: "engineer@example.com", planType: "plus" }) as T;
           return rateLimits({
@@ -111,7 +111,8 @@ describe("CodexUsageService", () => {
     expect(result.summary.resetCredits).toEqual({ availableCount: 0, credits: [] });
     expect(requests[0]).toEqual({
       method: "account/rateLimitResetCredit/consume",
-      params: { idempotencyKey: "05f9c8bb-08b1-43ad-b396-31f2b685ba9c", creditId: "reset-1" }
+      params: { idempotencyKey: "05f9c8bb-08b1-43ad-b396-31f2b685ba9c", creditId: "reset-1" },
+      timeoutMs: 15_000
     });
   });
 

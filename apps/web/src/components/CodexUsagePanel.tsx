@@ -20,7 +20,7 @@ export function CodexUsagePanel({
   usageMonitor
 }: {
   summary: CodexUsageSummaryResponse | null;
-  usageMonitor: Pick<CodexUsageMonitor, "pendingAttempt" | "resetAction" | "resetError" | "resetOutcome" | "resetRevision" | "consumeReset" | "refreshError">;
+  usageMonitor: Pick<CodexUsageMonitor, "pendingAttempt" | "resetAction" | "resetError" | "resetOutcome" | "resetObservation" | "resetRevision" | "consumeReset" | "refreshError">;
 }) {
   const [history, setHistory] = useState<CodexTokenUsageResponse | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -31,7 +31,7 @@ export function CodexUsagePanel({
   const historyInFlightRef = useRef<Promise<void> | null>(null);
   const accountLabel = summary ? formatCodexAccount(summary) : "loading";
   const planLabel = summary?.account?.planType ? summary.account.planType : null;
-  const { pendingAttempt, resetAction, resetError, resetOutcome, resetRevision, consumeReset, refreshError } = usageMonitor;
+  const { pendingAttempt, resetAction, resetError, resetOutcome, resetObservation, resetRevision, consumeReset, refreshError } = usageMonitor;
 
   const loadHistory = useCallback((refresh = false): Promise<void> => {
     if (historyInFlightRef.current) {
@@ -173,16 +173,16 @@ export function CodexUsagePanel({
           <Button variant="secondary" onClick={() => setSelectedCredit(null)} disabled={resetBusy || Boolean(pendingAttempt)}>Use next token</Button>
         ) : null}
 
-        {pendingAttempt && resetAction === "confirming" ? (
-          <p className="codex-reset-result" role="status">Confirming previous reset…</p>
+        {pendingAttempt && resetAction && !resetOutcome ? (
+          <p className="codex-reset-result" role="status">{resetAction === "using" ? "Using reset token…" : "Confirming reset…"}</p>
         ) : null}
-        {pendingAttempt && resetError && !resetBusy ? (
+        {resetError && !resetBusy ? (
           <div className="codex-reset-result usage-error" role="alert">
-            <span>{resetError} Retry to check the same reset attempt without spending another token.</span>
-            <Button variant="secondary" onClick={() => void consumeReset(pendingAttempt, "retrying", false)}>Retry</Button>
+            <span>{resetError}{pendingAttempt ? " Retry to check the same reset attempt without spending another token." : ""}</span>
+            {pendingAttempt ? <Button variant="secondary" onClick={() => void consumeReset(pendingAttempt, "retrying", false)}>Retry</Button> : null}
           </div>
         ) : null}
-        {resetOutcome ? <p className="codex-reset-result" role="status">{resetOutcomeMessage(resetOutcome)}</p> : null}
+        {resetOutcome ? <p className="codex-reset-result" role="status">{resetOutcomeMessage(resetOutcome, resetObservation)}</p> : null}
       </div>
 
       <div className="codex-history-section">
@@ -285,9 +285,13 @@ function resetCreditsDescription(summary: CodexUsageSummaryResponse | null, deta
   return `${resetCredits.availableCount} available`;
 }
 
-function resetOutcomeMessage(outcome: ConsumeCodexResetCreditOutcome): string {
-  if (outcome === "reset") return "Reset token redeemed. Confirming updated account limits…";
-  if (outcome === "alreadyRedeemed") return "This reset attempt was already completed. Confirming updated account limits…";
+function resetOutcomeMessage(outcome: ConsumeCodexResetCreditOutcome, observation: "confirmed" | "refreshed" | "delayed" | null): string {
+  if (outcome === "reset" || outcome === "alreadyRedeemed") {
+    if (observation === "confirmed") return "Reset complete. Updated account limits are shown.";
+    if (observation === "refreshed") return "Reset complete. Account limits refreshed.";
+    if (observation === "delayed") return "Reset token redeemed. Updated limits are still catching up.";
+    return "Reset token redeemed. Confirming updated account limits…";
+  }
   if (outcome === "nothingToReset") return "No eligible usage limit currently needs resetting.";
   return "No reset token is available for this account.";
 }

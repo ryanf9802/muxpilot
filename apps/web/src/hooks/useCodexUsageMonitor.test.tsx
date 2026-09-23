@@ -11,7 +11,7 @@ const apiMocks = vi.hoisted(() => ({
 }));
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 
-vi.mock("../api/client.js", () => ({ api: apiMocks }));
+vi.mock("../api/client.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../api/client.js")>(), api: apiMocks }));
 vi.mock("react-toastify", () => ({ toast: toastMocks }));
 
 import {
@@ -21,6 +21,7 @@ import {
   useCodexUsageMonitor,
   type CodexUsageMonitor
 } from "./useCodexUsageMonitor.js";
+import { ApiError } from "../api/client.js";
 
 beforeAll(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -133,6 +134,49 @@ describe("useCodexUsageMonitor", () => {
 
     expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
     expect(toastMocks.success).toHaveBeenCalledWith("Reset token redeemed. Updated usage has not yet been confirmed.");
+    expect(current!.resetObservation).toBe("delayed");
+    await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+    expect(current!.resetOutcome).toBeNull();
+  });
+
+  it("keeps the last valid limits while a redeemed token's summary is temporarily unavailable", async () => {
+    apiMocks.codexUsageSummary.mockResolvedValueOnce(summary(60)).mockResolvedValue(summary(0));
+    apiMocks.consumeCodexResetCredit.mockResolvedValue({
+      outcome: "reset",
+      summary: { ...summary(60), available: false, error: "temporarily unavailable", limits: { fiveHour: null, weekly: null } }
+    });
+    await renderMonitor((monitor) => { current = monitor; });
+    let redemption!: Promise<void>;
+
+    act(() => {
+      redemption = current!.consumeReset({ idempotencyKey: "attempt-unavailable", creditId: "credit-1", recoveryAttempted: false }, "using");
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(current!.summary?.limits.fiveHour?.usedPercent).toBe(60);
+    expect(current!.refreshError).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+      await redemption;
+    });
+    expect(current!.summary?.limits.fiveHour?.usedPercent).toBe(0);
+    expect(current!.resetObservation).toBe("confirmed");
+    await act(async () => { await vi.advanceTimersByTimeAsync(8_000); });
+    expect(current!.resetOutcome).toBeNull();
+  });
+
+  it("does not automatically repeat a rejected reset request", async () => {
+    apiMocks.consumeCodexResetCredit.mockRejectedValue(new ApiError("Invalid credit", 400));
+    await renderMonitor((monitor) => { current = monitor; });
+
+    await act(async () => {
+      await current!.consumeReset({ idempotencyKey: "attempt-invalid", creditId: "credit-1", recoveryAttempted: false }, "using");
+    });
+
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
+    expect(current!.pendingAttempt).toBeNull();
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
+    expect(current!.resetError).toContain("rejected");
   });
 
   async function renderMonitor(onMonitor: (monitor: CodexUsageMonitor) => void) {

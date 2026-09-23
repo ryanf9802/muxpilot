@@ -5,12 +5,13 @@ import type {
   ConsumeCodexResetCreditOutcome,
   ConsumeCodexResetCreditResponse
 } from "@muxpilot/core";
-import { api } from "../api/client.js";
+import { ApiError, api } from "../api/client.js";
 
 export const CODEX_USAGE_POLL_INTERVAL_MS = 10_000;
 export const CODEX_USAGE_RETRY_DELAYS_MS = [20_000, 40_000, 60_000] as const;
 export const CODEX_RESET_CONFIRM_INTERVAL_MS = 5_000;
 export const CODEX_RESET_CONFIRM_TIMEOUT_MS = 20_000;
+export const CODEX_RESET_RESULT_DISPLAY_MS = 8_000;
 export const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
 
 export interface PendingResetAttempt {
@@ -29,12 +30,13 @@ export interface CodexUsageMonitor {
   resetAction: ResetAction | null;
   resetError: string | null;
   resetOutcome: ConsumeCodexResetCreditOutcome | null;
+  resetObservation: "confirmed" | "refreshed" | "delayed" | null;
   resetRevision: number;
   consumeReset: (attempt: PendingResetAttempt, action: ResetAction, persist?: boolean) => Promise<void>;
 }
 
 const resetRequests = new Map<string, Promise<ConsumeCodexResetCreditResponse>>();
-const resetConfirmations = new Map<string, Promise<void>>();
+const resetConfirmations = new Map<string, Promise<boolean>>();
 
 export function useCodexUsageMonitor(): CodexUsageMonitor {
   const [summary, setSummary] = useState<CodexUsageSummaryResponse | null>(null);
@@ -44,6 +46,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
   const [resetAction, setResetAction] = useState<ResetAction | null>(null);
   const [resetError, setResetError] = useState<string | null>(null);
   const [resetOutcome, setResetOutcome] = useState<ConsumeCodexResetCreditOutcome | null>(null);
+  const [resetObservation, setResetObservation] = useState<"confirmed" | "refreshed" | "delayed" | null>(null);
   const [resetRevision, setResetRevision] = useState(0);
   const summaryRef = useRef<CodexUsageSummaryResponse | null>(null);
   const requestIdRef = useRef(0);
@@ -56,7 +59,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
     setRefreshError(null);
   }, []);
 
-  const refreshSummary = useCallback(async (force = false): Promise<CodexUsageSummaryResponse> => {
+  const refreshSummary = useCallback(async (force = false, quiet = false): Promise<CodexUsageSummaryResponse> => {
     const requestId = ++requestIdRef.current;
     try {
       const next = await api.codexUsageSummary(force);
@@ -64,7 +67,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
       if (requestId === requestIdRef.current) acceptSummary(next);
       return next;
     } catch (error) {
-      if (requestId === requestIdRef.current) {
+      if (requestId === requestIdRef.current && !quiet) {
         const message = error instanceof Error ? error.message : "Codex usage could not be refreshed.";
         setRefreshError(message);
         if (!summaryRef.current) {
@@ -124,28 +127,62 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
     setResetAction(action);
     setResetError(null);
     setResetOutcome(null);
+    setResetObservation(null);
     setPendingAttempt(attempt);
     if (persist) savePendingResetAttempt(attempt);
     const before = summaryRef.current;
     try {
-      const response = await requestReset(attempt);
-      clearPendingResetAttempt(attempt);
+      let currentAttempt = attempt;
+      let response: ConsumeCodexResetCreditResponse;
+      try {
+        response = await requestReset(currentAttempt);
+      } catch (error) {
+        if (currentAttempt.recoveryAttempted || !isRetryableResetError(error)) throw error;
+        const recoveryAttempt = { ...currentAttempt, recoveryAttempted: true };
+        if (!replacePendingResetAttempt(currentAttempt, recoveryAttempt)) throw error;
+        currentAttempt = recoveryAttempt;
+        setPendingAttempt(currentAttempt);
+        setResetAction("confirming");
+        response = await requestReset(currentAttempt);
+      }
+      clearPendingResetAttempt(currentAttempt);
       const nextAttempt = loadPendingResetAttempt();
       setPendingAttempt(nextAttempt);
       if (!nextAttempt) setResetOutcome(response.outcome);
       requestIdRef.current += 1;
-      acceptSummary(response.summary);
+      if (response.summary.available) acceptSummary(response.summary);
       setResetRevision((value) => value + 1);
       if (!nextAttempt && (response.outcome === "reset" || response.outcome === "alreadyRedeemed")) {
-        await confirmResetAttempt(attempt, before, response.summary, refreshSummary);
+        if (response.outcome === "alreadyRedeemed" && response.summary.available) {
+          setResetObservation("refreshed");
+          toast.success("Reset token redeemed. Account limits refreshed.");
+        } else {
+          const observed = await confirmResetAttempt(currentAttempt, before, response.summary, (force) => refreshSummary(force, true));
+          setResetObservation(observed ? "confirmed" : "delayed");
+        }
       }
     } catch (error) {
-      setResetError(error instanceof Error ? error.message : "The reset attempt could not be confirmed.");
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500 && !isRetryableResetError(error)) {
+        clearPendingResetAttempt(attempt);
+        setPendingAttempt(loadPendingResetAttempt());
+        setResetError(error.status === 401 ? "Sign in again before using a reset token." : "The reset request was rejected. Refresh account limits before trying again.");
+      } else {
+        setResetError("We couldn't confirm whether the reset token was used.");
+      }
     } finally {
       resetBusyRef.current = false;
       setResetAction(null);
     }
   }, [acceptSummary, refreshSummary]);
+
+  useEffect(() => {
+    if (!resetOutcome || resetAction) return;
+    const timer = window.setTimeout(() => {
+      setResetOutcome(null);
+      setResetObservation(null);
+    }, CODEX_RESET_RESULT_DISPLAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [resetOutcome, resetAction]);
 
   useEffect(() => {
     const restoredAttempt = loadPendingResetAttempt();
@@ -176,7 +213,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
     return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
-  return { summary, initialLoading, refreshError, pendingAttempt, resetAction, resetError, resetOutcome, resetRevision, consumeReset };
+  return { summary, initialLoading, refreshError, pendingAttempt, resetAction, resetError, resetOutcome, resetObservation, resetRevision, consumeReset };
 }
 
 function confirmResetAttempt(
@@ -184,7 +221,7 @@ function confirmResetAttempt(
   before: CodexUsageSummaryResponse | null,
   initial: CodexUsageSummaryResponse,
   refresh: (force?: boolean) => Promise<CodexUsageSummaryResponse>
-): Promise<void> {
+): Promise<boolean> {
   const key = `${attempt.idempotencyKey}:${attempt.creditId ?? ""}`;
   const existing = resetConfirmations.get(key);
   if (existing) return existing;
@@ -198,7 +235,7 @@ async function confirmResetUsage(
   before: CodexUsageSummaryResponse | null,
   initial: CodexUsageSummaryResponse,
   refresh: (force?: boolean) => Promise<CodexUsageSummaryResponse>
-): Promise<void> {
+): Promise<boolean> {
   let current = initial;
   const deadline = Date.now() + CODEX_RESET_CONFIRM_TIMEOUT_MS;
   while (!observedReset(before, current) && Date.now() < deadline) {
@@ -217,6 +254,11 @@ async function confirmResetUsage(
   } else {
     toast.success("Reset token redeemed. Updated usage has not yet been confirmed.");
   }
+  return observedReset(before, current);
+}
+
+function isRetryableResetError(error: unknown): boolean {
+  return !(error instanceof ApiError) || error.status === 408 || error.status === 429 || error.status >= 500;
 }
 
 export function observedReset(before: CodexUsageSummaryResponse | null, after: CodexUsageSummaryResponse): boolean {
@@ -283,7 +325,7 @@ function savePendingResetAttempt(attempt: PendingResetAttempt): boolean {
 
 function replacePendingResetAttempt(expected: PendingResetAttempt, replacement: PendingResetAttempt): boolean {
   const current = loadPendingResetAttempt();
-  if (!sameAttempt(current, expected)) return false;
+  if (!sameAttempt(current, expected) || current?.recoveryAttempted !== expected.recoveryAttempted) return false;
   return savePendingResetAttempt(replacement);
 }
 

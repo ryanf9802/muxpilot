@@ -11,10 +11,11 @@ const apiMocks = vi.hoisted(() => ({
   consumeCodexResetCredit: vi.fn()
 }));
 
-vi.mock("../api/client.js", () => ({ api: apiMocks }));
+vi.mock("../api/client.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../api/client.js")>(), api: apiMocks }));
 
 import { CodexUsagePanel } from "./CodexUsagePanel.js";
 import { useCodexUsageMonitor } from "../hooks/useCodexUsageMonitor.js";
+import { ApiError } from "../api/client.js";
 
 const PENDING_RESET_KEY = "muxpilot.codex-usage.pending-reset.v1";
 const summary: CodexUsageSummaryResponse = {
@@ -102,24 +103,45 @@ describe("CodexUsagePanel interactions", () => {
     expect(buttonLabels).not.toContain("30d");
   });
 
-  it("automatically confirms an uncertain attempt after the panel remounts", async () => {
-    apiMocks.consumeCodexResetCredit.mockRejectedValueOnce(new Error("Connection closed"));
+  it("confirms an uncertain attempt immediately with the same identifiers", async () => {
+    apiMocks.consumeCodexResetCredit
+      .mockRejectedValueOnce(new ApiError("Internal Server Error", 500))
+      .mockResolvedValueOnce({ outcome: "alreadyRedeemed", summary: { ...summary, limits: { ...summary.limits, fiveHour: { ...summary.limits.fiveHour!, usedPercent: 0, remainingPercent: 100 } } } });
 
     await clickButton("Use token");
     await clickButton("Use reset token");
 
     const firstAttempt = apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0];
-    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toContain(firstAttempt.idempotencyKey);
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledTimes(2);
+    expect(apiMocks.consumeCodexResetCredit.mock.calls[1]?.[0]).toEqual(firstAttempt);
+    expect(container.textContent).toContain("Reset complete");
+    expect(container.textContent).not.toContain("Internal Server Error");
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
+  });
+
+  it("keeps an uncertain attempt after two failed checks without another automatic request on remount", async () => {
+    apiMocks.consumeCodexResetCredit
+      .mockRejectedValueOnce(new Error("Connection closed"))
+      .mockRejectedValueOnce(new Error("Still offline"));
+
+    await clickButton("Use token");
+    await clickButton("Use reset token");
+
+    const firstAttempt = apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0];
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledTimes(2);
+    expect(apiMocks.consumeCodexResetCredit.mock.calls[1]?.[0]).toEqual(firstAttempt);
+    expect(window.localStorage.getItem(PENDING_RESET_KEY)).toContain('"recoveryAttempted":true');
     expect(container.textContent).toContain("Retry to check the same reset attempt");
 
     await act(async () => root.unmount());
     container.replaceChildren();
     root = createRoot(container);
-    apiMocks.consumeCodexResetCredit.mockResolvedValueOnce({ outcome: "alreadyRedeemed", summary });
     await renderPanel();
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledTimes(2);
 
-    expect(apiMocks.consumeCodexResetCredit.mock.calls[1]?.[0]).toEqual(firstAttempt);
-    expect(container.textContent).toContain("already completed");
+    apiMocks.consumeCodexResetCredit.mockResolvedValueOnce({ outcome: "alreadyRedeemed", summary });
+    await clickButton("Retry");
+    expect(apiMocks.consumeCodexResetCredit.mock.calls[2]?.[0]).toEqual(firstAttempt);
     expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
   });
 
@@ -146,7 +168,7 @@ describe("CodexUsagePanel interactions", () => {
     await renderPanel();
 
     expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
-    expect(container.textContent).toContain("Confirming previous reset");
+    expect(container.textContent).toContain("Confirming reset");
     await act(async () => resolveReset({ outcome: "reset", summary }));
     expect(window.localStorage.getItem(PENDING_RESET_KEY)).toBeNull();
   });
@@ -164,7 +186,7 @@ describe("CodexUsagePanel interactions", () => {
     expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
     expect(apiMocks.consumeCodexResetCredit.mock.calls[0]?.[0]).toEqual(attempt);
     expect(window.localStorage.getItem(PENDING_RESET_KEY)).toContain('"recoveryAttempted":true');
-    expect(container.textContent).toContain("Still offline");
+    expect(container.textContent).toContain("We couldn't confirm whether the reset token was used");
 
     await act(async () => root.unmount());
     container.replaceChildren();

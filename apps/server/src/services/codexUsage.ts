@@ -12,6 +12,7 @@ import type {
 import { nowIso } from "../utils/time.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
+const RESET_REQUEST_TIMEOUT_MS = 15_000;
 const FIVE_HOUR_WINDOW_MINS = 5 * 60;
 const WEEKLY_WINDOW_MINS = 7 * 24 * 60;
 const MODEL_CACHE_TTL_MS = 60_000;
@@ -194,7 +195,8 @@ export class CodexUsageService {
   async consumeResetCredit(idempotencyKey: string, creditId?: string | null) {
     const response = await this.client.request<{ outcome: "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit" }>(
       "account/rateLimitResetCredit/consume",
-      { idempotencyKey, ...(creditId ? { creditId } : {}) }
+      { idempotencyKey, ...(creditId ? { creditId } : {}) },
+      RESET_REQUEST_TIMEOUT_MS
     );
     this.cache = null;
     this.summaryGeneration += 1;
@@ -340,9 +342,9 @@ export class CodexAppServerClient {
     this.logger = options.logger;
   }
 
-  async request<T = unknown>(method: string, params?: unknown): Promise<T> {
-    await this.ensureInitialized();
-    return this.send<T>(method, params);
+  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+    await this.ensureInitialized(timeoutMs);
+    return this.send<T>(method, params, timeoutMs);
   }
 
   async initialize(): Promise<void> {
@@ -377,7 +379,7 @@ export class CodexAppServerClient {
     for (const listener of this.closeListeners) listener(reason);
   }
 
-  private async ensureInitialized(): Promise<void> {
+  private async ensureInitialized(timeoutMs?: number): Promise<void> {
     if (!this.initialized) {
       this.start();
       this.initialized = this.send("initialize", {
@@ -393,7 +395,7 @@ export class CodexAppServerClient {
             "remoteControl/status/changed"
           ]
         }
-      })
+      }, timeoutMs)
         .then(() => {
           this.write({ method: "initialized" });
         })
@@ -421,7 +423,7 @@ export class CodexAppServerClient {
     child.on("exit", (code, signal) => this.handleExit(child, new Error(`Codex app-server exited (${signal ?? code ?? "unknown"}).`)));
   }
 
-  private send<T = unknown>(method: string, params?: unknown): Promise<T> {
+  private send<T = unknown>(method: string, params?: unknown, timeoutMs = this.timeoutMs): Promise<T> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("Codex app-server is not running."));
     const id = this.nextRequestId++;
@@ -432,7 +434,7 @@ export class CodexAppServerClient {
         const error = new Error(`Codex app-server request timed out: ${method}`);
         reject(error);
         this.stop(error);
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
