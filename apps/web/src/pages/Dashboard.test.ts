@@ -718,6 +718,7 @@ const staticUsageMonitor = {
   resetAction: null,
   resetError: null,
   resetOutcome: null,
+  resetObservation: null,
   resetRevision: 0,
   refreshError: null,
   consumeReset: async () => undefined
