@@ -129,7 +129,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
     setResetOutcome(null);
     setResetObservation(null);
     setPendingAttempt(attempt);
-    if (persist) savePendingResetAttempt(attempt);
+    const pendingStored = persist ? savePendingResetAttempt(attempt) : sameAttempt(loadPendingResetAttempt(), attempt);
     const before = summaryRef.current;
     try {
       let currentAttempt = attempt;
@@ -162,6 +162,16 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
         }
       }
     } catch (error) {
+      const storedAttempt = loadPendingResetAttempt();
+      if (storedAttempt && !sameAttempt(storedAttempt, attempt)) {
+        setPendingAttempt(storedAttempt);
+        return;
+      }
+      if (pendingStored && !storedAttempt) {
+        setPendingAttempt(null);
+        void refreshSummary(true, true).catch(() => undefined);
+        return;
+      }
       if (error instanceof ApiError && error.status >= 400 && error.status < 500 && !isRetryableResetError(error)) {
         clearPendingResetAttempt(attempt);
         setPendingAttempt(loadPendingResetAttempt());

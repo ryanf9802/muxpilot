@@ -220,6 +220,28 @@ describe("CodexUsagePanel interactions", () => {
     expect(container.textContent).not.toContain("Usage limit reset");
   });
 
+  it("does not retry or report an older failed request against a newer pending attempt", async () => {
+    let rejectReset!: (error: Error) => void;
+    apiMocks.consumeCodexResetCredit.mockReturnValue(new Promise((_, reject) => { rejectReset = reject; }));
+    await clickButton("Use token");
+    await clickButton("Use reset token");
+
+    const newerAttempt = {
+      idempotencyKey: "4dfb0c0b-5ec3-4c1e-bb31-68266847eb80",
+      creditId: "reset-newer",
+      recoveryAttempted: true
+    };
+    await act(async () => {
+      window.localStorage.setItem(PENDING_RESET_KEY, JSON.stringify(newerAttempt));
+      window.dispatchEvent(new StorageEvent("storage", { key: PENDING_RESET_KEY }));
+      rejectReset(new Error("Old request failed"));
+    });
+
+    expect(apiMocks.consumeCodexResetCredit).toHaveBeenCalledOnce();
+    expect(JSON.parse(window.localStorage.getItem(PENDING_RESET_KEY)!)).toEqual(newerAttempt);
+    expect(container.textContent).not.toContain("Old request failed");
+  });
+
   it("discards malformed saved attempts without making a redemption request", async () => {
     await act(async () => root.unmount());
     container.replaceChildren();
