@@ -172,6 +172,7 @@ export class SessionManager {
   private readonly pendingPlanActionStatuses = new Map<string, { status: SessionStatus; expiresAtMs: number }>();
   private readonly processingQueuedSessionIds = new Set<string>();
   private readonly deliveringInputSessionIds = new Set<string>();
+  private readonly pendingMuxpilotDecisionRetrySessionIds = new Set<string>();
   private readonly liveApprovals = new Map<string, ApprovalRequest>();
   private readonly resolvingRepositoryApprovals = new Map<string, string>();
   private readonly readySessionDiscoveryGeneration = new Map<string, number>();
@@ -223,9 +224,11 @@ export class SessionManager {
         });
       }
       if (status !== "waiting" && status !== "idle") return;
-      this.runBackgroundTask("queued input", () => this.processQueuedInputs(event.sessionId));
+      this.runBackgroundTask("queued input", async () => {
+        await this.processQueuedInputs(event.sessionId);
+        await this.deliverPendingMuxpilotApprovalDecision(event.sessionId);
+      });
       this.runBackgroundTask("session environment", () => this.reconcileSessionEnvironment(event.sessionId));
-      this.runBackgroundTask("muxpilot approval decision", () => this.deliverPendingMuxpilotApprovalDecision(event.sessionId));
     });
     this.unsubscribeNotLoadedRecovery = this.events.subscribe((event) => {
       if (event.type !== "status.changed" || recordValue(event.payload)?.status !== "unknown") return;
@@ -2536,36 +2539,42 @@ export class SessionManager {
     if (!message || message.payload.source !== "muxpilot") return;
     const decision = recordValue(message.payload.muxpilotDecision);
     if (!decision || decision.state !== "pending" || (decision.decision !== "approve_once" && decision.decision !== "deny")) return;
-    const session = await this.db.getSession(sessionId);
-    if (!session || session.archived || !readyAppServerInputSession(session)) return;
-    if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return;
-    if ((await this.db.listQueuedInputs(sessionId)).length > 0) return;
-    if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return;
-    const approval = materializeApproval(message);
-    if (!approval) return;
-    const clientMessageId = `muxpilot-approval-${message.id}`;
-    const text = muxpilotApprovalDecisionMessage(approval, decision.decision);
-    const driver = this.appServerDriver(session);
-    if (!driver) return;
+    if (this.processingQueuedSessionIds.has(sessionId)) {
+      this.pendingMuxpilotDecisionRetrySessionIds.add(sessionId);
+      return;
+    }
+    if (this.deliveringInputSessionIds.has(sessionId)) return;
     this.deliveringInputSessionIds.add(sessionId);
     try {
-      const existing = await driver.reconcileInput(session, clientMessageId);
-      if (!existing) await driver.sendMessage(session, text, clientMessageId);
-      const deliveredAt = nowIso();
-      const current = await this.db.getMessage(sessionId, message.id);
-      if (current) {
-        const delivered = await this.db.updateMessagePayload(current, {
-          ...current.payload,
-          muxpilotDecision: { ...decision, state: "delivered", deliveredAt }
-        });
-        if (delivered) this.publish("message.appended", sessionId, delivered);
+      const session = await this.db.getSession(sessionId);
+      if (!session || session.archived || !readyAppServerInputSession(session)) return;
+      if ((await this.db.listQueuedInputs(sessionId)).length > 0) return;
+      if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return;
+      const approval = materializeApproval(message);
+      if (!approval) return;
+      const clientMessageId = `muxpilot-approval-${message.id}`;
+      const text = muxpilotApprovalDecisionMessage(approval, decision.decision);
+      const driver = this.appServerDriver(session);
+      if (!driver) return;
+      try {
+        const existing = await driver.reconcileInput(session, clientMessageId);
+        if (!existing) await driver.sendMessage(session, text, clientMessageId);
+        const deliveredAt = nowIso();
+        const current = await this.db.getMessage(sessionId, message.id);
+        if (current) {
+          const delivered = await this.db.updateMessagePayload(current, {
+            ...current.payload,
+            muxpilotDecision: { ...decision, state: "delivered", deliveredAt }
+          });
+          if (delivered) this.publish("message.appended", sessionId, delivered);
+        }
+        const status = activeInputStatus(session.inputMode);
+        await this.db.setSessionStatus(sessionId, status, deliveredAt);
+        await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, "ok", deliveredAt);
+        this.publish("status.changed", sessionId, { status });
+      } catch (error) {
+        await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, error instanceof Error ? error.message : String(error), nowIso());
       }
-      const status = activeInputStatus(session.inputMode);
-      await this.db.setSessionStatus(sessionId, status, deliveredAt);
-      await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, "ok", deliveredAt);
-      this.publish("status.changed", sessionId, { status });
-    } catch (error) {
-      await this.db.addAudit("muxpilot", "deliver_muxpilot_approval_decision", sessionId, error instanceof Error ? error.message : String(error), nowIso());
     } finally {
       this.deliveringInputSessionIds.delete(sessionId);
     }
@@ -3860,6 +3869,9 @@ export class SessionManager {
       }
     } finally {
       this.processingQueuedSessionIds.delete(sessionId);
+      if (this.pendingMuxpilotDecisionRetrySessionIds?.delete(sessionId)) {
+        this.runBackgroundTask("muxpilot approval decision", () => this.deliverPendingMuxpilotApprovalDecision(sessionId));
+      }
     }
   }
 

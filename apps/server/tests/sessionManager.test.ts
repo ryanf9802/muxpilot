@@ -1308,6 +1308,130 @@ describe("SessionManager app-server helpers", () => {
     expect((await db.getSession(session.id))?.status).toBe("working");
   });
 
+  it.each(["approve_once", "deny"] as const)("delivers a %s guard decision after empty queue processing releases its lock", async (decision) => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-approval-queue-race-"));
+    temporaryRoots.push(directory);
+    const db = new AppDatabase(join(directory, "test.db"));
+    const session = { ...managedSession(), status: "executing" as const };
+    await db.upsertSession(session, "2026-09-20T00:00:00.000Z");
+    let releaseQueue!: () => void;
+    let queueEntered!: () => void;
+    const queueGate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const queueStarted = new Promise<void>((resolve) => { queueEntered = resolve; });
+    vi.spyOn(db, "deleteEchoedSentQueuedInputs").mockImplementation(async () => {
+      queueEntered();
+      await queueGate;
+      return 0;
+    });
+    const sendMessage = vi.fn(async (_session, _text, clientMessageId: string) => ({
+      clientMessageId, threadId: "thread-1", turnId: "approval-continuation", acceptedAt: new Date().toISOString()
+    }));
+    const driver = { reconcileInput: vi.fn(async () => null), sendMessage };
+    const events = new EventBus();
+    const manager = new SessionManager(
+      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
+      null, null, null, null, {}, null,
+      { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
+    );
+    try {
+      const approval = await manager.requestMuxpilotApproval(session.id, {
+        guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
+      });
+      await db.setSessionStatus(session.id, "approval", new Date().toISOString());
+      await manager.resolveApproval(session.id, { decision, messageId: approval.messageId });
+      await queueStarted;
+      expect(sendMessage).not.toHaveBeenCalled();
+      events.publish({ type: "status.changed", sessionId: session.id, timestamp: new Date().toISOString(), payload: { status: "waiting" } });
+      releaseQueue();
+      await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+      expect(sendMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ id: session.id }),
+        expect.stringContaining(`"decision":"${decision === "approve_once" ? "approved" : "denied"}"`),
+        `muxpilot-approval-${approval.messageId}`
+      );
+      expect((await db.getMessage(session.id, approval.messageId))?.payload).toMatchObject({
+        muxpilotDecision: { decision, state: "delivered" }
+      });
+    } finally {
+      releaseQueue();
+      manager.stop();
+      await db.close();
+    }
+  });
+
+  it("keeps a guard decision pending behind queued input and resumes when the queue clears", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-approval-queued-input-"));
+    temporaryRoots.push(directory);
+    const db = new AppDatabase(join(directory, "test.db"));
+    const session = { ...managedSession(), status: "executing" as const };
+    await db.upsertSession(session, new Date().toISOString());
+    const queuedInputs = vi.spyOn(db, "listQueuedInputs").mockResolvedValue([{ status: "sent" } as never]);
+    const sendMessage = vi.fn(async () => ({
+      clientMessageId: "approval-receipt", threadId: "thread-1", turnId: "approval-turn", acceptedAt: new Date().toISOString()
+    }));
+    const events = new EventBus();
+    const manager = new SessionManager(
+      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
+      null, null, null, null, {}, null,
+      { has: vi.fn(() => true), require: vi.fn(() => ({ reconcileInput: async () => null, sendMessage })) } as never
+    );
+    try {
+      const approval = await manager.requestMuxpilotApproval(session.id, {
+        guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
+      });
+      await db.setSessionStatus(session.id, "approval", new Date().toISOString());
+      await manager.resolveApproval(session.id, { decision: "approve_once", messageId: approval.messageId });
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect((await db.getMessage(session.id, approval.messageId))?.payload.muxpilotDecision).toMatchObject({ state: "pending" });
+
+      queuedInputs.mockResolvedValue([]);
+      events.publish({ type: "status.changed", sessionId: session.id, timestamp: new Date().toISOString(), payload: { status: "waiting" } });
+      await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledOnce());
+      expect((await db.getMessage(session.id, approval.messageId))?.payload.muxpilotDecision).toMatchObject({ state: "delivered" });
+    } finally {
+      manager.stop();
+      await db.close();
+    }
+  });
+
+  it("reconciles an accepted guard continuation without sending it again", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-approval-reconciled-"));
+    temporaryRoots.push(directory);
+    const db = new AppDatabase(join(directory, "test.db"));
+    const session = { ...managedSession(), status: "waiting" as const };
+    await db.upsertSession(session, new Date().toISOString());
+    const sendMessage = vi.fn();
+    const reconcileInput = vi.fn(async () => ({
+      clientMessageId: "approval-receipt", threadId: "thread-1", turnId: "existing-turn", acceptedAt: new Date().toISOString()
+    }));
+    const events = new EventBus();
+    const manager = new SessionManager(
+      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
+      null, null, null, null, {}, null,
+      { has: vi.fn(() => true), require: vi.fn(() => ({ reconcileInput, sendMessage })) } as never
+    );
+    try {
+      const approval = await manager.requestMuxpilotApproval(session.id, {
+        guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
+      });
+      const message = (await db.getMessage(session.id, approval.messageId))!;
+      await db.updateMessagePayload(message, {
+        ...message.payload,
+        interactionOutcome: { kind: "approval", status: "answered", decision: "approve_once", submittedAt: new Date().toISOString(), resolvedBy: "user" },
+        muxpilotDecision: { decision: "approve_once", state: "pending", decidedAt: new Date().toISOString() }
+      });
+      await manager.recoverAutomatedApprovals();
+      await manager.recoverAutomatedApprovals();
+      expect(reconcileInput).toHaveBeenCalledOnce();
+      expect(reconcileInput).toHaveBeenCalledWith(expect.objectContaining({ id: session.id }), `muxpilot-approval-${approval.messageId}`);
+      expect(sendMessage).not.toHaveBeenCalled();
+      expect((await db.getMessage(session.id, approval.messageId))?.payload.muxpilotDecision).toMatchObject({ state: "delivered" });
+    } finally {
+      manager.stop();
+      await db.close();
+    }
+  });
+
   it("rejects approval mode overrides on agent-managed children", async () => {
     const session = {
       ...managedSession(),
