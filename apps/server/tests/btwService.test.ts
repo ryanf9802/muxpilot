@@ -82,6 +82,36 @@ describe("BtwService", () => {
     await db.close();
   });
 
+  it("keeps BTW turns available for completion or cancellation after two minutes", async () => {
+    const db = await tempDb();
+    await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
+    const client = new FakeAppServerClient();
+    const service = new BtwService({ db, events: new EventBus(), client, now: timestampClock() });
+    await service.start();
+    vi.useFakeTimers();
+    try {
+      const completed = await service.ask("source", "Long answer");
+      await vi.waitFor(() => expect(client.requests.some((request) => request.method === "turn/start")).toBe(true));
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(await db.getBtwExchange("source", completed.id)).toMatchObject({ status: "running" });
+      expect(client.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+
+      client.emit({ method: "turn/completed", params: { threadId: "btw-thread", turn: { id: "btw-turn", status: "completed" } } });
+      await vi.waitFor(async () => expect((await db.getBtwExchange("source", completed.id))?.status).toBe("completed"));
+
+      const cancelled = await service.ask("source", "Another long answer");
+      await vi.waitFor(() => expect(client.requests.filter((request) => request.method === "turn/start")).toHaveLength(2));
+      await vi.advanceTimersByTimeAsync(121_000);
+      expect(await db.getBtwExchange("source", cancelled.id)).toMatchObject({ status: "running" });
+      expect(await service.cancel("source", cancelled.id)).toMatchObject({ status: "cancelled" });
+      expect(client.requests.some((request) => request.method === "turn/interrupt")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await service.stop();
+      await db.close();
+    }
+  });
+
   it("falls back to a warned read-only answer when documents exceed capacity", async () => {
     const db = await tempDb();
     await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");

@@ -18,7 +18,6 @@ import {
 
 const BTW_RESTART_ERROR = "muxpilot restarted before this BTW answer completed.";
 const BTW_INTERACTIVE_ERROR = "BTW questions cannot request interactive input or approval.";
-const BTW_TIMEOUT_MS = 120_000;
 const BTW_HANDOFF_RETRY_MS = 1_000;
 const BTW_READ_ONLY_INSTRUCTIONS = `You are answering one quick side question from a snapshot of another Codex conversation.
 Answer directly and concisely. Do not continue, steer, or modify the source task.
@@ -68,7 +67,6 @@ interface ActiveBtwRun {
   finished: boolean;
   retrying: boolean;
   handoffBusy: boolean;
-  timeout: ReturnType<typeof setTimeout> | null;
   handoffTimer: ReturnType<typeof setTimeout> | null;
   handoffPromise: Promise<void> | null;
 }
@@ -262,7 +260,6 @@ export class BtwService {
       finished: false,
       retrying: false,
       handoffBusy: false,
-      timeout: null,
       handoffTimer: null,
       handoffPromise: null
     };
@@ -293,7 +290,6 @@ export class BtwService {
           await this.persistAndPublish(run);
         }
       }
-      run.timeout = setTimeout(() => void this.timeoutRun(run), BTW_TIMEOUT_MS);
       const fork = await this.client.request<ThreadForkResponse>("thread/fork", this.forkParams(run));
       const threadId = stringValue(fork.thread?.id);
       if (!threadId) throw new Error("Codex app-server did not return a BTW thread id");
@@ -560,21 +556,6 @@ export class BtwService {
     }
   }
 
-  private async timeoutRun(run: ActiveBtwRun): Promise<void> {
-    if (run.finished || isPendingDocumentHandoff(run.exchange.documentOperation)) return;
-    const threadId = run.threadId;
-    const turnId = run.turnId;
-    await this.finish(run, "failed", "BTW question timed out after 2 minutes.", false);
-    if (threadId && turnId) {
-      try {
-        await this.client.request("turn/interrupt", { threadId, turnId });
-      } catch {
-        // The exchange is already terminal from the operator's perspective.
-      }
-    }
-    if (threadId) await this.cleanupThread(threadId);
-  }
-
   private async finish(run: ActiveBtwRun, status: BtwExchangeStatus, error: string | null, cleanup = true): Promise<void> {
     if (run.finished) return;
     run.finished = true;
@@ -596,8 +577,6 @@ export class BtwService {
   }
 
   private clearGeneration(run: ActiveBtwRun): void {
-    if (run.timeout) clearTimeout(run.timeout);
-    run.timeout = null;
     if (run.threadId) this.activeByThread.delete(run.threadId);
     run.turnId = null;
   }
