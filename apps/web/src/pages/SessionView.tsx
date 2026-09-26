@@ -129,6 +129,8 @@ import {
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
   transcriptMessages,
+  turnFailureEventFromPayload,
+  turnFailureEventLabel,
   withApprovalDecisionEventPayload,
   withGitWorkflowEventPayload,
   withHeavyCommandQueueEventPayload,
@@ -721,6 +723,9 @@ export function inputDeliveryFailureIdentity(messages: ChatMessage[]): { message
 
 function transcriptFindEntry(item: CoreTranscriptItem): TranscriptFindEntry {
   if (item.type === "range") return { id: item.id, text: item.label };
+  const turnFailure = item.message.type === "status" && item.message.role === "system"
+    ? turnFailureEventFromPayload(item.message.payload) : null;
+  if (turnFailure) return { id: item.id, text: `${turnFailureEventLabel(turnFailure)} ${copyableMessageText(item.message)}` };
   const queueEvent = heavyCommandQueueEventFromPayload(item.message.payload);
   if (queueEvent) {
     return {
@@ -6090,6 +6095,32 @@ export function UserAction({
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
 }) {
   const menuTrigger = useContextMenuTrigger(message, onOpenMenu ?? (() => undefined), { disabled: !onOpenMenu });
+  const turnFailure = message.type === "status" && message.role === "system"
+    ? turnFailureEventFromPayload(message.payload) : null;
+  if (turnFailure) {
+    const usageLimit = turnFailure.providerErrorCode === "usageLimitExceeded";
+    return (
+      <details
+        className={`queue-automation-event turn-failure-event${onOpenMenu ? " user-action-copyable" : ""}`}
+        data-tone={usageLimit ? "warning" : "error"}
+        data-transcript-item-id={itemId}
+        {...menuTrigger.triggerProps}
+      >
+        <summary>
+          <span className="queue-automation-main">
+            <span className="turn-failure-badge">{usageLimit ? "Usage limit" : "Failed"}</span>
+            <strong>{turnFailureEventLabel(turnFailure)}</strong>
+            <span className="queue-automation-command">{turnFailure.failureReason}</span>
+          </span>
+          <time>{new Date(message.timestamp).toLocaleTimeString()}</time>
+        </summary>
+        <div className="queue-automation-details">
+          <p className="turn-failure-reason">{turnFailure.failureReason}</p>
+          {turnFailure.providerErrorCode ? <dl><div><dt>Provider code</dt><dd>{turnFailure.providerErrorCode}</dd></div></dl> : null}
+        </div>
+      </details>
+    );
+  }
   const approvalDecision = approvalDecisionEventFromPayload(message.payload);
   if (approvalDecision) {
     return (
@@ -6272,6 +6303,8 @@ function TranscriptRange({
 }
 
 function label(message: ChatMessage): string {
+  const turnFailure = turnFailureEventFromPayload(message.payload);
+  if (message.type === "status" && message.role === "system" && turnFailure) return turnFailureEventLabel(turnFailure);
   if (approvalDecisionEventFromPayload(message.payload)) return "Muxpilot approval";
   if (sessionWaitEventFromPayload(message.payload)) return "Session wait";
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
@@ -7322,6 +7355,7 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 
 function isUserActionMessage(message: ChatMessage): boolean {
   return Boolean(approvalDecisionEventFromPayload(message.payload))
+    || (message.type === "status" && message.role === "system" && Boolean(turnFailureEventFromPayload(message.payload)))
     || Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
     || Boolean(sessionWaitEventFromPayload(message.payload))

@@ -2643,6 +2643,35 @@ describe("MessageBubble", () => {
   });
 });
 
+describe("Codex turn failure events", () => {
+  it("renders a full-width usage-limit notice with the stored reason and timestamp", () => {
+    const reason = "You’ve hit your usage limit. Try again at Sep 30th, 2026 12:35 PM.";
+    const failure = { ...message("session-a", 3, `Codex could not complete this turn: ${reason}`, "system", "status"),
+      payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: "usageLimitExceeded", failureReason: reason } } };
+    const html = renderToStaticMarkup(createElement(UserAction, { message: failure }));
+    const item = transcriptMessageItem(failure);
+
+    expect(html).toContain("turn-failure-event");
+    expect(html).toContain('data-tone="warning"');
+    expect(html).toContain("Session stopped — usage limit reached");
+    expect(html).toContain("usageLimitExceeded");
+    expect(html).toContain(reason);
+    expect(html).toContain("<time>");
+    expect(copyableMessageText(failure)).toBe(failure.text);
+    expect(visibleTranscriptFindEntries([item], new Set(), {})[0]?.text).toContain("Session stopped — usage limit reached");
+    expect(groupEventStacks([failure])).toMatchObject([{ type: "user_action" }]);
+  });
+
+  it("renders other turn failures with error styling", () => {
+    const failure = { ...message("session-a", 3, "Codex could not complete this turn: Network error", "system", "status"),
+      payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Network error" } } };
+    const html = renderToStaticMarkup(createElement(UserAction, { message: failure }));
+    expect(html).toContain('data-tone="error"');
+    expect(html).toContain("Codex turn failed");
+    expect(html).toContain("Network error");
+  });
+});
+
 describe("heavyweight queue automation events", () => {
   it("renders a compact directional event with expandable command details", () => {
     const queueMessage = heavyQueueMessage("resume_requested");

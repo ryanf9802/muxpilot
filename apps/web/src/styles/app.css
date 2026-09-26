@@ -5213,6 +5213,28 @@ select:focus-visible {
   border-radius: 8px;
 }
 
+.turn-failure-event {
+  --turn-failure-color: var(--color-error);
+  background: color-mix(in srgb, var(--turn-failure-color) 8%, var(--color-input));
+  border-color: color-mix(in srgb, var(--turn-failure-color) 34%, var(--color-border));
+}
+
+.turn-failure-event[data-tone="warning"] { --turn-failure-color: var(--color-warning); }
+.turn-failure-event > summary::before { color: var(--turn-failure-color); }
+.turn-failure-badge {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  color: var(--turn-failure-color);
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  background: color-mix(in srgb, var(--turn-failure-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--turn-failure-color) 38%, transparent);
+  border-radius: 999px;
+}
+
+.turn-failure-reason { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+
 .workflow-automation-event {
   --workflow-event-color: var(--color-success);
   background: color-mix(in srgb, var(--workflow-event-color) 8%, var(--color-input));

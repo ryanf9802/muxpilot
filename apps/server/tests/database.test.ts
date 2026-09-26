@@ -1274,6 +1274,26 @@ describe("AppDatabase session prompts", () => {
     db.close();
   });
 
+  it("preserves turn failure notices across transcript page boundaries", async () => {
+    const db = await tempDb();
+    const session = testSession("turn-failure-pages");
+    db.upsertSession(session, "2026-07-07T00:00:00.000Z");
+    db.appendMessage(testMessage(session.id, 1, "user", "First prompt"));
+    db.appendMessage(testMessage(session.id, 2, "tool", "Tool output", undefined, "tool_output"));
+    db.appendMessage({
+      ...testMessage(session.id, 3, "system", "Codex could not complete this turn: Limit reached", undefined, "status"),
+      payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: "usageLimitExceeded", failureReason: "Limit reached" } }
+    });
+    db.appendMessage(testMessage(session.id, 4, "user", "Resume"));
+
+    const recent = db.listRecentMessages(session.id, 1);
+    const older = db.listMessagesBefore(session.id, recent.items[0]!.firstSequence, 1);
+    expect(itemSpans(recent)).toEqual([[4, 4, "message"]]);
+    expect(itemSpans(older)).toEqual([[3, 3, "user_action"]]);
+    expect(older.hasMoreBefore).toBe(true);
+    db.close();
+  });
+
   it("loads an active transcript tail from the previous assistant output through the latest prompt", async () => {
     const db = await tempDb();
     const session = testSession("session-active-tail");

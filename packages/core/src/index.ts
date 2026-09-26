@@ -7,5 +7,6 @@ export * from "./sessionName.js";
 export * from "./sessionStatus.js";
 export * from "./sessionWaitEvent.js";
 export * from "./transcript.js";
+export * from "./turnFailureEvent.js";
 export * from "./types.js";
 export * from "./userContext.js";

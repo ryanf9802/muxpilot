@@ -24,6 +24,7 @@ import {
   withSessionWaitEventPayload
 } from "./sessionWaitEvent.js";
 import { appendSkillNamesToText, normalizeSubagentNotificationText, normalizeUserContextText } from "./userContext.js";
+import { turnFailureEventFromPayload } from "./turnFailureEvent.js";
 
 type InternalTranscriptItem =
   | { type: "message"; message: ChatMessage }
@@ -365,6 +366,7 @@ function isRegularAssistantMessage(message: ChatMessage): boolean {
 
 function isUserActionMessage(message: ChatMessage): boolean {
   return Boolean(approvalDecisionEventFromPayload(message.payload))
+    || (message.type === "status" && message.role === "system" && Boolean(turnFailureEventFromPayload(message.payload)))
     || Boolean(heavyCommandQueueEventFromPayload(message.payload))
     || Boolean(gitWorkflowEventFromPayload(message.payload))
     || Boolean(sessionWaitEventFromPayload(message.payload))

@@ -5,8 +5,29 @@ import { serializeGitWorkflowEvent } from "./gitWorkflowEvent.js";
 import { serializeSessionWaitEvent } from "./sessionWaitEvent.js";
 import { serializeApprovalDecisionEvent } from "./approvalDecisionEvent.js";
 import type { ChatMessage } from "./types.js";
+import { turnFailureEventFromPayload, turnFailureEventLabel } from "./turnFailureEvent.js";
 
 describe("buildTranscriptItems", () => {
+  it("keeps stored turn failures visible between activity and the next prompt", () => {
+    const failure = { ...message(3, "Codex could not complete this turn: Limit reached", "system", "status"),
+      payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: "usageLimitExceeded", failureReason: "Limit reached" } } };
+    const messages = [message(1, "prompt"), message(2, "tool output", "tool", "tool_output"), failure, message(4, "resume")];
+
+    expect(buildTranscriptItems(messages).map((item) => item.type)).toEqual(["message", "range", "user_action", "message"]);
+    expect(buildExpandedTranscriptItems(messages).map((item) => item.type)).toEqual(["message", "message", "user_action", "message"]);
+    expect(buildTranscriptItems([message(2, "tool output", "tool", "tool_output"), failure]).at(-1)).toMatchObject({ type: "user_action", firstSequence: 3 });
+    expect(turnFailureEventLabel(turnFailureEventFromPayload(failure.payload)!)).toBe("Session stopped — usage limit reached");
+  });
+
+  it("classifies generic failures but leaves malformed and text-only records in activity", () => {
+    const failure = { ...message(2, "Failed", "system", "status"), payload: { turnFailure: { failureCode: "turn_failed", failureReason: "Network error" } } };
+    expect(turnFailureEventLabel(turnFailureEventFromPayload(failure.payload)!)).toBe("Codex turn failed");
+    expect(buildTranscriptItems([message(1, "prompt"), failure])[1]).toMatchObject({ type: "user_action" });
+    expect(turnFailureEventFromPayload({ turnFailure: { failureCode: "turn_failed", failureReason: "" } })).toBeNull();
+    expect(turnFailureEventFromPayload({ turnFailure: { failureCode: "turn_interrupted", failureReason: "Stopped" } })).toBeNull();
+    expect(buildTranscriptItems([message(1, "prompt"), message(2, "You've hit your usage limit", "system", "status")])[1]).toMatchObject({ type: "range" });
+  });
+
   it("keeps approvals and questions outside collapsed activity ranges", () => {
     const items = buildTranscriptItems([
       message(1, "prompt"),
