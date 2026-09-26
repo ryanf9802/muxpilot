@@ -151,7 +151,8 @@ const RUNTIME_ACTIVITY_STATUSES = new Set<SessionStatus>([
 const AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES = new Set<SessionStatus>([
   "idle",
   "waiting",
-  "plan_ready"
+  "plan_ready",
+  "input_failed"
 ]);
 type InputDeliveryIntent = "auto" | "steer";
 type InputDeliveryFailureCode =
@@ -306,7 +307,7 @@ export class SessionManager {
     const blockers: string[] = [];
     if (session.runtime?.kind !== "systemd_service" || session.runtime.state !== "connected") blockers.push(`runtime_${session.runtime?.state ?? "unavailable"}`);
     if (session.initializing) blockers.push("initializing");
-    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status) && session.status !== "input_failed") blockers.push(`status_${session.status}`);
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status)) blockers.push(`status_${session.status}`);
     if (this.deliveringInputSessionIds.has(session.id) || this.processingQueuedSessionIds.has(session.id)) blockers.push("input_delivery");
     if ((await this.db.listQueuedInputs(session.id)).length > 0) blockers.push("queued_input");
     if (inputDeliveryState(await this.db.latestUserMessage(session.id)) === "pending") blockers.push("uncertain_input");
@@ -1767,7 +1768,7 @@ export class SessionManager {
     if (!this.sessionEnvironment || session.runtime?.kind !== "systemd_service") return session;
     const environment = await this.sessionEnvironment.describe(session.id);
     if (environment.state === "applied" || session.runtime.state === "hibernated" || session.runtime.state === "stopped") return session;
-    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status) && session.status !== "input_failed") {
+    if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status)) {
       throw new InputDeliveryError("Session variables are pending until the current work reaches a safe boundary.");
     }
     await this.requireAppServerDriver().kill(session);

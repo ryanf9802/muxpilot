@@ -65,7 +65,7 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       return true;
     }
     const authenticationError = authenticationFailure(event.method, event.params);
-    if (authenticationError) {
+    if (authenticationError && !restoring) {
       const existing = await this.requireSession(sessionId);
       const updated: ManagedSession = {
         ...existing,
@@ -103,7 +103,7 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     const applied = await this.store.applyAppServerProjection(input(
       sessionId,
       preservePlanReady(normalizedProjection, current, pendingPlan),
-      authenticationError ? null : turnFailure(event.params),
+      turnFailure(event.params),
       event.receivedAt
     ));
     const session = applied.messageChanged || applied.statusChanged
@@ -162,7 +162,7 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
         method: "turn/completed",
         params: { threadId, turn: latestTurn },
         receivedAt: restoredAt
-      }, recoveryGuard);
+      }, recoveryGuard, true);
       return;
     }
     if (codexTurnInterruption(latestTurn)) {

@@ -393,7 +393,14 @@ describe("CodexAppServerReconciler", () => {
       method: "turn/completed",
       params: {
         threadId: "thread-1",
-        turn: { id: "turn-1", status: "failed", error: { message: "Access token unauthorized after signing in to another account" } }
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          error: {
+            message: "Access token unauthorized after signing in to another account",
+            codexErrorInfo: "unauthorized"
+          }
+        }
       },
       receivedAt: "2026-09-01T12:00:00.000Z"
     });
@@ -404,6 +411,32 @@ describe("CodexAppServerReconciler", () => {
       authenticationError: expect.stringMatching(/Access token unauthorized.*Codex CLI/)
     }), "2026-09-01T12:00:00.000Z");
     expect(onAuthenticationFailure).toHaveBeenCalledWith("session-1", expect.stringContaining("Access token unauthorized"));
+    expect(store.applyAppServerProjection).toHaveBeenCalledWith(expect.objectContaining({
+      turnFailure: expect.objectContaining({
+        failureCode: "turn_failed",
+        providerErrorCode: "unauthorized"
+      })
+    }));
+    await reconciler.restore(
+      "session-1",
+      "thread-1",
+      { type: "idle" },
+      {
+        id: "turn-1",
+        status: "failed",
+        error: {
+          message: "Access token unauthorized after signing in to another account",
+          codexErrorInfo: "unauthorized"
+        }
+      },
+      "2026-09-01T12:01:00.000Z"
+    );
+    expect(store.applyAppServerProjection).toHaveBeenCalledTimes(2);
+    expect(store.applyAppServerProjection).toHaveBeenLastCalledWith(expect.objectContaining({
+      turnFailure: expect.objectContaining({ providerErrorCode: "unauthorized" })
+    }));
+    expect(onAuthenticationFailure).toHaveBeenCalledTimes(1);
+    expect(store.upsertSession).toHaveBeenCalledTimes(1);
     expect(publish).toHaveBeenCalledWith(expect.objectContaining({
       type: "session.updated",
       payload: expect.objectContaining({ authenticationResumeRequired: true })

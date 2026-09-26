@@ -2114,7 +2114,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     );
   });
 
-  it.each(["idle", "waiting", "plan_ready"] as const)(
+  it.each(["idle", "waiting", "plan_ready", "input_failed"] as const)(
     "restarts a %s runtime only after positive idle evidence",
     async (status) => {
       const harness = authenticationManager({ ...managedSession(), status });
@@ -2135,6 +2135,21 @@ describe("SessionManager Codex authentication runtime safety", () => {
       );
     }
   );
+
+  it("defers authentication restart of a failed turn while runtime work is active", async () => {
+    const harness = authenticationManager({ ...managedSession(), status: "input_failed" }, ["active_turn"]);
+
+    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+
+    expect(harness.driver.kill).not.toHaveBeenCalled();
+    expect(harness.db.addAudit).toHaveBeenCalledWith(
+      "muxpilot",
+      "runtime:auth_restart_deferred",
+      "session-1",
+      JSON.stringify({ blockers: ["active_turn"] }),
+      expect.any(String)
+    );
+  });
 
   it("rechecks eligibility inside the runtime lock", async () => {
     const observed = { ...managedSession(), status: "idle" as const };
