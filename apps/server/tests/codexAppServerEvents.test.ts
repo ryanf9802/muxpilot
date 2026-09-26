@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectAppServerEvent } from "../src/services/sessionDrivers/codexAppServerEvents.js";
-import { serializeApprovalDecisionEvent, serializeSessionWaitEvent } from "@muxpilot/core";
+import { serializeApprovalDecisionEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
 
 const receivedAt = "2026-09-01T12:00:00.000Z";
 
@@ -163,6 +163,39 @@ describe("projectAppServerEvent", () => {
         role: "system",
         text: "Muxpilot gate denied",
         payload: { muxpilotApprovalDecision: { approvalId: "approval-1", decision: "denied" } }
+      }
+    });
+  });
+
+  it("projects a released heavyweight run as a typed system event", () => {
+    const marker = serializeHeavyCommandQueueEvent({
+      version: 1,
+      kind: "run_released",
+      runId: "muj0fvsw-adb557d8b6d2",
+      commandDisplay: "docker run -d postgres:16",
+      skill: "$muxpilot-heavy-command-queue"
+    });
+    const projected = projectAppServerEvent({
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: { id: "agent-1", type: "agentMessage", text: marker }
+      }
+    }, receivedAt);
+
+    expect(projected).toMatchObject({
+      message: {
+        type: "status",
+        role: "system",
+        text: "Heavyweight command running · session released until completion",
+        payload: {
+          codexItemIdentity: { threadId: "thread-1", turnId: "turn-1", itemId: "agent-1" },
+          muxpilotHeavyCommandQueue: {
+            event: { kind: "run_released", runId: "muj0fvsw-adb557d8b6d2" },
+            rawText: marker
+          }
+        }
       }
     });
   });

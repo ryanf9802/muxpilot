@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   approvalDecisionEventSummary,
+  heavyCommandQueueEventSummary,
   normalizeApprovalDecisionEvent,
+  normalizeHeavyCommandQueueEvent,
   normalizeSessionWaitEvent,
   sessionWaitEventSummary,
-  withSessionWaitEventPayload,
   withApprovalDecisionEventPayload,
+  withHeavyCommandQueueEventPayload,
+  withSessionWaitEventPayload,
   type ChatMessage,
   type SessionStatus
 } from "@muxpilot/core";
@@ -297,7 +300,8 @@ function completedItemMessage(
   const identityPayload = { ...eventIdentity };
   const approvalDecision = mapped.role === "user" ? normalizeApprovalDecisionEvent(mapped.text) : null;
   const waitEvent = mapped.role === "user" ? normalizeSessionWaitEvent(mapped.text) : null;
-  const automationEvent = approvalDecision ?? waitEvent;
+  const heavyCommandEvent = normalizeHeavyCommandQueueEvent(mapped.text);
+  const automationEvent = approvalDecision ?? waitEvent ?? heavyCommandEvent;
   const payload = {
     source: "codex_app_server",
     method: notification.method,
@@ -312,10 +316,12 @@ function completedItemMessage(
     timestamp,
     text: approvalDecision
       ? approvalDecisionEventSummary(approvalDecision.event)
-      : waitEvent ? sessionWaitEventSummary(waitEvent.event) : mapped.text,
+      : waitEvent ? sessionWaitEventSummary(waitEvent.event)
+      : heavyCommandEvent ? heavyCommandQueueEventSummary(heavyCommandEvent.event) : mapped.text,
     payload: approvalDecision
       ? withApprovalDecisionEventPayload(payload, approvalDecision)
-      : waitEvent ? withSessionWaitEventPayload(payload, waitEvent) : payload
+      : waitEvent ? withSessionWaitEventPayload(payload, waitEvent)
+      : heavyCommandEvent ? withHeavyCommandQueueEventPayload(payload, heavyCommandEvent) : payload
   };
 }
 
