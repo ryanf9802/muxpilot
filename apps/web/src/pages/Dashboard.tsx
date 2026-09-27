@@ -13,6 +13,7 @@ import {
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
   AgentProviderKind,
+  ProviderDescriptor,
   ProviderModelCatalogResponse,
   ApprovalReviewerSettings,
   CollaborationMode,
@@ -80,10 +81,9 @@ export function Dashboard() {
   const [agentParentId, setAgentParentId] = useState("");
   const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" | "agentParent" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [reviewerSettings, setReviewerSettings] = useState<ApprovalReviewerSettings | null>(null);
   const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
-  const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<ProviderModelCatalogResponse | null>(null);
-  const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
+  const [modelDefaultsProvider, setModelDefaultsProvider] = useState<AgentProviderKind>("codex");
+  const [modelDefaultsByProvider, setModelDefaultsByProvider] = useState<Partial<Record<AgentProviderKind, ProviderModelDefaults>>>({});
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false);
   const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | "reviewer" | null>(null);
   const [modelDefaultsError, setModelDefaultsError] = useState("");
@@ -302,18 +302,27 @@ export function Dashboard() {
     }
   }
 
-  async function loadModelDefaults() {
+  const modelDefaultsProviders = providers.providers.filter((descriptor) => descriptor.enabled);
+  const currentModelDefaults = modelDefaultsByProvider[modelDefaultsProvider] ?? null;
+
+  function updateProviderModelDefaults(kind: AgentProviderKind, update: Partial<ProviderModelDefaults>) {
+    setModelDefaultsByProvider((current) => ({
+      ...current,
+      [kind]: { catalog: null, defaults: null, reviewer: null, ...current[kind], ...update }
+    }));
+  }
+
+  // Opening the drawer refreshes the default provider; other provider tabs load lazily the first time they are shown.
+  async function loadModelDefaults(kind: AgentProviderKind) {
     setModelDefaultsLoading(true);
     setModelDefaultsError("");
     try {
       const [catalog, response, reviewer] = await Promise.all([
-        api.providerModels("codex"),
-        api.globalModelSettings("codex"),
-        api.approvalReviewerSettings("codex")
+        api.providerModels(kind),
+        api.globalModelSettings(kind),
+        api.approvalReviewerSettings(kind)
       ]);
-      setModelDefaultsCatalog(catalog);
-      setModelDefaults(response.settings);
-      setReviewerSettings(reviewer.settings);
+      updateProviderModelDefaults(kind, { catalog, defaults: response.settings, reviewer: reviewer.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not load model defaults.");
     } finally {
@@ -321,17 +330,27 @@ export function Dashboard() {
     }
   }
 
+  function showModelDefaults(kind: AgentProviderKind) {
+    setModelDefaultsProvider(kind);
+    setModelDefaultsError("");
+    if (!modelDefaultsByProvider[kind]?.catalog) void loadModelDefaults(kind);
+  }
+
   function openModelDefaults() {
     setModelDefaultsOpen(true);
-    void loadModelDefaults();
+    const preferred = modelDefaultsProviders.find((descriptor) => descriptor.kind === providers.defaultProvider) ?? modelDefaultsProviders[0];
+    const kind = preferred?.kind ?? providers.defaultProvider;
+    setModelDefaultsProvider(kind);
+    void loadModelDefaults(kind);
   }
 
   async function applyReviewerSettings(model: string, reasoningEffort: string | null): Promise<void> {
+    const kind = modelDefaultsProvider;
     setModelDefaultsApplying("reviewer");
     setModelDefaultsError("");
     try {
-      const response = await api.updateApprovalReviewerSettings("codex", { model, reasoningEffort });
-      setReviewerSettings(response.settings);
+      const response = await api.updateApprovalReviewerSettings(kind, { model, reasoningEffort });
+      updateProviderModelDefaults(kind, { reviewer: response.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
     } finally {
@@ -340,11 +359,12 @@ export function Dashboard() {
   }
 
   async function applyModelDefault(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
+    const kind = modelDefaultsProvider;
     setModelDefaultsApplying(mode);
     setModelDefaultsError("");
     try {
-      const response = await api.updateGlobalModelSettings("codex", { mode, model, reasoningEffort });
-      setModelDefaults(response.settings);
+      const response = await api.updateGlobalModelSettings(kind, { mode, model, reasoningEffort });
+      updateProviderModelDefaults(kind, { defaults: response.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update model defaults.");
     } finally {
@@ -399,17 +419,27 @@ export function Dashboard() {
 
       <ModelSettingsDrawer
         open={modelDefaultsOpen}
+        provider={modelDefaultsProvider}
+        providerFastMode={findProvider(providers.providers, modelDefaultsProvider)?.capabilities.fastMode ?? true}
+        toolbar={modelDefaultsProviders.length > 1 ? (
+          <ModelDefaultsProviderTabs
+            providers={modelDefaultsProviders}
+            value={modelDefaultsProvider}
+            disabled={Boolean(modelDefaultsApplying)}
+            onChange={showModelDefaults}
+          />
+        ) : null}
         title="Default model settings"
-        description="Choose the model and reasoning effort inherited by new sessions, then apply it to the Normal or Plan default."
-        selections={modelDefaults ?? modelDefaultsCatalog?.defaults ?? emptyModelSelections}
+        description={`Choose the ${providerLabel(modelDefaultsProvider)} model and reasoning effort inherited by new sessions, then apply it to the Normal or Plan default.`}
+        selections={currentModelDefaults?.defaults ?? currentModelDefaults?.catalog?.defaults ?? emptyModelSelections}
         activeMode={null}
-        catalog={modelDefaultsCatalog}
+        catalog={currentModelDefaults?.catalog ?? null}
         loading={modelDefaultsLoading}
         error={modelDefaultsError}
         applying={modelDefaultsApplying}
-        reviewerSettings={reviewerSettings}
+        reviewerSettings={currentModelDefaults?.reviewer ?? null}
         onClose={() => setModelDefaultsOpen(false)}
-        onRetry={() => void loadModelDefaults()}
+        onRetry={() => void loadModelDefaults(modelDefaultsProvider)}
         onApply={applyModelDefault}
         onApplyReviewer={applyReviewerSettings}
       />
@@ -667,6 +697,44 @@ export function DashboardPrimaryActions({
         <Plus size={16} />
         <span className="dashboard-new-session-button-label">New session</span>
       </button>
+    </div>
+  );
+}
+
+interface ProviderModelDefaults {
+  catalog: ProviderModelCatalogResponse | null;
+  defaults: SessionModelSelections | null;
+  reviewer: ApprovalReviewerSettings | null;
+}
+
+export function ModelDefaultsProviderTabs({
+  providers,
+  value,
+  disabled = false,
+  onChange
+}: {
+  providers: ProviderDescriptor[];
+  value: AgentProviderKind;
+  disabled?: boolean;
+  onChange: (provider: AgentProviderKind) => void;
+}) {
+  return (
+    <div className="dialog-tabs model-settings-provider-tabs" role="tablist" aria-label="Provider defaults">
+      {providers.map((descriptor) => (
+        <button
+          key={descriptor.kind}
+          type="button"
+          role="tab"
+          data-provider={descriptor.kind}
+          aria-selected={descriptor.kind === value}
+          data-active={descriptor.kind === value || undefined}
+          disabled={disabled}
+          onClick={() => onChange(descriptor.kind)}
+        >
+          <span className="provider-badge-dot" aria-hidden="true" />
+          {descriptor.displayName}
+        </button>
+      ))}
     </div>
   );
 }

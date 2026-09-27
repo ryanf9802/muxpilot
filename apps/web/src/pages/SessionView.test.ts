@@ -84,6 +84,8 @@ import {
   sessionWithPendingInputMode,
   sessionWithPendingFastMode,
   sessionModeShortcutAction,
+  sessionFastModeCapable,
+  runtimeAttachCommandOrNull,
   saveComposerDraft,
   saveQuestionAnswerDraft,
   saveVimModePreference,
@@ -143,6 +145,7 @@ import {
 } from "./SessionView.js";
 import { ApiError } from "../api/client.js";
 import { childSessionAttentionItems } from "../utils/sessionStatus.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
 
 describe("InputDeliveryFailureBanner", () => {
   it("offers retry and dismissal with the persisted delivery failure detail", () => {
@@ -345,6 +348,15 @@ describe("SessionTitleHeading", () => {
     expect(html).toContain('<div class="session-title-heading"><h1>branch-the-chat</h1><button class="session-title-fork-button"');
     expect(html).toContain('aria-label="Fork session"');
     expect(html).not.toContain(">Fork</button>");
+  });
+
+  it("shows the provider badge beside the name only when requested", () => {
+    const html = renderToStaticMarkup(createElement(SessionTitleHeading, {
+      name: "claude-work",
+      onFork: () => undefined,
+      provider: "claude"
+    }));
+    expect(html).toContain('<h1>claude-work</h1><span class="provider-badge" data-provider="claude"');
   });
 });
 
@@ -1074,6 +1086,16 @@ describe("session mode shortcuts", () => {
     expect(sessionModeShortcutAction(keyEvent("n"), normal, null, ownerDocument)).toBeNull();
   });
 
+  it("ignores the Fast shortcut when the session or provider cannot use Fast mode", () => {
+    const normal = managedSession({ inputMode: "default", fastMode: false, fastModeAvailable: true, status: "waiting" });
+    expect(sessionModeShortcutAction(keyEvent("f"), normal, null, ownerDocument, false)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("f"), { ...normal, capabilities: { ...sessionCapabilities(), fastMode: false } }, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("p"), normal, null, ownerDocument, false)).toEqual({ type: "inputMode", mode: "plan" });
+    expect(sessionFastModeCapable(normal, providerDescriptor("claude", { capabilities: { ...providerDescriptor("claude").capabilities, fastMode: false } }))).toBe(false);
+    expect(sessionFastModeCapable({ capabilities: { ...sessionCapabilities(), fastMode: false } }, providerDescriptor("codex"))).toBe(false);
+    expect(sessionFastModeCapable(normal, null)).toBe(true);
+  });
+
   it("ignores typing, interactive controls, overlays, modifiers, repeats, and composition", () => {
     const session = managedSession({ inputMode: "default" });
     for (const target of ["input", "textarea", "button", ".cm-editor", "[contenteditable]"]) {
@@ -1241,6 +1263,29 @@ describe("skill composer helpers", () => {
     expect(replaceSkillToken("use $team now", { start: 4, end: 9, query: "team" }, "teamweave-browser")).toEqual({
       text: "use $teamweave-browser now",
       caret: 23
+    });
+  });
+
+  it("only treats Claude slash commands at the start of the message as skill tokens", () => {
+    const claude = { prefix: "/", position: "start" } as const;
+    expect(activeSkillToken("/rev", 4, claude)).toEqual({ start: 0, end: 4, query: "rev" });
+    expect(activeSkillToken("  /rev", 6, claude)).toEqual({ start: 2, end: 6, query: "rev" });
+    expect(activeSkillToken("please /rev", 11, claude)).toBeNull();
+    expect(activeSkillToken("$team", 5, claude)).toBeNull();
+    expect(activeSkillToken("/rev", 4)).toBeNull();
+  });
+
+  it("does not mistake paths for Claude slash commands", () => {
+    const claude = { prefix: "/", position: "start" } as const;
+    expect(activeSkillToken("/home/dev/project", 17, claude)).toBeNull();
+    expect(activeSkillToken("/home/dev/project", 5, claude)).toBeNull();
+    expect(activeSkillToken("/home", 5, claude)).toEqual({ start: 0, end: 5, query: "home" });
+  });
+
+  it("replaces a Claude token with a slash command", () => {
+    expect(replaceSkillToken("/rev please", { start: 0, end: 4, query: "rev" }, "review", { prefix: "/", position: "start" })).toEqual({
+      text: "/review please",
+      caret: 8
     });
   });
 });
@@ -1858,6 +1903,24 @@ describe("runtime presentation helpers", () => {
     expect(html).toContain('aria-label="Copy runtime attach command"');
     expect(copiedHtml).toContain('aria-label="Runtime attach command copied"');
     expect(html).not.toContain("gpt-");
+  });
+
+  it("uses the server attach command and hides attach for providers without one", () => {
+    const runtime = { kind: "systemd_service" as const, unit: "muxpilot-a.service", socketPath: "/run/a.sock", state: "connected" as const, agentVersion: "1.0.0" };
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime })).toBe("codex --remote 'unix:///run/a.sock'");
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime: { ...runtime, attachCommand: "custom attach" } })).toBe("custom attach");
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "claude", threadId: null, transcriptPath: null }, runtime })).toBeNull();
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime: { ...runtime, attachCommand: null } })).toBeNull();
+    expect(runtimeAttachCommandOrNull({ runtime })).toBe("codex --remote 'unix:///run/a.sock'");
+
+    const claudeHtml = renderToStaticMarkup(createElement(RuntimeAttachButton, {
+      session: { provider: { kind: "claude", threadId: null, transcriptPath: null }, runtime },
+      copied: false,
+      accessMode: "local",
+      enabled: true,
+      onCopy: () => undefined
+    }));
+    expect(claudeHtml).toBe("");
   });
 
   it("omits runtime attach on remote access", () => {
@@ -3016,6 +3079,21 @@ describe("WorkingIndicator", () => {
     expect(html).not.toContain("Codex is queued");
   });
 
+  it("names the session provider", () => {
+    expect(renderToStaticMarkup(createElement(WorkingIndicator, { provider: "claude" }))).toContain("Claude is working");
+    expect(renderToStaticMarkup(createElement(WorkingIndicator, { provider: "claude", status: "planning" }))).toContain("Claude is planning...");
+    expect(renderToStaticMarkup(createElement(QueuedIndicator, { provider: "claude" }))).toContain("Claude is queued");
+    expect(renderToStaticMarkup(createElement(TranscriptSyncIndicator, { provider: "claude" }))).toContain("<span>Claude</span>");
+    expect(renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
+      busyAction: null,
+      detail: "",
+      provider: "claude",
+      error: "",
+      onRetry: () => undefined,
+      onDismiss: () => undefined
+    }))).toContain("Claude did not complete the last input.");
+  });
+
   it("renders transcript synchronization without an elapsed runtime", () => {
     const html = renderToStaticMarkup(createElement(TranscriptSyncIndicator));
 
@@ -3710,5 +3788,24 @@ function repo(name: string, branch: string | null): RepoMetadata {
     branch,
     dirty: false,
     worktree: null
+  };
+}
+
+function sessionCapabilities(): NonNullable<ManagedSession["capabilities"]> {
+  return {
+    start: true,
+    sendMessage: true,
+    steer: true,
+    resume: true,
+    fork: true,
+    verifiedInput: true,
+    interrupt: true,
+    kill: true,
+    approvals: true,
+    questions: true,
+    planActions: true,
+    fastMode: true,
+    terminalAttach: true,
+    hibernate: true
   };
 }

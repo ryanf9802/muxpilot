@@ -11,6 +11,7 @@ import {
   dashboardPreviewLines,
   DashboardPrimaryActions,
   DashboardUsageGrid,
+  ModelDefaultsProviderTabs,
   dashboardStatusFilterFromSearchParams,
   filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
@@ -767,6 +768,19 @@ describe("SessionCard provider badges", () => {
 
     const shown = renderToStaticMarkup(createElement(SessionCard, { ...props, showProvider: true }));
     expect(shown).toContain('aria-label="Codex provider"');
+  });
+});
+
+describe("ModelDefaultsProviderTabs", () => {
+  it("renders one tab per enabled provider with the selected provider active", () => {
+    const html = renderToStaticMarkup(createElement(ModelDefaultsProviderTabs, {
+      providers: [providerDescriptor("codex"), providerDescriptor("claude")],
+      value: "claude",
+      onChange: () => undefined
+    }));
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('data-provider="codex" aria-selected="false"');
+    expect(html).toContain('data-provider="claude" aria-selected="true" data-active="true"');
   });
 });
 

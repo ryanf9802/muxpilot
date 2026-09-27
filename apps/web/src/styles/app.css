@@ -1166,6 +1166,30 @@ select:focus-visible {
   height: 10px;
 }
 
+@media (max-width: 440px) {
+  .session-title-heading .provider-badge,
+  .session-card-head-actions .provider-badge {
+    min-height: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+  }
+
+  .session-title-heading .provider-badge-label,
+  .session-card-head-actions .provider-badge-label {
+    display: none;
+  }
+}
+
+.model-settings-provider-tabs {
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  margin-bottom: 12px;
+}
+
+.model-settings-provider-tabs button[data-active="true"] {
+  border-color: color-mix(in srgb, var(--provider-accent) 55%, var(--color-border));
+}
+
 .provider-auth-status {
   display: inline-flex;
   flex: 0 0 auto;

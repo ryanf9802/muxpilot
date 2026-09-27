@@ -1,7 +1,8 @@
 import { ClipboardList, MessageSquare, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type {
   AgentModel,
+  AgentProviderKind,
   ProviderModelCatalogResponse,
   CollaborationMode,
   ApprovalMode,
@@ -12,6 +13,7 @@ import type {
 } from "@muxpilot/core";
 import { Modal } from "./Modal.js";
 import { Button, DialogActions } from "./Button.js";
+import { providerLabel } from "../utils/providers.js";
 
 export function effectiveModelSettings(
   session: Pick<ManagedSession, "models">,
@@ -27,6 +29,9 @@ export function effectiveModelSettings(
 
 export function ModelSettingsDrawer({
   open,
+  provider,
+  providerFastMode = true,
+  toolbar = null,
   title,
   description,
   selections,
@@ -48,6 +53,12 @@ export function ModelSettingsDrawer({
   onApprovalModeChange
 }: {
   open: boolean;
+  /** Scopes radio groups and copy so drawers for different providers never share form state. */
+  provider: AgentProviderKind;
+  /** Whether the provider supports Fast mode at all; the Fast-mode warning is meaningless otherwise. */
+  providerFastMode?: boolean;
+  /** Optional controls rendered above the options, e.g. provider tabs for global defaults. */
+  toolbar?: ReactNode;
   title: string;
   description: string;
   selections: SessionModelSelections;
@@ -95,7 +106,7 @@ export function ModelSettingsDrawer({
       ? draftEffort === null
       : selectedModel!.supportedReasoningEfforts.some((option) => option.reasoningEffort === draftEffort)
   );
-  const fastUnavailable = fastMode === true && selectedModel !== null && !supportsFast(selectedModel);
+  const fastUnavailable = providerFastMode && fastMode === true && selectedModel !== null && !selectedModel.supportsFastMode;
   const activeSelectionChanged = activeMode === "plan" ? changedPlan : activeMode === "default" ? changedNormal : false;
   const badgeSelections = useMemo(() => ({ normal, plan }), [normal.model, normal.reasoningEffort, plan.model, plan.reasoningEffort]);
 
@@ -121,6 +132,7 @@ export function ModelSettingsDrawer({
       initialFocusRef={initialFocusRef}
     >
       <div className="model-settings-intro">
+        {toolbar}
         <p>{description}</p>
         <div className="model-settings-legend" aria-label="Option badge legend">
           <Badge icon={<MessageSquare />} label="Current Normal selection" legend />
@@ -136,7 +148,7 @@ export function ModelSettingsDrawer({
             <Button size="small" onClick={onRetry} disabled={busy}>Retry</Button>
           </div>
         ) : null}
-        {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No Codex models are currently available.</p> : null}
+        {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No {providerLabel(provider)} models are currently available.</p> : null}
         {catalog && catalog.models.length > 0 ? (
           <>
             <fieldset className="model-settings-options">
@@ -146,7 +158,7 @@ export function ModelSettingsDrawer({
                   <input
                     ref={index === 0 ? initialFocusRef : undefined}
                     type="radio"
-                    name="codex-model"
+                    name={`${provider}-model`}
                     value={model.model}
                     checked={draftModel === model.model}
                     disabled={busy}
@@ -176,7 +188,7 @@ export function ModelSettingsDrawer({
                   <label className="model-settings-option" key={option.reasoningEffort}>
                     <input
                       type="radio"
-                      name="codex-reasoning-effort"
+                      name={`${provider}-reasoning-effort`}
                       value={option.reasoningEffort}
                       checked={draftEffort === option.reasoningEffort}
                       disabled={busy}
@@ -289,10 +301,6 @@ function validEffort(model: AgentModel | null | undefined, preferred: string | n
 
 function effortLabel(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function supportsFast(model: AgentModel): boolean {
-  return model.supportsFastMode;
 }
 
 const emptyDefaults: ProviderModelCatalogResponse["defaults"] = {
