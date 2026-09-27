@@ -6,7 +6,7 @@ import type { AgentSessionOwnership, ChatMessage, ManagedSession } from "@muxpil
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { AppServerLaunchAttemptError } from "../src/providers/codex/driver.js";
-import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
+import { latestCodexFastModeFromText, managedGitLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
 import { readyAuth, testProvider, testProviders } from "./helpers/providers.js";
 import { ProviderRegistry } from "../src/providers/registry.js";
 
@@ -353,6 +353,7 @@ describe("SessionManager app-server helpers", () => {
       },
       agentMutationQueue: Promise.resolve(),
       managedEnvironment: { MUXPILOT_SESSION_SCOPES_AVAILABLE: "1" },
+      providers: testProviders({}),
       createSession,
       waitForAgentChildReady: vi.fn(async () => undefined),
       sendInput,
@@ -362,6 +363,44 @@ describe("SessionManager app-server helpers", () => {
     await expect(manager.agentCreateChild(parent.id, "child", "task")).resolves.toBe(child);
     expect(calls).toEqual(["create", "task"]);
     expect(sendInput).toHaveBeenCalledWith(child.id, "task", "default", parent.id);
+    expect(createSession.mock.calls[0]?.[0]).toMatchObject({ provider: "codex" });
+  });
+
+  it("defaults children to the parent's provider and uses provider defaults across providers", async () => {
+    const parent = {
+      ...managedSession(),
+      id: "parent",
+      provider: { kind: "claude" as const, threadId: "claude-parent", transcriptPath: null },
+      models: { default: { model: "claude-opus", reasoningEffort: "high" }, plan: { model: "claude-opus", reasoningEffort: "max" } },
+      fastMode: true
+    };
+    const child = managedChild("child", "parent", "parent");
+    const createSession = vi.fn(async () => child);
+    const setSessionModelSettings = vi.fn();
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        getSession: vi.fn(async (id: string) => id === parent.id ? parent : child),
+        listSessions: vi.fn(async () => [parent]),
+        setSessionModelSettings
+      },
+      agentMutationQueue: Promise.resolve(),
+      managedEnvironment: { MUXPILOT_SESSION_SCOPES_AVAILABLE: "1" },
+      providers: new ProviderRegistry([testProvider("codex", {}), testProvider("claude", {})]),
+      createSession,
+      waitForAgentChildReady: vi.fn(async () => undefined),
+      sendInput: vi.fn(async () => undefined),
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await manager.agentCreateChild(parent.id, "same", "task");
+    expect(createSession.mock.calls[0]?.[0]).toMatchObject({ provider: "claude" });
+    expect(createSession.mock.calls[0]?.[1]).toEqual({ model: "claude-opus", reasoningEffort: "high", fastMode: true });
+    expect(setSessionModelSettings).toHaveBeenCalledTimes(2);
+
+    await manager.agentCreateChild(parent.id, "other", "task", "default", "codex");
+    expect(createSession.mock.calls[1]?.[0]).toMatchObject({ provider: "codex" });
+    expect(createSession.mock.calls[1]?.[1]).toBeUndefined();
+    expect(setSessionModelSettings).toHaveBeenCalledTimes(2);
   });
 
   it("can start periodic management without scheduling duplicate app-server recovery", () => {
@@ -1841,7 +1880,7 @@ describe("SessionManager app-server helpers", () => {
       controlPath: "/sessions/workspace-1",
       commonGitDir: "/repo/.git"
     } as StoredGitWorkspace;
-    const instructions = managedCodexLaunchOptions(workspace, "/codex", "/worktrees").developerInstructions;
+    const instructions = managedGitLaunchOptions(workspace, "/codex", "/worktrees").developerInstructions;
 
     expect(instructions).toContain("run any full build required by repository guidance");
     expect(instructions).toContain("Repository-required builds are authorized validation");

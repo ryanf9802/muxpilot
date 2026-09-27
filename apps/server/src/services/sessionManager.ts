@@ -712,7 +712,7 @@ export class SessionManager {
   private async prepareOrchestratedLaunch(options: AgentSessionLaunchOptions): Promise<{ options: AgentSessionLaunchOptions; capabilityId: string | null }> {
     if (!this.orchestrationProvider) return { options, capabilityId: null };
     const capability = await this.orchestrationProvider.prepareLaunch();
-    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and Codex file evidence; report the evidence and do not attempt a workaround without operator direction. Muxpilot resolves runtime and Muxpilot guard approvals according to the operator-selected per-session mode; agents cannot change that mode. When a Muxpilot guard requires confirmation and no direct skill authorization applies, call request_muxpilot_approval with the exact guards, action, consequences, and reason, then end the turn immediately. Do not ask for that approval as an ordinary chat response.";
+    const instruction = "Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to perform a review in parallel; if built-in subagents are unavailable, keep the review in the current session. Use the muxpilot_sessions tools for delegated work only when the operator explicitly requests a nested muxpilot session or the work is durable and benefits from independent monitoring and its own resource scope. Agent-created muxpilot children must use fresh context. Never poll a muxpilot child: arm wait_for_sessions, then end the turn immediately. If muxpilot state appears inconsistent, compare its record with raw service, process, protocol, and provider transcript evidence; report the evidence and do not attempt a workaround without operator direction. Muxpilot resolves runtime and Muxpilot guard approvals according to the operator-selected per-session mode; agents cannot change that mode. When a Muxpilot guard requires confirmation and no direct skill authorization applies, call request_muxpilot_approval with the exact guards, action, consequences, and reason, then end the turn immediately. Do not ask for that approval as an ordinary chat response.";
     return {
       capabilityId: capability.capabilityId,
       options: {
@@ -2022,7 +2022,13 @@ export class SessionManager {
     this.publish("status.changed", session.id, { status: "blocked" });
   }
 
-  async agentCreateChild(actorSessionId: string, name: string, task: string, mode?: CollaborationMode): Promise<ManagedSession> {
+  async agentCreateChild(
+    actorSessionId: string,
+    name: string,
+    task: string,
+    mode?: CollaborationMode,
+    provider?: AgentProviderKind
+  ): Promise<ManagedSession> {
     return this.withAgentMutation(async () => {
       const actor = requireStoredSession(await this.db.getSession(actorSessionId));
       if (actor.status === "missing" || actor.archived) {
@@ -2036,12 +2042,17 @@ export class SessionManager {
       if (liveAgentDescendants(all, rootSessionId).length >= AGENT_DESCENDANT_LIMIT) {
         throw new AgentSessionError(`This root already has ${AGENT_DESCENDANT_LIMIT} live agent-managed sessions`);
       }
+      // Children default to the parent's provider; model settings are only portable within one provider.
+      const childProvider = provider ?? actor.provider.kind;
+      this.providers.driver(childProvider);
+      this.requireAuthenticationAvailable(childProvider);
+      const sameProvider = childProvider === actor.provider.kind;
       const cwd = actor.gitWorkspace?.entryPath ?? actor.repo.root ?? actor.cwd;
       const request: CreateSessionRequest = actor.gitWorkspace
-        ? { cwd, name, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
-        : { cwd, name, workspace: { mode: "directory" } };
+        ? { cwd, name, provider: childProvider, workspace: { mode: "git", targetBranch: actor.gitWorkspace.targetBranch } }
+        : { cwd, name, provider: childProvider, workspace: { mode: "directory" } };
       const childMode = mode ?? "default";
-      const inheritedSettings = { ...actor.models[childMode], fastMode: actor.fastMode };
+      const inheritedSettings = sameProvider ? { ...actor.models[childMode], fastMode: actor.fastMode } : undefined;
       const ownership: AgentSessionOwnership = {
         parentSessionId: actor.id,
         rootSessionId,
@@ -2055,9 +2066,11 @@ export class SessionManager {
         budgetExhaustedAt: null
       };
       const child = await this.createSession(request, inheritedSettings, ownership);
-      for (const selection of ["default", "plan"] as const) {
-        const settings = actor.models[selection];
-        if (settings.model) await this.db.setSessionModelSettings(child.id, selection, settings.model, settings.reasoningEffort, nowIso());
+      if (sameProvider) {
+        for (const selection of ["default", "plan"] as const) {
+          const settings = actor.models[selection];
+          if (settings.model) await this.db.setSessionModelSettings(child.id, selection, settings.model, settings.reasoningEffort, nowIso());
+        }
       }
       await this.waitForAgentChildReady(child.id);
       await this.sendInput(child.id, task, childMode, actor.id);
@@ -2772,7 +2785,7 @@ export class SessionManager {
       fastMode: preferences.fastMode
     } : undefined);
     const documentOptions = await this.withDocumentLaunchOptions({
-      ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
+      ...managedGitLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
       model: resolvedLaunchSettings?.model,
       reasoningEffort: resolvedLaunchSettings?.reasoningEffort,
       fastMode: resolvedLaunchSettings?.fastMode
@@ -2849,7 +2862,7 @@ export class SessionManager {
       documentScopeId = workspace.id;
       await this.requireDocuments().copy(await this.ensureDocumentScope(source), documentScopeId);
       documentOptions = await this.withDocumentLaunchOptions({
-        ...managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
+        ...managedGitLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment),
         ...inheritedSettings
       }, documentScopeId);
     } else {
@@ -3214,7 +3227,7 @@ export class SessionManager {
       const workspace = await this.gitWorkspaces.getBySession(session.id);
       if (!workspace) throw new Error(`Managed Git workspace is missing for app-server thread replacement: ${session.gitWorkspace.id}`);
       await this.gitWorkspaces.ensureControlPath(workspace);
-      launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
+      launchOptions = managedGitLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
     } else {
       await requireExistingDirectory(session.cwd ?? session.repo.root);
       launchOptions = { environment: this.managedEnvironment };
@@ -3252,7 +3265,7 @@ export class SessionManager {
       const workspace = await this.gitWorkspaces.getBySession(session.id);
       if (!workspace) throw new Error(`Managed Git workspace is missing during app-server recovery: ${session.gitWorkspace.id}`);
       directory = await this.gitWorkspaces.ensureControlPath(workspace);
-      launchOptions = managedCodexLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
+      launchOptions = managedGitLaunchOptions(workspace, this.codexHome, this.gitWorktreeRoot, this.managedEnvironment);
     } else {
       directory = await requireExistingDirectory(session.cwd ?? session.repo.root);
       launchOptions = { environment: this.managedEnvironment };
@@ -4317,7 +4330,11 @@ function restoreSessionName(session: ManagedSession): string {
   return "restored";
 }
 
-export function managedCodexLaunchOptions(
+/**
+ * Launch options for a managed Git session. Instructions use Codex skill syntax (`$skill-name`); providers with
+ * a different skill syntax adapt them at launch.
+ */
+export function managedGitLaunchOptions(
   workspace: StoredGitWorkspace,
   codexHome: string | null = process.env.CODEX_HOME ?? null,
   worktreeRoot: string | null = null,
@@ -4370,7 +4387,7 @@ export function managedCodexLaunchOptions(
     ].join(" "),
     environment: {
       ...managedEnvironment,
-      ...(codexHome ? { CODEX_HOME: codexHome, MUXPILOT_GIT_HELPER_DIR: helperDir! } : {}),
+      ...(helperDir ? { MUXPILOT_GIT_HELPER_DIR: helperDir } : {}),
       MUXPILOT_GIT_WORKSPACE_ID: workspace.id,
       MUXPILOT_GIT_REPO_ROOT: summary.repoRoot,
       MUXPILOT_GIT_ENTRY_PATH: summary.entryPath,

@@ -256,8 +256,8 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       readSessionRuntime: vi.fn(async () => ({ sessionId: session.id })),
       readSessionProcessTree: vi.fn(async () => ({ sessionId: session.id, rootPid: 700, processes: [], truncated: false })),
       readSessionProtocolJournal: vi.fn(async () => ({ sessionId: session.id, fileSize: 3, startOffset: 0, endOffset: 3, text: "rpc" })),
-      listCodexSessionFiles: vi.fn(async () => ({ root: "/codex/sessions", files: [], nextOffset: null })),
-      readCodexSessionFile: vi.fn(async () => ({
+      listTranscriptFiles: vi.fn(async () => ({ root: "/codex/sessions", files: [], nextOffset: null })),
+      readTranscriptFile: vi.fn(async () => ({
         relativePath: "rollout.jsonl",
         fileSize: 3,
         startOffset: 0,
@@ -310,7 +310,12 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     expect(rawEvidence.readSessionRuntime).toHaveBeenCalledWith(session);
     await expect(call("read_codex_session_file", { relativePath: "rollout.jsonl" }))
       .resolves.toMatchObject({ text: "raw", startOffset: 0, endOffset: 3 });
-    expect(rawEvidence.readCodexSessionFile).toHaveBeenCalledWith("rollout.jsonl", null, 64 * 1024);
+    expect(rawEvidence.readTranscriptFile).toHaveBeenCalledWith("codex", "rollout.jsonl", null, 64 * 1024);
+    await call("read_transcript_file", { relativePath: "project/abc.jsonl", provider: "claude" });
+    expect(rawEvidence.readTranscriptFile).toHaveBeenLastCalledWith("claude", "project/abc.jsonl", null, 64 * 1024);
+    await call("list_transcript_files", {});
+    expect(rawEvidence.listTranscriptFiles).toHaveBeenLastCalledWith("codex", 100, 0);
+    await expect(call("list_transcript_files", { provider: "gemini" })).rejects.toThrow("provider must be one of");
 
     await expect(call("read_session", { sessionId: session.id, limit: 5 })).resolves.toMatchObject({
       goalTelemetry: { available: true, sampledAt: goal.sampledAt },
@@ -354,9 +359,10 @@ describe("SessionOrchestrationBroker raw evidence", () => {
       "read_session_runtime",
       "read_session_process_tree",
       "read_session_protocol_journal",
-      "list_codex_session_files",
-      "read_codex_session_file"
+      "list_transcript_files",
+      "read_transcript_file"
     ]));
+    expect(definitions.find((tool) => tool.name === "create_session")?.description).toContain("provider");
     expect(definitions.find((tool) => tool.name === "list_sessions")?.description).toContain("goal telemetry");
     expect(definitions.find((tool) => tool.name === "read_session")?.description).toContain("goal telemetry");
   });

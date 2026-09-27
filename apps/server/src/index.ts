@@ -169,7 +169,7 @@ codexProvider.authLifecycle.setRuntimeHooks({
 });
 await codexProvider.authLifecycle.start();
 const rawSessionEvidence = new RawSessionEvidenceReader(
-  config.codexHome,
+  { transcripts: { codex: join(config.codexHome, "sessions") } },
   undefined,
   undefined,
   config.dataDir

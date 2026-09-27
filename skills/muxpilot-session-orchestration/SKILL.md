@@ -5,15 +5,15 @@ description: Coordinate muxpilot sessions through the session tools, including d
 
 # Muxpilot Session Orchestration
 
-Use built-in Codex subagents for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to run a review in parallel. If built-in subagents are unavailable, keep the review in the current session instead of substituting a nested muxpilot session.
+Use your provider's built-in subagents (Codex subagents or Claude Task subagents) for routine bounded delegation, especially standard code-review passes. Do not create a nested muxpilot session merely to run a review in parallel. If built-in subagents are unavailable, keep the review in the current session instead of substituting a nested muxpilot session.
 
-Use the tools exposed by `muxpilot_sessions` only when the operator explicitly requests a nested muxpilot session or the delegated work is durable and benefits from independent monitoring and its own resource scope. These tools coordinate independent Codex sessions; they do not create in-process subagents.
+Use the tools exposed by `muxpilot_sessions` only when the operator explicitly requests a nested muxpilot session or the delegated work is durable and benefits from independent monitoring and its own resource scope. These tools coordinate independent muxpilot sessions (Codex or Claude); they do not create in-process subagents.
 
 ## Visibility and messaging
 
-- Use `list_sessions` to inspect session IDs, hierarchy, status, context use, delegated work budgets, and Codex thread-goal objective, state, elapsed time, and token use when available.
+- Use `list_sessions` to inspect session IDs, hierarchy, status, context use, delegated work budgets, agent provider, and Codex thread-goal objective, state, elapsed time, and token use when available.
 - Use `read_session` for the same goal telemetry plus a bounded recent transcript. Read only what the current decision needs.
-- When muxpilot's normalized state may be wrong, inspect independent evidence with `read_session_runtime`, `read_session_process_tree`, `read_session_protocol_journal`, `list_codex_session_files`, and `read_codex_session_file`. Compare the raw sources yourself; the tools do not classify mismatches.
+- When muxpilot's normalized state may be wrong, inspect independent evidence with `read_session_runtime`, `read_session_process_tree`, `read_session_protocol_journal`, `list_transcript_files`, and `read_transcript_file`. Compare the raw sources yourself; the tools do not classify mismatches.
 - Raw evidence tools are diagnostic and read-only. Report factual inconsistencies and wait for separate operator direction before attempting remediation.
 - You may send a work message to any live managed session by exact ID. The transcript records you as the delegating session.
 - Claim only an unowned session. Release, interrupt, finish, or otherwise control lifecycle only for sessions in your descendant tree.
@@ -21,6 +21,8 @@ Use the tools exposed by `muxpilot_sessions` only when the operator explicitly r
 - Never answer or bypass a security approval for another session. Approval decisions remain with the operator.
 
 ## Delegated children
+
+- `create_session` starts the child with this session's agent provider. Pass `provider` (`codex` or `claude`) only when the operator asks for a different provider; model settings are inherited only within the same provider.
 
 Create a child with a concrete, bounded task. A child starts with fresh model context, inherits the parent repository, target, cwd, and launch settings, and runs in its own resource scope. No more than two live descendants may exist within one operator-rooted tree.
 
@@ -37,7 +39,7 @@ Every agent-created muxpilot child session has its own private `$MUXPILOT_DOCUME
 
 The parent verifies the evidence, applies accepted changes to its canonical documents, and rejects or corrects unsupported child conclusions before continuing.
 
-Built-in Codex subagents are not muxpilot child sessions: they share the main agent's environment and documents directory. Tell them not to edit session documents and to return proposed document changes to the main agent.
+Built-in provider subagents are not muxpilot child sessions: they share the main agent's environment and documents directory. Tell them not to edit session documents and to return proposed document changes to the main agent.
 
 ## Waiting without token burn
 
@@ -47,8 +49,8 @@ Use `cancel_wait` only when the dependency no longer blocks your work. If contin
 
 ## Context telemetry and work-token budgets
 
-Every orchestration response reports context-window use and delegated work-token use when available. Context-window use is informational; let Codex manage its context and automatic compaction. Delegated children default to a 1,000,000 work-token budget measured from creation or claim; uncached input, output, and reasoning tokens count. Extend a budget only with a specific audited reason.
+Every orchestration response reports context-window use and delegated work-token use when available. Context-window use is informational; let the provider manage its context and automatic compaction. Delegated children default to a 1,000,000 work-token budget measured from creation or claim; uncached input, output, and reasoning tokens count. Extend a budget only with a specific audited reason.
 
-`list_sessions` and `read_session` also report the Codex thread goal when one exists, including its objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Check `goalTelemetry.available` before interpreting `goal: null`: an available source with a null goal means that thread has no recorded goal, while an unavailable source means muxpilot could not inspect Codex's goal store.
+For Codex sessions, `list_sessions` and `read_session` also report the Codex thread goal when one exists, including its objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Check `goalTelemetry.available` before interpreting `goal: null`: an available source with a null goal means that thread has no recorded goal, while an unavailable source means muxpilot could not inspect Codex's goal store.
 
 Finish or release children promptly once their result has been incorporated. Finishing a child stops it; it does not merge Git work or authorize deployment, publication, or any other external mutation.

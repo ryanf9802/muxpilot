@@ -5,11 +5,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AppDatabase, PersistedAgentWait } from "../db/database.js";
 import type { MuxpilotGuard } from "@muxpilot/core";
-import { liveSessionSubtree, serializeSessionWaitEvent, sessionStatusPresentation, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
+import { AGENT_PROVIDER_KINDS, isAgentProviderKind, liveSessionSubtree, type AgentProviderKind, serializeSessionWaitEvent, sessionStatusPresentation, type ManagedSession, type QuestionAnswerRequest } from "@muxpilot/core";
 import type { SessionManager } from "./sessionManager.js";
 import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionResourceUnit } from "./sessionScopes.js";
-import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
+import { RAW_TRANSCRIPT_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 import { agentWorkTokensUsed } from "./agentUsage.js";
 import type { McpServerLaunchConfig } from "../providers/types.js";
 import type { CodexGoalReader, CodexGoalSnapshot, CodexGoalTelemetry } from "../providers/codex/goalStore.js";
@@ -139,18 +139,28 @@ export class SessionOrchestrationBroker {
       case "read_session_protocol_journal": return this.rawEvidence.readSessionProtocolJournal(
         await this.authorizedEvidenceSession(actorId, requiredString(args.sessionId, "sessionId")),
         optionalInteger(args.offset, 0, Number.MAX_SAFE_INTEGER),
-        boundedInteger(args.length, 1, 256 * 1024, RAW_CODEX_DEFAULT_READ_BYTES)
+        boundedInteger(args.length, 1, 256 * 1024, RAW_TRANSCRIPT_DEFAULT_READ_BYTES)
       );
-      case "list_codex_session_files": return this.rawEvidence.listCodexSessionFiles(
+      case "list_transcript_files":
+      case "list_codex_session_files": return this.rawEvidence.listTranscriptFiles(
+        request.action === "list_codex_session_files" ? "codex" : optionalProvider(args.provider) ?? actor.provider.kind,
         boundedInteger(args.limit, 1, 500, 100),
         boundedInteger(args.offset, 0, Number.MAX_SAFE_INTEGER, 0)
       );
-      case "read_codex_session_file": return this.rawEvidence.readCodexSessionFile(
+      case "read_transcript_file":
+      case "read_codex_session_file": return this.rawEvidence.readTranscriptFile(
+        request.action === "read_codex_session_file" ? "codex" : optionalProvider(args.provider) ?? actor.provider.kind,
         requiredString(args.relativePath, "relativePath"),
         optionalInteger(args.offset, 0, Number.MAX_SAFE_INTEGER),
-        boundedInteger(args.length, 1, 256 * 1024, RAW_CODEX_DEFAULT_READ_BYTES)
+        boundedInteger(args.length, 1, 256 * 1024, RAW_TRANSCRIPT_DEFAULT_READ_BYTES)
       );
-      case "create_session": return summarizeSession(await this.manager.agentCreateChild(actorId, requiredString(args.name, "name"), requiredString(args.task, "task"), collaborationMode(args.mode)));
+      case "create_session": return summarizeSession(await this.manager.agentCreateChild(
+        actorId,
+        requiredString(args.name, "name"),
+        requiredString(args.task, "task"),
+        collaborationMode(args.mode),
+        optionalProvider(args.provider)
+      ));
       case "claim_session": return summarizeSession(await this.manager.agentClaim(actorId, requiredString(args.sessionId, "sessionId")));
       case "release_session": return summarizeSession(await this.manager.agentRelease(actorId, requiredString(args.sessionId, "sessionId")));
       case "send_message": return summarizeSession(await this.manager.agentSendInput(actorId, requiredString(args.sessionId, "sessionId"), requiredString(args.text, "text"), collaborationMode(args.mode)));
@@ -366,6 +376,7 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
   return {
     id: session.id,
     name: session.name,
+    provider: session.provider.kind,
     status: session.status,
     effectiveStatus: effective.status,
     effectiveStatusSessionId: effective.sourceSessionId,
@@ -450,4 +461,10 @@ function muxpilotGuards(value: unknown): MuxpilotGuard[] {
     throw new Error("guards must contain one or more valid Muxpilot guards");
   }
   return [...new Set(value as MuxpilotGuard[])];
+}
+
+function optionalProvider(value: unknown): AgentProviderKind | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isAgentProviderKind(value)) throw new Error(`provider must be one of: ${AGENT_PROVIDER_KINDS.join(", ")}`);
+  return value;
 }
