@@ -7,7 +7,8 @@ import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { AppServerLaunchAttemptError } from "../src/providers/codex/driver.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
-import { testProviders } from "./helpers/providers.js";
+import { readyAuth, testProvider, testProviders } from "./helpers/providers.js";
+import { ProviderRegistry } from "../src/providers/registry.js";
 
 const temporaryRoots: string[] = [];
 
@@ -178,7 +179,7 @@ describe("SessionManager app-server helpers", () => {
     const addAudit = vi.fn(async () => undefined);
     const codexStore = { stop: vi.fn() };
     const manager = new SessionManager({
-      db: { addAudit } as never,
+      db: { addAudit, getSession: vi.fn(async () => managedSession()) } as never,
       codexStore: codexStore as never,
       events: new EventBus(),
       discoveryIntervalMs: 60_000,
@@ -186,10 +187,10 @@ describe("SessionManager app-server helpers", () => {
       documents: { newScopeId: vi.fn(() => "scope-1") } as never,
       codexHome: null,
       managedEnvironment: {},
-      providers: testProviders(({}))
+      providers: new ProviderRegistry([testProvider("codex", {}, {
+        auth: readyAuth("codex", { assertAvailable: available, assertReady: reconciled })
+      })])
     });
-    manager.setAuthenticationGuard(reconciled);
-    manager.setAuthenticationAvailabilityGuard(available);
     Object.assign(manager as object, {
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -227,9 +228,8 @@ describe("SessionManager app-server helpers", () => {
       documents: { newScopeId: vi.fn(() => "scope-1") } as never,
       codexHome: null,
       managedEnvironment: {},
-      providers: testProviders(({}))
+      providers: new ProviderRegistry([testProvider("codex", {}, { auth: readyAuth("codex", { assertAvailable: available }) })])
     });
-    manager.setAuthenticationAvailabilityGuard(available);
     Object.assign(manager as object, {
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -1910,6 +1910,55 @@ describe("SessionManager app-server helpers", () => {
   });
 });
 
+describe("SessionManager provider authentication isolation", () => {
+  it("suspends only the signed-out provider's sessions and gates creation per provider", async () => {
+    const codexSession = { ...managedSession(), id: "codex-session", status: "idle" as const };
+    const claudeSession = {
+      ...managedSession(),
+      id: "claude-session",
+      status: "idle" as const,
+      provider: { kind: "claude" as const, threadId: "claude-thread", transcriptPath: null }
+    };
+    const stored = new Map<string, ManagedSession>([[codexSession.id, codexSession], [claudeSession.id, claudeSession]]);
+    const codexDriver = { hibernationBlockers: vi.fn(async () => []), kill: vi.fn(async () => undefined) };
+    const claudeDriver = { hibernationBlockers: vi.fn(async () => []), kill: vi.fn(async () => undefined) };
+    const signedOut = vi.fn(() => { throw new Error("Claude authentication is required"); });
+    const manager = Object.assign(Object.create(SessionManager.prototype), {
+      db: {
+        listSessions: vi.fn(async () => [...stored.values()]),
+        getSession: vi.fn(async (id: string) => stored.get(id) ?? null),
+        upsertSession: vi.fn(async (session: ManagedSession) => { stored.set(session.id, session); }),
+        addAudit: vi.fn(async () => undefined),
+        listQueuedInputs: vi.fn(async () => []),
+        latestUserMessage: vi.fn(async () => null),
+        activeBtwExchange: vi.fn(async () => null),
+        listAgentWaits: vi.fn(async () => [])
+      },
+      providers: new ProviderRegistry([
+        testProvider("codex", codexDriver),
+        testProvider("claude", claudeDriver, { auth: readyAuth("claude", { assertAvailable: signedOut, assertReady: signedOut }) })
+      ]),
+      runtimeOperationTails: new Map<string, Promise<void>>(),
+      deliveringInputSessionIds: new Set<string>(),
+      processingQueuedSessionIds: new Set<string>(),
+      heavyCommandQueue: { hasActive: vi.fn(async () => false) },
+      publish: vi.fn()
+    }) as SessionManager;
+
+    await expect(manager.suspendForProviderSignOut("claude")).resolves.toEqual([]);
+
+    expect(claudeDriver.kill).toHaveBeenCalledOnce();
+    expect(codexDriver.kill).not.toHaveBeenCalled();
+    expect(stored.get("claude-session")).toMatchObject({
+      authenticationResumeRequired: true,
+      authenticationError: "Claude authentication is required. Sign in with the Claude CLI, then return to muxpilot."
+    });
+    expect(stored.get("codex-session")?.authenticationResumeRequired).toBeUndefined();
+    await expect(manager.createSession({ cwd: "/tmp", name: "claude-work", provider: "claude" }))
+      .rejects.toThrow("Claude authentication is required");
+  });
+});
+
 describe("SessionManager Codex authentication runtime safety", () => {
   it("resumes an authentication-stopped runtime before clearing its recovery flag", async () => {
     const session = {
@@ -1997,7 +2046,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
   ] as const)("defers runtime replacement while a session is %s", async (status) => {
     const harness = authenticationManager({ ...managedSession(), status });
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.hibernationBlockers).not.toHaveBeenCalled();
     expect(harness.driver.kill).not.toHaveBeenCalled();
@@ -2015,7 +2064,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     async (status) => {
       const harness = authenticationManager({ ...managedSession(), status });
 
-      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual([]);
+      await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual([]);
 
       expect(harness.db.setSessionStatus).toHaveBeenCalledWith("session-1", "idle", expect.any(String));
       expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2032,7 +2081,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
   it("keeps a running session blocked when fresh runtime evidence reports an active turn", async () => {
     const harness = authenticationManager({ ...managedSession(), status: "running" }, ["active_turn"]);
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.db.setSessionStatus).not.toHaveBeenCalled();
     expect(harness.driver.kill).not.toHaveBeenCalled();
@@ -2054,7 +2103,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
       runtime: { ...session.runtime!, state: "starting" }
     });
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
     expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2074,7 +2123,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
       runtime: { ...session.runtime!, state: "failed" }
     });
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
     expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2091,7 +2140,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     async (runtimeBlocker) => {
       const harness = authenticationManager(managedSession(), [runtimeBlocker]);
 
-      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+      await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
       expect(harness.driver.kill).not.toHaveBeenCalled();
       expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2108,7 +2157,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     const harness = authenticationManager(managedSession());
     harness.driver.hibernationBlockers.mockRejectedValueOnce(new Error("connection unavailable"));
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
     expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2125,7 +2174,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     async (status) => {
       const harness = authenticationManager({ ...managedSession(), status });
 
-      await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual([]);
+      await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual([]);
 
       expect(harness.driver.hibernationBlockers).toHaveBeenCalledWith(expect.objectContaining({ status }));
       expect(harness.driver.kill).toHaveBeenCalledOnce();
@@ -2145,7 +2194,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
   it("defers authentication restart of a failed turn while runtime work is active", async () => {
     const harness = authenticationManager({ ...managedSession(), status: "input_failed" }, ["active_turn"]);
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
     expect(harness.db.addAudit).toHaveBeenCalledWith(
@@ -2162,7 +2211,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     const locked = { ...observed, status: "executing" as const };
     const harness = authenticationManager(observed, [], locked);
 
-    await expect(harness.manager.reconcileCodexAuthentication()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
   });
@@ -2177,7 +2226,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     const harness = authenticationManager(captured);
     harness.db.listSessions.mockResolvedValue([captured, admitted]);
 
-    await expect(harness.manager.reconcileCodexAuthentication([captured.id])).resolves.toEqual([]);
+    await expect(harness.manager.reconcileProviderAuthentication("codex", [captured.id])).resolves.toEqual([]);
 
     expect(harness.driver.kill).toHaveBeenCalledOnce();
     expect(harness.driver.kill).toHaveBeenCalledWith(expect.objectContaining({ id: captured.id }));
@@ -2187,7 +2236,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
   it("does not stop an unsafe runtime during sign-out", async () => {
     const harness = authenticationManager({ ...managedSession(), status: "question" });
 
-    await expect(harness.manager.suspendForCodexSignOut()).resolves.toEqual(["session-1"]);
+    await expect(harness.manager.suspendForProviderSignOut("codex")).resolves.toEqual(["session-1"]);
 
     expect(harness.driver.kill).not.toHaveBeenCalled();
     expect(harness.db.addAudit).toHaveBeenCalledWith(

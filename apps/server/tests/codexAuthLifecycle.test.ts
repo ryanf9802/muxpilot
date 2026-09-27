@@ -273,8 +273,14 @@ async function createFixture(
   const lifecycle = new CodexAuthLifecycle(
     {
       clearCodexAuthProfiles: clearProfiles,
-      getCodexAuthReconciledPrincipal: getReconciledPrincipal,
-      setCodexAuthReconciledPrincipal: setReconciledPrincipal
+      getProviderAuthReconciledPrincipal: async (provider: string) => {
+        expect(provider).toBe("codex");
+        return getReconciledPrincipal();
+      },
+      setProviderAuthReconciledPrincipal: async (provider: string, principal: string, updatedAt: string) => {
+        expect(provider).toBe("codex");
+        return (setReconciledPrincipal as unknown as (principal: string, updatedAt: string) => Promise<void>)(principal, updatedAt);
+      }
     },
     new EventBus(),
     codexHome,

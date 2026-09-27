@@ -43,6 +43,7 @@ export function testProvider(
       missingCapabilities: []
     }),
     driver: driver as AgentSessionDriver | null,
+    auth: readyAuth(kind),
     ...overrides
   };
 }
@@ -50,4 +51,25 @@ export function testProvider(
 /** Registry with a single Codex provider backed by `driver` (or none). */
 export function testProviders(driver: unknown | null = null, extra: AgentProvider[] = []): ProviderRegistry {
   return new ProviderRegistry([testProvider("codex", driver), ...extra], "codex");
+}
+
+/** Always-ready authentication for tests that do not exercise provider auth. */
+export function readyAuth(kind: AgentProviderKind = "codex", overrides: Partial<AgentProvider["auth"]> = {}): AgentProvider["auth"] {
+  const state = {
+    provider: kind,
+    status: "ready" as const,
+    account: null,
+    revision: 1,
+    observedAt: "2026-09-27T00:00:00.000Z",
+    error: null,
+    admissionHeld: false,
+    pendingSessionIds: []
+  };
+  return {
+    state: () => state,
+    assertAvailable: () => undefined,
+    assertReady: () => undefined,
+    refresh: async () => state,
+    ...overrides
+  };
 }

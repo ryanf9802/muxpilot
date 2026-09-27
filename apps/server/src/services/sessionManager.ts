@@ -212,8 +212,6 @@ export class SessionManager {
   private readonly runtimeOperationTails = new Map<string, Promise<void>>();
   private readonly automatedApprovalMessageIds = new Set<string>();
   private approvalAutomationGenerations = new Map<string, number>();
-  private authenticationGuard: (() => void) | null = null;
-  private authenticationAvailabilityGuard: (() => void) | null = null;
   private readonly unsubscribeQueueReadiness: () => void;
   private readonly unsubscribeNotLoadedRecovery: () => void;
 
@@ -412,32 +410,34 @@ export class SessionManager {
     this.orchestrationProvider = provider;
   }
 
-  setAuthenticationGuard(guard: (() => void) | null): void {
-    this.authenticationGuard = guard;
+  /** Signed-in check used before starting new provider work (creation, restore, model catalogs). */
+  private requireAuthenticationAvailable(provider: AgentProviderKind): void {
+    this.providers.get(provider).auth.assertAvailable();
   }
 
-  setAuthenticationAvailabilityGuard(guard: (() => void) | null): void {
-    this.authenticationAvailabilityGuard = guard;
+  /** Signed in and no account change is still being reconciled; required before sending work to a runtime. */
+  private requireAuthenticationReady(provider: AgentProviderKind): void {
+    this.providers.get(provider).auth.assertReady();
   }
 
-  private requireAuthenticationAvailable(): void {
-    (this.authenticationAvailabilityGuard ?? this.authenticationGuard)?.();
+  private async providerSessions(provider: AgentProviderKind): Promise<ManagedSession[]> {
+    return (await this.db.listSessions(false, false)).filter((session) => session.provider.kind === provider);
   }
 
-  async codexAuthenticationBlockers(): Promise<string[]> {
-    const sessions = await this.db.listSessions(false, false);
+  async providerAuthenticationBlockers(provider: AgentProviderKind): Promise<string[]> {
+    const sessions = await this.providerSessions(provider);
     const blockers: string[] = [];
     for (const session of sessions) {
       if (session.runtime?.kind !== "systemd_service") continue;
       if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") continue;
-      if ((await this.codexAuthenticationRuntimeRestartBlockers(session)).length > 0) blockers.push(session.id);
+      if ((await this.authenticationRuntimeRestartBlockers(session)).length > 0) blockers.push(session.id);
     }
     return blockers;
   }
 
-  async reconcileCodexAuthentication(sessionIds: readonly string[] | null = null): Promise<string[]> {
+  async reconcileProviderAuthentication(provider: AgentProviderKind, sessionIds: readonly string[] | null = null): Promise<string[]> {
     const blockers = new Set<string>();
-    const sessions = await this.db.listSessions(false, false);
+    const sessions = await this.providerSessions(provider);
     const sessionsById = new Map(sessions.map((session) => [session.id, session]));
     const candidates = sessionIds === null
       ? sessions
@@ -452,13 +452,13 @@ export class SessionManager {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
         if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
-        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(
+        const restartBlockers = await this.authenticationRuntimeRestartBlockers(
           session,
           candidate.status === session.status
         );
         if (restartBlockers.length > 0) {
           blockers.add(session.id);
-          await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restart_deferred", session.id, restartBlockers);
+          await this.auditAuthenticationRuntimeDecision("runtime:auth_restart_deferred", session.id, restartBlockers);
           return;
         }
         const driver = this.requireDriver(session);
@@ -466,7 +466,7 @@ export class SessionManager {
         const cleared = { ...session, runtime: { ...session.runtime, state: "stopped" as const }, authenticationError: null };
         await this.db.upsertSession(cleared, nowIso());
         await this.resumeAppServerSession(cleared);
-        await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restarted", session.id, []);
+        await this.auditAuthenticationRuntimeDecision("runtime:auth_restarted", session.id, []);
       }).catch(async (error) => {
         const current = await this.db.getSession(candidate.id);
         if (!current) return;
@@ -482,22 +482,23 @@ export class SessionManager {
     return [...blockers];
   }
 
-  async suspendForCodexSignOut(): Promise<string[]> {
+  async suspendForProviderSignOut(provider: AgentProviderKind): Promise<string[]> {
     const blockers = new Set<string>();
-    for (const candidate of await this.db.listSessions(false, false)) {
+    const displayName = providerDisplayName(provider);
+    for (const candidate of await this.providerSessions(provider)) {
       if (candidate.runtime?.kind !== "systemd_service") continue;
       if (candidate.runtime.state === "hibernated" || candidate.runtime.state === "stopped") continue;
       await this.serializeRuntimeOperation(candidate.id, async () => {
         const session = await this.db.getSession(candidate.id);
         if (!session || session.runtime?.kind !== "systemd_service") return;
         if (session.runtime.state === "hibernated" || session.runtime.state === "stopped") return;
-        const restartBlockers = await this.codexAuthenticationRuntimeRestartBlockers(
+        const restartBlockers = await this.authenticationRuntimeRestartBlockers(
           session,
           candidate.status === session.status
         );
         if (restartBlockers.length > 0) {
           blockers.add(session.id);
-          await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_deferred", session.id, restartBlockers);
+          await this.auditAuthenticationRuntimeDecision("runtime:auth_signout_deferred", session.id, restartBlockers);
           return;
         }
         await this.requireDriver(session).kill(session);
@@ -505,18 +506,18 @@ export class SessionManager {
           ...session,
           status: "waiting" as const,
           runtime: { ...session.runtime, state: "stopped" as const },
-          authenticationError: "Codex authentication is required. Sign in with the Codex CLI, then return to muxpilot.",
+          authenticationError: `${displayName} authentication is required. Sign in with the ${displayName} CLI, then return to muxpilot.`,
           authenticationResumeRequired: true
         };
         await this.db.upsertSession(updated, nowIso());
-        await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_stopped", session.id, []);
+        await this.auditAuthenticationRuntimeDecision("runtime:auth_signout_stopped", session.id, []);
         this.publish("session.updated", session.id, updated);
       });
     }
     return [...blockers];
   }
 
-  private async codexAuthenticationRuntimeRestartBlockers(
+  private async authenticationRuntimeRestartBlockers(
     session: ManagedSession,
     reconcileStaleStatus = false
   ): Promise<string[]> {
@@ -551,7 +552,7 @@ export class SessionManager {
     return [...new Set(blockers)];
   }
 
-  private async auditCodexAuthenticationRuntimeDecision(
+  private async auditAuthenticationRuntimeDecision(
     action: string,
     sessionId: string,
     blockers: string[]
@@ -563,8 +564,8 @@ export class SessionManager {
     }
   }
 
-  resumeQueuedInputsAfterAuthentication(): void {
-    void this.db.listSessions(false, false).then((sessions) => {
+  resumeQueuedInputsAfterAuthentication(provider: AgentProviderKind): void {
+    void this.providerSessions(provider).then((sessions) => {
       for (const session of sessions) this.runBackgroundTask("queued input", () => this.processQueuedInputs(session.id));
     });
   }
@@ -963,7 +964,7 @@ export class SessionManager {
   }
 
   async codexModelCatalog(): Promise<CodexModelCatalogResponse> {
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable("codex");
     return await this.codexMetadata?.catalog() ?? {
       models: [],
       defaults: emptySessionModels()
@@ -1417,7 +1418,7 @@ export class SessionManager {
 
     const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
-      this.authenticationGuard?.();
+      this.requireAuthenticationReady(live.provider.kind);
       const session = await this.resumeAppServerSession(live);
       if (session.archived) await this.db.markSessionArchived(session.id, false, nowIso());
       const updated = requireSession(await this.db.getSession(session.id));
@@ -1430,10 +1431,10 @@ export class SessionManager {
       const detail = restoreProvider ? restoreProvider.compatibility().detail : "the provider is not enabled";
       throw new SessionRestoreError(`${providerDisplayName(source.provider.kind)} sessions are unavailable: ${detail}`);
     }
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable(source.provider.kind);
     const restored = await this.resumeAppServerSession(source);
     await this.db.markSessionArchived(restored.id, false, nowIso());
-    await this.db.addAudit("local", "restore_session:codex_app_server", source.id, "ok", nowIso());
+    await this.db.addAudit("local", `restore_session:${source.provider.kind}`, source.id, "ok", nowIso());
     const updated = requireSession(await this.db.getSession(restored.id));
     this.publish("session.updated", updated.id, updated);
     return { session: updated, restored: true };
@@ -1559,9 +1560,9 @@ export class SessionManager {
     actorSessionId: string | null = null,
     content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<QueuedInput> {
-    this.authenticationGuard?.();
     const storedSession = await this.db.getSession(sessionId);
     const session = requireSession(storedSession);
+    this.requireAuthenticationReady(session.provider.kind);
     if (session.authenticationResumeRequired) throw new QueuedInputError("Resume this session after its authentication failure before queuing more work.");
     if (session.status === "input_failed") {
       throw new QueuedInputError("Retry or dismiss the failed input before queuing another message");
@@ -1759,8 +1760,8 @@ export class SessionManager {
     delivery: InputDeliveryIntent = "auto",
     content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
-    this.authenticationGuard?.();
     const session = requireSession(await this.db.getSession(sessionId));
+    this.requireAuthenticationReady(session.provider.kind);
     if (session.authenticationResumeRequired) throw new InputDeliveryError("Resume this session after its authentication failure before sending more work.");
     return this.serializeRuntimeOperation(sessionId, () => this.sendInputExclusive(sessionId, text, mode, actorSessionId, delivery, content));
   }
@@ -2718,7 +2719,7 @@ export class SessionManager {
     agentOwnership?: AgentSessionOwnership,
     provider: AgentProviderKind = this.providers.defaultProvider()
   ): Promise<ManagedSession> {
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable(provider);
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
     this.providers.driver(provider);
@@ -2735,7 +2736,7 @@ export class SessionManager {
       ...resolvedLaunchSettings
     }, documentScopeId);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable(provider);
     const session = await this.launchAppServerSession({
       provider,
       operation: "start",
@@ -2758,10 +2759,10 @@ export class SessionManager {
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
     agentOwnership?: AgentSessionOwnership
   ): Promise<ManagedSession> {
-    this.requireAuthenticationAvailable();
+    const provider = request.provider ?? this.providers.defaultProvider();
+    this.requireAuthenticationAvailable(provider);
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
-    const provider = request.provider ?? this.providers.defaultProvider();
     this.providers.driver(provider);
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
@@ -2792,7 +2793,7 @@ export class SessionManager {
       fastMode: resolvedLaunchSettings?.fastMode
     }, workspace.id);
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable(provider);
     const session = await this.launchAppServerSession({
       provider,
       operation: "start",
@@ -2813,9 +2814,9 @@ export class SessionManager {
   }
 
   async forkSession(sessionId: string, name: string): Promise<ManagedSession> {
-    this.requireAuthenticationAvailable();
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
+    this.requireAuthenticationAvailable(source.provider.kind);
     if (source.authenticationResumeRequired) throw new AgentSessionError("Resume this session after its authentication failure before forking it.");
     const sourceThreadId = sessionThreadId(source);
     if (!sourceThreadId) throw new CreateSessionError("Session does not have a provider conversation id to fork");
@@ -2878,7 +2879,7 @@ export class SessionManager {
     }
 
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
-    this.requireAuthenticationAvailable();
+    this.requireAuthenticationAvailable(source.provider.kind);
     const session = await this.launchAppServerSession({
       provider: source.provider.kind,
       operation: "fork",
@@ -3487,7 +3488,7 @@ export class SessionManager {
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     if (action.type === "resumeAfterAuthentication") {
       await this.serializeRuntimeOperation(sessionId, async () => {
-        this.authenticationGuard?.();
+        this.requireAuthenticationReady(session.provider.kind);
         const current = requireSession(await this.db.getSession(sessionId));
         if (current.runtime?.kind === "systemd_service" && current.runtime.state === "stopped") {
           await this.resumeAppServerSession(current);
@@ -3841,7 +3842,9 @@ export class SessionManager {
   private async processQueuedInputs(sessionId: string): Promise<void> {
     if (this.processingQueuedSessionIds.has(sessionId) || this.deliveringInputSessionIds.has(sessionId)) return;
     try {
-      this.authenticationGuard?.();
+      const session = await this.db.getSession(sessionId);
+      if (!session) return;
+      this.requireAuthenticationReady(session.provider.kind);
     } catch {
       return;
     }
@@ -3945,7 +3948,7 @@ export class SessionManager {
     requestedModel: string,
     reasoningEffort: string | null
   ): Promise<void> {
-    this.authenticationGuard?.();
+    this.requireAuthenticationReady(session.provider.kind);
     const driver = this.requireDriver(session);
     if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
     const catalog = await this.codexModelCatalog();

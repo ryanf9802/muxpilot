@@ -8,7 +8,7 @@ import type {
   CodexModelCatalogResponse,
   GlobalModelSettingsResponse,
   CodexUsageSummaryResponse,
-  CodexAuthState,
+  ProviderAuthState,
   CodexTokenUsageResponse,
   ConsumeCodexResetCreditRequest,
   ConsumeCodexResetCreditResponse,
@@ -184,8 +184,8 @@ export const api = {
   consumeCodexResetCredit: (request: ConsumeCodexResetCreditRequest) =>
     json<ConsumeCodexResetCreditResponse>("/api/codex-usage/reset", { method: "POST", body: JSON.stringify(request) }),
   codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
-  codexAuth: () => json<CodexAuthState>("/api/codex-auth"),
-  refreshCodexAuth: () => json<CodexAuthState>("/api/codex-auth/refresh", { method: "POST" }),
+  codexAuth: () => json<ProviderAuthState>("/api/codex-auth"),
+  refreshCodexAuth: () => json<ProviderAuthState>("/api/codex-auth/refresh", { method: "POST" }),
   globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
   updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>
     json<GlobalModelSettingsResponse>("/api/model-settings/defaults", {

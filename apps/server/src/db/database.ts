@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import type {
+  AgentProviderKind,
   AgentSessionOwnership,
   ApprovalMode,
   ApprovalReviewerSettings,
@@ -62,7 +63,10 @@ const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
 const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
 const CODEX_AUTH_PROFILES = "codex_auth_profiles_v1";
-const CODEX_AUTH_RECONCILED_PRINCIPAL = "codex_auth_reconciled_principal_v1";
+/** `codex_auth_reconciled_principal_v1` predates multi-provider support; the key shape is kept for every provider. */
+function providerAuthReconciledPrincipalKey(provider: AgentProviderKind): string {
+  return `${provider}_auth_reconciled_principal_v1`;
+}
 const TRANSCRIPT_SCAN_CHUNK_SIZE = 256;
 const USAGE_LIMIT_THRESHOLDS: readonly UsageLimitThreshold[] = [75, 50, 25, 10, 0];
 
@@ -749,12 +753,12 @@ export class AppDatabase {
     return this.call("clearCodexAuthProfiles") as Promise<void>;
   }
 
-  getCodexAuthReconciledPrincipal(): Promise<string | null> {
-    return this.call("getCodexAuthReconciledPrincipal") as Promise<string | null>;
+  getProviderAuthReconciledPrincipal(provider: AgentProviderKind): Promise<string | null> {
+    return this.call("getProviderAuthReconciledPrincipal", provider) as Promise<string | null>;
   }
 
-  setCodexAuthReconciledPrincipal(principal: string, updatedAt: string): Promise<void> {
-    return this.call("setCodexAuthReconciledPrincipal", principal, updatedAt) as Promise<void>;
+  setProviderAuthReconciledPrincipal(provider: AgentProviderKind, principal: string, updatedAt: string): Promise<void> {
+    return this.call("setProviderAuthReconciledPrincipal", provider, principal, updatedAt) as Promise<void>;
   }
 
   getUnrestrictedRemoteAccessEnabled(): Promise<boolean> {
@@ -2730,12 +2734,12 @@ export class SyncAppDatabase {
     this.db.prepare("DELETE FROM app_settings WHERE key = ?").run(CODEX_AUTH_PROFILES);
   }
 
-  getCodexAuthReconciledPrincipal(): string | null {
-    return this.getSetting(CODEX_AUTH_RECONCILED_PRINCIPAL);
+  getProviderAuthReconciledPrincipal(provider: AgentProviderKind): string | null {
+    return this.getSetting(providerAuthReconciledPrincipalKey(provider));
   }
 
-  setCodexAuthReconciledPrincipal(principal: string, updatedAt: string): void {
-    this.setSetting(CODEX_AUTH_RECONCILED_PRINCIPAL, principal, updatedAt);
+  setProviderAuthReconciledPrincipal(provider: AgentProviderKind, principal: string, updatedAt: string): void {
+    this.setSetting(providerAuthReconciledPrincipalKey(provider), principal, updatedAt);
   }
 
   getUnrestrictedRemoteAccessEnabled(): boolean {

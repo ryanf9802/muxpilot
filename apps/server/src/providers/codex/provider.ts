@@ -6,7 +6,7 @@ import { sessionRuntimeCapabilityId } from "../../runtime/capabilityId.js";
 import { ProtocolJournal, protocolJournalPath } from "../../runtime/protocolJournal.js";
 import { shellQuote, SystemdSessionSupervisor } from "../../runtime/systemdSessionSupervisor.js";
 import { ProjectionReconciler } from "../shared/projectionReconciler.js";
-import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig } from "../types.js";
+import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig, ProviderAuthGate } from "../types.js";
 import { CodexAppServerConnectionManager } from "./connectionManager.js";
 import { CodexAppServerDriver } from "./driver.js";
 import { codexProjectionAdapter } from "./reconciler.js";
@@ -33,6 +33,7 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = {
 
 export interface CodexProviderOptions {
   compatibility: ProviderCompatibility;
+  auth: ProviderAuthGate;
   dataDir: string;
   runtimeDir?: string;
   codexHome: string;
@@ -55,7 +56,8 @@ export function createCodexProvider(options: CodexProviderOptions): AgentProvide
     capabilities: CODEX_CAPABILITIES,
     skillInvocation: { prefix: "$", position: "anywhere" },
     compatibility: () => options.compatibility,
-    driver: createCodexDriver(options)
+    driver: createCodexDriver(options),
+    auth: options.auth
   };
 }
 

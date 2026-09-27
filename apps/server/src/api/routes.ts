@@ -64,7 +64,8 @@ import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
-import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../providers/codex/authLifecycle.js";
+import type { CodexAuthLifecycle } from "../providers/codex/authLifecycle.js";
+import { ProviderAuthUnavailableError } from "../providers/shared/authLifecycle.js";
 import { SessionEnvironmentError, type SessionEnvironmentService } from "../services/sessionEnvironment.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
@@ -255,7 +256,7 @@ export function registerRoutes(
     try {
       return await manager.codexModelCatalog();
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });
@@ -269,7 +270,7 @@ export function registerRoutes(
     try {
       return { settings: await manager.globalModelSettings() };
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
   });
@@ -279,7 +280,7 @@ export function registerRoutes(
     try {
       return { settings: await manager.updateGlobalModelSettings(body.mode, body.model, body.reasoningEffort) };
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
@@ -294,7 +295,7 @@ export function registerRoutes(
     try {
       return { settings: await manager.updateApprovalReviewerSettings(body.model, body.reasoningEffort) };
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
@@ -464,7 +465,7 @@ export function registerRoutes(
     try {
       return await manager.restoreSession(id);
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNotFoundError || error instanceof SessionRestoreError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
@@ -482,7 +483,7 @@ export function registerRoutes(
     try {
       return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds);
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionRestoreError || error instanceof SessionNotFoundError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
@@ -506,7 +507,7 @@ export function registerRoutes(
       const session = await manager.createSession(body);
       return reply.code(201).send({ session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNameError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof CreateSessionError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
@@ -527,7 +528,7 @@ export function registerRoutes(
       const session = await manager.forkSession(id, body.name);
       return reply.code(201).send({ session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) {
+      if (error instanceof ProviderAuthUnavailableError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
       }
@@ -752,7 +753,7 @@ export function registerRoutes(
         ? { ok: true, session: null, message: null, queuedInput: result.queuedInput }
         : { ok: true, ...result, queuedInput: null });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof InputModeSwitchError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
@@ -818,7 +819,7 @@ export function registerRoutes(
     try {
       return reply.code(202).send({ exchange: await btw.ask(id, body.text) });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) {
+      if (error instanceof ProviderAuthUnavailableError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
       }
@@ -860,7 +861,7 @@ export function registerRoutes(
       const input = await manager.enqueueInput(id, canonicalInputText(body), body.mode, null, body.content);
       return reply.code(201).send({ queuedInput: input });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
@@ -899,7 +900,7 @@ export function registerRoutes(
       const session = await manager.act(id, action);
       return reply.code(202).send({ ok: true, session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNameError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }

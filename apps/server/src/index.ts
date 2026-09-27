@@ -133,6 +133,7 @@ const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
 await sessionEnvironment.initialize();
 const codexProvider = createCodexProvider({
   compatibility: appServerCompatibility,
+  auth: codexAuth,
   dataDir: config.dataDir,
   runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
   codexHome: config.codexHome,
@@ -163,20 +164,18 @@ const manager = new SessionManager({
   sessionEnvironment
 });
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
-manager.setAuthenticationGuard(() => codexAuth.assertReady());
-manager.setAuthenticationAvailabilityGuard(() => codexAuth.assertAvailable());
 btw.setAuthenticationGuard(() => codexAuth.assertReady());
 codexAuth.setRuntimeHooks({
-  blockers: async () => [...new Set([...await manager.codexAuthenticationBlockers(), ...btw.authenticationBlockers()])],
-  reconcile: (sessionIds) => manager.reconcileCodexAuthentication(sessionIds),
-  suspend: () => manager.suspendForCodexSignOut(),
+  blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("codex"), ...btw.authenticationBlockers()])],
+  reconcile: (sessionIds) => manager.reconcileProviderAuthentication("codex", sessionIds),
+  suspend: () => manager.suspendForProviderSignOut("codex"),
   invalidateConsumers: () => {
     codexUsage.invalidateAuthentication();
     codexModels.invalidateAuthentication();
     approvalReviewer.invalidateAuthentication();
     btw.invalidateAuthentication();
   },
-  admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication()
+  admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("codex")
 });
 await codexAuth.start();
 const rawSessionEvidence = new RawSessionEvidenceReader(

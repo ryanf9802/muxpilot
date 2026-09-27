@@ -619,7 +619,7 @@ export interface SessionEvent {
     | "btw.updated"
     | "btw.finished"
     | "documents.updated"
-    | "codex.auth.updated";
+    | "provider.auth.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;
@@ -1156,29 +1156,6 @@ export interface CodexUsageSummaryResponse {
     weekly: CodexUsageLimit | null;
   };
   resetCredits: CodexRateLimitResetCredits | null;
-}
-
-export type CodexAuthLifecycleStatus =
-  | "checking"
-  | "ready"
-  | "signed_out"
-  | "authentication_required"
-  | "temporarily_unavailable";
-
-export interface CodexAuthAccount {
-  type: string;
-  email: string | null;
-  planType: string | null;
-}
-
-export interface CodexAuthState {
-  status: CodexAuthLifecycleStatus;
-  account: CodexAuthAccount | null;
-  revision: number;
-  observedAt: string;
-  error: string | null;
-  admissionHeld: boolean;
-  pendingSessionIds: string[];
 }
 
 export interface CodexTokenUsageDailyPoint {

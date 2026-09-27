@@ -9,6 +9,7 @@ import type {
   QuestionAnswerRequest,
   SessionCapabilities,
   SessionModelSettings,
+  ProviderAuthState,
   ProviderCapabilities,
   ProviderCompatibility,
   ProviderSkillInvocation,
@@ -174,4 +175,15 @@ export interface AgentProvider {
   /** Startup compatibility probe result; an unavailable provider has no driver. */
   compatibility(): ProviderCompatibility;
   readonly driver: AgentSessionDriver | null;
+  readonly auth: ProviderAuthGate;
+}
+
+/** The authentication surface SessionManager and routes use; implemented by ProviderAuthLifecycle. */
+export interface ProviderAuthGate {
+  state(): ProviderAuthState;
+  /** Throws ProviderAuthUnavailableError unless the account is signed in. */
+  assertAvailable(): void;
+  /** Throws unless signed in and no account change is still being reconciled. */
+  assertReady(): void;
+  refresh(): Promise<ProviderAuthState>;
 }
