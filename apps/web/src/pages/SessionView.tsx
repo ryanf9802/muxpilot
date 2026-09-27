@@ -1697,7 +1697,7 @@ export function SessionView() {
     sessions: shellSessions,
     openCreateSession,
     openForkSession,
-    registerCreateSessionCwdPrefill,
+    registerCreateSessionPrefill,
     registerPromptHistoryPrefill,
     registerPrimaryInputFocus,
     connectionEpoch,
@@ -1950,8 +1950,10 @@ export function SessionView() {
   }, [session]);
 
   useEffect(
-    () => registerCreateSessionCwdPrefill(() => (sessionRef.current ? sessionCreateSessionCwd(sessionRef.current) : "")),
-    [registerCreateSessionCwdPrefill]
+    () => registerCreateSessionPrefill(() => (sessionRef.current
+      ? { cwd: sessionCreateSessionCwd(sessionRef.current), provider: sessionProvider(sessionRef.current) }
+      : { cwd: "" })),
+    [registerCreateSessionPrefill]
   );
 
   useEffect(
@@ -3577,7 +3579,7 @@ export function SessionView() {
           <button
             className="session-new-session-button"
             type="button"
-            onClick={() => openCreateSession(sessionCreateSessionCwd(readySession))}
+            onClick={() => openCreateSession(sessionCreateSessionCwd(readySession), { provider: sessionProvider(readySession) })}
             aria-label="New session"
             title="New session"
           >

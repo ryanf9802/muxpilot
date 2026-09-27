@@ -51,6 +51,13 @@ describe("dashboard data ownership", () => {
     expect(filterSessionsByDashboardQuery([matching, other], "CACHE")).toEqual([matching]);
   });
 
+  it("matches sessions by provider label", () => {
+    const claude = testSession({ id: "claude", paneId: "%113", windowName: "work" });
+    claude.provider = { kind: "claude", threadId: null, transcriptPath: null };
+    const codex = testSession({ id: "codex", paneId: "%114", windowName: "work" });
+    expect(filterSessionsByDashboardQuery([claude, codex], "claude")).toEqual([claude]);
+  });
+
   it("filters by the stable name after an app-server rename", () => {
     const renamed = testSession({ id: "renamed", paneId: "%111", windowName: "changes" });
     renamed.name = "runtime-evidence";
@@ -725,6 +732,41 @@ describe("ProviderUsagePanel", () => {
     expect(html).toContain("Codex account authentication required.");
     expect(html).toContain("Not signed in");
     expect(html).toContain("unavailable");
+  });
+});
+
+describe("SessionCard provider badges", () => {
+  it("shows the provider only when badges are enabled and marks children from another provider", () => {
+    const root = testSession({ id: "root", paneId: "%120", windowName: "root" });
+    const child = testSession({ id: "child", paneId: "%121", windowName: "child" });
+    child.provider = { kind: "claude", threadId: null, transcriptPath: null };
+    child.agentOwnership = {
+      parentSessionId: "root",
+      rootSessionId: "root",
+      origin: "created",
+      createdAt: "2026-07-07T12:00:00.000Z",
+      workTokenBaseline: 0,
+      workTokenBudget: 1_000_000,
+      completedAt: null
+    };
+    const props = {
+      session: root,
+      displayName: "root",
+      previewLines: [],
+      notificationRules: [],
+      notificationRing: null,
+      children: [child],
+      onOpen: () => undefined,
+      onOpenMenu: () => undefined,
+      onOpenMenuFromButton: () => undefined
+    };
+
+    const hidden = renderToStaticMarkup(createElement(SessionCard, props));
+    expect(hidden).not.toContain('aria-label="Codex provider"');
+    expect(hidden).toContain('aria-label="Claude provider"');
+
+    const shown = renderToStaticMarkup(createElement(SessionCard, { ...props, showProvider: true }));
+    expect(shown).toContain('aria-label="Codex provider"');
   });
 });
 

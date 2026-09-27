@@ -12,6 +12,7 @@ import {
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
+  AgentProviderKind,
   ProviderModelCatalogResponse,
   ApprovalReviewerSettings,
   CollaborationMode,
@@ -34,7 +35,8 @@ import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
 import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
-import { providerUsageEnabled } from "../utils/providers.js";
+import { findProvider, providerLabel, providerUsageEnabled, sessionProvider, shouldShowProviderBadges } from "../utils/providers.js";
+import { ProviderBadge } from "../components/ProviderBadge.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
@@ -173,6 +175,7 @@ export function Dashboard() {
   );
 
   const sessionGroups = useMemo(() => groupSessionsByRepo(sessions), [sessions]);
+  const showProviderBadges = shouldShowProviderBadges(providers.providers, shellSessions);
   const renameNameWarning = renameSession ? sessionNameValidationMessage(renameName) : null;
   const renameNameInvalid = Boolean(renameSession) && !isValidSessionName(normalizeSessionName(renameName));
 
@@ -451,6 +454,7 @@ export function Dashboard() {
                         notificationRules={sessionNotificationRules(notificationSettings, session.id)}
                         notificationRing={notificationRings[session.id] ?? null}
                         children={agentSessionDescendants(session.id, sessions)}
+                        showProvider={showProviderBadges}
                         onOpen={() => navigate(`/sessions/${session.id}`)}
                         onOpenChild={(childId) => navigate(`/sessions/${childId}`)}
                         onOpenMenu={openMenu}
@@ -490,7 +494,7 @@ export function Dashboard() {
               setMenu(null);
               openForkSession(menu.session);
             }}
-            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.provider.threadId}
+            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.provider?.threadId || findProvider(providers.providers, sessionProvider(menu.session))?.capabilities.fork === false}
           >
             Fork session
           </ContextMenuItem>
@@ -751,6 +755,7 @@ export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query
   if (!needle) return sessions;
   return sessions.filter((session) => [
     sessionBaseName(session),
+    providerLabel(sessionProvider(session)),
     session.repo.name,
     session.repo.branch,
     session.preview,
@@ -800,6 +805,7 @@ export function SessionCard({
   notificationRules,
   notificationRing,
   children = [],
+  showProvider = false,
   onOpen,
   onOpenChild = () => undefined,
   onOpenMenu,
@@ -811,6 +817,7 @@ export function SessionCard({
   notificationRules: NotificationRuleType[];
   notificationRing: NotificationTriggeredPayload["severity"] | null;
   children?: ManagedSession[];
+  showProvider?: boolean;
   onOpen: () => void;
   onOpenChild?: (sessionId: string) => void;
   onOpenMenu: (session: ManagedSession, x: number, y: number) => void;
@@ -852,6 +859,7 @@ export function SessionCard({
             ) : null}
           </div>
           <span className="session-card-head-actions">
+            {showProvider ? <ProviderBadge provider={sessionProvider(session)} /> : null}
             {session.fastMode === true ? (
               <span className="session-fast-mode-indicator" title="Fast mode enabled" aria-label="Fast mode enabled">
                 <Zap size={14} />
@@ -912,7 +920,7 @@ export function SessionCard({
             {allChildrenCompleted ? null : <span>{agentTreeStatusLabel(children)}</span>}
           </summary>
           <div className="agent-session-children">
-            <AgentSessionRows parentSessionId={session.id} allSessions={children} depth={0} onOpen={onOpenChild} revealCompleted={allChildrenCompleted} />
+            <AgentSessionRows parentSessionId={session.id} rootProvider={sessionProvider(session)} allSessions={children} depth={0} onOpen={onOpenChild} revealCompleted={allChildrenCompleted} />
           </div>
         </details>
       ) : null}
@@ -1142,12 +1150,14 @@ function includeAgentAncestors(filtered: ManagedSession[], all: ManagedSession[]
 
 function AgentSessionRows({
   parentSessionId,
+  rootProvider,
   allSessions,
   depth,
   onOpen,
   revealCompleted = false
 }: {
   parentSessionId: string;
+  rootProvider: AgentProviderKind;
   allSessions: ManagedSession[];
   depth: number;
   onOpen: (sessionId: string) => void;
@@ -1164,14 +1174,14 @@ function AgentSessionRows({
   return (
     <>
       {visibleChildren.map((child) => (
-        <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted={revealCompleted} />
+        <AgentSessionRow key={child.id} session={child} rootProvider={rootProvider} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted={revealCompleted} />
       ))}
       {completedRoots.length > 0 ? (
         <details className="agent-session-completed">
           <summary>{formatSessionCount(completedCount, "completed agent")}</summary>
           <div className="agent-session-completed-children">
             {completedRoots.map((child) => (
-              <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted />
+              <AgentSessionRow key={child.id} session={child} rootProvider={rootProvider} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted />
             ))}
           </div>
         </details>
@@ -1180,7 +1190,8 @@ function AgentSessionRows({
   );
 }
 
-function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
+function AgentSessionRow({ session, rootProvider, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; rootProvider: AgentProviderKind; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
+  const provider = sessionProvider(session);
   const statusPresentation = sessionStatusPresentation(session, allSessions);
   const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
   const ownership = session.agentOwnership;
@@ -1189,11 +1200,14 @@ function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted 
   return (
     <div className="agent-session-branch" style={{ "--agent-depth": depth } as CSSProperties}>
       <button className="agent-session-row" type="button" data-completed={statusPresentation.status === "completed" || undefined} onClick={() => onOpen(session.id)}>
-        <span className="agent-session-row-name">{sessionDisplayName(session)}</span>
+        <span className="agent-session-row-name">
+          {sessionDisplayName(session)}
+          {provider !== rootProvider ? <ProviderBadge provider={provider} /> : null}
+        </span>
         <span className="agent-session-row-meta">{context}{budget ? ` · ${budget}` : ""}</span>
         {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} />}
       </button>
-      <AgentSessionRows parentSessionId={session.id} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />
+      <AgentSessionRows parentSessionId={session.id} rootProvider={rootProvider} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />
     </div>
   );
 }

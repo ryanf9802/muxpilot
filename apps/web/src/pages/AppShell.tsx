@@ -65,7 +65,20 @@ import { installVisibleViewportVariables } from "../utils/visualViewport.js";
 import { useProviderUsageMonitor, type ProviderUsageMonitor } from "../hooks/useProviderUsageMonitor.js";
 import { useResetCredits, type ResetCreditsMonitor } from "../hooks/useResetCredits.js";
 import { isProviderAuthUpdatedEvent, useProviders, type ProvidersState } from "../hooks/useProviders.js";
-import { findProvider, providerCompatibilityLabel, providerLabel, providerUnavailableReason, providerUsageEnabled } from "../utils/providers.js";
+import {
+  findProvider,
+  loadLastUsedProvider,
+  providerCreateAvailability,
+  providerLabel,
+  providerUnavailableReason,
+  providerUsageEnabled,
+  resolveInitialProvider,
+  saveLastUsedProvider,
+  sessionProvider,
+  shouldShowProviderBadges
+} from "../utils/providers.js";
+import { ProviderBadge } from "../components/ProviderBadge.js";
+import { ProviderSelector } from "../components/ProviderSelector.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -113,6 +126,8 @@ export function AppShell() {
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
+  const [createSessionProviderChoice, setCreateSessionProviderChoice] = useState<AgentProviderKind | null>(null);
+  const [createSessionProviderPreference, setCreateSessionProviderPreference] = useState<{ parent: AgentProviderKind | null; lastUsed: AgentProviderKind | null }>({ parent: null, lastUsed: null });
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
   const [createSessionTab, setCreateSessionTab] = useState<"create" | "history">("create");
@@ -156,6 +171,15 @@ export function AppShell() {
     claude: { ...claudeUsage, resetCredits: claudeResetCredits }
   }), [claudeResetCredits, claudeUsage, codexResetCredits, codexUsage]);
   const { applyAuthUpdate: applyProviderAuthUpdate, reload: reloadProviders } = providers;
+  // Until the operator picks explicitly, the provider follows the latest catalog so late-loading status is respected.
+  const createSessionProvider = createSessionProviderChoice ?? resolveInitialProvider({
+    parent: createSessionProviderPreference.parent,
+    lastUsed: createSessionProviderPreference.lastUsed,
+    serverDefault: providers.defaultProvider,
+    providers: providers.providers
+  });
+  const createSessionDescriptor = findProvider(providers.providers, createSessionProvider);
+  const createSessionAvailability = providerCreateAvailability(createSessionDescriptor);
   const sessionsRef = useRef<ManagedSession[]>([]);
   const sessionMutationSequenceRef = useRef(0);
   const sessionMutationsRef = useRef<SessionListMutation[]>([]);
@@ -176,7 +200,7 @@ export function AppShell() {
   const notificationMenuRef = useRef<HTMLDivElement | null>(null);
   const directorySuggestionRefs = useRef(new Map<string, HTMLButtonElement>());
   const promptHistoryPrefillRef = useRef<() => string>(() => "");
-  const createSessionCwdPrefillRef = useRef<() => string>(() => "");
+  const createSessionPrefillRef = useRef<() => CreateSessionPrefill>(() => ({ cwd: "" }));
   const primaryInputFocusRef = useRef<PrimaryInputFocusHandler>(() => false);
   const sessionHistoryRequestIdRef = useRef(0);
   const connectionProbeRef = useRef<{
@@ -611,7 +635,7 @@ export function AppShell() {
     }
     let cancelled = false;
     setGitSkillStatus("checking");
-    void api.gitWorkflowSkillStatus("codex").then((status) => {
+    void api.gitWorkflowSkillStatus(createSessionProvider).then((status) => {
       if (!cancelled) setGitSkillStatus(status.status);
     }).catch(() => {
       if (!cancelled) setGitSkillStatus("error");
@@ -619,7 +643,7 @@ export function AppShell() {
     return () => {
       cancelled = true;
     };
-  }, [createSessionGitProbe?.isGit, createSessionGitProbe?.repoRoot, createSessionOpen]);
+  }, [createSessionGitProbe?.isGit, createSessionGitProbe?.repoRoot, createSessionOpen, createSessionProvider]);
 
   useEffect(() => {
     if (!createSessionOpen || createSessionTab !== "history") return undefined;
@@ -655,6 +679,7 @@ export function AppShell() {
   });
 
   const stoplightCounts = useMemo(() => countSessionStatuses(sessions), [sessions]);
+  const showHistoryProviderBadges = shouldShowProviderBadges(providers.providers, sessionHistoryResults.map((result) => ({ provider: { kind: result.provider } })));
   const directorySuggestions = serverDirectorySuggestions;
   const createSessionNameWarning = createSessionOpen ? sessionNameValidationMessage(createSessionName) : null;
   const createSessionNameInvalid = createSessionOpen && !isValidSessionName(normalizeSessionName(createSessionName));
@@ -687,8 +712,10 @@ export function AppShell() {
     directorySuggestionRefs.current.get(path)?.scrollIntoView({ block: "nearest" });
   }, [createSessionDirectorySelectedIndex, showDirectorySuggestions, visibleDirectorySuggestions]);
 
-  const openCreateSession = useCallback((cwd = "") => {
+  const openCreateSession = useCallback((cwd = "", options: { provider?: AgentProviderKind } = {}) => {
     const hasPrefilledCwd = cwd.trim().length > 0;
+    setCreateSessionProviderChoice(null);
+    setCreateSessionProviderPreference({ parent: options.provider ?? null, lastUsed: loadLastUsedProvider() });
     setCreateSessionOpen(true);
     setCreateSessionTab("create");
     setCreateSessionCwd(cwd);
@@ -718,22 +745,22 @@ export function AppShell() {
       if (!isNewSessionShortcut(event)) return;
       event.preventDefault();
       if (createSessionOpen || forkSessionSource || connectOpen || promptHistoryOpen) return;
-      let cwd = "";
+      let prefill: CreateSessionPrefill = { cwd: "" };
       try {
-        cwd = createSessionCwdPrefillRef.current();
+        prefill = createSessionPrefillRef.current();
       } catch {
-        cwd = "";
+        prefill = { cwd: "" };
       }
-      openCreateSession(cwd);
+      openCreateSession(prefill.cwd, { provider: prefill.provider });
     };
     document.addEventListener("keydown", handleNewSessionShortcut);
     return () => document.removeEventListener("keydown", handleNewSessionShortcut);
   }, [connectionState, connectOpen, createSessionOpen, forkSessionSource, openCreateSession, promptHistoryOpen]);
 
-  const registerCreateSessionCwdPrefill = useCallback((provider: () => string) => {
-    createSessionCwdPrefillRef.current = provider;
+  const registerCreateSessionPrefill = useCallback((prefill: () => CreateSessionPrefill) => {
+    createSessionPrefillRef.current = prefill;
     return () => {
-      if (createSessionCwdPrefillRef.current === provider) createSessionCwdPrefillRef.current = () => "";
+      if (createSessionPrefillRef.current === prefill) createSessionPrefillRef.current = () => ({ cwd: "" });
     };
   }, []);
 
@@ -870,7 +897,7 @@ export function AppShell() {
     setForkSessionBusy(true);
     setForkSessionError(null);
     try {
-      const unavailable = providerUnavailableReason(codexDescriptor);
+      const unavailable = forkSessionBlockedReason(forkSessionSource, providers.providers);
       if (unavailable) {
         setForkSessionError(unavailable);
         return;
@@ -976,7 +1003,9 @@ export function AppShell() {
 
   async function restoreHistorySession(result: SessionHistoryResult) {
     if (sessionHistoryRestoreId) return;
-    const unavailable = providerUnavailableReason(codexDescriptor);
+    const unavailable = isSessionHistoryResultActive(result)
+      ? null
+      : providerCreateAvailability(findProvider(providers.providers, result.provider)).blocking;
     if (unavailable) {
       setSessionHistoryError(unavailable);
       return;
@@ -1025,13 +1054,14 @@ export function AppShell() {
 
   async function restoreSessionRecovery() {
     const incident = sessionRecoveryIncident;
-    if (!incident || sessionRecoveryBusy || sessionRecoverySelectedIds.size === 0) return;
+    const sessionIds = restorableRecoverySessionIds(incident, sessionRecoverySelectedIds, providers.providers);
+    if (!incident || sessionRecoveryBusy || sessionIds.length === 0) return;
     setSessionRecoveryBusy(true);
     setSessionRecoveryErrors({});
     try {
       const response = await api.restoreSessionRecovery({
         incidentId: incident.id,
-        sessionIds: [...sessionRecoverySelectedIds]
+        sessionIds
       });
       for (const result of response.results) {
         if (result.session) syncSessionStoplight(result.session);
@@ -1065,6 +1095,10 @@ export function AppShell() {
     if (!isValidSessionName(name)) {
       return;
     }
+    if (!createSessionAvailability.selectable) {
+      setCreateSessionError(createSessionAvailability.blocking);
+      return;
+    }
     if (createSessionGitProbe?.isGit && !gitWorkspaceFieldsAvailable) {
       setCreateSessionError("Run pnpm app start prod to install or update the muxpilot Git workflow skill first.");
       return;
@@ -1081,13 +1115,15 @@ export function AppShell() {
     setCreateSessionBusy(true);
     setCreateSessionError(null);
     try {
+      const provider = createSessionProvider;
       const request: CreateSessionRequest = createSessionGitProbe?.isGit
-        ? { cwd, name, workspace: {
+        ? { cwd, name, provider, workspace: {
             mode: "git" as const,
             targetBranch: createSessionTargetBranch.trim()
           } }
-        : { cwd, name, workspace: { mode: "directory" } };
+        : { cwd, name, provider, workspace: { mode: "directory" } };
       const response = await api.createSession(request);
+      saveLastUsedProvider(provider);
       syncSessionStoplight(response.session);
       setCreateSessionOpen(false);
       navigate(`/sessions/${response.session.id}`, { state: { loadingSession: response.session } });
@@ -1184,7 +1220,7 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
-      {sessionTransferOpen ? <SessionTransferDialog descriptor={codexDescriptor} onClose={() => setSessionTransferOpen(false)} /> : null}
+      {sessionTransferOpen ? <SessionTransferDialog providers={providers.providers} onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
           className="notification-rule-menu"
@@ -1301,7 +1337,7 @@ export function AppShell() {
               openCreateSession,
               openSessionTransfer,
               openForkSession,
-              registerCreateSessionCwdPrefill,
+              registerCreateSessionPrefill,
               registerPromptHistoryPrefill,
               registerPrimaryInputFocus,
               connectionEpoch,
@@ -1328,7 +1364,7 @@ export function AppShell() {
           selectedIds={sessionRecoverySelectedIds}
           busy={sessionRecoveryBusy}
           errors={sessionRecoveryErrors}
-          descriptor={codexDescriptor}
+          providers={providers.providers}
           onToggle={toggleSessionRecoverySelection}
           onDismiss={() => void dismissSessionRecovery()}
           onRestore={() => void restoreSessionRecovery()}
@@ -1340,7 +1376,7 @@ export function AppShell() {
           name={forkSessionName}
           busy={forkSessionBusy}
           error={forkSessionError}
-          descriptor={codexDescriptor}
+          providers={providers.providers}
           onNameChange={(value) => {
             setForkSessionName(normalizeSessionNameInput(value));
             setForkSessionError(null);
@@ -1370,11 +1406,20 @@ export function AppShell() {
             </div>
             {createSessionTab === "create" ? (
               <>
-                <p className="session-git-probe-note" data-status={codexDescriptor?.compatibility.status}>
-                  {!providers.loaded && providers.loading
-                    ? "Checking Codex compatibility…"
-                    : providerCompatibilityLabel(codexDescriptor)}
-                </p>
+                {!providers.loaded ? (
+                  <p className="session-git-probe-note">{providers.error ? "Providers could not be loaded." : "Checking providers…"}</p>
+                ) : (
+                  <ProviderSelector
+                    providers={providers.providers}
+                    value={createSessionProvider}
+                    disabled={createSessionBusy}
+                    onChange={(provider) => {
+                      setCreateSessionProviderChoice(provider);
+                      setCreateSessionError(null);
+                    }}
+                    onCheckAuth={providers.refreshAuth}
+                  />
+                )}
                 <label className="rename-field">
                   <span>Directory</span>
                   <div className="session-directory-combobox">
@@ -1446,9 +1491,9 @@ export function AppShell() {
                         </select>
                       </label>
                     ) : null}
-                    <GitWorkflowSkillStatusCallout status={gitSkillStatus} onRetry={() => {
+                    <GitWorkflowSkillStatusCallout provider={createSessionProvider} status={gitSkillStatus} onRetry={() => {
                       setGitSkillStatus("checking");
-                      void api.gitWorkflowSkillStatus("codex").then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
+                      void api.gitWorkflowSkillStatus(createSessionProvider).then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
                     }} />
                     {gitWorkspaceFieldsAvailable && createSessionGitProbe.localBranches.length === 0
                       ? <p className="session-git-probe-note">This repository has no local branches.</p>
@@ -1482,7 +1527,7 @@ export function AppShell() {
                   <Button
                     variant="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || !codexDescriptor?.compatibility.available || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
+                    disabled={createSessionBusy || createSessionNameInvalid || !createSessionAvailability.selectable || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
                     busy={createSessionBusy}
                     busyLabel="Creating"
                   >
@@ -1512,6 +1557,7 @@ export function AppShell() {
                     ? sessionHistoryResults.map((result, index) => {
                         const active = isSessionHistoryResultActive(result);
                         const actionLabel = sessionHistoryResultActionLabel(result);
+                        const blocked = active ? null : providerCreateAvailability(findProvider(providers.providers, result.provider)).blocking;
                         return (
                           <button
                             key={sessionHistoryResultKey(result)}
@@ -1520,6 +1566,9 @@ export function AppShell() {
                             aria-selected={index === sessionHistorySelectedIndex}
                             className={index === sessionHistorySelectedIndex ? "session-history-result session-history-result-selected" : "session-history-result"}
                             disabled={Boolean(sessionHistoryRestoreId)}
+                            data-provider={result.provider}
+                            data-unavailable={blocked ? true : undefined}
+                            title={blocked ?? undefined}
                             onMouseEnter={() => setSessionHistorySelectedIndex(index)}
                             onMouseDown={(event) => event.preventDefault()}
                             onClick={() => void restoreHistorySession(result)}
@@ -1527,6 +1576,7 @@ export function AppShell() {
                             <span className="session-history-result-main">
                               <span className="session-history-result-title">
                                 <strong>{result.sessionName}</strong>
+                                {showHistoryProviderBadges ? <ProviderBadge provider={result.provider} /> : null}
                                 {active ? <span className="session-history-result-active">Active</span> : null}
                               </span>
                               <span className="session-history-result-meta">{sessionHistoryResultMeta(result)}</span>
@@ -1567,7 +1617,7 @@ export function SessionRecoveryContent({
   selectedIds,
   busy,
   errors,
-  descriptor,
+  providers,
   onToggle,
   onDismiss,
   onRestore
@@ -1576,32 +1626,41 @@ export function SessionRecoveryContent({
   selectedIds: ReadonlySet<string>;
   busy: boolean;
   errors: Record<string, string>;
-  descriptor: ProviderDescriptor | null;
+  providers: ProviderDescriptor[];
   onToggle: (sessionId: string) => void;
   onDismiss: () => void;
   onRestore: () => void;
 }) {
+  const restorableIds = restorableRecoverySessionIds(incident, selectedIds, providers);
+  const showProviderBadges = shouldShowProviderBadges(providers, incident.sessions.map((session) => ({ provider: { kind: session.provider } })));
   return (
     <>
       <p className="session-recovery-copy">
         muxpilot stopped unexpectedly. Reopen the conversations you had running before the interruption. Commands that were executing will not restart automatically.
       </p>
       <div className="session-recovery-results" role="group" aria-label="Sessions to restore">
-        {incident.sessions.map((session) => (
-          <label className="session-recovery-result" key={sessionHistoryResultKey(session)}>
-            <input type="checkbox" checked={selectedIds.has(session.sessionId)} disabled={busy} onChange={() => onToggle(session.sessionId)} />
-            <span className="session-recovery-result-main">
-              <strong>{session.sessionName}</strong>
-              <span>{sessionHistoryResultMeta({ ...session, status: session.previousStatus })}</span>
-              {errors[session.sessionId] ? <small role="alert">{errors[session.sessionId]}</small> : null}
-            </span>
-          </label>
-        ))}
+        {incident.sessions.map((session) => {
+          const unavailable = providerUnavailableReason(findProvider(providers, session.provider), session.provider);
+          return (
+            <label className="session-recovery-result" key={sessionHistoryResultKey(session)} data-provider={session.provider}>
+              <input type="checkbox" checked={!unavailable && selectedIds.has(session.sessionId)} disabled={busy || Boolean(unavailable)} onChange={() => onToggle(session.sessionId)} />
+              <span className="session-recovery-result-main">
+                <span className="session-recovery-result-title">
+                  <strong>{session.sessionName}</strong>
+                  {showProviderBadges ? <ProviderBadge provider={session.provider} /> : null}
+                </span>
+                <span>{sessionHistoryResultMeta({ ...session, status: session.previousStatus })}</span>
+                {unavailable ? <small>{unavailable}</small> : null}
+                {errors[session.sessionId] ? <small role="alert">{errors[session.sessionId]}</small> : null}
+              </span>
+            </label>
+          );
+        })}
       </div>
       <DialogActions>
         <Button variant="ghost" onClick={onDismiss} disabled={busy}>Not now</Button>
-        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !descriptor?.compatibility.available} busy={busy} busyLabel="Restoring">
-          Restore selected ({selectedIds.size})
+        <Button variant="primary" onClick={onRestore} disabled={busy || restorableIds.length === 0} busy={busy} busyLabel="Restoring">
+          Restore selected ({restorableIds.length})
         </Button>
       </DialogActions>
     </>
@@ -1617,10 +1676,10 @@ export interface AppShellOutletContext {
   retrySessions: () => Promise<void>;
   subscribeSessionEvents: (listener: (event: SessionEvent) => void) => () => void;
   sessionStoplightSeverity: SessionStatusSeverity | null;
-  openCreateSession: (cwd?: string) => void;
+  openCreateSession: (cwd?: string, options?: { provider?: AgentProviderKind }) => void;
   openSessionTransfer: () => void;
   openForkSession: (session: ManagedSession) => void;
-  registerCreateSessionCwdPrefill: (provider: () => string) => () => void;
+  registerCreateSessionPrefill: (prefill: () => CreateSessionPrefill) => () => void;
   registerPromptHistoryPrefill: (provider: () => string) => () => void;
   registerPrimaryInputFocus: (provider: PrimaryInputFocusHandler) => () => void;
   connectionEpoch: number;
@@ -1632,6 +1691,31 @@ export interface AppShellOutletContext {
 }
 
 export type ProviderUsageMonitorState = ProviderUsageMonitor & { resetCredits: ResetCreditsMonitor };
+
+/** What Ctrl+N pre-fills from the current page: the working directory and, inside a session, its provider. */
+export interface CreateSessionPrefill {
+  cwd: string;
+  provider?: AgentProviderKind;
+}
+
+/** Selected recovery sessions whose provider runtime can currently start. */
+export function restorableRecoverySessionIds(
+  incident: SessionRecoveryIncident | null,
+  selectedIds: ReadonlySet<string>,
+  providers: readonly ProviderDescriptor[]
+): string[] {
+  return (incident?.sessions ?? [])
+    .filter((session) => selectedIds.has(session.sessionId) && !providerUnavailableReason(findProvider(providers, session.provider), session.provider))
+    .map((session) => session.sessionId);
+}
+
+/** Forks always continue in the source session's provider, so that provider must support and admit them. */
+export function forkSessionBlockedReason(session: ManagedSession, providers: readonly ProviderDescriptor[]): string | null {
+  const kind = sessionProvider(session);
+  const descriptor = findProvider(providers, kind);
+  if (descriptor && !descriptor.capabilities.fork) return `${providerLabel(kind)} sessions cannot be forked.`;
+  return providerCreateAvailability(descriptor).blocking;
+}
 
 export function defaultForkSessionName(session: ManagedSession): string {
   const suffix = "-fork";
@@ -1656,7 +1740,7 @@ function ForkSessionDialog({
   name,
   busy,
   error,
-  descriptor,
+  providers,
   onNameChange,
   onClose,
   onSubmit
@@ -1665,13 +1749,15 @@ function ForkSessionDialog({
   name: string;
   busy: boolean;
   error: string | null;
-  descriptor: ProviderDescriptor | null;
+  providers: ProviderDescriptor[];
   onNameChange: (value: string) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const invalid = !isValidSessionName(normalizeSessionName(name));
   const warning = sessionNameValidationMessage(name);
+  const provider = sessionProvider(source);
+  const blocked = forkSessionBlockedReason(source, providers);
   return (
     <Modal
       open
@@ -1684,7 +1770,9 @@ function ForkSessionDialog({
     >
       <p className="session-fork-summary">
         Create a new conversation from the current persisted history of <strong>{sessionBaseName(source)}</strong>.
+        {shouldShowProviderBadges(providers, [source]) ? <> The fork continues in <ProviderBadge provider={provider} />.</> : null}
       </p>
+      {blocked ? <p className="dialog-error" role="alert">{blocked}</p> : null}
       {forkSessionWarnings(source).map((message) => (
         <div className="session-fork-warning" role="note" key={message}>
           <AlertTriangle size={17} aria-hidden="true" />
@@ -1707,7 +1795,7 @@ function ForkSessionDialog({
       {error ? <p className="dialog-error" role="alert">{error}</p> : null}
       <DialogActions>
         <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !descriptor?.compatibility.available} busy={busy} busyLabel="Forking">
+        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || Boolean(blocked)} busy={busy} busyLabel="Forking">
           Fork and open
         </Button>
       </DialogActions>
@@ -1812,24 +1900,27 @@ export function sessionNameValidationMessage(value: string): string | null {
 }
 
 export function GitWorkflowSkillStatusCallout({
+  provider = "codex",
   status,
   onRetry
 }: {
+  provider?: AgentProviderKind;
   status: MuxpilotGitSkillStatus["status"] | "checking" | "error" | null;
   onRetry: () => void;
 }) {
-  if (status === "checking") return <p className="session-git-probe-note">Checking Codex skill…</p>;
+  const label = providerLabel(provider);
+  if (status === "checking") return <p className="session-git-probe-note">Checking {label} skill…</p>;
   if (status === "missing" || status === "outdated") {
     return (
       <div className="session-git-skill-callout">
-        <p>Run <code>pnpm app start prod</code> to {status === "missing" ? "install" : "update"} the muxpilot Git workflow skill.</p>
+        <p>Run <code>pnpm app start prod</code> to {status === "missing" ? "install" : "update"} the muxpilot Git workflow skill for {label}.</p>
       </div>
     );
   }
   if (status === "error") {
     return (
       <div className="session-git-skill-callout">
-        <p>Could not check the muxpilot Git workflow skill.</p>
+        <p>Could not check the muxpilot Git workflow skill for {label}.</p>
         <button type="button" onClick={onRetry}>Retry</button>
       </div>
     );
@@ -2147,8 +2238,8 @@ export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: st
   return suggestions.some((suggestion) => suggestion.value === preferred) ? preferred : suggestions[0]?.value ?? "";
 }
 
-function SessionTransferDialog({ descriptor, onClose }: {
-  descriptor: ProviderDescriptor | null;
+function SessionTransferDialog({ providers, onClose }: {
+  providers: ProviderDescriptor[];
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"export" | "import">("export");
@@ -2298,7 +2389,12 @@ function SessionTransferDialog({ descriptor, onClose }: {
     }
   }
 
-  const portableSessions = sessions.filter((session) => Boolean(session.provider.threadId && session.provider.transcriptPath));
+  const portableSessions = sessions.filter((session) => isTransferableSession(session, providers));
+  const showProviderBadges = shouldShowProviderBadges(providers, [
+    ...sessions,
+    ...(preview?.sessions ?? []).map((session) => ({ provider: { kind: session.provider } }))
+  ]);
+  const importBlockers = transferImportBlockers(preview, providers);
   const expandedSelectedIds = expandedTransferSelection(selected, sessions);
   const mappingComplete = preview?.mappings.every((requirement) => {
     const value = mappings[requirement.sourceCwd];
@@ -2336,7 +2432,10 @@ function SessionTransferDialog({ descriptor, onClose }: {
                     if (event.target.checked) next.add(session.id); else next.delete(session.id);
                     return next;
                   })} />
-                  <span><strong>{sessionBaseName(session)}</strong><small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small></span>
+                  <span>
+                    <span className="session-transfer-option-title"><strong>{sessionBaseName(session)}</strong>{showProviderBadges ? <ProviderBadge provider={sessionProvider(session)} /> : null}</span>
+                    <small>{session.repo.name} · {session.status}{session.archived ? " · archived" : ""}</small>
+                  </span>
                 </label>
               ))}
               {!portableSessions.length ? <p className="prompt-history-muted">No portable sessions found.</p> : null}
@@ -2397,6 +2496,17 @@ function SessionTransferDialog({ descriptor, onClose }: {
             </> : null}
             {preview && !result ? <>
               <p className="session-git-probe-note">{preview.sessions.length} session{preview.sessions.length === 1 ? "" : "s"} found · {preview.encrypted ? "encrypted" : "plaintext"}. Map each source location before all sessions are resumed.</p>
+              {showProviderBadges ? (
+                <div className="session-transfer-preview-sessions">
+                  {preview.sessions.map((session) => (
+                    <span className="session-transfer-preview-session" key={`${session.provider}:${session.threadId}`}>
+                      <ProviderBadge provider={session.provider} />
+                      {session.sessionName}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {importBlockers.map((blocker) => <p className="session-git-probe-note dialog-error" key={blocker}>{blocker}</p>)}
               <div className="session-transfer-mappings">
                 {preview.mappings.map((requirement) => <div key={requirement.sourceCwd} className="session-transfer-mapping">
                   <div className="session-transfer-mapping-head"><strong>{requirement.repoName}</strong><span>{requirement.sourceCwd}</span></div>
@@ -2438,20 +2548,39 @@ function SessionTransferDialog({ descriptor, onClose }: {
               </div>
               <DialogActions>
                 <Button variant="ghost" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</Button>
-                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !descriptor?.compatibility.available} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
+                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || importBlockers.length > 0} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
                   Import and resume all
                 </Button>
               </DialogActions>
             </> : null}
             {result ? <><div className="session-transfer-results">
               {result.branches.map((item) => <div className="session-transfer-result" key={`${item.destinationCwd}:${item.branchName}`}><strong>{item.branchName}</strong><span>{item.status.replaceAll("_", " ")} · upstream {item.upstreamStatus.replaceAll("_", " ")}{item.warning ? ` · ${item.warning}` : ""}</span></div>)}
-              {result.results.map((item) => <div className="session-transfer-result" key={`${item.provider}:${item.threadId}`} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
+              {result.results.map((item) => <div className="session-transfer-result" key={`${item.provider}:${item.threadId}`} data-status={item.status}><strong>{item.sessionName}{showProviderBadges ? <> <ProviderBadge provider={item.provider} /></> : null}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
             </div><DialogActions><Button variant="primary" onClick={onClose}>Done</Button></DialogActions></> : null}
           </div>
         )}
         {error ? <p className="dialog-error" role="alert">{error}</p> : null}
     </Modal>
   );
+}
+
+export function isTransferableSession(session: ManagedSession, providers: readonly ProviderDescriptor[]): boolean {
+  if (!session.provider?.threadId || !session.provider.transcriptPath) return false;
+  return findProvider(providers, sessionProvider(session))?.capabilities.transcriptTransfer !== false;
+}
+
+/** Imports resume every archived session, so each provider in the archive must be able to run here. */
+export function transferImportBlockers(
+  preview: Pick<SessionTransferInspectResponse, "sessions"> | null,
+  providers: readonly ProviderDescriptor[]
+): string[] {
+  const kinds = [...new Set((preview?.sessions ?? []).map((session) => session.provider))];
+  return kinds.flatMap((kind) => {
+    const descriptor = findProvider(providers, kind);
+    if (descriptor && !descriptor.capabilities.transcriptTransfer) return [`${providerLabel(kind)} sessions cannot be imported on this host.`];
+    const reason = providerUnavailableReason(descriptor, kind);
+    return reason ? [reason] : [];
+  });
 }
 
 function expandedTransferSelection(selected: Set<string>, sessions: ManagedSession[]): string[] {

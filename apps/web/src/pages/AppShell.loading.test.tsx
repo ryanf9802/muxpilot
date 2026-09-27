@@ -76,6 +76,44 @@ describe("AppShell session loading", () => {
     expect(summaries.mock.calls.length).toBe(loadsBefore + 1);
   });
 
+  it("preselects the session provider for Ctrl+N and creates the session with the chosen provider", async () => {
+    installLocalStorage();
+    mockShellApi(fakeSocket(), async () => ({ sessions: [] }));
+    vi.spyOn(client.api, "sessionDirectories").mockResolvedValue({ directories: [] });
+    vi.spyOn(client.api, "gitRepositoryProbe").mockResolvedValue({
+      isGit: false, bare: false, incompatibleReason: null, repoRoot: null, repoName: "repo", currentBranch: null, dirty: false, localBranches: [], remotes: []
+    });
+    const createSession = vi.spyOn(client.api, "createSession").mockResolvedValue({ session: testSession("created", "waiting") as ManagedSession });
+    const observed: { current: AppShellOutletContext | null } = { current: null };
+    await renderShell((value) => { observed.current = value; });
+    await act(async () => { await flushPromises(); });
+
+    act(() => { observed.current!.registerCreateSessionPrefill(() => ({ cwd: "/repo", provider: "claude" })); });
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "n", ctrlKey: true, bubbles: true }));
+      await flushPromises();
+    });
+    expect(document.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Claude");
+
+    await act(async () => { (document.querySelector('[role="radio"][data-provider="codex"]') as HTMLButtonElement).click(); });
+    expect(document.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Codex");
+    await act(async () => { (document.querySelector('[role="radio"][data-provider="claude"]') as HTMLButtonElement).click(); });
+
+    const nameInput = Array.from(document.querySelectorAll<HTMLLabelElement>(".rename-field"))
+      .find((label) => label.querySelector("span")?.textContent === "Name")!.querySelector("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput, "claude-work");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Create" && button.getAttribute("type") === "submit") as HTMLButtonElement).click();
+      await flushPromises();
+    });
+
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo", name: "claude-work", provider: "claude" }));
+    expect(window.localStorage.getItem("muxpilot.new-session.provider.v1")).toBe("claude");
+  });
+
   it("offers remaining-capacity notification thresholds beneath status changes", async () => {
     mockShellApi(fakeSocket(), async () => ({ sessions: [] }));
     await renderShell(() => undefined);
@@ -242,6 +280,19 @@ function buttonWithText(label: string): HTMLButtonElement {
   const button = Array.from(container?.querySelectorAll("button") ?? []).find((candidate) => candidate.textContent?.trim() === label);
   expect(button, `button ${label}`).toBeDefined();
   return button as HTMLButtonElement;
+}
+
+function installLocalStorage(): void {
+  const stored = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+      removeItem: (key: string) => stored.delete(key),
+      clear: () => stored.clear()
+    }
+  });
 }
 
 function authPayload(provider: ProviderAuthState["provider"], status: ProviderAuthState["status"], revision: number): ProviderAuthState {
