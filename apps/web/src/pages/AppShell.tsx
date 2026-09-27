@@ -64,8 +64,8 @@ import {
 import { installVisibleViewportVariables } from "../utils/visualViewport.js";
 import { useProviderUsageMonitor, type ProviderUsageMonitor } from "../hooks/useProviderUsageMonitor.js";
 import { useResetCredits, type ResetCreditsMonitor } from "../hooks/useResetCredits.js";
-import { useProviders, type ProvidersState } from "../hooks/useProviders.js";
-import { findProvider, providerCompatibilityLabel, providerUnavailableReason } from "../utils/providers.js";
+import { isProviderAuthUpdatedEvent, useProviders, type ProvidersState } from "../hooks/useProviders.js";
+import { findProvider, providerCompatibilityLabel, providerLabel, providerUnavailableReason, providerUsageEnabled } from "../utils/providers.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -76,7 +76,7 @@ export const SESSION_LIST_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 30_000] as co
 export const SESSION_NAME_VALIDATION_MESSAGE = "Name must be a 2-32 character Git-style name.";
 const GLOBAL_NOTIFICATION_MENU_WIDTH = 220;
 const GLOBAL_NOTIFICATION_MENU_HEIGHT = 270;
-const GLOBAL_USAGE_LIMIT_MENU_HEIGHT = 205;
+const GLOBAL_USAGE_LIMIT_MENU_HEIGHT = 245;
 const GLOBAL_USAGE_LIMIT_MENU_OFFSET_Y = 108;
 const USAGE_LIMIT_THRESHOLDS: readonly UsageLimitThreshold[] = [75, 50, 25, 10, 0];
 const GLOBAL_NOTIFICATION_SETTINGS_MENU_HEIGHT = 96;
@@ -155,6 +155,7 @@ export function AppShell() {
     codex: { ...codexUsage, resetCredits: codexResetCredits },
     claude: { ...claudeUsage, resetCredits: claudeResetCredits }
   }), [claudeResetCredits, claudeUsage, codexResetCredits, codexUsage]);
+  const { applyAuthUpdate: applyProviderAuthUpdate, reload: reloadProviders } = providers;
   const sessionsRef = useRef<ManagedSession[]>([]);
   const sessionMutationSequenceRef = useRef(0);
   const sessionMutationsRef = useRef<SessionListMutation[]>([]);
@@ -466,8 +467,14 @@ export function AppShell() {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     socket.onmessage = (message) => {
       const event = JSON.parse(message.data) as SessionEvent | { type: string };
+      if (isProviderAuthUpdatedEvent(event)) {
+        // App-scoped authentication updates never describe a session, so they bypass the session list entirely.
+        if (applyProviderAuthUpdate(event.payload).becameReady) void loadSessions().catch(handleConnectedRequestFailure);
+        return;
+      }
       if (sessionStreamMessageRequiresReconcile(event)) {
         void loadSessions().catch(handleConnectedRequestFailure);
+        void reloadProviders();
       }
       if ("sessionId" in event) {
         const sessionEvent = event as SessionEvent;
@@ -498,11 +505,12 @@ export function AppShell() {
         });
       } else if (isUsageLimitNotificationTriggeredEvent(event)) {
         if (notificationSoundEnabled(notificationSettingsRef.current)) playNotificationBell();
-        toast(event.payload.body, {
+        const message = usageLimitToastMessage(event.payload);
+        toast(message, {
           position: locationPathRef.current.startsWith("/sessions/") ? "top-right" : "top-left",
           type: event.payload.severity === "red" ? "error" : "warning",
           className: "session-notification-toast",
-          ariaLabel: `${event.payload.body}. Open dashboard`,
+          ariaLabel: `${message}. Open dashboard`,
           onClick: () => navigate(event.payload.url)
         });
       }
@@ -526,7 +534,7 @@ export function AppShell() {
       cancelSessionListRequest();
       socket.close();
     };
-  }, [cancelSessionListRequest, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, scheduleSessionReconcile, shellSocketEpoch]);
+  }, [applyProviderAuthUpdate, cancelSessionListRequest, connectionState, handleConnectedRequestFailure, loadNotificationSettings, loadSessions, navigate, probeShellConnection, reloadProviders, scheduleSessionReconcile, shellSocketEpoch]);
 
   useEffect(() => {
     if (connectionState !== "connected") return;
@@ -1206,6 +1214,7 @@ export function AppShell() {
               setNotificationSettingsSubmenuOpen(false);
             }}
             disabled={notificationToggleBusy}
+            title="Usage limit alerts for all providers"
           >
             Usage limits
           </ContextMenuItem>
@@ -1215,6 +1224,7 @@ export function AppShell() {
               position={usageLimitSubmenuPosition(notificationMenu)}
               label="Usage limit notification settings"
             >
+              <p className="context-menu-caption">Remaining capacity alerts apply to every provider.</p>
               {USAGE_LIMIT_THRESHOLDS.map((threshold) => {
                 const enabled = notificationSettings?.usageLimitThresholds?.includes(threshold) ?? false;
                 return (
@@ -1623,11 +1633,6 @@ export interface AppShellOutletContext {
 
 export type ProviderUsageMonitorState = ProviderUsageMonitor & { resetCredits: ResetCreditsMonitor };
 
-/** Usage polling runs only for installed providers that report account limits. */
-export function providerUsageEnabled(descriptor: ProviderDescriptor | null): boolean {
-  return Boolean(descriptor?.enabled && descriptor.compatibility.available && descriptor.capabilities.usageLimits);
-}
-
 export function defaultForkSessionName(session: ManagedSession): string {
   const suffix = "-fork";
   const normalized = normalizeSessionName(sessionBaseName(session)) || "session";
@@ -1720,6 +1725,10 @@ function isNotificationTriggeredEvent(event: SessionEvent | { type: string }): e
 
 function isUsageLimitNotificationTriggeredEvent(event: SessionEvent | { type: string }): event is SessionEvent & { payload: UsageLimitNotificationTriggeredPayload } {
   return event.type === "usage.notification.triggered" && Boolean((event as { payload?: unknown }).payload);
+}
+
+export function usageLimitToastMessage(payload: Pick<UsageLimitNotificationTriggeredPayload, "provider" | "body">): string {
+  return payload.provider ? `${providerLabel(payload.provider)}: ${payload.body}` : payload.body;
 }
 
 function toastTypeForNotification(payload: NotificationTriggeredPayload): "success" | "warning" | "error" {

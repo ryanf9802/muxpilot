@@ -34,6 +34,7 @@ import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
 import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
+import { providerUsageEnabled } from "../utils/providers.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
@@ -630,20 +631,7 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      {usageMonitors.codex.initialLoading && !usageMonitors.codex.summary ? (
-        <UsagePanelSkeleton />
-      ) : usageMonitors.codex.summary ? (
-        <ProviderUsagePanel
-          provider="codex"
-          descriptor={providers.providers.find((descriptor) => descriptor.kind === "codex") ?? null}
-          summary={usageMonitors.codex.summary}
-          refreshError={usageMonitors.codex.refreshError}
-          resetCredits={usageMonitors.codex.resetCredits}
-          onCheckAuth={() => providers.refreshAuth("codex")}
-        />
-      ) : (
-        <UsageUnavailablePanel title="Codex usage" />
-      )}
+      <DashboardUsageGrid providers={providers} usageMonitors={usageMonitors} />
     </section>
   );
 }
@@ -684,13 +672,55 @@ const emptyModelSelections: SessionModelSelections = {
   plan: { model: null, reasoningEffort: null }
 };
 
-function UsageUnavailablePanel({ title }: { title: string }) {
+/** One usage panel per installed provider that reports limits; stacked, or two columns on wide screens. */
+export function DashboardUsageGrid({
+  providers,
+  usageMonitors
+}: Pick<AppShellOutletContext, "providers" | "usageMonitors">) {
+  if (!providers.loaded) {
+    return (
+      <div className="dashboard-usage-grid" data-count={1}>
+        {providers.error ? <UsageUnavailablePanel title="Provider usage" /> : <UsagePanelSkeleton />}
+      </div>
+    );
+  }
+  const usageProviders = providers.providers.filter(providerUsageEnabled);
+  if (usageProviders.length === 0) {
+    return (
+      <div className="dashboard-usage-grid" data-count={1}>
+        <UsageUnavailablePanel title="Provider usage" message="No installed provider reports account usage." />
+      </div>
+    );
+  }
+  return (
+    <div className="dashboard-usage-grid" data-count={usageProviders.length}>
+      {usageProviders.map((descriptor) => {
+        const monitor = usageMonitors[descriptor.kind];
+        if (monitor.initialLoading && !monitor.summary) return <UsagePanelSkeleton key={descriptor.kind} />;
+        if (!monitor.summary) return <UsageUnavailablePanel key={descriptor.kind} title={`${descriptor.displayName} usage`} />;
+        return (
+          <ProviderUsagePanel
+            key={descriptor.kind}
+            provider={descriptor.kind}
+            descriptor={descriptor}
+            summary={monitor.summary}
+            refreshError={monitor.refreshError}
+            resetCredits={descriptor.capabilities.resetCredits ? monitor.resetCredits : null}
+            onCheckAuth={() => providers.refreshAuth(descriptor.kind)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function UsageUnavailablePanel({ title, message = "Usage data is unavailable. Muxpilot will retry automatically." }: { title: string; message?: string }) {
   return (
     <section className="usage-panel">
       <div className="usage-panel-head">
         <div>
           <h2>{title}</h2>
-          <p>Usage data is unavailable. Muxpilot will retry automatically.</p>
+          <p>{message}</p>
         </div>
       </div>
     </section>

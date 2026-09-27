@@ -143,6 +143,11 @@ export function providerUnavailableReason(descriptor: ProviderDescriptor | null 
   return providerCompatibilityLabel(descriptor);
 }
 
+/** Usage polling runs only for installed providers that report account limits. */
+export function providerUsageEnabled(descriptor: ProviderDescriptor | null | undefined): boolean {
+  return Boolean(descriptor?.enabled && descriptor.compatibility.available && descriptor.capabilities.usageLimits);
+}
+
 export function providerAuthStatusLabel(status: ProviderAuthStatus): string {
   if (status === "ready") return "Signed in";
   if (status === "checking") return "Checking sign-in";

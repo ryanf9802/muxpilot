@@ -10,6 +10,7 @@ import {
   dashboardLocationState,
   dashboardPreviewLines,
   DashboardPrimaryActions,
+  DashboardUsageGrid,
   dashboardStatusFilterFromSearchParams,
   filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
@@ -23,6 +24,9 @@ import {
   sessionNameValidationMessage,
 } from "./Dashboard.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
+import type { ProvidersState } from "../hooks/useProviders.js";
+import type { ProviderUsageMonitorState } from "./AppShell.js";
 
 const dashboardStyles = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
 
@@ -723,6 +727,75 @@ describe("ProviderUsagePanel", () => {
     expect(html).toContain("unavailable");
   });
 });
+
+describe("DashboardUsageGrid", () => {
+  it("renders one panel per installed provider that reports usage", () => {
+    const html = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: providersState([providerDescriptor("codex"), providerDescriptor("claude")]),
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+
+    expect(html).toContain('class="dashboard-usage-grid" data-count="2"');
+    expect(html).toContain("Codex usage");
+    expect(html).toContain("Claude usage");
+    expect(html.match(/Usage reset tokens/g)).toHaveLength(1);
+  });
+
+  it("omits providers that are not installed and waits for the catalog", () => {
+    const missingClaude = providerDescriptor("claude", { compatibility: { status: "missing_binary", available: false } });
+    const html = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: providersState([providerDescriptor("codex"), missingClaude]),
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+    expect(html).toContain('data-count="1"');
+    expect(html).not.toContain("Claude usage");
+
+    const loading = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: { ...providersState([]), loaded: false },
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+    expect(loading).not.toContain("Codex usage");
+    expect(loading).toContain("dashboard-usage-grid");
+  });
+});
+
+function providersState(providers: ProvidersState["providers"]): ProvidersState {
+  return {
+    loaded: true,
+    loading: false,
+    error: null,
+    defaultProvider: "codex",
+    providers,
+    reload: async () => undefined,
+    applyAuthUpdate: () => ({ applied: false, becameReady: false }),
+    refreshAuth: async () => null,
+    setDefaultProvider: async () => undefined
+  };
+}
+
+function usageMonitor(provider: "codex" | "claude"): ProviderUsageMonitorState {
+  const summary = {
+    provider,
+    available: true,
+    error: null,
+    refreshedAt: "2026-07-07T12:00:00.000Z",
+    accountStatus: "authenticated" as const,
+    account: { kind: provider === "codex" ? "chatgpt" : "claudeAi", email: `${provider}@example.com`, planType: null },
+    limits: [{ id: "five_hour", label: "5h limit", limitName: null, usedPercent: 10, remainingPercent: 90, windowDurationMins: 300, resetsAt: null }],
+    resetCredits: provider === "codex" ? { availableCount: 0, credits: [] } : null
+  };
+  return {
+    provider,
+    enabled: true,
+    summary,
+    initialLoading: false,
+    refreshError: null,
+    refreshSummary: async () => summary,
+    acceptExternalSummary: () => undefined,
+    currentSummary: () => summary,
+    resetCredits: staticResetCredits
+  };
+}
 
 const staticResetCredits = {
   pendingAttempt: null,
