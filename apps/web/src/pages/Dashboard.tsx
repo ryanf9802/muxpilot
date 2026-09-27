@@ -12,7 +12,7 @@ import {
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
-  CodexModelCatalogResponse,
+  ProviderModelCatalogResponse,
   ApprovalReviewerSettings,
   CollaborationMode,
   ManagedSession,
@@ -32,7 +32,7 @@ import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/Loa
 import { Modal } from "../components/Modal.js";
 import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
-import { CodexUsagePanel } from "../components/CodexUsagePanel.js";
+import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
@@ -42,8 +42,7 @@ import {
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
 
-export { CodexUsagePanel };
-export { CODEX_USAGE_POLL_INTERVAL_MS as DASHBOARD_USAGE_RECONCILE_INTERVAL_MS } from "../hooks/useCodexUsageMonitor.js";
+export { PROVIDER_USAGE_POLL_INTERVAL_MS as DASHBOARD_USAGE_RECONCILE_INTERVAL_MS } from "../hooks/useProviderUsageMonitor.js";
 
 const ACTION_MENU_WIDTH = 220;
 const ACTION_MENU_HEIGHT = 312;
@@ -63,7 +62,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode, codexUsageMonitor } =
+  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode, providers, usageMonitors } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [q, setQ] = useState("");
@@ -80,7 +79,7 @@ export function Dashboard() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [reviewerSettings, setReviewerSettings] = useState<ApprovalReviewerSettings | null>(null);
   const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
-  const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<CodexModelCatalogResponse | null>(null);
+  const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<ProviderModelCatalogResponse | null>(null);
   const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false);
   const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | "reviewer" | null>(null);
@@ -304,9 +303,9 @@ export function Dashboard() {
     setModelDefaultsError("");
     try {
       const [catalog, response, reviewer] = await Promise.all([
-        api.codexModels(),
-        api.globalModelSettings(),
-        api.approvalReviewerSettings()
+        api.providerModels("codex"),
+        api.globalModelSettings("codex"),
+        api.approvalReviewerSettings("codex")
       ]);
       setModelDefaultsCatalog(catalog);
       setModelDefaults(response.settings);
@@ -327,7 +326,7 @@ export function Dashboard() {
     setModelDefaultsApplying("reviewer");
     setModelDefaultsError("");
     try {
-      const response = await api.updateApprovalReviewerSettings({ model, reasoningEffort });
+      const response = await api.updateApprovalReviewerSettings("codex", { model, reasoningEffort });
       setReviewerSettings(response.settings);
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
@@ -340,7 +339,7 @@ export function Dashboard() {
     setModelDefaultsApplying(mode);
     setModelDefaultsError("");
     try {
-      const response = await api.updateGlobalModelSettings({ mode, model, reasoningEffort });
+      const response = await api.updateGlobalModelSettings("codex", { mode, model, reasoningEffort });
       setModelDefaults(response.settings);
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update model defaults.");
@@ -631,12 +630,16 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      {codexUsageMonitor.initialLoading && !codexUsageMonitor.summary ? (
+      {usageMonitors.codex.initialLoading && !usageMonitors.codex.summary ? (
         <UsagePanelSkeleton />
-      ) : codexUsageMonitor.summary ? (
-        <CodexUsagePanel
-          summary={codexUsageMonitor.summary}
-          usageMonitor={codexUsageMonitor}
+      ) : usageMonitors.codex.summary ? (
+        <ProviderUsagePanel
+          provider="codex"
+          descriptor={providers.providers.find((descriptor) => descriptor.kind === "codex") ?? null}
+          summary={usageMonitors.codex.summary}
+          refreshError={usageMonitors.codex.refreshError}
+          resetCredits={usageMonitors.codex.resetCredits}
+          onCheckAuth={() => providers.refreshAuth("codex")}
         />
       ) : (
         <UsageUnavailablePanel title="Codex usage" />

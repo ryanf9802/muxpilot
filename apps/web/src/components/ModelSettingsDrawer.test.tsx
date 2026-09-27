@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CodexModelCatalogResponse, ManagedSession } from "@muxpilot/core";
+import type { ManagedSession, ProviderModelCatalogResponse } from "@muxpilot/core";
 import { effectiveModelSettings, ModelSettingsDrawer } from "./ModelSettingsDrawer.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -212,7 +212,8 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   return Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.trim() === label)!;
 }
 
-const catalog: CodexModelCatalogResponse = {
+const catalog: ProviderModelCatalogResponse = {
+  provider: "codex",
   models: [
     {
       id: "gpt-default",
@@ -226,7 +227,7 @@ const catalog: CodexModelCatalogResponse = {
         { reasoningEffort: "high", description: "Deeper" }
       ],
       defaultReasoningEffort: "medium",
-      serviceTiers: [{ id: "fast", name: "Fast", description: "Priority" }]
+      supportsFastMode: true
     },
     {
       id: "gpt-other",
@@ -240,7 +241,7 @@ const catalog: CodexModelCatalogResponse = {
         { reasoningEffort: "high", description: "Deep" }
       ],
       defaultReasoningEffort: "low",
-      serviceTiers: []
+      supportsFastMode: false
     }
   ],
   defaults: {

@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ProviderCompatibility, ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
+import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
-  appServerCompatibilityLabel,
   applySessionEventToSessions,
   ConnectDeviceContent,
   defaultForkSessionName,
@@ -37,7 +36,6 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
-  runtimeUnavailableLabel,
   sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
@@ -53,42 +51,10 @@ import {
   syncSessionIntoStoplightSessions
 } from "./AppShell.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
-  it("describes app-server availability and concrete incompatibility", () => {
-    const available: ProviderCompatibility = {
-      provider: "codex",
-      status: "available",
-      available: true,
-      version: "0.152.0",
-      detail: "ready",
-      checkedAt: "2026-09-01T12:00:00.000Z",
-      missingCapabilities: []
-    };
-    expect(appServerCompatibilityLabel(available)).toBe("Codex app-server available · Codex 0.152.0.");
-    expect(appServerCompatibilityLabel({
-      ...available,
-      status: "user_systemd_unavailable",
-      available: false,
-      version: null,
-      detail: "A persistent user-systemd manager is required."
-    })).toBe("A persistent user-systemd manager is required.");
-  });
-
-  it("explains unavailable app-server runtime", () => {
-    const appServer: ProviderCompatibility = {
-      provider: "codex",
-      status: "available",
-      available: true,
-      version: "0.152.0",
-      detail: "ready",
-      checkedAt: "2026-09-01T12:00:00.000Z",
-      missingCapabilities: []
-    };
-    expect(runtimeUnavailableLabel(appServer)).toBe("ready");
-  });
-
   it("renders every interrupted session selected with crash limitations and failures", () => {
     const incident: SessionRecoveryIncident = {
       id: "incident-1",
@@ -116,15 +82,7 @@ describe("shell connection state", () => {
       selectedIds: new Set(["session-1"]),
       busy: false,
       errors: { "session-1": "Directory is unavailable" },
-      compatibility: {
-        provider: "codex",
-        status: "available",
-        available: true,
-        version: "0.152.0",
-        detail: "Codex app-server is available.",
-        checkedAt: "2026-09-01T20:00:00.000Z",
-        missingCapabilities: []
-      },
+      descriptor: providerDescriptor("codex"),
       onToggle: () => undefined,
       onDismiss: () => undefined,
       onRestore: () => undefined

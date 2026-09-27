@@ -127,15 +127,40 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/remote-access", expect.objectContaining({ credentials: "include" }));
   });
 
-  it("loads app-server compatibility status", async () => {
-    const fetchMock = mockJsonResponse({ status: "available", available: true });
+  it("loads the provider catalog and scopes provider authentication by kind", async () => {
+    const fetchMock = mockJsonResponse({ defaultProvider: "codex", providers: [] });
 
-    await api.appServerCompatibility();
+    await api.providers();
+    await api.setDefaultProvider("claude");
+    await api.providerAuth("claude");
+    await api.refreshProviderAuth("codex");
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/app-server/compatibility",
-      expect.objectContaining({ credentials: "include" })
-    );
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/providers",
+      "/api/providers/default",
+      "/api/providers/claude/auth",
+      "/api/providers/codex/auth/refresh"
+    ]);
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ method: "PATCH", body: JSON.stringify({ provider: "claude" }) }));
+    expect(fetchMock.mock.calls[3]?.[1]).toEqual(expect.objectContaining({ method: "POST" }));
+  });
+
+  it("loads provider usage summaries, history and Codex reset tokens", async () => {
+    const fetchMock = mockJsonResponse({});
+
+    await api.providerUsageSummary("claude", true);
+    await api.providerUsageHistory("claude", 7);
+    await api.consumeResetCredit("codex", { idempotencyKey: "attempt-1", creditId: null });
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "/api/providers/claude/usage/summary?refresh=1",
+      "/api/providers/claude/usage/history?days=7",
+      "/api/providers/codex/usage/reset"
+    ]);
+    expect(fetchMock.mock.calls[2]?.[1]).toEqual(expect.objectContaining({
+      method: "POST",
+      body: JSON.stringify({ idempotencyKey: "attempt-1", creditId: null })
+    }));
   });
 
   it("loads lightweight session summaries with encoded server-side filters", async () => {
@@ -236,30 +261,30 @@ describe("api client request headers", () => {
     expect(response.session?.inputMode).toBe("plan");
   });
 
-  it("fetches discovered Codex skills", async () => {
+  it("fetches discovered provider skills", async () => {
     const fetchMock = mockJsonResponse({ skills: [] });
 
-    await api.codexSkills();
+    await api.providerSkills("claude");
 
-    expect(fetchMock).toHaveBeenCalledWith("/api/codex/skills", expect.objectContaining({ credentials: "include" }));
+    expect(fetchMock).toHaveBeenCalledWith("/api/providers/claude/skills", expect.objectContaining({ credentials: "include" }));
   });
 
-  it("checks the muxpilot Git workflow skill", async () => {
+  it("checks the muxpilot Git workflow skill for the chosen provider", async () => {
     const fetchMock = mockJsonResponse({ status: "current", path: "/home/user/.codex/skills/muxpilot-git-workflow" });
 
-    await api.gitWorkflowSkillStatus();
+    await api.gitWorkflowSkillStatus("codex");
     expect(fetchMock).toHaveBeenLastCalledWith(
-      "/api/codex/skills/muxpilot-git-workflow/status",
+      "/api/providers/codex/skills/muxpilot-git-workflow/status",
       expect.objectContaining({ credentials: "include" })
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("fetches session-scoped Codex skills", async () => {
+  it("fetches session-scoped skills", async () => {
     const fetchMock = mockJsonResponse({ skills: [] });
 
-    await api.codexSkills("session-1");
+    await api.sessionSkills("session-1");
 
     expect(fetchMock).toHaveBeenCalledWith("/api/sessions/session-1/skills", expect.objectContaining({ credentials: "include" }));
   });
@@ -317,10 +342,10 @@ describe("api client request headers", () => {
     expect(new Headers(init.headers).get("Content-Type")).toBe("application/json");
   });
 
-  it("loads Codex model options and applies a model selection action", async () => {
-    const fetchMock = mockJsonResponse({ models: [], defaults: {} });
+  it("loads provider model options and applies a model selection action", async () => {
+    const fetchMock = mockJsonResponse({ provider: "claude", models: [], defaults: {} });
 
-    await api.codexModels();
+    await api.providerModels("claude");
     await api.action("session-1", {
       type: "setModelSettings",
       mode: "plan",
@@ -328,7 +353,7 @@ describe("api client request headers", () => {
       reasoningEffort: "high"
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/codex-models");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/providers/claude/models");
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/sessions/session-1/actions");
     expect((fetchMock.mock.calls[1]?.[1] as RequestInit).body).toBe(JSON.stringify({
       type: "setModelSettings",
@@ -341,15 +366,15 @@ describe("api client request headers", () => {
   it("reads and updates global model defaults", async () => {
     const fetchMock = mockJsonResponse({ settings: {} });
 
-    await api.globalModelSettings();
-    await api.updateGlobalModelSettings({
+    await api.globalModelSettings("codex");
+    await api.updateGlobalModelSettings("codex", {
       mode: "default",
       model: "gpt-5.6-sol",
       reasoningEffort: "medium"
     });
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/model-settings/defaults");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/model-settings/defaults");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/providers/codex/model-settings/defaults");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/providers/codex/model-settings/defaults");
     expect(fetchMock.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
       method: "PATCH",
       body: JSON.stringify({ mode: "default", model: "gpt-5.6-sol", reasoningEffort: "medium" })

@@ -79,8 +79,8 @@ import type {
   BtwDeltaPayload,
   BtwExchange,
   ChatMessage,
-  CodexSkill,
-  CodexModelCatalogResponse,
+  AgentSkill,
+  ProviderModelCatalogResponse,
   CollaborationMode,
   MessageContentPart,
   GitWorkspaceSummary,
@@ -165,6 +165,7 @@ import {
 } from "../utils/documentMarkdown.js";
 import { codeMirrorComposerFieldAttributes, credentialSuppressedField, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+import { sessionProvider } from "../utils/providers.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
 import { effectiveModelSettings, ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
@@ -1750,7 +1751,7 @@ export function SessionView() {
   const [inputModeError, setInputModeError] = useState("");
   const [fastModeError, setFastModeError] = useState("");
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
-  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResponse | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<ProviderModelCatalogResponse | null>(null);
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelSettingsError, setModelSettingsError] = useState("");
   const [modelSettingsApplying, setModelSettingsApplying] = useState<CollaborationMode | null>(null);
@@ -1760,7 +1761,7 @@ export function SessionView() {
   const [messageMenu, setMessageMenu] = useState<MessageActionMenuState | null>(null);
   const [imagePreview, setImagePreview] = useState<SessionImageTarget | null>(null);
   const [messageActionError, setMessageActionError] = useState("");
-  const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [codexSkills, setCodexSkills] = useState<AgentSkill[]>([]);
   const [sessionVariables, setSessionVariables] = useState<SessionEnvironmentVariable[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
@@ -1902,7 +1903,7 @@ export function SessionView() {
       if (!options.force && now - skillsLastRefreshRef.current < SKILL_REFRESH_STALE_MS) return;
       skillsRefreshRunningRef.current = true;
       try {
-        const response = await api.codexSkills(id);
+        const response = await api.sessionSkills(id);
         if (activeIdRef.current === id) {
           setCodexSkills(response.skills);
           skillsLastRefreshRef.current = Date.now();
@@ -2588,7 +2589,7 @@ export function SessionView() {
     setModelCatalogLoading(true);
     setModelSettingsError("");
     try {
-      const catalog = await api.codexModels();
+      const catalog = await api.providerModels(sessionProvider(sessionRef.current));
       setModelCatalog(catalog);
     } catch (error) {
       setModelSettingsError(error instanceof Error ? error.message : String(error));
@@ -4332,11 +4333,11 @@ export function activeVariableToken(text: string, caret: number): ActiveSkillTok
   return { start, end, query: token.slice(1) };
 }
 
-export function skillSuggestions(skills: CodexSkill[], query: string, limit = 8): CodexSkill[] {
+export function skillSuggestions(skills: AgentSkill[], query: string, limit = 8): AgentSkill[] {
   const normalizedQuery = query.toLowerCase();
   return skills
     .map((skill) => ({ skill, score: skillSuggestionScore(skill.name, normalizedQuery) }))
-    .filter((match): match is { skill: CodexSkill; score: number } => match.score !== null)
+    .filter((match): match is { skill: AgentSkill; score: number } => match.score !== null)
     .sort((a, b) => a.score - b.score || a.skill.name.localeCompare(b.skill.name))
     .map((match) => match.skill)
     .slice(0, limit);
@@ -4602,7 +4603,7 @@ function VimPromptEditor({
   onSuggestionCommand?: (command: SkillSuggestionCommand) => boolean;
   onFocus?: () => void;
   onBlur?: () => void;
-  skills: CodexSkill[];
+  skills: AgentSkill[];
   variables: SessionEnvironmentVariable[];
   placeholder?: string;
   disabled?: boolean;
@@ -4892,7 +4893,7 @@ export function SkillTextArea({
   onSubmitShortcut?: () => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  skills: CodexSkill[];
+  skills: AgentSkill[];
   variables?: SessionEnvironmentVariable[];
   onSkillSearch?: () => void;
   placeholder?: string;
@@ -5285,7 +5286,7 @@ export function ModelSettingsButton({
   onOpen
 }: {
   session: ManagedSession;
-  catalog: CodexModelCatalogResponse | null;
+  catalog: ProviderModelCatalogResponse | null;
   compact?: boolean;
   onOpen?: () => void;
 }) {
@@ -5353,7 +5354,7 @@ export function RuntimeAttachButton({
 
 export function sessionModelDisplay(
   session: Pick<ManagedSession, "inputMode" | "models">,
-  catalog: CodexModelCatalogResponse | null = null
+  catalog: ProviderModelCatalogResponse | null = null
 ): { model: string; reasoningEffort: string } {
   const settings = catalog
     ? effectiveModelSettings(session, catalog.defaults, session.inputMode)
@@ -5512,7 +5513,7 @@ function QueuedInputList({
 }: {
   sessionId: string;
   inputs: QueuedInput[];
-  skills: CodexSkill[];
+  skills: AgentSkill[];
   variables: SessionEnvironmentVariable[];
   vimEnabled: boolean;
   onSkillSearch: () => void;

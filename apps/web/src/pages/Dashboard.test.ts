@@ -3,8 +3,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import type { GitWorkspaceState, ManagedSession } from "@muxpilot/core";
+import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import {
-  CodexUsagePanel,
   DASHBOARD_STATUSES,
   DASHBOARD_USAGE_RECONCILE_INTERVAL_MS,
   dashboardLocationState,
@@ -636,18 +636,23 @@ describe("dashboard repo session ordering", () => {
   });
 });
 
-describe("CodexUsagePanel", () => {
+describe("ProviderUsagePanel", () => {
   it("renders the account and Codex limit usage", () => {
     const html = renderToStaticMarkup(
-      createElement(CodexUsagePanel, {
-        usageMonitor: staticUsageMonitor,
+      createElement(ProviderUsagePanel, {
+        provider: "codex",
+        refreshError: null,
+        resetCredits: staticResetCredits,
         summary: {
+          provider: "codex",
           available: true,
           error: null,
           refreshedAt: "2026-07-07T12:00:00.000Z",
+          accountStatus: "authenticated",
           account: { kind: "chatgpt", email: "engineer@example.com", planType: "plus" },
-          limits: {
-            fiveHour: {
+          limits: [
+            {
+              id: "five_hour",
               label: "5h limit",
               limitName: "codex",
               usedPercent: 40,
@@ -655,7 +660,8 @@ describe("CodexUsagePanel", () => {
               windowDurationMins: 300,
               resetsAt: 1_784_000_000
             },
-            weekly: {
+            {
+              id: "weekly",
               label: "Weekly limit",
               limitName: "codex",
               usedPercent: 70,
@@ -663,7 +669,7 @@ describe("CodexUsagePanel", () => {
               windowDurationMins: 10_080,
               resetsAt: 1_784_300_000
             }
-          },
+          ],
           resetCredits: {
             availableCount: 1,
             credits: [{
@@ -695,15 +701,18 @@ describe("CodexUsagePanel", () => {
 
   it("keeps the panel visible when Codex usage is unavailable", () => {
     const html = renderToStaticMarkup(
-      createElement(CodexUsagePanel, {
-        usageMonitor: staticUsageMonitor,
+      createElement(ProviderUsagePanel, {
+        provider: "codex",
+        refreshError: null,
+        resetCredits: staticResetCredits,
         summary: {
+          provider: "codex",
           available: false,
           error: "Codex account authentication required.",
           refreshedAt: "2026-07-07T12:00:00.000Z",
           accountStatus: "signed_out",
           account: null,
-          limits: { fiveHour: null, weekly: null },
+          limits: [],
           resetCredits: null
         }
       })
@@ -715,14 +724,13 @@ describe("CodexUsagePanel", () => {
   });
 });
 
-const staticUsageMonitor = {
+const staticResetCredits = {
   pendingAttempt: null,
   resetAction: null,
   resetError: null,
   resetOutcome: null,
   resetObservation: null,
   resetRevision: 0,
-  refreshError: null,
   consumeReset: async () => undefined
 };
 

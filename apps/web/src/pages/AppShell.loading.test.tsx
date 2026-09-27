@@ -7,6 +7,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { DashboardSessionSummary, ManagedSession } from "@muxpilot/core";
 import * as client from "../api/client.js";
 import { AppShell, type AppShellOutletContext } from "./AppShell.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -64,7 +65,8 @@ describe("AppShell session loading", () => {
         timestamp: "2026-09-18T12:00:00.000Z",
         payload: {
           deviceId: "device-test",
-          limit: "fiveHour",
+          provider: "codex",
+          limit: "five_hour",
           limitLabel: "5h limit",
           remainingPercent: 24,
           threshold: 25,
@@ -172,23 +174,20 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
   };
   vi.spyOn(client.api, "notificationSettings").mockResolvedValue(notificationSettings as never);
   vi.spyOn(client.api, "updateNotificationSetting").mockResolvedValue(notificationSettings as never);
-  vi.spyOn(client.api, "codexUsageSummary").mockResolvedValue({
+  vi.spyOn(client.api, "providerUsageSummary").mockImplementation(async (provider) => ({
+    provider,
     available: true,
     error: null,
     refreshedAt: "2026-09-10T12:00:00.000Z",
+    accountStatus: "authenticated",
     account: null,
-    limits: { fiveHour: null, weekly: null },
+    limits: [],
     resetCredits: null
-  });
+  }));
   vi.spyOn(client.api, "sessionRecovery").mockResolvedValue({ incident: null });
-  vi.spyOn(client.api, "appServerCompatibility").mockResolvedValue({
-    provider: "codex",
-    status: "available",
-    available: true,
-    version: "test",
-    detail: "ready",
-    checkedAt: "2026-09-10T12:00:00.000Z",
-    missingCapabilities: []
+  vi.spyOn(client.api, "providers").mockResolvedValue({
+    defaultProvider: "codex",
+    providers: [providerDescriptor("codex"), providerDescriptor("claude")]
   });
   vi.spyOn(client, "eventSocket").mockReturnValue(socket as unknown as WebSocket);
 }

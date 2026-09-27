@@ -6,7 +6,8 @@ import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, no
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
-  ProviderCompatibility,
+  AgentProviderKind,
+  ProviderDescriptor,
   CreateSessionRequest,
   GitRepositoryProbe,
   ManagedSession,
@@ -61,7 +62,10 @@ import {
   playNotificationBell
 } from "../utils/notifications.js";
 import { installVisibleViewportVariables } from "../utils/visualViewport.js";
-import { useCodexUsageMonitor, type CodexUsageMonitor } from "../hooks/useCodexUsageMonitor.js";
+import { useProviderUsageMonitor, type ProviderUsageMonitor } from "../hooks/useProviderUsageMonitor.js";
+import { useResetCredits, type ResetCreditsMonitor } from "../hooks/useResetCredits.js";
+import { useProviders, type ProvidersState } from "../hooks/useProviders.js";
+import { findProvider, providerCompatibilityLabel, providerUnavailableReason } from "../utils/providers.js";
 
 export type ShellConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected" | "unauthorized";
 export const SHELL_RECONNECT_INTERVAL_MS = 2000;
@@ -91,7 +95,6 @@ export function foregroundConnectionDisplayState(
 export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
-  const codexUsageMonitor = useCodexUsageMonitor();
   const [connectionState, setConnectionState] = useState<ShellConnectionState>("connecting");
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
@@ -109,8 +112,6 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
-  const [appServerCompatibility, setAppServerCompatibility] = useState<ProviderCompatibility | null>(null);
-  const [appServerCompatibilityLoading, setAppServerCompatibilityLoading] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
   const [createSessionError, setCreateSessionError] = useState<string | null>(null);
@@ -143,6 +144,17 @@ export function AppShell() {
   const [promptHistoryOpen, setPromptHistoryOpen] = useState(false);
   const [promptHistoryInitialQuery, setPromptHistoryInitialQuery] = useState("");
   const [promptHistoryRequestKey, setPromptHistoryRequestKey] = useState(0);
+  const providers = useProviders({ connected: connectionState === "connected", connectionEpoch });
+  const codexDescriptor = findProvider(providers.providers, "codex");
+  const claudeDescriptor = findProvider(providers.providers, "claude");
+  const codexUsage = useProviderUsageMonitor("codex", providerUsageEnabled(codexDescriptor));
+  const codexResetCredits = useResetCredits("codex", codexUsage, providerUsageEnabled(codexDescriptor) && codexDescriptor!.capabilities.resetCredits);
+  const claudeUsage = useProviderUsageMonitor("claude", providerUsageEnabled(claudeDescriptor));
+  const claudeResetCredits = useResetCredits("claude", claudeUsage, providerUsageEnabled(claudeDescriptor) && claudeDescriptor!.capabilities.resetCredits);
+  const usageMonitors = useMemo<Record<AgentProviderKind, ProviderUsageMonitorState>>(() => ({
+    codex: { ...codexUsage, resetCredits: codexResetCredits },
+    claude: { ...claudeUsage, resetCredits: claudeResetCredits }
+  }), [claudeResetCredits, claudeUsage, codexResetCredits, codexUsage]);
   const sessionsRef = useRef<ManagedSession[]>([]);
   const sessionMutationSequenceRef = useRef(0);
   const sessionMutationsRef = useRef<SessionListMutation[]>([]);
@@ -591,7 +603,7 @@ export function AppShell() {
     }
     let cancelled = false;
     setGitSkillStatus("checking");
-    void api.gitWorkflowSkillStatus().then((status) => {
+    void api.gitWorkflowSkillStatus("codex").then((status) => {
       if (!cancelled) setGitSkillStatus(status.status);
     }).catch(() => {
       if (!cancelled) setGitSkillStatus("error");
@@ -627,23 +639,6 @@ export function AppShell() {
       window.clearTimeout(timer);
     };
   }, [createSessionOpen, createSessionTab, sessionHistoryQuery]);
-
-  useEffect(() => {
-    if (connectionState !== "connected") return undefined;
-    let cancelled = false;
-    setAppServerCompatibilityLoading(true);
-    void api.appServerCompatibility()
-      .then((compatibility) => {
-        if (cancelled) return;
-        setAppServerCompatibility(compatibility);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setAppServerCompatibility(null);
-      })
-      .finally(() => { if (!cancelled) setAppServerCompatibilityLoading(false); });
-    return () => { cancelled = true; };
-  }, [connectionEpoch, connectionState]);
 
   useDismissableContextMenu(Boolean(notificationMenu), notificationMenuRef, () => {
     setNotificationMenu(null);
@@ -867,8 +862,9 @@ export function AppShell() {
     setForkSessionBusy(true);
     setForkSessionError(null);
     try {
-      if (!appServerCompatibility?.available) {
-        setForkSessionError(runtimeUnavailableLabel(appServerCompatibility));
+      const unavailable = providerUnavailableReason(codexDescriptor);
+      if (unavailable) {
+        setForkSessionError(unavailable);
         return;
       }
       const response = await api.forkSession(forkSessionSource.id, { name });
@@ -972,8 +968,9 @@ export function AppShell() {
 
   async function restoreHistorySession(result: SessionHistoryResult) {
     if (sessionHistoryRestoreId) return;
-    if (!appServerCompatibility?.available) {
-      setSessionHistoryError(runtimeUnavailableLabel(appServerCompatibility));
+    const unavailable = providerUnavailableReason(codexDescriptor);
+    if (unavailable) {
+      setSessionHistoryError(unavailable);
       return;
     }
     setSessionHistoryRestoreId(result.sessionId);
@@ -1179,7 +1176,7 @@ export function AppShell() {
           ) : null}
         </div>
       </header>
-      {sessionTransferOpen ? <SessionTransferDialog compatibility={appServerCompatibility} onClose={() => setSessionTransferOpen(false)} /> : null}
+      {sessionTransferOpen ? <SessionTransferDialog descriptor={codexDescriptor} onClose={() => setSessionTransferOpen(false)} /> : null}
       {notificationMenu ? (
         <ContextMenu
           className="notification-rule-menu"
@@ -1301,7 +1298,8 @@ export function AppShell() {
               accessMode,
               notificationSettings,
               setNotificationSettings,
-              codexUsageMonitor
+              providers,
+              usageMonitors
             } satisfies AppShellOutletContext
           }
         />
@@ -1320,7 +1318,7 @@ export function AppShell() {
           selectedIds={sessionRecoverySelectedIds}
           busy={sessionRecoveryBusy}
           errors={sessionRecoveryErrors}
-          compatibility={appServerCompatibility}
+          descriptor={codexDescriptor}
           onToggle={toggleSessionRecoverySelection}
           onDismiss={() => void dismissSessionRecovery()}
           onRestore={() => void restoreSessionRecovery()}
@@ -1332,7 +1330,7 @@ export function AppShell() {
           name={forkSessionName}
           busy={forkSessionBusy}
           error={forkSessionError}
-          compatibility={appServerCompatibility}
+          descriptor={codexDescriptor}
           onNameChange={(value) => {
             setForkSessionName(normalizeSessionNameInput(value));
             setForkSessionError(null);
@@ -1362,10 +1360,10 @@ export function AppShell() {
             </div>
             {createSessionTab === "create" ? (
               <>
-                <p className="session-git-probe-note" data-status={appServerCompatibility?.status}>
-                  {appServerCompatibilityLoading
-                    ? "Checking Codex app-server compatibility…"
-                    : appServerCompatibilityLabel(appServerCompatibility)}
+                <p className="session-git-probe-note" data-status={codexDescriptor?.compatibility.status}>
+                  {!providers.loaded && providers.loading
+                    ? "Checking Codex compatibility…"
+                    : providerCompatibilityLabel(codexDescriptor)}
                 </p>
                 <label className="rename-field">
                   <span>Directory</span>
@@ -1440,7 +1438,7 @@ export function AppShell() {
                     ) : null}
                     <GitWorkflowSkillStatusCallout status={gitSkillStatus} onRetry={() => {
                       setGitSkillStatus("checking");
-                      void api.gitWorkflowSkillStatus().then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
+                      void api.gitWorkflowSkillStatus("codex").then((status) => setGitSkillStatus(status.status)).catch(() => setGitSkillStatus("error"));
                     }} />
                     {gitWorkspaceFieldsAvailable && createSessionGitProbe.localBranches.length === 0
                       ? <p className="session-git-probe-note">This repository has no local branches.</p>
@@ -1474,7 +1472,7 @@ export function AppShell() {
                   <Button
                     variant="primary"
                     type="submit"
-                    disabled={createSessionBusy || createSessionNameInvalid || !appServerCompatibility?.available || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
+                    disabled={createSessionBusy || createSessionNameInvalid || !codexDescriptor?.compatibility.available || Boolean(createSessionGitProbe?.isGit && (!gitWorkspaceFieldsAvailable || !createSessionGitProbe.localBranches.includes(createSessionTargetBranch)))}
                     busy={createSessionBusy}
                     busyLabel="Creating"
                   >
@@ -1559,7 +1557,7 @@ export function SessionRecoveryContent({
   selectedIds,
   busy,
   errors,
-  compatibility,
+  descriptor,
   onToggle,
   onDismiss,
   onRestore
@@ -1568,7 +1566,7 @@ export function SessionRecoveryContent({
   selectedIds: ReadonlySet<string>;
   busy: boolean;
   errors: Record<string, string>;
-  compatibility: ProviderCompatibility | null;
+  descriptor: ProviderDescriptor | null;
   onToggle: (sessionId: string) => void;
   onDismiss: () => void;
   onRestore: () => void;
@@ -1592,7 +1590,7 @@ export function SessionRecoveryContent({
       </div>
       <DialogActions>
         <Button variant="ghost" onClick={onDismiss} disabled={busy}>Not now</Button>
-        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !compatibility?.available} busy={busy} busyLabel="Restoring">
+        <Button variant="primary" onClick={onRestore} disabled={busy || selectedIds.size === 0 || !descriptor?.compatibility.available} busy={busy} busyLabel="Restoring">
           Restore selected ({selectedIds.size})
         </Button>
       </DialogActions>
@@ -1619,7 +1617,15 @@ export interface AppShellOutletContext {
   accessMode: AccessMode | null;
   notificationSettings: NotificationSettings | null;
   setNotificationSettings: (settings: NotificationSettings) => void;
-  codexUsageMonitor: CodexUsageMonitor;
+  providers: ProvidersState;
+  usageMonitors: Record<AgentProviderKind, ProviderUsageMonitorState>;
+}
+
+export type ProviderUsageMonitorState = ProviderUsageMonitor & { resetCredits: ResetCreditsMonitor };
+
+/** Usage polling runs only for installed providers that report account limits. */
+export function providerUsageEnabled(descriptor: ProviderDescriptor | null): boolean {
+  return Boolean(descriptor?.enabled && descriptor.compatibility.available && descriptor.capabilities.usageLimits);
 }
 
 export function defaultForkSessionName(session: ManagedSession): string {
@@ -1645,7 +1651,7 @@ function ForkSessionDialog({
   name,
   busy,
   error,
-  compatibility,
+  descriptor,
   onNameChange,
   onClose,
   onSubmit
@@ -1654,7 +1660,7 @@ function ForkSessionDialog({
   name: string;
   busy: boolean;
   error: string | null;
-  compatibility: ProviderCompatibility | null;
+  descriptor: ProviderDescriptor | null;
   onNameChange: (value: string) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1696,7 +1702,7 @@ function ForkSessionDialog({
       {error ? <p className="dialog-error" role="alert">{error}</p> : null}
       <DialogActions>
         <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !compatibility?.available} busy={busy} busyLabel="Forking">
+        <Button variant="primary" type="submit" icon={<GitFork size={16} />} disabled={busy || invalid || !descriptor?.compatibility.available} busy={busy} busyLabel="Forking">
           Fork and open
         </Button>
       </DialogActions>
@@ -2132,8 +2138,8 @@ export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: st
   return suggestions.some((suggestion) => suggestion.value === preferred) ? preferred : suggestions[0]?.value ?? "";
 }
 
-function SessionTransferDialog({ compatibility, onClose }: {
-  compatibility: ProviderCompatibility | null;
+function SessionTransferDialog({ descriptor, onClose }: {
+  descriptor: ProviderDescriptor | null;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"export" | "import">("export");
@@ -2423,7 +2429,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
               </div>
               <DialogActions>
                 <Button variant="ghost" onClick={() => { void api.cancelSessionTransfer(preview.token); setPreview(null); }} disabled={busy}>Choose another</Button>
-                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !compatibility?.available} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
+                <Button variant="primary" icon={<Upload size={16} />} disabled={busy || !mappingComplete || !descriptor?.compatibility.available} busy={busy} busyLabel="Importing" onClick={() => void importSessions()}>
                   Import and resume all
                 </Button>
               </DialogActions>
@@ -2452,18 +2458,6 @@ function expandedTransferSelection(selected: Set<string>, sessions: ManagedSessi
     }
   }
   return [...expanded];
-}
-
-export function appServerCompatibilityLabel(compatibility: ProviderCompatibility | null): string {
-  if (!compatibility) return "Codex app-server compatibility could not be loaded.";
-  if (compatibility.available) {
-    return `Codex app-server available${compatibility.version ? ` · Codex ${compatibility.version}` : ""}.`;
-  }
-  return compatibility.detail;
-}
-
-export function runtimeUnavailableLabel(compatibility: ProviderCompatibility | null): string {
-  return compatibility?.detail ?? "Codex app-server compatibility could not be loaded.";
 }
 
 export function primaryInputFocusCommandForShortcut(

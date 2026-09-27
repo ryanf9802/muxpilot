@@ -1,8 +1,8 @@
 import { ClipboardList, MessageSquare, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type {
-  CodexModel,
-  CodexModelCatalogResponse,
+  AgentModel,
+  ProviderModelCatalogResponse,
   CollaborationMode,
   ApprovalMode,
   ApprovalReviewerSettings,
@@ -15,7 +15,7 @@ import { Button, DialogActions } from "./Button.js";
 
 export function effectiveModelSettings(
   session: Pick<ManagedSession, "models">,
-  defaults: CodexModelCatalogResponse["defaults"],
+  defaults: ProviderModelCatalogResponse["defaults"],
   mode: CollaborationMode
 ): SessionModelSettings {
   const saved = session.models[mode];
@@ -53,7 +53,7 @@ export function ModelSettingsDrawer({
   selections: SessionModelSelections;
   activeMode: CollaborationMode | null;
   fastMode?: boolean | null;
-  catalog: CodexModelCatalogResponse | null;
+  catalog: ProviderModelCatalogResponse | null;
   loading: boolean;
   error: string;
   applying: CollaborationMode | "reviewer" | null;
@@ -88,8 +88,8 @@ export function ModelSettingsDrawer({
 
   const changedNormal = draftModel !== normal.model || draftEffort !== normal.reasoningEffort;
   const changedPlan = draftModel !== plan.model || draftEffort !== plan.reasoningEffort;
-  const changedReviewer = reviewerSettings !== undefined && reviewerSettings !== null
-    && (draftModel !== reviewerSettings.model || draftEffort !== reviewerSettings.reasoningEffort);
+  const changedReviewer = Boolean(reviewerSettings)
+    && (draftModel !== reviewerSettings!.model || draftEffort !== reviewerSettings!.reasoningEffort);
   const valid = Boolean(selectedModel) && (
     selectedModel!.supportedReasoningEfforts.length === 0
       ? draftEffort === null
@@ -278,7 +278,7 @@ function Badge({ icon, label, legend = false }: { icon: ReactElement; label: str
   );
 }
 
-function validEffort(model: CodexModel | null | undefined, preferred: string | null): string | null {
+function validEffort(model: AgentModel | null | undefined, preferred: string | null): string | null {
   if (!model || model.supportedReasoningEfforts.length === 0) return null;
   if (preferred && model.supportedReasoningEfforts.some((option) => option.reasoningEffort === preferred)) return preferred;
   if (model.defaultReasoningEffort && model.supportedReasoningEfforts.some((option) => option.reasoningEffort === model.defaultReasoningEffort)) {
@@ -291,11 +291,11 @@ function effortLabel(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function supportsFast(model: CodexModel): boolean {
-  return model.serviceTiers.some((tier) => tier.id.toLowerCase() === "fast" || tier.id.toLowerCase() === "priority");
+function supportsFast(model: AgentModel): boolean {
+  return model.supportsFastMode;
 }
 
-const emptyDefaults: CodexModelCatalogResponse["defaults"] = {
+const emptyDefaults: ProviderModelCatalogResponse["defaults"] = {
   default: { model: null, reasoningEffort: null },
   plan: { model: null, reasoningEffort: null }
 };
