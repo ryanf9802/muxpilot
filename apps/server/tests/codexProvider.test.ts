@@ -3,47 +3,48 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AppServerCompatibility } from "@muxpilot/core";
-import { CodexAppServerConnectionManager } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
-import {
-  appServerCapabilityId,
-  createSessionDriverRegistry
-} from "../src/services/sessionDrivers/appServerRuntime.js";
-import { SystemdAppServerSupervisor } from "../src/services/sessionDrivers/systemdAppServerSupervisor.js";
+import type { ProviderCompatibility } from "@muxpilot/core";
+import { CodexAppServerConnectionManager } from "../src/providers/codex/connectionManager.js";
+import { codexRuntimeCommand, createCodexProvider } from "../src/providers/codex/provider.js";
+import { sessionRuntimeCapabilityId } from "../src/runtime/capabilityId.js";
+import { SystemdSessionSupervisor } from "../src/runtime/systemdSessionSupervisor.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("app-server runtime composition", () => {
-  it("registers no driver when compatibility is unavailable", () => {
+describe("Codex provider composition", () => {
+  it("has no driver when compatibility is unavailable", () => {
     const { runtimeDir: _runtimeDir, ...unavailableOptions } = options({
+      provider: "codex",
       status: "user_systemd_unavailable",
       available: false,
-      codexVersion: null,
+      version: null,
       detail: "unavailable",
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: ["user-systemd"]
     });
-    const registry = createSessionDriverRegistry(unavailableOptions);
-    expect(registry.has("codex_app_server")).toBe(false);
+    const provider = createCodexProvider(unavailableOptions);
+    expect(provider.driver).toBeNull();
+    expect(provider.compatibility()).toMatchObject({ provider: "codex", available: false });
   });
 
   it("requires the user runtime directory when app-server is available", () => {
     const { runtimeDir: _runtimeDir, ...availableOptions } = options(availableCompatibility());
 
-    expect(() => createSessionDriverRegistry(availableOptions)).toThrow("requires XDG_RUNTIME_DIR");
+    expect(() => createCodexProvider(availableOptions)).toThrow("requires XDG_RUNTIME_DIR");
   });
 
   it("registers the compatible driver without starting a service or creating runtime files", () => {
     const dataDir = join(tmpdir(), `muxpilot-app-runtime-${randomUUID()}`);
-    const registry = createSessionDriverRegistry({
+    const provider = createCodexProvider({
       ...options(availableCompatibility()),
       dataDir,
       runtimeDir: join(tmpdir(), "muxpilot-runtime")
     });
-    expect(registry.has("codex_app_server")).toBe(true);
-    expect(registry.require("codex_app_server").capabilities).toMatchObject({
+    expect(provider.kind).toBe("codex");
+    expect(provider.driver?.kind).toBe("codex");
+    expect(provider.driver?.capabilities).toMatchObject({
       start: true,
       verifiedInput: true,
       terminalAttach: true
@@ -59,7 +60,7 @@ describe("app-server runtime composition", () => {
       state: "connected" as const,
       agentVersion: "0.152.0"
     };
-    vi.spyOn(SystemdAppServerSupervisor.prototype, "start")
+    const start = vi.spyOn(SystemdSessionSupervisor.prototype, "start")
       .mockResolvedValueOnce({ ...runtime, launchDisposition: "reused" })
       .mockResolvedValueOnce({ ...runtime, launchDisposition: "started" });
     vi.spyOn(CodexAppServerConnectionManager.prototype, "start").mockResolvedValue({
@@ -80,12 +81,12 @@ describe("app-server runtime composition", () => {
       .mockResolvedValueOnce({ environment: { TOKEN: "pending" }, revision: 7 })
       .mockResolvedValueOnce({ environment: { TOKEN: "pending" }, revision: 8 });
     const markApplied = vi.fn(async () => undefined);
-    const registry = createSessionDriverRegistry({
+    const provider = createCodexProvider({
       ...options(availableCompatibility()),
       runtimeDir: join(tmpdir(), "muxpilot-runtime"),
       sessionEnvironment: { resolveForLaunch, markApplied }
     });
-    const driver = registry.require("codex_app_server");
+    const driver = provider.driver!;
     const spec = {
       sessionId: "session-1",
       name: "Session 1",
@@ -99,19 +100,39 @@ describe("app-server runtime composition", () => {
     await expect(driver.start(spec)).resolves.toMatchObject({ launchDisposition: "started" });
     expect(markApplied).toHaveBeenCalledOnce();
     expect(markApplied).toHaveBeenCalledWith("session-1", 8);
+    const startSpec = start.mock.calls[0]![0];
+    expect(startSpec.environment).toMatchObject({ TOKEN: "pending", CODEX_HOME: "/tmp/codex-home" });
+    expect(startSpec.agentVersion).toBe("0.152.0");
+    expect(startSpec.command({ socketPath: "/run/app.sock", directory: "/data/x" })).toEqual(codexRuntimeCommand("/run/app.sock", []));
+  });
+
+  it("launches the same Codex app-server argv as before provider extraction", () => {
+    expect(codexRuntimeCommand("/run/user/1000/muxpilot/app-server-sessions/abc/app-server.sock", [
+      { name: "muxpilot_sessions", command: "/usr/bin/node", args: ["/mcp.mjs", "cap"], defaultToolsApprovalMode: "approve" }
+    ])).toEqual([
+      "codex",
+      "-c", "check_for_update_on_startup=false",
+      "-c", "sandbox_workspace_write.network_access=true",
+      "-c", "mcp_servers.muxpilot_sessions.command=\"/usr/bin/node\"",
+      "-c", "mcp_servers.muxpilot_sessions.args=[\"/mcp.mjs\",\"cap\"]",
+      "-c", "mcp_servers.muxpilot_sessions.default_tools_approval_mode=\"approve\"",
+      "app-server",
+      "--listen",
+      "unix:///run/user/1000/muxpilot/app-server-sessions/abc/app-server.sock"
+    ]);
   });
 
   it("derives a stable private runtime identity from the muxpilot session id", () => {
-    expect(appServerCapabilityId("session-1")).toMatch(/^[a-f0-9]{24}$/);
-    expect(appServerCapabilityId("session-1")).toBe(appServerCapabilityId("session-1"));
-    expect(appServerCapabilityId("session-1")).not.toBe(appServerCapabilityId("session-2"));
-    expect(appServerCapabilityId("session-1", "shadow")).not.toBe(appServerCapabilityId("session-1"));
-    expect(() => appServerCapabilityId(" ")).toThrow("must not be empty");
-    expect(() => appServerCapabilityId("session-1", " ")).toThrow("namespace must not be empty");
+    expect(sessionRuntimeCapabilityId("session-1")).toMatch(/^[a-f0-9]{24}$/);
+    expect(sessionRuntimeCapabilityId("session-1")).toBe(sessionRuntimeCapabilityId("session-1"));
+    expect(sessionRuntimeCapabilityId("session-1")).not.toBe(sessionRuntimeCapabilityId("session-2"));
+    expect(sessionRuntimeCapabilityId("session-1", "shadow")).not.toBe(sessionRuntimeCapabilityId("session-1"));
+    expect(() => sessionRuntimeCapabilityId(" ")).toThrow("must not be empty");
+    expect(() => sessionRuntimeCapabilityId("session-1", " ")).toThrow("namespace must not be empty");
   });
 });
 
-function options(compatibility: AppServerCompatibility) {
+function options(compatibility: ProviderCompatibility) {
   return {
     compatibility,
     dataDir: "/tmp/muxpilot-app-server-runtime-test",
@@ -123,11 +144,12 @@ function options(compatibility: AppServerCompatibility) {
   };
 }
 
-function availableCompatibility(): AppServerCompatibility {
+function availableCompatibility(): ProviderCompatibility {
   return {
+    provider: "codex",
     status: "available",
     available: true,
-    codexVersion: "0.152.0",
+    version: "0.152.0",
     detail: "available",
     checkedAt: "2026-09-01T12:00:00.000Z",
     missingCapabilities: []

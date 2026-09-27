@@ -9,7 +9,7 @@ import type {
   CodexUsageLimit,
   CodexUsageSummaryResponse
 } from "@muxpilot/core";
-import { nowIso } from "../utils/time.js";
+import { nowIso } from "../../utils/time.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const RESET_REQUEST_TIMEOUT_MS = 15_000;

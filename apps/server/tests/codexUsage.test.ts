@@ -7,7 +7,7 @@ import {
   selectCodexRateLimitSnapshot,
   type AccountReadResponse,
   type RateLimitsReadResponse
-} from "../src/services/codexUsage.js";
+} from "../src/providers/codex/usage.js";
 
 describe("CodexUsageService", () => {
   it("single-flights concurrent reads and caches successful summaries", async () => {

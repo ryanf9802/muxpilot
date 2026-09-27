@@ -157,21 +157,6 @@ export interface SessionCapabilities {
   hibernate: boolean;
 }
 
-export type AppServerCompatibilityStatus =
-  | "available"
-  | "user_systemd_unavailable"
-  | "incompatible_codex_protocol"
-  | "failed_health_probe";
-
-export interface AppServerCompatibility {
-  status: AppServerCompatibilityStatus;
-  available: boolean;
-  codexVersion: string | null;
-  detail: string;
-  checkedAt: string;
-  missingCapabilities: string[];
-}
-
 export interface RepoMetadata {
   root: string | null;
   name: string;
@@ -791,12 +776,14 @@ export type CreateSessionRequest =
   | {
       cwd: string;
       name: string;
+      /** Agent provider for the new session; defaults to the host's default provider. */
+      provider?: AgentProviderKind;
       workspace: {
         mode: "git";
         targetBranch: string;
       };
     }
-  | { cwd: string; name: string; workspace?: { mode: "directory" } };
+  | { cwd: string; name: string; provider?: AgentProviderKind; workspace?: { mode: "directory" } };
 
 export interface ForkSessionRequest {
   name: string;

@@ -7,10 +7,10 @@ import {
   type AppServerDriverEventSink,
   type AppServerProcessStore,
   type AppServerRequestStore
-} from "../src/services/sessionDrivers/codexAppServerDriver.js";
-import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
-import { JsonRpcResponseError, type JsonRpcConnection } from "../src/services/sessionDrivers/jsonRpcConnection.js";
-import type { RuntimeStartSpec, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
+} from "../src/providers/codex/driver.js";
+import type { AppServerSessionConnection, AppServerSessionHandlers } from "../src/providers/codex/connectionManager.js";
+import { JsonRpcResponseError, type JsonRpcConnection } from "../src/runtime/jsonRpcConnection.js";
+import type { RuntimeStartSpec, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/providers/types.js";
 
 const runtime: SystemdSessionRuntimeRef = {
   kind: "systemd_service",
@@ -1245,9 +1245,9 @@ function createHarness(
         sessionId: spec.sessionId,
         capabilityId: "0123456789abcdef01234567",
         cwd: spec.cwd,
-        codexHome: "/codex",
-        codexVersion: "0.152.0",
-        environment: {},
+        agentVersion: "0.152.0",
+        command: () => ["codex", "app-server"],
+        environment: { CODEX_HOME: "/codex" },
         mcpServers: spec.options.mcpServers ?? []
       } satisfies RuntimeStartSpec),
       requestStore,

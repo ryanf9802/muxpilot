@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeAppServerCompatibility, type AppServerProbeExecutor } from "../src/services/appServerCompatibility.js";
+import { probeAppServerCompatibility, type AppServerProbeExecutor } from "../src/providers/codex/compatibility.js";
 import {
   REQUIRED_CLIENT_METHODS,
   REQUIRED_PROTOCOL_FIELDS,
   REQUIRED_SERVER_NOTIFICATIONS,
   REQUIRED_SERVER_REQUESTS
-} from "../src/services/sessionDrivers/codexAppServerProtocol.js";
+} from "../src/providers/codex/protocol.js";
 
 const requiredSchema = JSON.stringify([
   ...REQUIRED_CLIENT_METHODS,
@@ -27,9 +27,10 @@ function executor(overrides: Partial<AppServerProbeExecutor> = {}): AppServerPro
 describe("app-server compatibility probe", () => {
   it("reports an available installed protocol", async () => {
     await expect(probeAppServerCompatibility(true, executor(), () => new Date("2026-09-01T12:00:00Z"))).resolves.toEqual({
+      provider: "codex",
       status: "available",
       available: true,
-      codexVersion: "0.152.0",
+      version: "0.152.0",
       detail: "Codex app-server, Unix socket proxying, and the required protocol methods are available.",
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: []
@@ -50,7 +51,7 @@ describe("app-server compatibility probe", () => {
       proxyHelp: vi.fn(async () => "proxy"),
       protocolSchema: vi.fn(async () => JSON.stringify(["initialize", "thread/start"]))
     }));
-    expect(result.status).toBe("incompatible_codex_protocol");
+    expect(result.status).toBe("incompatible_protocol");
     expect(result.missingCapabilities).toEqual(expect.arrayContaining(["thread/resume", "turn/start", "unix-listen", "unix-proxy"]));
   });
 
@@ -61,7 +62,7 @@ describe("app-server compatibility probe", () => {
     expect(result).toMatchObject({
       status: "failed_health_probe",
       available: false,
-      codexVersion: "0.152.0",
+      version: "0.152.0",
       detail: "Codex app-server health probe failed: schema command failed"
     });
   });

@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession, SessionEvent } from "@muxpilot/core";
 import { AppDatabase } from "../src/db/database.js";
 import { BtwService, type BtwError } from "../src/services/btwService.js";
-import type { CodexAppServerMessage } from "../src/services/codexUsage.js";
+import type { CodexAppServerMessage } from "../src/providers/codex/usage.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { SessionDocumentError } from "../src/services/sessionDocuments.js";
 

@@ -40,19 +40,19 @@ import type {
   TranscriptPageResponse,
   TranscriptSearchResponse
 } from "@muxpilot/core";
-import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity, sessionThreadId, sessionTranscriptPath } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, providerDisplayName, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity, sessionThreadId, sessionTranscriptPath } from "@muxpilot/core";
 import { serializeApprovalDecisionEvent } from "@muxpilot/core";
 import type { AppDatabase, AppServerReconciliationState, StoredGitWorkspace } from "../db/database.js";
-import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
-import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../codex/parser.js";
-import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "./sessionDrivers/types.js";
-import type { SessionDriverRegistry } from "./sessionDrivers/registry.js";
+import { CodexSessionStore, type CodexSessionFile } from "../providers/codex/sessionStore.js";
+import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../providers/codex/parser.js";
+import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "../providers/types.js";
+import { ProviderRegistry, ProviderUnavailableError } from "../providers/registry.js";
 import {
   AppServerLaunchAttemptError,
   AppServerSteerUnavailableError,
   PLAN_IMPLEMENTATION_CLEAR_CONTEXT_PREFIX,
   PLAN_IMPLEMENTATION_MESSAGE
-} from "./sessionDrivers/codexAppServerDriver.js";
+} from "../providers/codex/driver.js";
 import { eventId, stableId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import { loadRepoMetadata } from "./gitMetadata.js";
@@ -67,7 +67,7 @@ import {
   type BtwDocumentChanges,
   type SessionDocumentSnapshot
 } from "./sessionDocuments.js";
-import type { ApprovalReviewResult } from "./approvalReviewer.js";
+import type { ApprovalReviewResult } from "../providers/codex/approvalReviewer.js";
 import type { SessionEnvironmentService } from "./sessionEnvironment.js";
 
 interface ApprovalReviewProvider {
@@ -91,6 +91,25 @@ interface CodexMetadataLookup {
   listModels(): Promise<CodexModel[]>;
   catalog(): Promise<CodexModelCatalogResponse>;
   effectiveServiceTier(cwd: string): Promise<string | null>;
+}
+
+export interface SessionManagerOptions {
+  db: AppDatabase;
+  events: EventBus;
+  documents: SessionDocumentService;
+  providers?: ProviderRegistry;
+  codexStore: CodexSessionStore;
+  discoveryIntervalMs?: number;
+  parserIntervalMs?: number;
+  approvalReviewer?: ApprovalReviewProvider | null;
+  gitWorkspaces?: GitWorkspaceManager | null;
+  codexHome?: string | null;
+  gitWorktreeRoot?: string | null;
+  managedEnvironment?: Record<string, string>;
+  codexMetadata?: CodexMetadataLookup | null;
+  appServerHibernateMs?: number;
+  imagePath?: ((sessionId: string, imageId: string) => string) | null;
+  sessionEnvironment?: SessionEnvironmentService | null;
 }
 
 interface SessionManagerStartOptions {
@@ -198,24 +217,40 @@ export class SessionManager {
   private readonly unsubscribeQueueReadiness: () => void;
   private readonly unsubscribeNotLoadedRecovery: () => void;
 
-  constructor(
-    private readonly db: AppDatabase,
-    private readonly codexStore: CodexSessionStore,
-    private readonly events: EventBus,
-    private readonly discoveryIntervalMs: number,
-    private readonly parserIntervalMs: number,
-    private readonly documents: SessionDocumentService,
-    private readonly approvalReviewer: ApprovalReviewProvider | null = null,
-    private readonly gitWorkspaces: GitWorkspaceManager | null = null,
-    private readonly codexHome: string | null = process.env.CODEX_HOME ?? null,
-    private readonly gitWorktreeRoot: string | null = null,
-    private readonly managedEnvironment: Record<string, string> = {},
-    private readonly codexMetadata: CodexMetadataLookup | null = null,
-    private readonly sessionDrivers: SessionDriverRegistry | null = null,
-    private readonly appServerHibernateMs = 900_000,
-    private readonly imagePath: ((sessionId: string, imageId: string) => string) | null = null,
-    private readonly sessionEnvironment: SessionEnvironmentService | null = null
-  ) {
+  private readonly db: AppDatabase;
+  private readonly providers: ProviderRegistry;
+  private readonly codexStore: CodexSessionStore;
+  private readonly events: EventBus;
+  private readonly discoveryIntervalMs: number;
+  private readonly parserIntervalMs: number;
+  private readonly documents: SessionDocumentService;
+  private readonly approvalReviewer: ApprovalReviewProvider | null;
+  private readonly gitWorkspaces: GitWorkspaceManager | null;
+  private readonly codexHome: string | null;
+  private readonly gitWorktreeRoot: string | null;
+  private readonly managedEnvironment: Record<string, string>;
+  private readonly codexMetadata: CodexMetadataLookup | null;
+  private readonly appServerHibernateMs: number;
+  private readonly imagePath: ((sessionId: string, imageId: string) => string) | null;
+  private readonly sessionEnvironment: SessionEnvironmentService | null;
+
+  constructor(options: SessionManagerOptions) {
+    this.db = options.db;
+    this.providers = options.providers ?? new ProviderRegistry();
+    this.codexStore = options.codexStore;
+    this.events = options.events;
+    this.discoveryIntervalMs = options.discoveryIntervalMs ?? 60_000;
+    this.parserIntervalMs = options.parserIntervalMs ?? 60_000;
+    this.documents = options.documents;
+    this.approvalReviewer = options.approvalReviewer ?? null;
+    this.gitWorkspaces = options.gitWorkspaces ?? null;
+    this.codexHome = options.codexHome === undefined ? process.env.CODEX_HOME ?? null : options.codexHome;
+    this.gitWorktreeRoot = options.gitWorktreeRoot ?? null;
+    this.managedEnvironment = options.managedEnvironment ?? {};
+    this.codexMetadata = options.codexMetadata ?? null;
+    this.appServerHibernateMs = options.appServerHibernateMs ?? 900_000;
+    this.imagePath = options.imagePath ?? null;
+    this.sessionEnvironment = options.sessionEnvironment ?? null;
     this.unsubscribeQueueReadiness = this.events.subscribe((event) => {
       if (event.type !== "status.changed") return;
       const status = recordValue(event.payload)?.status;
@@ -294,7 +329,7 @@ export class SessionManager {
       if ((await this.sessionEnvironmentRestartBlockers(session)).length > 0) return;
       await this.sessionEnvironment!.markApplying(sessionId);
       try {
-        await this.requireAppServerDriver().kill(session);
+        await this.requireDriver(session).kill(session);
         const stopped = { ...session, runtime: { ...session.runtime, state: "stopped" as const } };
         await this.db.upsertSession(stopped, nowIso());
         await this.resumeAppServerSession(stopped);
@@ -316,7 +351,7 @@ export class SessionManager {
     if ((await this.db.listAgentWaits()).some((wait) => wait.actorSessionId === session.id)) blockers.push("orchestration_continuation");
     if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) blockers.push("heavy_command");
     if (blockers.length === 0) {
-      try { blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session)); }
+      try { blockers.push(...await this.requireDriver(session).hibernationBlockers(session)); }
       catch { blockers.push("runtime_evidence_unavailable"); }
     }
     return [...new Set(blockers)];
@@ -329,13 +364,13 @@ export class SessionManager {
       const sessions = (await this.db.listSessions(true))
         .filter(isRecoverableAppServerSession)
         .sort(compareAppServerRecoveryOrder);
-      if (!this.sessionDrivers?.has("codex_app_server")) {
-        for (const session of sessions) {
-          await this.markAppServerRecoveryFailed(session.id, "App-server runtime compatibility is unavailable", false);
-        }
-        return;
-      }
       for (const session of sessions) {
+        const provider = this.providers.maybe(session.provider.kind);
+        if (!provider?.driver) {
+          const detail = provider ? provider.compatibility().detail : `${session.provider.kind} sessions are not enabled`;
+          await this.markAppServerRecoveryFailed(session.id, `Runtime compatibility is unavailable: ${detail}`, false);
+          continue;
+        }
         try {
           await this.resumeAppServerSession(session);
         } catch (error) {
@@ -426,7 +461,7 @@ export class SessionManager {
           await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_restart_deferred", session.id, restartBlockers);
           return;
         }
-        const driver = this.requireAppServerDriver();
+        const driver = this.requireDriver(session);
         await driver.kill(session);
         const cleared = { ...session, runtime: { ...session.runtime, state: "stopped" as const }, authenticationError: null };
         await this.db.upsertSession(cleared, nowIso());
@@ -465,7 +500,7 @@ export class SessionManager {
           await this.auditCodexAuthenticationRuntimeDecision("runtime:auth_signout_deferred", session.id, restartBlockers);
           return;
         }
-        await this.requireAppServerDriver().kill(session);
+        await this.requireDriver(session).kill(session);
         const updated = {
           ...session,
           status: "waiting" as const,
@@ -498,7 +533,7 @@ export class SessionManager {
       let liveStatusBlockers: string[] = [];
       if (reconcileStaleStatus && RUNTIME_ACTIVITY_STATUSES.has(current.status)) {
         try {
-          liveStatusBlockers = await this.requireAppServerDriver().hibernationBlockers(current);
+          liveStatusBlockers = await this.requireDriver(current).hibernationBlockers(current);
         } catch {
           liveStatusBlockers = ["runtime_evidence_unavailable"];
         }
@@ -508,7 +543,7 @@ export class SessionManager {
     }
     if (blockers.length === 0) {
       try {
-        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(current));
+        blockers.push(...await this.requireDriver(current).hibernationBlockers(current));
       } catch {
         blockers.push("runtime_evidence_unavailable");
       }
@@ -757,7 +792,7 @@ export class SessionManager {
     if (!RUNTIME_ACTIVITY_STATUSES.has(current.status)) return current;
     if (this.deliveringInputSessionIds?.has(sessionId) || this.processingQueuedSessionIds?.has(sessionId)) return current;
     if (current.gitWorkspace && await this.heavyCommandQueue?.hasActive(current.gitWorkspace.id)) return current;
-    const blockers = await this.requireAppServerDriver().hibernationBlockers(current).catch(() => ["runtime_evidence_unavailable"]);
+    const blockers = await this.requireDriver(current).hibernationBlockers(current).catch(() => ["runtime_evidence_unavailable"]);
     if (blockers.length > 0) return current;
 
     const latest = requireSession(await this.db.getSession(sessionId));
@@ -782,7 +817,7 @@ export class SessionManager {
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
     const session = await this.db.getSession(sessionId);
     if (!session || session.status === "missing") return false;
-    const appServerDriver = this.appServerDriver(session);
+    const appServerDriver = this.requireDriver(session);
     if (!appServerDriver || session.archived || session.initializing || session.runtime?.state !== "connected" ||
       (!isInputReadyStatus(session.status) && session.status !== "queued" && session.status !== "running" && session.status !== "working")) return false;
     if (this.deliveringInputSessionIds.has(sessionId) || this.processingQueuedSessionIds.has(sessionId)) return false;
@@ -1390,8 +1425,10 @@ export class SessionManager {
       return { session: updated, restored: false };
     }
 
-    if (!this.sessionDrivers?.has()) {
-      throw new SessionRestoreError("Codex app-server is unavailable; muxpilot is running in read-only history mode");
+    const restoreProvider = this.providers.maybe(source.provider.kind);
+    if (!restoreProvider?.driver) {
+      const detail = restoreProvider ? restoreProvider.compatibility().detail : "the provider is not enabled";
+      throw new SessionRestoreError(`${providerDisplayName(source.provider.kind)} sessions are unavailable: ${detail}`);
     }
     this.requireAuthenticationAvailable();
     const restored = await this.resumeAppServerSession(source);
@@ -1408,7 +1445,7 @@ export class SessionManager {
     mapping: SessionTransferImportMapping,
     importedDocuments: SessionDocumentSnapshot[] | null = null
   ): Promise<SessionTransferImportResult> {
-    this.requireAppServerDriver();
+    this.providers.driver(portable.provider);
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     const existing = (await this.db.listSessions(true)).find((session) =>
       session.provider.kind === portable.provider && sessionThreadId(session) === portable.threadId
@@ -1500,7 +1537,7 @@ export class SessionManager {
   }
 
   async validatePortableMapping(portable: PortableSession, mapping: SessionTransferImportMapping): Promise<void> {
-    this.requireAppServerDriver();
+    this.providers.driver(portable.provider);
     const destination = await requireExistingDirectory(mapping.destinationCwd);
     if (portable.workspaceMode !== "git") return;
     if (!this.gitWorkspaces) throw new SessionRestoreError("Managed Git workspaces are unavailable");
@@ -1511,8 +1548,8 @@ export class SessionManager {
     if (!probe.localBranches.includes(targetBranch)) throw new SessionRestoreError(`Local target branch '${targetBranch}' does not exist for '${portable.sessionName}'`);
   }
 
-  assertPortableRuntimeAvailable(_mapping: SessionTransferImportMapping): void {
-    this.requireAppServerDriver();
+  assertPortableRuntimeAvailable(portable: Pick<PortableSession, "provider">): void {
+    this.providers.driver(portable.provider);
   }
 
   async enqueueInput(
@@ -1777,7 +1814,7 @@ export class SessionManager {
     if (!AUTHENTICATION_RUNTIME_RESTART_SAFE_STATUSES.has(session.status)) {
       throw new InputDeliveryError("Session variables are pending until the current work reaches a safe boundary.");
     }
-    await this.requireAppServerDriver().kill(session);
+    await this.requireDriver(session).kill(session);
     const stopped = { ...session, runtime: { ...session.runtime, state: "stopped" as const } };
     await this.db.upsertSession(stopped, nowIso());
     return this.resumeAppServerSession(stopped);
@@ -1790,7 +1827,7 @@ export class SessionManager {
     content?: import("@muxpilot/core").MessageContentPart[]
   ): Promise<{ session: ManagedSession; message: ChatMessage } | { queuedInput: QueuedInput }> {
     const targetMode = session.inputMode;
-    const driver = this.appServerDriver(session);
+    const driver = this.requireDriver(session);
     const heavyweightActive = session.gitWorkspace
       ? await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id) ?? false
       : false;
@@ -1910,7 +1947,7 @@ export class SessionManager {
   }
 
   private async sendSessionNotice(session: ManagedSession, text: string): Promise<void> {
-    await this.requireAppServerDriver().sendMessage(session, text, eventId());
+    await this.requireDriver(session).sendMessage(session, text, eventId());
   }
 
   private async recordSubmittedInput(
@@ -2280,7 +2317,7 @@ export class SessionManager {
         if (!current?.agentOwnership || current.agentOwnership.completedAt) continue;
         if (current.gitWorkspace) await this.heavyCommandQueue?.cancelWorkspace(current.gitWorkspace.id, "owning agent session was finished");
         if (current.runtime && current.runtime.state !== "hibernated" && current.runtime.state !== "stopped") {
-          await this.requireAppServerDriver().kill(current);
+          await this.requireDriver(current).kill(current);
           await this.db.upsertSession({ ...current, runtime: { ...current.runtime, state: "stopped" } }, nowIso());
         }
         const completedAt = nowIso();
@@ -2301,7 +2338,7 @@ export class SessionManager {
       if ((await this.db.listQueuedInputs(sessionId)).length > 0) return false;
       if (session.gitWorkspace && await this.heavyCommandQueue?.hasActive(session.gitWorkspace.id)) return false;
 
-      const driver = this.appServerDriver(session);
+      const driver = this.requireDriver(session);
       if (!driver) return false;
       this.deliveringInputSessionIds.add(sessionId);
       try {
@@ -2328,7 +2365,7 @@ export class SessionManager {
   }
 
   private async interruptSessionRuntime(session: ManagedSession, intent: "budget_guard"): Promise<void> {
-    await this.requireAppServerDriver().interrupt(session, null, intent);
+    await this.requireDriver(session).interrupt(session, null, intent);
   }
 
   private async waitForAgentChildReady(sessionId: string): Promise<void> {
@@ -2353,7 +2390,7 @@ export class SessionManager {
     let current = message;
     try {
       current = await this.updateInputDelivery(current, { deliveryPhase: "delivering" });
-      const driver = this.requireAppServerDriver();
+      const driver = this.requireDriver(session);
       if (session.inputMode !== mode) {
         await driver.setPreferences(session, { mode });
         await this.db.setSessionInputMode(session.id, mode, nowIso());
@@ -2437,7 +2474,7 @@ export class SessionManager {
       return;
     }
     try {
-      await this.requireAppServerDriver().answerApproval(session, approval.requestId ?? approval.id, decision);
+      await this.requireDriver(session).answerApproval(session, approval.requestId ?? approval.id, decision);
     } catch (error) {
       throw new ApprovalResolutionError("Could not submit the approval to Codex app-server: " + (error instanceof Error ? error.message : String(error)));
     }
@@ -2562,7 +2599,7 @@ export class SessionManager {
       if (!approval) return;
       const clientMessageId = `muxpilot-approval-${message.id}`;
       const text = muxpilotApprovalDecisionMessage(approval, decision.decision);
-      const driver = this.appServerDriver(session);
+      const driver = this.requireDriver(session);
       if (!driver) return;
       try {
         const existing = await driver.reconcileInput(session, clientMessageId);
@@ -2613,7 +2650,7 @@ export class SessionManager {
     if (expectedMessageId && expectedMessageId !== question.messageId) throw new QuestionResolutionError("The question changed before this answer was submitted");
     const normalized = normalizeQuestionAnswer(question, request);
     try {
-      await this.requireAppServerDriver().answerQuestion(session, question.requestId ?? question.id, normalized);
+      await this.requireDriver(session).answerQuestion(session, question.requestId ?? question.id, normalized);
     } catch (error) {
       if (error instanceof QuestionResolutionError) throw error;
       throw new QuestionResolutionError(`Could not submit the answer to Codex app-server: ${error instanceof Error ? error.message : String(error)}`);
@@ -2678,12 +2715,13 @@ export class SessionManager {
     cwd: string,
     name: string,
     launchSettings?: { model: string | null; reasoningEffort: string | null; fastMode?: boolean | null },
-    agentOwnership?: AgentSessionOwnership
+    agentOwnership?: AgentSessionOwnership,
+    provider: AgentProviderKind = this.providers.defaultProvider()
   ): Promise<ManagedSession> {
     this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(cwd);
     const sessionName = requireSessionName(name);
-    this.requireAppServerDriver();
+    this.providers.driver(provider);
     const preferences = launchSettings === undefined
       ? await this.defaultAppServerPreferences()
       : undefined;
@@ -2699,6 +2737,7 @@ export class SessionManager {
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
+      provider,
       operation: "start",
       directory,
       repoPath: directory,
@@ -2709,7 +2748,7 @@ export class SessionManager {
       documentScopeId,
       agentOwnership
     });
-    await this.db.addAudit("local", "create_session", session.id, "codex_app_server", nowIso());
+    await this.db.addAudit("local", "create_session", session.id, provider, nowIso());
     this.publish("session.updated", session.id, session);
     return session;
   }
@@ -2722,13 +2761,14 @@ export class SessionManager {
     this.requireAuthenticationAvailable();
     const directory = await requireExistingDirectory(request.cwd);
     const sessionName = requireSessionName(request.name);
-    this.requireAppServerDriver();
+    const provider = request.provider ?? this.providers.defaultProvider();
+    this.providers.driver(provider);
     const probe = await this.gitWorkspaces?.probe(directory) ?? null;
     if (probe?.isGit && request.workspace?.mode !== "git") {
       throw new CreateSessionError("Target branch is required for new Git sessions", 400);
     }
     if (request.workspace?.mode !== "git") {
-      return this.createSessionInDirectory(directory, sessionName, launchSettings, agentOwnership);
+      return this.createSessionInDirectory(directory, sessionName, launchSettings, agentOwnership, provider);
     }
     if (!this.gitWorkspaces) throw new CreateSessionError("Managed Git workspaces are unavailable", 503);
 
@@ -2754,6 +2794,7 @@ export class SessionManager {
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
+      provider,
       operation: "start",
       directory: controlPath,
       repoPath: workspace.summary.entryPath,
@@ -2785,7 +2826,7 @@ export class SessionManager {
       sessionId: source.id,
       sessionName: sessionName(source)
     };
-    this.requireAppServerDriver();
+    this.requireDriver(source);
     return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
   }
 
@@ -2839,6 +2880,7 @@ export class SessionManager {
     const prepared = await this.prepareOrchestratedLaunch(documentOptions);
     this.requireAuthenticationAvailable();
     const session = await this.launchAppServerSession({
+      provider: source.provider.kind,
       operation: "fork",
       directory,
       repoPath,
@@ -2858,6 +2900,7 @@ export class SessionManager {
   }
 
   private async launchAppServerSession(input: {
+    provider: AgentProviderKind;
     operation: "start" | "resume" | "fork";
     directory: string;
     repoPath: string;
@@ -2872,7 +2915,7 @@ export class SessionManager {
     documentScopeId: string;
     agentOwnership?: AgentSessionOwnership;
   }): Promise<ManagedSession> {
-    const driver = this.requireAppServerDriver();
+    const driver = this.providers.driver(input.provider);
     const sessionId = `app-${eventId()}`;
     if (input.agentOwnership) {
       await this.sessionEnvironment?.setReferenceParent(sessionId, input.agentOwnership.parentSessionId);
@@ -2955,7 +2998,7 @@ export class SessionManager {
     }
     if (blockers.length === 0) {
       try {
-        blockers.push(...await this.requireAppServerDriver().hibernationBlockers(session));
+        blockers.push(...await this.requireDriver(session).hibernationBlockers(session));
       } catch {
         blockers.push("runtime_evidence_unavailable");
       }
@@ -2964,7 +3007,7 @@ export class SessionManager {
   }
 
   async hibernateIdleAppServerSessions(nowMs = Date.now()): Promise<void> {
-    if (this.appServerHibernationRunning || !this.sessionDrivers?.has()) return;
+    if (this.appServerHibernationRunning || !this.providers.hasDrivers()) return;
     this.appServerHibernationRunning = true;
     try {
       const sessions = (await this.db.listSessions(true))
@@ -2972,7 +3015,8 @@ export class SessionManager {
           !session.archived &&
           session.runtime !== undefined &&
           session.runtime.state === "connected" &&
-          session.status === "idle"
+          session.status === "idle" &&
+          this.providers.maybeDriver(session.provider.kind) !== null
         )
         .sort(compareAppServerRecoveryOrder);
       for (const session of sessions) {
@@ -3001,7 +3045,7 @@ export class SessionManager {
     if (blockers.length > 0) {
       throw new SessionRuntimeActionError(`Session cannot hibernate while ${blockers.join(", ")}`);
     }
-    const runtime = await this.requireAppServerDriver().hibernate(session);
+    const runtime = await this.requireDriver(session).hibernate(session);
     const now = nowIso();
     const current = requireSession(await this.db.getSession(session.id));
     await this.db.upsertSession({ ...current, runtime, status: "idle", initializing: false }, now);
@@ -3054,7 +3098,7 @@ export class SessionManager {
       if (session.archived || blockers.length > 0) {
         throw new SessionRuntimeActionError(`Session runtime cannot be restarted: ${session.archived ? "archived" : blockers.join(", ")}`);
       }
-      await this.requireAppServerDriver().kill(session);
+      await this.requireDriver(session).kill(session);
       const stopped = { ...session, runtime: { ...session.runtime!, state: "stopped" as const } };
       await this.db.upsertSession(stopped, nowIso());
       await this.resumeAppServerSession(stopped);
@@ -3078,7 +3122,7 @@ export class SessionManager {
     action: PlanActionChoice,
     plan: string | null
   ): Promise<void> {
-    const driver = this.requireAppServerDriver();
+    const driver = this.requireDriver(session);
     if (action === "stay_in_plan") {
       await driver.choosePlanAction(session, action, { plan: null, clientMessageId: null });
       this.answeredPlanMessageIds.add(planMessage.id);
@@ -3212,7 +3256,7 @@ export class SessionManager {
     const startFreshThread = await isDisposableEmptyAppServerThread(session, await this.db.latestUserMessage(session.id));
     const sourceThreadId = sessionThreadId(session);
     if (!startFreshThread && !sourceThreadId) throw new Error("Session does not have a provider conversation id to resume");
-    const driver = this.requireAppServerDriver();
+    const driver = this.requireDriver(session);
     const documentScopeId = await this.ensureDocumentScope(session);
     const activeModel = session.models[session.inputMode];
     let directory: string;
@@ -3385,11 +3429,13 @@ export class SessionManager {
     return persisted;
   }
 
-  private requireAppServerDriver(): AgentSessionDriver {
-    if (!this.sessionDrivers?.has()) {
-      throw new CreateSessionError("App-server sessions are unavailable", 503);
+  private requireDriver(session: Pick<ManagedSession, "provider">): AgentSessionDriver {
+    try {
+      return this.providers.driverFor(session);
+    } catch (error) {
+      if (error instanceof ProviderUnavailableError) throw new CreateSessionError(error.message, 503);
+      throw error;
     }
-    return this.sessionDrivers.require();
   }
 
   private finishSessionInitialization(sessionId: string, ready: Promise<void>): void {
@@ -3437,7 +3483,7 @@ export class SessionManager {
       return updatedSession;
     }
     const session = requireSession(storedSession);
-    const driver = this.requireAppServerDriver();
+    const driver = this.requireDriver(session);
     if (action.type === "extendAgentBudget") return this.operatorExtendAgentBudget(sessionId, action.additionalTokens, action.reason);
     if (action.type === "resumeAfterAuthentication") {
       await this.serializeRuntimeOperation(sessionId, async () => {
@@ -3559,7 +3605,7 @@ export class SessionManager {
           await this.serializeRuntimeOperation(current.id, async () => {
             const locked = await this.db.getSession(current.id);
             if (!locked || locked.status === "missing" || locked.runtime?.state === "stopped") return;
-            await this.requireAppServerDriver().kill(locked);
+            await this.requireDriver(locked).kill(locked);
             const latest = requireStoredSession(await this.db.getSession(locked.id));
             await this.db.upsertSession({
               ...latest,
@@ -3639,7 +3685,7 @@ export class SessionManager {
       await this.retryFailedTurn(session, message, submission);
       return;
     }
-    await this.retryAppServerInputDelivery(session, message, submission, this.requireAppServerDriver());
+    await this.retryAppServerInputDelivery(session, message, submission, this.requireDriver(session));
   }
 
   private async retryFailedTurn(
@@ -3784,11 +3830,6 @@ export class SessionManager {
     return updated;
   }
 
-  private appServerDriver(session: ManagedSession): AgentSessionDriver | null {
-    if (!this.sessionDrivers) throw new Error("App-server session driver registry is unavailable");
-    return this.sessionDrivers.require();
-  }
-
   private pendingPlanActionStatus(sessionId: string): SessionStatus | null {
     const pending = this.pendingPlanActionStatuses.get(sessionId);
     if (!pending) return null;
@@ -3889,7 +3930,7 @@ export class SessionManager {
     if (!canToggleFastMode(session.status)) throw new FastModeSwitchError("Fast mode cannot be changed in the sessions current state");
     if (session.fastModeAvailable === false) throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
     try {
-      await this.requireAppServerDriver().setPreferences(session, { fastMode: enabled });
+      await this.requireDriver(session).setPreferences(session, { fastMode: enabled });
     } catch (error) {
       throw new FastModeSwitchError(error instanceof Error ? error.message : String(error));
     }
@@ -3905,7 +3946,7 @@ export class SessionManager {
     reasoningEffort: string | null
   ): Promise<void> {
     this.authenticationGuard?.();
-    const driver = this.appServerDriver(session);
+    const driver = this.requireDriver(session);
     if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
     const catalog = await this.codexModelCatalog();
     const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
@@ -3973,7 +4014,7 @@ export class SessionManager {
   private async isLiveAppServerRuntime(session: ManagedSession): Promise<boolean> {
     if (!session.runtime) return false;
     try {
-      const evidence = await this.requireAppServerDriver().runtimeEvidence(session);
+      const evidence = await this.requireDriver(session).runtimeEvidence(session);
       return evidence.activeState === "active" && evidence.socketPresent;
     } catch {
       return false;

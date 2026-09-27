@@ -1,6 +1,6 @@
 import type { Writable } from "node:stream";
 import type { ProtocolJournal, ProtocolJournalEntry } from "./protocolJournal.js";
-import type { RuntimeProxyConnection } from "./types.js";
+import type { RuntimeProxyConnection } from "../providers/types.js";
 
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;

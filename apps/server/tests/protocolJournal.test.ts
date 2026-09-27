@@ -2,7 +2,7 @@ import { appendFile, mkdtemp, readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ProtocolJournal, protocolJournalPath, type ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
+import { ProtocolJournal, protocolJournalPath, type ProtocolJournalEntry } from "../src/runtime/protocolJournal.js";
 
 const capabilityId = "0123456789abcdef01234567";
 

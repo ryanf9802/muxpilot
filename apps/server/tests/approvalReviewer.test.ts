@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseApprovalReview } from "../src/services/approvalReviewer.js";
+import { parseApprovalReview } from "../src/providers/codex/approvalReviewer.js";
 
 describe("approval reviewer responses", () => {
   it("accepts a structured decision and bounds its explanation", () => {

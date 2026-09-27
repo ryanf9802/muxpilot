@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession } from "@muxpilot/core";
-import type { CodexGoalReader } from "../src/codex/codexGoalStore.js";
+import type { CodexGoalReader } from "../src/providers/codex/goalStore.js";
 import type { AppDatabase } from "../src/db/database.js";
 import type { SessionManager } from "../src/services/sessionManager.js";
 import { SessionOrchestrationBroker } from "../src/services/sessionOrchestrationBroker.js";

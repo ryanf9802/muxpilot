@@ -3,7 +3,7 @@ import { z } from "zod";
 import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
-  AppServerCompatibility,
+  ProviderCompatibility,
   CodexSkillsResponse,
   CreateSessionRequest,
   DashboardSessionSummary,
@@ -54,8 +54,9 @@ import type { AppConfig } from "../config/config.js";
 import type { AccessControl } from "../auth/auth.js";
 import { buildConnectivity, buildRemoteAccess } from "../services/connectivity.js";
 import { discoverCodexSkills } from "../services/skillDiscovery.js";
-import type { CodexUsageService } from "../services/codexUsage.js";
+import type { CodexUsageService } from "../providers/codex/usage.js";
 import type { NotificationService } from "../services/notifications.js";
+import type { ProviderRegistry } from "../providers/registry.js";
 import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
 import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
@@ -63,7 +64,7 @@ import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
-import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../services/codexAuthLifecycle.js";
+import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../providers/codex/authLifecycle.js";
 import { SessionEnvironmentError, type SessionEnvironmentService } from "../services/sessionEnvironment.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
@@ -234,7 +235,7 @@ export function registerRoutes(
   sessionTransfers?: SessionTransferService,
   heavyCommands?: HeavyCommandService,
   btw?: BtwService,
-  appServerCompatibility?: AppServerCompatibility,
+  providers?: ProviderRegistry,
   sessionImages?: SessionImageService,
   codexAuth?: CodexAuthLifecycle,
   sessionEnvironment?: SessionEnvironmentService
@@ -243,9 +244,10 @@ export function registerRoutes(
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
   );
 
-  if (appServerCompatibility) {
-    app.get("/api/app-server/compatibility", { preHandler: access.requireAccess }, async (): Promise<AppServerCompatibility> =>
-      appServerCompatibility
+  const codexProvider = providers?.maybe("codex");
+  if (codexProvider) {
+    app.get("/api/app-server/compatibility", { preHandler: access.requireAccess }, async (): Promise<ProviderCompatibility> =>
+      codexProvider.compatibility()
     );
   }
 

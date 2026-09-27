@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { registerRoutes } from "../src/api/routes.js";
-import { CodexAuthUnavailableError } from "../src/services/codexAuthLifecycle.js";
+import { CodexAuthUnavailableError } from "../src/providers/codex/authLifecycle.js";
 
 const apps: ReturnType<typeof Fastify>[] = [];
 

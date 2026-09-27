@@ -6,10 +6,9 @@ import type {
   AppServerReconciliationState
 } from "../../db/database.js";
 import { eventId } from "../../utils/ids.js";
-import type { EventBus } from "../eventBus.js";
-import { projectAppServerEvent, type AppServerEventProjection } from "./codexAppServerEvents.js";
-import type { AppServerDriverEventSink } from "./codexAppServerDriver.js";
-import type { DriverEvent, DriverInterruptIntent } from "./types.js";
+import type { EventBus } from "../../services/eventBus.js";
+import type { AppServerEventProjection } from "../codex/events.js";
+import type { DriverEvent, DriverEventSink, DriverInterruptIntent } from "../types.js";
 import { codexTurnFailure, codexTurnInterruption } from "../../utils/codexTurnFailure.js";
 
 export interface AppServerProjectionStore {
@@ -22,13 +21,29 @@ export interface AppServerProjectionStore {
   repairAppServerProjectionThread(sessionId: string, threadId: string): Promise<AppServerProjectionRepairResult>;
 }
 
-export class CodexAppServerReconciler implements AppServerDriverEventSink {
+/** Provider-specific interpretation of runtime events for the shared projection pipeline. */
+export interface ProjectionAdapter {
+  project(event: { method: string; params: unknown }, receivedAt: string): AppServerEventProjection | null;
+  /** A sanitized operator-facing message when the event proves the provider account needs re-authentication. */
+  authenticationFailure(method: string, params: unknown): string | null;
+  /** Server requests that may legitimately carry a child thread id (approvals, questions). */
+  isInteractiveServerRequest(event: DriverEvent): boolean;
+  /** Event that reports the provider account changed outside muxpilot. */
+  accountUpdatedMethod?: string;
+}
+
+/**
+ * Serializes runtime events per session and projects them into persisted messages, reconciliation state and
+ * session status. Turn and status events share one Codex-compatible shape across providers.
+ */
+export class ProjectionReconciler implements DriverEventSink {
   private readonly operationTails = new Map<string, Promise<void>>();
   private readonly latestProjectedTurnIds = new Map<string, string>();
 
   constructor(
     private readonly store: AppServerProjectionStore,
     private readonly events: Pick<EventBus, "publish">,
+    private readonly adapter: ProjectionAdapter,
     private readonly onAuthenticationFailure?: (sessionId: string, error: string) => void,
     private readonly onAccountUpdated?: () => void
   ) {}
@@ -60,11 +75,11 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
     recoveryGuard?: { threadKey: string; turnId: string },
     restoring = false
   ): Promise<boolean> {
-    if (event.method === "account/updated") {
+    if (this.adapter.accountUpdatedMethod && event.method === this.adapter.accountUpdatedMethod) {
       this.onAccountUpdated?.();
       return true;
     }
-    const authenticationError = authenticationFailure(event.method, event.params);
+    const authenticationError = this.adapter.authenticationFailure(event.method, event.params);
     if (authenticationError && !restoring) {
       const existing = await this.requireSession(sessionId);
       const updated: ManagedSession = {
@@ -77,11 +92,11 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
       this.publish("session.updated", sessionId, updated, event.receivedAt);
       this.onAuthenticationFailure?.(sessionId, authenticationError);
     }
-    const projection = projectAppServerEvent({ method: event.method, params: event.params }, event.receivedAt);
+    const projection = this.adapter.project({ method: event.method, params: event.params }, event.receivedAt);
     if (!projection || projection.transient) return true;
     const existingSession = await this.requireSession(sessionId);
-    const rootThreadId = existingSession.provider?.kind === "codex" ? existingSession.provider.threadId : null;
-    if (rootThreadId && projection.identity.threadId !== rootThreadId && !isInteractiveServerRequest(event)) return true;
+    const rootThreadId = existingSession.provider.threadId;
+    if (rootThreadId && projection.identity.threadId !== rootThreadId && !this.adapter.isInteractiveServerRequest(event)) return true;
     const current = await this.store.getAppServerReconciliationState(sessionId);
     const normalizedProjection = preserveBudgetBlock(
       preserveActiveTurnUntilCompletion(
@@ -200,44 +215,6 @@ export class CodexAppServerReconciler implements AppServerDriverEventSink {
   private publish(type: "message.appended" | "status.changed" | "session.updated", sessionId: string, payload: unknown, timestamp: string): void {
     this.events.publish({ id: eventId(), type, sessionId, payload, timestamp });
   }
-}
-
-function authenticationFailure(method: string, value: unknown): string | null {
-  const root = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-  const turn = root?.turn && typeof root.turn === "object" && !Array.isArray(root.turn) ? root.turn as Record<string, unknown> : null;
-  if (method !== "connection/error" && !(method === "turn/completed" && turn?.status === "failed")) return null;
-  const text = collectErrorText(value).join(" ");
-  if (!/unauthori[sz]ed|access token|refresh token|logged out|signed in to another account|authentication required/i.test(text)) return null;
-  const sanitized = text
-    .replace(/((?:access|refresh|id)[_-]?token|api[_-]?key|authorization)\s*[:=]\s*["']?[^"',\s}]+/gi, "$1=[credential redacted]")
-    .replace(/(?:sk-|sess-|Bearer\s+)[A-Za-z0-9._-]+/gi, "[credential redacted]")
-    .slice(0, 800) || "Codex account authentication required.";
-  return `${sanitized} Manage Codex authentication with the Codex CLI, then return to muxpilot.`;
-}
-
-function collectErrorText(value: unknown, depth = 0): string[] {
-  if (depth > 5) return [];
-  if (typeof value === "string") return [value];
-  if (!value || typeof value !== "object") return [];
-  if (Array.isArray(value)) return value.flatMap((item) => collectErrorText(item, depth + 1));
-  return Object.values(value as Record<string, unknown>).flatMap((item) => collectErrorText(item, depth + 1));
-}
-
-function isInteractiveServerRequest(event: DriverEvent): boolean {
-  const params = event.params;
-  return Boolean(
-    [
-      "item/commandExecution/requestApproval",
-      "item/fileChange/requestApproval",
-      "item/permissions/requestApproval",
-      "item/tool/requestUserInput"
-    ].includes(event.method)
-    && params
-    && typeof params === "object"
-    && !Array.isArray(params)
-    && "requestId" in params
-    && "params" in params
-  );
 }
 
 function input(

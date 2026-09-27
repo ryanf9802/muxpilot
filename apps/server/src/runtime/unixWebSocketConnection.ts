@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { PassThrough, Writable } from "node:stream";
-import type { RuntimeProxyConnection } from "./types.js";
+import type { RuntimeProxyConnection } from "../providers/types.js";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_HANDSHAKE_BYTES = 16 * 1024;

@@ -4,16 +4,16 @@ import {
   type InitializeResponse,
   type ThreadIdentityResponse,
   type ThreadLaunchSettings
-} from "./codexAppServerProtocol.js";
+} from "./protocol.js";
 import {
   JsonRpcConnection,
   JsonRpcResponseError,
   type JsonRpcConnectionHandlers,
   type JsonRpcNotification,
   type JsonRpcServerRequest
-} from "./jsonRpcConnection.js";
-import type { AppServerCommandProcessOwnership, ProtocolJournal } from "./protocolJournal.js";
-import type { RuntimeSupervisor, SystemdSessionRuntimeRef } from "./types.js";
+} from "../../runtime/jsonRpcConnection.js";
+import type { AppServerCommandProcessOwnership, ProtocolJournal } from "../../runtime/protocolJournal.js";
+import type { RuntimeSupervisor, SystemdSessionRuntimeRef } from "../types.js";
 
 export interface AppServerSessionHandlers {
   notification?(notification: JsonRpcNotification): void | Promise<void>;

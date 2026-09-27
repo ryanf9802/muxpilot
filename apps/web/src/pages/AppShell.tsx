@@ -6,7 +6,7 @@ import { AUTH_EXPIRED_EVENT, ApiError, api, eventSocket, isUnauthorizedError, no
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import type {
   AccessMode,
-  AppServerCompatibility,
+  ProviderCompatibility,
   CreateSessionRequest,
   GitRepositoryProbe,
   ManagedSession,
@@ -109,7 +109,7 @@ export function AppShell() {
   const [createSessionGitProbe, setCreateSessionGitProbe] = useState<GitRepositoryProbe | null>(null);
   const [createSessionGitProbeBusy, setCreateSessionGitProbeBusy] = useState(false);
   const [createSessionTargetBranch, setCreateSessionTargetBranch] = useState("");
-  const [appServerCompatibility, setAppServerCompatibility] = useState<AppServerCompatibility | null>(null);
+  const [appServerCompatibility, setAppServerCompatibility] = useState<ProviderCompatibility | null>(null);
   const [appServerCompatibilityLoading, setAppServerCompatibilityLoading] = useState(false);
   const [gitSkillStatus, setGitSkillStatus] = useState<MuxpilotGitSkillStatus["status"] | "checking" | "error" | null>(null);
   const [createSessionBusy, setCreateSessionBusy] = useState(false);
@@ -1568,7 +1568,7 @@ export function SessionRecoveryContent({
   selectedIds: ReadonlySet<string>;
   busy: boolean;
   errors: Record<string, string>;
-  compatibility: AppServerCompatibility | null;
+  compatibility: ProviderCompatibility | null;
   onToggle: (sessionId: string) => void;
   onDismiss: () => void;
   onRestore: () => void;
@@ -1654,7 +1654,7 @@ function ForkSessionDialog({
   name: string;
   busy: boolean;
   error: string | null;
-  compatibility: AppServerCompatibility | null;
+  compatibility: ProviderCompatibility | null;
   onNameChange: (value: string) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -2133,7 +2133,7 @@ export function importTargetBranchValue(probe: GitRepositoryProbe, preferred: st
 }
 
 function SessionTransferDialog({ compatibility, onClose }: {
-  compatibility: AppServerCompatibility | null;
+  compatibility: ProviderCompatibility | null;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<"export" | "import">("export");
@@ -2454,15 +2454,15 @@ function expandedTransferSelection(selected: Set<string>, sessions: ManagedSessi
   return [...expanded];
 }
 
-export function appServerCompatibilityLabel(compatibility: AppServerCompatibility | null): string {
+export function appServerCompatibilityLabel(compatibility: ProviderCompatibility | null): string {
   if (!compatibility) return "Codex app-server compatibility could not be loaded.";
   if (compatibility.available) {
-    return `Codex app-server available${compatibility.codexVersion ? ` · Codex ${compatibility.codexVersion}` : ""}.`;
+    return `Codex app-server available${compatibility.version ? ` · Codex ${compatibility.version}` : ""}.`;
   }
   return compatibility.detail;
 }
 
-export function runtimeUnavailableLabel(compatibility: AppServerCompatibility | null): string {
+export function runtimeUnavailableLabel(compatibility: ProviderCompatibility | null): string {
   return compatibility?.detail ?? "Codex app-server compatibility could not be loaded.";
 }
 

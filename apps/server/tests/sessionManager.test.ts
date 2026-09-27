@@ -5,8 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionOwnership, ChatMessage, ManagedSession } from "@muxpilot/core";
 import { AppDatabase, type StoredGitWorkspace } from "../src/db/database.js";
 import { EventBus } from "../src/services/eventBus.js";
-import { AppServerLaunchAttemptError } from "../src/services/sessionDrivers/codexAppServerDriver.js";
+import { AppServerLaunchAttemptError } from "../src/providers/codex/driver.js";
 import { latestCodexFastModeFromText, managedCodexLaunchOptions, normalizeRepositoryApprovalPrefix, sessionChanged, SessionManager } from "../src/services/sessionManager.js";
+import { testProviders } from "./helpers/providers.js";
 
 const temporaryRoots: string[] = [];
 
@@ -58,21 +59,17 @@ describe("SessionManager app-server helpers", () => {
     }));
     const driver = { sendMessage, setPreferences: vi.fn(async () => undefined) };
     const codexStore = { stop: vi.fn() };
-    const manager = new SessionManager(
+    const manager = new SessionManager({
       db,
-      codexStore as never,
-      new EventBus(),
-      60_000,
-      60_000,
-      {} as never,
-      null,
-      null,
-      null,
-      null,
-      {},
-      null,
-      { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
-    );
+      codexStore: codexStore as never,
+      events: new EventBus(),
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: {} as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(driver)
+    });
 
     await manager.act(session.id, { type: "retryInputDelivery", messageId: failedMessage.id, turnId: "failed-turn" });
 
@@ -148,21 +145,17 @@ describe("SessionManager app-server helpers", () => {
         acceptedAt: "2026-09-17T15:30:00.000Z"
       }));
       const driver = { reconcileInput, setPreferences: vi.fn(async () => undefined) };
-      const manager = new SessionManager(
+      const manager = new SessionManager({
         db,
-        { stop: vi.fn() } as never,
-        new EventBus(),
-        60_000,
-        60_000,
-        {} as never,
-        null,
-        null,
-        null,
-        null,
-        {},
-        null,
-        { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
-      );
+        codexStore: { stop: vi.fn() } as never,
+        events: new EventBus(),
+        discoveryIntervalMs: 60_000,
+        parserIntervalMs: 60_000,
+        documents: {} as never,
+        codexHome: null,
+        managedEnvironment: {},
+        providers: testProviders(driver)
+      });
 
       await manager.act(session.id, { type: actionType, messageId: failedMessage.id, turnId: null });
 
@@ -184,21 +177,17 @@ describe("SessionManager app-server helpers", () => {
     const launch = vi.fn(async () => managedSession());
     const addAudit = vi.fn(async () => undefined);
     const codexStore = { stop: vi.fn() };
-    const manager = new SessionManager(
-      { addAudit } as never,
-      codexStore as never,
-      new EventBus(),
-      60_000,
-      60_000,
-      { newScopeId: vi.fn(() => "scope-1") } as never,
-      null,
-      null,
-      null,
-      null,
-      {},
-      null,
-      { has: vi.fn(() => true), require: vi.fn(() => ({})) } as never
-    );
+    const manager = new SessionManager({
+      db: { addAudit } as never,
+      codexStore: codexStore as never,
+      events: new EventBus(),
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: { newScopeId: vi.fn(() => "scope-1") } as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(({}))
+    });
     manager.setAuthenticationGuard(reconciled);
     manager.setAuthenticationAvailabilityGuard(available);
     Object.assign(manager as object, {
@@ -229,21 +218,17 @@ describe("SessionManager app-server helpers", () => {
       .mockImplementationOnce(() => { throw new Error("authentication changed"); });
     const launch = vi.fn(async () => managedSession());
     const codexStore = { stop: vi.fn() };
-    const manager = new SessionManager(
-      { addAudit: vi.fn(async () => undefined) } as never,
-      codexStore as never,
-      new EventBus(),
-      60_000,
-      60_000,
-      { newScopeId: vi.fn(() => "scope-1") } as never,
-      null,
-      null,
-      null,
-      null,
-      {},
-      null,
-      { has: vi.fn(() => true), require: vi.fn(() => ({})) } as never
-    );
+    const manager = new SessionManager({
+      db: { addAudit: vi.fn(async () => undefined) } as never,
+      codexStore: codexStore as never,
+      events: new EventBus(),
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: { newScopeId: vi.fn(() => "scope-1") } as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(({}))
+    });
     manager.setAuthenticationAvailabilityGuard(available);
     Object.assign(manager as object, {
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
@@ -283,7 +268,8 @@ describe("SessionManager app-server helpers", () => {
     const ready = vi.fn(() => { calls.push("ready"); });
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       sessionEnvironment: environment,
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       persistInitializingAppServerSession: persist,
       bindOrchestratedLaunch: vi.fn(async () => child),
       finishSessionInitialization: ready
@@ -291,7 +277,7 @@ describe("SessionManager app-server helpers", () => {
 
     await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
       .launchAppServerSession({
-        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        provider: "codex", operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
         options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
       })).resolves.toBe(child);
     expect(calls).toEqual(["inherit:parent", "start", "persist", "ready"]);
@@ -304,12 +290,12 @@ describe("SessionManager app-server helpers", () => {
     const failure = new Error("start failed");
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       sessionEnvironment: { setReferenceParent },
-      requireAppServerDriver: () => ({ start: vi.fn(async () => { throw failure; }) })
+      providers: testProviders({ start: vi.fn(async () => { throw failure; }) })
     }) as SessionManager;
 
     await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
       .launchAppServerSession({
-        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        provider: "codex", operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
         options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
       })).rejects.toBe(failure);
     expect(setReferenceParent).toHaveBeenNthCalledWith(1, expect.stringMatching(/^app-/), "parent");
@@ -332,7 +318,8 @@ describe("SessionManager app-server helpers", () => {
     };
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       sessionEnvironment: { setReferenceParent },
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       persistInitializingAppServerSession: vi.fn(async () => child),
       bindOrchestratedLaunch: vi.fn(async () => { throw failure; }),
       db: { setSessionInitializationResult: vi.fn(async () => child), setSessionAgentOwnership }
@@ -340,7 +327,7 @@ describe("SessionManager app-server helpers", () => {
 
     await expect((manager as unknown as { launchAppServerSession(input: unknown): Promise<ManagedSession> })
       .launchAppServerSession({
-        operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
+        provider: "codex", operation: "start", directory: "/tmp", repoPath: "/tmp", sessionName: "child",
         options: {}, orchestrationCapabilityId: null, documentScopeId: "scope", agentOwnership: ownership
       })).rejects.toBe(failure);
     expect(driver.kill).toHaveBeenCalledOnce();
@@ -380,14 +367,14 @@ describe("SessionManager app-server helpers", () => {
   it("can start periodic management without scheduling duplicate app-server recovery", () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
-    const manager = new SessionManager(
-      { latestApprovalMessage: vi.fn(async () => null) } as never,
-      codexStore as never,
+    const manager = new SessionManager({
+      db: { latestApprovalMessage: vi.fn(async () => null) } as never,
+      codexStore: codexStore as never,
       events,
-      60_000,
-      60_000,
-      {} as never
-    );
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: {} as never
+    });
     const recoverAppServerSessions = vi.fn(async () => undefined);
     manager.recoverAppServerSessions = recoverAppServerSessions;
 
@@ -407,7 +394,7 @@ describe("SessionManager app-server helpers", () => {
     const resumeAppServerSession = vi.fn(async () => ({ ...interrupted, status: "idle" as const }));
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db: { listSessions: vi.fn(async () => [interrupted]) },
-      sessionDrivers: { has: vi.fn(() => true) },
+      providers: testProviders({}),
       appServerRecoveryRunning: false,
       resumeAppServerSession
     }) as SessionManager;
@@ -470,7 +457,7 @@ describe("SessionManager app-server helpers", () => {
     const resumeAppServerSession = vi.fn();
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db: { listSessions: vi.fn(async () => [session]) },
-      sessionDrivers: { has: vi.fn(() => true) },
+      providers: testProviders({}),
       appServerRecoveryRunning: false,
       resumeAppServerSession
     }) as SessionManager;
@@ -527,7 +514,8 @@ describe("SessionManager app-server helpers", () => {
       deliveringInputSessionIds: new Set<string>(),
       processingQueuedSessionIds: new Set<string>(),
       heavyCommandQueue: { cancelWorkspace, hasActive },
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       publish
     }) as SessionManager;
 
@@ -568,7 +556,7 @@ describe("SessionManager app-server helpers", () => {
       processingQueuedSessionIds: new Set<string>(),
       gitWorkspaces: { get: vi.fn(async () => ({ sessionId: current.id })) },
       heavyCommandQueue: { hasActive: vi.fn(async () => active) },
-      requireAppServerDriver: () => ({ hibernationBlockers: vi.fn(async () => []) }),
+      requireDriver: () => ({ hibernationBlockers: vi.fn(async () => []) }),
       publish
     }) as SessionManager;
 
@@ -603,7 +591,7 @@ describe("SessionManager app-server helpers", () => {
       processingQueuedSessionIds: new Set<string>(),
       gitWorkspaces: { get: vi.fn(async () => ({ sessionId: current.id })) },
       heavyCommandQueue: { hasActive: vi.fn(async () => false) },
-      requireAppServerDriver: () => ({
+      requireDriver: () => ({
         hibernationBlockers: vi.fn(async () => {
           current = { ...current, status: "executing" };
           return [];
@@ -635,7 +623,7 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       runtimeOperationTails: new Map<string, Promise<void>>(),
-      requireAppServerDriver: () => ({ rename }),
+      requireDriver: () => ({ rename }),
       publish
     }) as SessionManager;
 
@@ -687,7 +675,8 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       managedEnvironment: {},
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       ensureDocumentScope: vi.fn(async () => "scope-1"),
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -752,7 +741,8 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       managedEnvironment: {},
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       ensureDocumentScope: vi.fn(async () => "scope-1"),
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -807,7 +797,8 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       managedEnvironment: {},
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       ensureDocumentScope: vi.fn(async () => "scope-1"),
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -861,7 +852,8 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       managedEnvironment: {},
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       ensureDocumentScope: vi.fn(async () => "scope-1"),
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -910,7 +902,8 @@ describe("SessionManager app-server helpers", () => {
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
       managedEnvironment: {},
-      requireAppServerDriver: () => driver,
+      requireDriver: () => driver,
+      providers: testProviders(driver),
       ensureDocumentScope: vi.fn(async () => "scope-1"),
       withDocumentLaunchOptions: vi.fn(async (options: object) => options),
       prepareOrchestratedLaunch: vi.fn(async (options: object) => ({ options, capabilityId: null })),
@@ -932,14 +925,14 @@ describe("SessionManager app-server helpers", () => {
   it("processes queued input when app-server reconciliation makes a session idle", async () => {
     const events = new EventBus();
     const codexStore = { stop: vi.fn() };
-    const manager = new SessionManager(
-      { latestApprovalMessage: vi.fn(async () => null) } as never,
-      codexStore as never,
+    const manager = new SessionManager({
+      db: { latestApprovalMessage: vi.fn(async () => null) } as never,
+      codexStore: codexStore as never,
       events,
-      1_000,
-      1_000,
-      {} as never
-    );
+      discoveryIntervalMs: 1_000,
+      parserIntervalMs: 1_000,
+      documents: {} as never
+    });
     const processQueuedInputs = vi.fn(async () => undefined);
     (manager as unknown as { processQueuedInputs: typeof processQueuedInputs }).processQueuedInputs = processQueuedInputs;
 
@@ -985,14 +978,14 @@ describe("SessionManager app-server helpers", () => {
     };
     const codexStore = { stop: vi.fn() };
     const events = new EventBus();
-    const manager = new SessionManager(
-      db as never,
-      codexStore as never,
+    const manager = new SessionManager({
+      db: db as never,
+      codexStore: codexStore as never,
       events,
-      1_000,
-      1_000,
-      {} as never
-    );
+      discoveryIntervalMs: 1_000,
+      parserIntervalMs: 1_000,
+      documents: {} as never
+    });
     const resumeAppServerSession = vi.fn(async () => ({ ...session, status: "idle" as const }));
     (manager as unknown as { resumeAppServerSession: typeof resumeAppServerSession }).resumeAppServerSession = resumeAppServerSession;
 
@@ -1273,7 +1266,7 @@ describe("SessionManager app-server helpers", () => {
       automatedApprovalMessageIds: new Set<string>(),
       approvalAutomationGenerations: new Map<string, number>(),
       heavyCommandQueue: null,
-      sessionDrivers: { has: vi.fn(() => true), require: vi.fn(() => driver) },
+      providers: testProviders(driver),
       publish
     }) as SessionManager;
 
@@ -1324,11 +1317,17 @@ describe("SessionManager app-server helpers", () => {
     }));
     const driver = { reconcileInput: vi.fn(async () => null), sendMessage };
     const events = new EventBus();
-    const manager = new SessionManager(
-      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
-      null, null, null, null, {}, null,
-      { has: vi.fn(() => true), require: vi.fn(() => driver) } as never
-    );
+    const manager = new SessionManager({
+      db,
+      codexStore: { stop: vi.fn() } as never,
+      events,
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: {} as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(driver)
+    });
     try {
       const approval = await manager.requestMuxpilotApproval(session.id, {
         guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
@@ -1366,11 +1365,17 @@ describe("SessionManager app-server helpers", () => {
       clientMessageId: "approval-receipt", threadId: "thread-1", turnId: "approval-turn", acceptedAt: new Date().toISOString()
     }));
     const events = new EventBus();
-    const manager = new SessionManager(
-      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
-      null, null, null, null, {}, null,
-      { has: vi.fn(() => true), require: vi.fn(() => ({ reconcileInput: async () => null, sendMessage })) } as never
-    );
+    const manager = new SessionManager({
+      db,
+      codexStore: { stop: vi.fn() } as never,
+      events,
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: {} as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(({ reconcileInput: async () => null, sendMessage }))
+    });
     try {
       const approval = await manager.requestMuxpilotApproval(session.id, {
         guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
@@ -1401,11 +1406,17 @@ describe("SessionManager app-server helpers", () => {
       clientMessageId: "approval-receipt", threadId: "thread-1", turnId: "existing-turn", acceptedAt: new Date().toISOString()
     }));
     const events = new EventBus();
-    const manager = new SessionManager(
-      db, { stop: vi.fn() } as never, events, 60_000, 60_000, {} as never,
-      null, null, null, null, {}, null,
-      { has: vi.fn(() => true), require: vi.fn(() => ({ reconcileInput, sendMessage })) } as never
-    );
+    const manager = new SessionManager({
+      db,
+      codexStore: { stop: vi.fn() } as never,
+      events,
+      discoveryIntervalMs: 60_000,
+      parserIntervalMs: 60_000,
+      documents: {} as never,
+      codexHome: null,
+      managedEnvironment: {},
+      providers: testProviders(({ reconcileInput, sendMessage }))
+    });
     try {
       const approval = await manager.requestMuxpilotApproval(session.id, {
         guards: ["fixed-target"], action: "Retarget future work", consequences: "Target changes", reason: "Operator request"
@@ -1445,7 +1456,7 @@ describe("SessionManager app-server helpers", () => {
     const setSessionApprovalMode = vi.fn(async () => session);
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db: { getSession: vi.fn(async () => session), setSessionApprovalMode },
-      sessionDrivers: { has: () => true, require: () => ({}) }
+      providers: testProviders({})
     }) as SessionManager;
 
     await expect(manager.act(session.id, { type: "setApprovalMode", mode: "full" })).rejects.toThrow("inherited from its parent");
@@ -1486,7 +1497,7 @@ describe("SessionManager app-server helpers", () => {
     };
     const manager = Object.assign(Object.create(SessionManager.prototype), {
       db,
-      requireAppServerDriver: () => ({ interrupt }),
+      requireDriver: () => ({ interrupt }),
       publish: vi.fn()
     }) as SessionManager;
 
@@ -1766,7 +1777,7 @@ describe("SessionManager app-server helpers", () => {
         getSession: vi.fn(async () => session),
         latestPlanReadyMessage: vi.fn(async () => plan)
       },
-      requireAppServerDriver: () => ({})
+      requireDriver: () => ({})
     }) as SessionManager;
 
     await expect(manager.act(session.id, {
@@ -1790,7 +1801,7 @@ describe("SessionManager app-server helpers", () => {
       deliveringInputSessionIds: new Set(),
       processingQueuedSessionIds: new Set(),
       serializeRuntimeOperation: async (_id: string, operation: () => Promise<boolean>) => operation(),
-      appServerDriver: () => ({ sendMessage }),
+      requireDriver: () => ({ sendMessage }),
       publish: vi.fn(),
       sendInput: vi.fn(() => { throw new Error("Wake must not use the input queue"); })
     }) as SessionManager;
@@ -2341,10 +2352,7 @@ function authenticationManager(
   const resumeAppServerSession = vi.fn(async (session: ManagedSession) => session);
   const manager = Object.assign(Object.create(SessionManager.prototype), {
     db,
-    sessionDrivers: {
-      has: vi.fn(() => true),
-      require: vi.fn(() => driver)
-    },
+    providers: testProviders(driver),
     runtimeOperationTails: new Map<string, Promise<void>>(),
     deliveringInputSessionIds: new Set<string>(),
     processingQueuedSessionIds: new Set<string>(),
@@ -2400,7 +2408,7 @@ function killTreeManager(initialSessions: ManagedSession[]) {
     runtimeOperationTails: new Map<string, Promise<void>>(),
     readySessionDiscoveryGeneration: new Map<string, number>(),
     heavyCommandQueue: { cancelWorkspace },
-    requireAppServerDriver: () => ({ kill }),
+    requireDriver: () => ({ kill }),
     publish
   }) as SessionManager;
   return { manager, sessions, kill, addAudit, publish, cancelWorkspace };
@@ -2431,14 +2439,14 @@ function ingestManager(
     upsertSession: vi.fn(async () => undefined),
     ...overrides
   };
-  return new SessionManager(
-    db as never,
-    { listRecent: vi.fn(async () => []), stop: vi.fn() } as never,
-    { publish, subscribe: vi.fn(() => () => undefined) } as never,
-    1_000,
-    1_000,
-    {} as never
-  );
+  return new SessionManager({
+    db: db as never,
+    codexStore: { listRecent: vi.fn(async () => []), stop: vi.fn() } as never,
+    events: { publish, subscribe: vi.fn(() => () => undefined) } as never,
+    discoveryIntervalMs: 1_000,
+    parserIntervalMs: 1_000,
+    documents: {} as never
+  });
 }
 
 async function rejectedQuestionRollout(): Promise<string> {

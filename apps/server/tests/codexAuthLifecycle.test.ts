@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexAuthLifecycle } from "../src/services/codexAuthLifecycle.js";
+import { CodexAuthLifecycle } from "../src/providers/codex/authLifecycle.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 const roots: string[] = [];

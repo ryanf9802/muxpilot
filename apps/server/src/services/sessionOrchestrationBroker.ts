@@ -11,8 +11,8 @@ import { nowIso } from "../utils/time.js";
 import { isMuxpilotSessionResourceUnit } from "./sessionScopes.js";
 import { RAW_CODEX_DEFAULT_READ_BYTES, type RawSessionEvidence } from "./rawSessionEvidence.js";
 import { agentWorkTokensUsed } from "./agentUsage.js";
-import type { McpServerLaunchConfig } from "./sessionDrivers/types.js";
-import type { CodexGoalReader, CodexGoalSnapshot, CodexGoalTelemetry } from "../codex/codexGoalStore.js";
+import type { McpServerLaunchConfig } from "../providers/types.js";
+import type { CodexGoalReader, CodexGoalSnapshot, CodexGoalTelemetry } from "../providers/codex/goalStore.js";
 
 const MAX_REQUEST_BYTES = 256 * 1024;
 const TERMINAL_OR_ATTENTION = new Set(["idle", "waiting", "question", "approval", "plan_ready", "blocked", "input_failed", "startup_failed", "missing"]);

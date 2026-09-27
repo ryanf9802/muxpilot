@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { AppServerCompatibility, ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
+import type { ProviderCompatibility, ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
@@ -57,10 +57,11 @@ import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
   it("describes app-server availability and concrete incompatibility", () => {
-    const available: AppServerCompatibility = {
+    const available: ProviderCompatibility = {
+      provider: "codex",
       status: "available",
       available: true,
-      codexVersion: "0.152.0",
+      version: "0.152.0",
       detail: "ready",
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: []
@@ -70,16 +71,17 @@ describe("shell connection state", () => {
       ...available,
       status: "user_systemd_unavailable",
       available: false,
-      codexVersion: null,
+      version: null,
       detail: "A persistent user-systemd manager is required."
     })).toBe("A persistent user-systemd manager is required.");
   });
 
   it("explains unavailable app-server runtime", () => {
-    const appServer: AppServerCompatibility = {
+    const appServer: ProviderCompatibility = {
+      provider: "codex",
       status: "available",
       available: true,
-      codexVersion: "0.152.0",
+      version: "0.152.0",
       detail: "ready",
       checkedAt: "2026-09-01T12:00:00.000Z",
       missingCapabilities: []
@@ -115,9 +117,10 @@ describe("shell connection state", () => {
       busy: false,
       errors: { "session-1": "Directory is unavailable" },
       compatibility: {
+        provider: "codex",
         status: "available",
         available: true,
-        codexVersion: "0.152.0",
+        version: "0.152.0",
         detail: "Codex app-server is available.",
         checkedAt: "2026-09-01T20:00:00.000Z",
         missingCapabilities: []

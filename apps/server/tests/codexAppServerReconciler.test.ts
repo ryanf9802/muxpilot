@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, SessionStatus } from "@muxpilot/core";
 import type { AppServerReconciliationState } from "../src/db/database.js";
-import {
-  CodexAppServerReconciler,
-  type AppServerProjectionStore
-} from "../src/services/sessionDrivers/codexAppServerReconciler.js";
+import type { AppServerProjectionStore } from "../src/providers/shared/projectionReconciler.js";
+import { CodexAppServerReconciler } from "../src/providers/codex/reconciler.js";
 
 describe("CodexAppServerReconciler", () => {
   it("persists completed items before publishing transcript and status", async () => {

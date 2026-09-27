@@ -15,7 +15,7 @@ import {
   CodexAppServerClient,
   type CodexAppServerClientOptions,
   type CodexAppServerMessage
-} from "./codexUsage.js";
+} from "../providers/codex/usage.js";
 
 const BTW_RESTART_ERROR = "muxpilot restarted before this BTW answer completed.";
 const BTW_INTERACTIVE_ERROR = "BTW questions cannot request interactive input or approval.";

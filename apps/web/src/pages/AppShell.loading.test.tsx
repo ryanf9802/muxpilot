@@ -182,9 +182,10 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
   });
   vi.spyOn(client.api, "sessionRecovery").mockResolvedValue({ incident: null });
   vi.spyOn(client.api, "appServerCompatibility").mockResolvedValue({
+    provider: "codex",
     status: "available",
     available: true,
-    codexVersion: "test",
+    version: "test",
     detail: "ready",
     checkedAt: "2026-09-10T12:00:00.000Z",
     missingCapabilities: []

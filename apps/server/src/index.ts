@@ -4,12 +4,12 @@ import websocket from "@fastify/websocket";
 import Fastify, { LogController } from "fastify";
 import { loadConfig } from "./config/config.js";
 import { AppDatabase } from "./db/database.js";
-import { CodexSessionStore } from "./codex/codexSessionStore.js";
+import { CodexSessionStore } from "./providers/codex/sessionStore.js";
 import { EventBus } from "./services/eventBus.js";
 import { SessionManager } from "./services/sessionManager.js";
 import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
-import { CodexModelsService, CodexUsageService } from "./services/codexUsage.js";
+import { CodexModelsService, CodexUsageService } from "./providers/codex/usage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
@@ -27,14 +27,15 @@ import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroke
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
-import { probeAppServerCompatibility } from "./services/appServerCompatibility.js";
+import { probeAppServerCompatibility } from "./providers/codex/compatibility.js";
 import { randomBytes } from "node:crypto";
-import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
-import { CodexGoalStore } from "./codex/codexGoalStore.js";
+import { createCodexProvider } from "./providers/codex/provider.js";
+import { ProviderRegistry } from "./providers/registry.js";
+import { CodexGoalStore } from "./providers/codex/goalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
-import { ApprovalReviewer } from "./services/approvalReviewer.js";
+import { ApprovalReviewer } from "./providers/codex/approvalReviewer.js";
 import { SessionImageService } from "./services/sessionImages.js";
-import { CodexAuthLifecycle } from "./services/codexAuthLifecycle.js";
+import { CodexAuthLifecycle } from "./providers/codex/authLifecycle.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -130,7 +131,7 @@ if (config.resourceGovernor !== "off") {
 const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
 await sessionEnvironment.initialize();
-const sessionDrivers = createSessionDriverRegistry({
+const codexProvider = createCodexProvider({
   compatibility: appServerCompatibility,
   dataDir: config.dataDir,
   runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
@@ -142,24 +143,25 @@ const sessionDrivers = createSessionDriverRegistry({
   onAuthenticationFailure: (_sessionId, error) => codexAuth.reportAuthenticationFailure(error),
   onAccountUpdated: () => codexAuth.reportAccountUpdated()
 });
-const manager = new SessionManager(
+const providers = new ProviderRegistry([codexProvider], "codex");
+const manager = new SessionManager({
   db,
-  codex,
+  providers,
+  codexStore: codex,
   events,
-  config.discoveryIntervalMs,
-  config.parserIntervalMs,
-  sessionDocuments,
+  discoveryIntervalMs: config.discoveryIntervalMs,
+  parserIntervalMs: config.parserIntervalMs,
+  documents: sessionDocuments,
   approvalReviewer,
   gitWorkspaces,
-  config.codexHome,
-  config.gitWorktreeRoot,
+  codexHome: config.codexHome,
+  gitWorktreeRoot: config.gitWorktreeRoot,
   managedEnvironment,
-  codexModels,
-  sessionDrivers,
-  config.appServerHibernateMs,
-  (sessionId, imageId) => sessionImages.path(sessionId, imageId),
+  codexMetadata: codexModels,
+  appServerHibernateMs: config.appServerHibernateMs,
+  imagePath: (sessionId, imageId) => sessionImages.path(sessionId, imageId),
   sessionEnvironment
-);
+});
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
 manager.setAuthenticationGuard(() => codexAuth.assertReady());
 manager.setAuthenticationAvailabilityGuard(() => codexAuth.assertAvailable());
@@ -271,7 +273,7 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages, codexAuth, sessionEnvironment);
+registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, providers, sessionImages, codexAuth, sessionEnvironment);
 
 app.get("/healthz", async () => ({
   ok: true,

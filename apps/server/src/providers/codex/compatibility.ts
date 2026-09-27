@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { AppServerCompatibility } from "@muxpilot/core";
-import { checkGeneratedProtocolSchema } from "./sessionDrivers/codexAppServerProtocol.js";
+import type { ProviderCompatibility } from "@muxpilot/core";
+import { checkGeneratedProtocolSchema } from "./protocol.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,13 +19,14 @@ export async function probeAppServerCompatibility(
   userSystemdAvailable: boolean,
   executor: AppServerProbeExecutor = new CodexCliAppServerProbeExecutor(),
   now: () => Date = () => new Date()
-): Promise<AppServerCompatibility> {
+): Promise<ProviderCompatibility> {
   const checkedAt = now().toISOString();
   if (!userSystemdAvailable) {
     return {
+      provider: "codex",
       status: "user_systemd_unavailable",
       available: false,
-      codexVersion: null,
+      version: null,
       detail: "A persistent user-systemd manager is required for app-server sessions.",
       checkedAt,
       missingCapabilities: ["user-systemd"]
@@ -46,27 +47,30 @@ export async function probeAppServerCompatibility(
     if (!proxyHelp.includes("--sock")) missingCapabilities.push("unix-proxy");
     if (missingCapabilities.length > 0) {
       return {
-        status: "incompatible_codex_protocol",
+        provider: "codex",
+        status: "incompatible_protocol",
         available: false,
-        codexVersion: version,
+        version,
         detail: `Codex app-server is missing required capabilities: ${missingCapabilities.join(", ")}.`,
         checkedAt,
         missingCapabilities
       };
     }
     return {
+      provider: "codex",
       status: "available",
       available: true,
-      codexVersion: version,
+      version,
       detail: "Codex app-server, Unix socket proxying, and the required protocol methods are available.",
       checkedAt,
       missingCapabilities: []
     };
   } catch (error) {
     return {
+      provider: "codex",
       status: "failed_health_probe",
       available: false,
-      codexVersion: version,
+      version,
       detail: `Codex app-server health probe failed: ${probeErrorMessage(error)}`,
       checkedAt,
       missingCapabilities: []

@@ -1,8 +1,8 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { JsonRpcConnection, JsonRpcResponseError, type JsonRpcConnectionHandlers } from "../src/services/sessionDrivers/jsonRpcConnection.js";
-import type { ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
-import type { RuntimeProxyConnection } from "../src/services/sessionDrivers/types.js";
+import { JsonRpcConnection, JsonRpcResponseError, type JsonRpcConnectionHandlers } from "../src/runtime/jsonRpcConnection.js";
+import type { ProtocolJournalEntry } from "../src/runtime/protocolJournal.js";
+import type { RuntimeProxyConnection } from "../src/providers/types.js";
 
 describe("JsonRpcConnection", () => {
   it("correlates ordered requests and journals both directions", async () => {

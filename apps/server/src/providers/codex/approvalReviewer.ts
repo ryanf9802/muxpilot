@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 import type { ApprovalRequest, ApprovalReviewerSettings, ManagedSession } from "@muxpilot/core";
-import { CodexAppServerClient, type CodexAppServerMessage } from "./codexUsage.js";
+import { CodexAppServerClient, type CodexAppServerMessage } from "./usage.js";
 
 const REVIEW_TIMEOUT_MS = 60_000;
 const REVIEW_INSTRUCTIONS = `You review one runtime approval request for an existing Codex session.

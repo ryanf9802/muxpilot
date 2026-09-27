@@ -5,14 +5,15 @@ import type {
   QuestionAnswerRequest,
   SessionCapabilities
 } from "@muxpilot/core";
-import { CodexAppServerConnectionManager, type AppServerSessionHandlers } from "./codexAppServerConnectionManager.js";
-import { CodexAppServerProtocol, type TurnSteerResponse } from "./codexAppServerProtocol.js";
-import { JsonRpcResponseError } from "./jsonRpcConnection.js";
+import { CodexAppServerConnectionManager, type AppServerSessionHandlers } from "./connectionManager.js";
+import { CodexAppServerProtocol, type TurnSteerResponse } from "./protocol.js";
+import { JsonRpcResponseError } from "../../runtime/jsonRpcConnection.js";
 import type {
   AgentSessionDriver,
   AgentSessionLaunchResult,
   AgentSessionLaunchSpec,
   DriverEvent,
+  DriverEventSink,
   DriverInputReceipt,
   DriverInterruptIntent,
   DriverInterruptOutcome,
@@ -22,7 +23,7 @@ import type {
   RuntimeStartSpec,
   RuntimeSupervisor,
   SystemdSessionRuntimeRef
-} from "./types.js";
+} from "../types.js";
 
 function protocolInput(text: string, content?: import("@muxpilot/core").MessageContentPart[]): Array<Record<string, string>> {
   if (!content?.length) return [{ type: "text", text }];
@@ -78,17 +79,7 @@ interface AppServerProcessOwnership {
   processId: string;
 }
 
-export interface AppServerDriverEventSink {
-  handle(sessionId: string, event: DriverEvent): Promise<void>;
-  restore(sessionId: string, threadId: string, status: unknown, latestTurn: Record<string, unknown> | null, restoredAt: string): Promise<void>;
-  recordIntentionalInterruption?(
-    sessionId: string,
-    threadId: string,
-    turnId: string,
-    intent: DriverInterruptIntent,
-    observedAt: string
-  ): Promise<void>;
-}
+export type AppServerDriverEventSink = DriverEventSink;
 
 export interface AppServerRequestStore {
   upsertAppServerRequest(request: {
@@ -134,7 +125,7 @@ export class AppServerLaunchAttemptError extends Error {
 }
 
 export class CodexAppServerDriver implements AgentSessionDriver {
-  readonly kind = "codex_app_server" as const;
+  readonly kind = "codex" as const;
   readonly capabilities = CODEX_APP_SERVER_CAPABILITIES;
   private readonly subscribers = new Map<string, Set<(event: DriverEvent) => void>>();
   private readonly activeTurns = new Map<string, string>();

@@ -265,7 +265,7 @@ export class SessionTransferService {
     const mappingBySource = new Map(mappings.map((mapping) => [mapping.sourceCwd, mapping]));
     for (const session of staged.manifest.sessions) {
       if (!mappingBySource.has(session.sourceCwd)) throw new SessionTransferError(`Missing destination mapping for '${session.sourceCwd}'`);
-      this.manager.assertPortableRuntimeAvailable(mappingBySource.get(session.sourceCwd)!);
+      this.manager.assertPortableRuntimeAvailable(session);
       if (session.workspaceMode === "git") continue;
       try {
         await this.manager.validatePortableMapping(session, mappingBySource.get(session.sourceCwd)!);

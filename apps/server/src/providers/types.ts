@@ -1,5 +1,6 @@
 import type { Readable, Writable } from "node:stream";
 import type {
+  AgentProviderKind,
   AgentProviderRef,
   ApprovalDecision,
   CollaborationMode,
@@ -8,6 +9,9 @@ import type {
   QuestionAnswerRequest,
   SessionCapabilities,
   SessionModelSettings,
+  ProviderCapabilities,
+  ProviderCompatibility,
+  ProviderSkillInvocation,
   SessionRuntimeRef
 } from "@muxpilot/core";
 
@@ -75,12 +79,25 @@ export interface DriverEvent {
   receivedAt: string;
 }
 
+/** Receives runtime events for projection into muxpilot state. */
+export interface DriverEventSink {
+  handle(sessionId: string, event: DriverEvent): Promise<void>;
+  restore(sessionId: string, threadId: string, status: unknown, latestTurn: Record<string, unknown> | null, restoredAt: string): Promise<void>;
+  recordIntentionalInterruption?(
+    sessionId: string,
+    threadId: string,
+    turnId: string,
+    intent: DriverInterruptIntent,
+    observedAt: string
+  ): Promise<void>;
+}
+
 export interface DriverSubscription {
   close(): Promise<void>;
 }
 
 export interface AgentSessionDriver {
-  readonly kind: "codex_app_server";
+  readonly kind: AgentProviderKind;
   readonly capabilities: SessionCapabilities;
   start(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult>;
   resume(spec: AgentSessionLaunchSpec): Promise<AgentSessionLaunchResult>;
@@ -115,8 +132,9 @@ export interface RuntimeStartSpec {
   sessionId: string;
   capabilityId: string;
   cwd: string;
-  codexHome: string;
-  codexVersion: string | null;
+  agentVersion: string | null;
+  /** Provider runtime argv, given the private socket and state directory owned by this runtime. */
+  command(paths: { socketPath: string; directory: string }): string[];
   environment: Record<string, string>;
   mcpServers: McpServerLaunchConfig[];
 }
@@ -142,4 +160,18 @@ export interface RuntimeSupervisor {
   reconnect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeProxyConnection>;
   stop(runtime: SystemdSessionRuntimeRef): Promise<SystemdSessionRuntimeRef>;
   inspect(runtime: SystemdSessionRuntimeRef): Promise<RuntimeEvidence>;
+}
+
+/**
+ * Everything muxpilot needs from one agent provider (Codex, Claude). Session behavior that differs by
+ * provider is reached through this bundle; provider-neutral orchestration stays in SessionManager.
+ */
+export interface AgentProvider {
+  readonly kind: AgentProviderKind;
+  readonly displayName: string;
+  readonly capabilities: ProviderCapabilities;
+  readonly skillInvocation: ProviderSkillInvocation;
+  /** Startup compatibility probe result; an unavailable provider has no driver. */
+  compatibility(): ProviderCompatibility;
+  readonly driver: AgentSessionDriver | null;
 }

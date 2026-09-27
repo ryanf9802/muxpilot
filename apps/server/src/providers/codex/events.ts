@@ -12,7 +12,7 @@ import {
   type ChatMessage,
   type SessionStatus
 } from "@muxpilot/core";
-import type { JsonRpcNotification } from "./jsonRpcConnection.js";
+import type { JsonRpcNotification } from "../../runtime/jsonRpcConnection.js";
 import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
 
 export interface AppServerEventIdentity {

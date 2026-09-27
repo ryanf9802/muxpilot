@@ -3,17 +3,18 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { codexRuntimeCommand } from "../src/providers/codex/provider.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   appServerServiceUnit,
   runtimePaths,
-  SystemdAppServerSupervisor
-} from "../src/services/sessionDrivers/systemdAppServerSupervisor.js";
-import type { RuntimeProxyConnection, RuntimeStartSpec } from "../src/services/sessionDrivers/types.js";
+  SystemdSessionSupervisor
+} from "../src/runtime/systemdSessionSupervisor.js";
+import type { RuntimeProxyConnection, RuntimeStartSpec } from "../src/providers/types.js";
 
 const capabilityId = "0123456789abcdef01234567";
 
-describe("SystemdAppServerSupervisor", () => {
+describe("SystemdSessionSupervisor", () => {
   it("accepts a Codex socket symlink but rejects broken and non-socket targets", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-socket-link-"));
     const socketPath = join(root, "codex.sock");
@@ -23,7 +24,7 @@ describe("SystemdAppServerSupervisor", () => {
       server.listen(socketPath, resolve);
     });
     try {
-      const supervisor = new SystemdAppServerSupervisor(root, {
+      const supervisor = new SystemdSessionSupervisor(root, {
         run: vi.fn(async () => ({ stdout: "ActiveState=active\nSubState=running\nMainPID=4242\n" }))
       });
       const owned = runtimePaths(root, capabilityId).socketPath;
@@ -65,7 +66,7 @@ describe("SystemdAppServerSupervisor", () => {
     let socketReady = false;
     const calls: Array<{ command: string; args: string[] }> = [];
     const proxy: RuntimeProxyConnection = { input: new PassThrough(), output: new PassThrough(), close: vi.fn(async () => undefined) };
-    const supervisor = new SystemdAppServerSupervisor(root, {
+    const supervisor = new SystemdSessionSupervisor(root, {
       run: vi.fn(async (command, args) => {
         calls.push({ command, args });
         if (command === "systemd-run") { active = true; socketReady = true; }
@@ -78,7 +79,11 @@ describe("SystemdAppServerSupervisor", () => {
       openProxy: vi.fn(() => proxy),
       delay: vi.fn(async () => undefined),
       now: vi.fn(() => 0)
-    }, { executablePath: "/node/bin:/usr/bin", socketRoot });
+    }, {
+      executablePath: "/node/bin:/usr/bin",
+      socketRoot,
+      attachmentCommand: (current) => `codex --remote 'unix://${current.socketPath}'`
+    });
 
     const runtime = await supervisor.start(spec(root));
 
@@ -127,7 +132,7 @@ describe("SystemdAppServerSupervisor", () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-reuse-"));
     const socketRoot = await mkdtemp(join(tmpdir(), "muxpilot-app-server-reuse-sockets-"));
     const calls: Array<{ command: string; args: string[] }> = [];
-    const supervisor = new SystemdAppServerSupervisor(root, {
+    const supervisor = new SystemdSessionSupervisor(root, {
       run: vi.fn(async (command, args) => {
         calls.push({ command, args });
         return command === "systemctl" && args.includes("show")
@@ -151,7 +156,7 @@ describe("SystemdAppServerSupervisor", () => {
   it("stops the durable service without deleting thread identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-stop-"));
     const run = vi.fn(async () => ({ stdout: "" }));
-    const supervisor = new SystemdAppServerSupervisor(root, { run });
+    const supervisor = new SystemdSessionSupervisor(root, { run });
     const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "connected" as const, agentVersion: "0.152.0" };
 
     await expect(supervisor.stop(runtime)).resolves.toEqual({ ...runtime, state: "stopped" });
@@ -168,7 +173,7 @@ describe("SystemdAppServerSupervisor", () => {
     const run = vi.fn()
       .mockRejectedValueOnce(absent)
       .mockRejectedValueOnce(unrelated);
-    const supervisor = new SystemdAppServerSupervisor(root, { run });
+    const supervisor = new SystemdSessionSupervisor(root, { run });
 
     await expect(supervisor.stop(runtime)).resolves.toEqual({ ...runtime, state: "stopped" });
     await expect(supervisor.stop(runtime)).rejects.toThrow("systemd user manager unavailable");
@@ -177,7 +182,7 @@ describe("SystemdAppServerSupervisor", () => {
   it("fails closed for invalid capability ids and unavailable services", async () => {
     expect(() => appServerServiceUnit("../escape")).toThrow(/24 lowercase hexadecimal/);
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-missing-"));
-    const supervisor = new SystemdAppServerSupervisor(root, {
+    const supervisor = new SystemdSessionSupervisor(root, {
       run: vi.fn(async () => ({ stdout: "ActiveState=inactive\nSubState=dead\nMainPID=0\n" })),
       socketReady: vi.fn(async () => false)
     });
@@ -191,7 +196,7 @@ describe("SystemdAppServerSupervisor", () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-long-socket-"));
     const run = vi.fn(async () => ({ stdout: "" }));
     const socketRoot = join(root, "nested-runtime-segment".repeat(8));
-    const supervisor = new SystemdAppServerSupervisor(root, { run }, { socketRoot });
+    const supervisor = new SystemdSessionSupervisor(root, { run }, { socketRoot });
 
     await expect(supervisor.start(spec(root))).rejects.toThrow(
       /socket path is \d+ bytes; the maximum supported length is 107.*shorter XDG_RUNTIME_DIR/
@@ -209,7 +214,7 @@ describe("SystemdAppServerSupervisor", () => {
       state: "stopped" as const,
       agentVersion: null
     };
-    const supervisor = new SystemdAppServerSupervisor(root, {
+    const supervisor = new SystemdSessionSupervisor(root, {
       run: vi.fn(async () => ({ stdout: "ActiveState=inactive\nSubState=dead\nMainPID=0\n" })),
       socketReady: vi.fn(async () => false)
     }, { socketRoot, legacySocketRoots: [root] });
@@ -224,7 +229,7 @@ describe("SystemdAppServerSupervisor", () => {
   it("rejects invalid or duplicate MCP configuration before starting a service", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-invalid-mcp-"));
     const run = vi.fn(async () => ({ stdout: "" }));
-    const supervisor = new SystemdAppServerSupervisor(root, { run });
+    const supervisor = new SystemdSessionSupervisor(root, { run });
     const invalid = spec(root);
     invalid.mcpServers = [{ name: "muxpilot.sessions", command: "/usr/bin/node", args: [] }];
     await expect(supervisor.start(invalid)).rejects.toThrow("Invalid app-server MCP server name");
@@ -237,19 +242,21 @@ describe("SystemdAppServerSupervisor", () => {
   });
 });
 
+const mcpServers = [{
+  name: "muxpilot_sessions",
+  command: "/usr/bin/node",
+  args: ["/opt/muxpilot-session-mcp.mjs", "/run/capability.json"],
+  defaultToolsApprovalMode: "approve" as const
+}];
+
 function spec(root: string): RuntimeStartSpec {
   return {
     sessionId: "session-1",
     capabilityId,
     cwd: "/repo",
-    codexHome: `${root}/codex`,
-    codexVersion: "0.152.0",
-    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents", PATH: "/untrusted/session/path" },
-    mcpServers: [{
-      name: "muxpilot_sessions",
-      command: "/usr/bin/node",
-      args: ["/opt/muxpilot-session-mcp.mjs", "/run/capability.json"],
-      defaultToolsApprovalMode: "approve"
-    }]
+    agentVersion: "0.152.0",
+    command: ({ socketPath }) => codexRuntimeCommand(socketPath, mcpServers),
+    environment: { MUXPILOT_DOCUMENTS_DIR: "/documents", PATH: "/untrusted/session/path", CODEX_HOME: `${root}/codex` },
+    mcpServers
   };
 }

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { serializeApprovalDecisionEvent, serializeGitWorkflowEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
-import { parseCodexJsonl } from "../src/codex/parser.js";
+import { parseCodexJsonl } from "../src/providers/codex/parser.js";
 
 describe("parseCodexJsonl", () => {
   it("reports active context and cache-adjusted lifetime work tokens", async () => {

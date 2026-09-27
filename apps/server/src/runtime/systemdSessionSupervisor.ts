@@ -8,7 +8,7 @@ import type {
   RuntimeStartSpec,
   RuntimeSupervisor,
   SystemdSessionRuntimeRef
-} from "./types.js";
+} from "../providers/types.js";
 import { openUnixWebSocketJsonLineConnection } from "./unixWebSocketConnection.js";
 
 const CAPABILITY_ID = /^[a-f0-9]{24}$/;
@@ -32,15 +32,21 @@ interface SupervisorDependencies {
   now(): number;
 }
 
-interface SystemdAppServerSupervisorOptions {
+interface SystemdSessionSupervisorOptions {
   startTimeoutMs?: number;
   socketPollMs?: number;
   executablePath?: string;
   socketRoot?: string;
   legacySocketRoots?: string[];
+  /** Shell command an operator can use to attach a terminal to a live runtime. */
+  attachmentCommand?: (runtime: SystemdSessionRuntimeRef) => string;
 }
 
-export class SystemdAppServerSupervisor implements RuntimeSupervisor {
+/**
+ * Runs one provider runtime per session as a transient user systemd service that listens on a private
+ * unix socket. The provider supplies the command; unit naming and socket ownership are provider-neutral.
+ */
+export class SystemdSessionSupervisor implements RuntimeSupervisor {
   private readonly runtimeRoot: string;
   private readonly socketRoot: string;
   private readonly legacySocketRoots: string[];
@@ -48,11 +54,12 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
   private readonly startTimeoutMs: number;
   private readonly socketPollMs: number;
   private readonly executablePath: string | null;
+  private readonly attachmentCommand: (runtime: SystemdSessionRuntimeRef) => string;
 
   constructor(
     runtimeRoot: string,
     dependencies: Partial<SupervisorDependencies> = {},
-    options: SystemdAppServerSupervisorOptions = {}
+    options: SystemdSessionSupervisorOptions = {}
   ) {
     this.runtimeRoot = resolve(runtimeRoot);
     this.socketRoot = resolve(options.socketRoot ?? runtimeRoot);
@@ -61,6 +68,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     this.startTimeoutMs = options.startTimeoutMs ?? DEFAULT_START_TIMEOUT_MS;
     this.socketPollMs = options.socketPollMs ?? DEFAULT_SOCKET_POLL_MS;
     this.executablePath = options.executablePath ?? process.env.PATH ?? null;
+    this.attachmentCommand = options.attachmentCommand ?? (() => "");
   }
 
   async start(spec: RuntimeStartSpec): Promise<SystemdSessionRuntimeRef & { launchDisposition: "started" | "reused" }> {
@@ -73,8 +81,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
     await preparePrivateDirectory(paths.socketDirectory);
     const environment = {
       ...spec.environment,
-      ...(this.executablePath ? { PATH: this.executablePath } : {}),
-      CODEX_HOME: spec.codexHome
+      ...(this.executablePath ? { PATH: this.executablePath } : {})
     };
     const nextEnvironment = environmentFileContents(environment);
     const runtime: SystemdSessionRuntimeRef = {
@@ -82,7 +89,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       unit: paths.unit,
       socketPath: paths.socketPath,
       state: "starting",
-      agentVersion: spec.codexVersion
+      agentVersion: spec.agentVersion
     };
     const existing = await this.inspect(runtime);
     // Recovery reconnects to a healthy runtime even when the desired launch
@@ -141,7 +148,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       mainPid: Number.isSafeInteger(mainPid) && mainPid > 0 ? mainPid : null,
       controlGroup: properties.ControlGroup || null,
       socketPresent: await this.dependencies.socketReady(runtime.socketPath),
-      attachmentCommand: `codex --remote ${shellQuote(`unix://${runtime.socketPath}`)}`
+      attachmentCommand: this.attachmentCommand(runtime)
     };
   }
 
@@ -210,22 +217,8 @@ function validateSocketPath(socketPath: string): void {
 }
 
 function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtimePaths>): string[] {
-  const configArgs = [
-    "-c", "check_for_update_on_startup=false",
-    "-c", "sandbox_workspace_write.network_access=true"
-  ];
-  for (const server of spec.mcpServers) {
-    configArgs.push(
-      "-c", `mcp_servers.${server.name}.command=${JSON.stringify(server.command)}`,
-      "-c", `mcp_servers.${server.name}.args=${JSON.stringify(server.args)}`
-    );
-    if (server.defaultToolsApprovalMode) {
-      configArgs.push(
-        "-c",
-        `mcp_servers.${server.name}.default_tools_approval_mode=${JSON.stringify(server.defaultToolsApprovalMode)}`
-      );
-    }
-  }
+  const command = spec.command({ socketPath: paths.socketPath, directory: paths.directory });
+  if (command.length === 0 || !command[0]?.trim()) throw new Error("Session runtime command must not be empty");
   return [
     "--user",
     `--unit=${paths.unit}`,
@@ -239,11 +232,7 @@ function systemdRunArgs(spec: RuntimeStartSpec, paths: ReturnType<typeof runtime
     "--property=StartLimitBurst=3",
     "--property=KillMode=control-group",
     `--property=EnvironmentFile=${paths.environmentPath}`,
-    "codex",
-    ...configArgs,
-    "app-server",
-    "--listen",
-    `unix://${paths.socketPath}`
+    ...command
   ];
 }
 
@@ -292,7 +281,7 @@ function parseSystemdProperties(output: string): Record<string, string> {
   }));
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
