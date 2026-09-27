@@ -646,6 +646,26 @@ function isSessionBackShortcutEditableTarget(target: EventTarget | null): boolea
   );
 }
 
+export function sessionModeShortcutAction(
+  event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "repeat" | "isComposing" | "defaultPrevented" | "target">,
+  session: ManagedSession | null,
+  actionBusy: SessionAction["type"] | null,
+  ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document
+): { type: "inputMode"; mode: CollaborationMode } | { type: "fastMode"; enabled: boolean } | null {
+  if (!session || actionBusy || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented) return null;
+  if (isSessionBackShortcutEditableTarget(event.target) || ownerDocument?.querySelector("[role='dialog'], [role='menu']")) return null;
+  if (event.key === "p" || event.key === "n") {
+    if (session.agentOwnership?.completedAt || session.initializing || session.startupError || session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated") return null;
+    const mode = event.key === "p" ? "plan" : "default";
+    return session.inputMode === mode ? null : { type: "inputMode", mode };
+  }
+  if (event.key === "f") {
+    if (session.agentOwnership?.completedAt || session.initializing || session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated" || session.fastModeAvailable === false || !canToggleFastMode(session.status)) return null;
+    return { type: "fastMode", enabled: session.fastMode !== true };
+  }
+  return null;
+}
+
 export function transcriptVimNavigationCommand(
   event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey">,
   pendingG: boolean
@@ -3241,6 +3261,18 @@ export function SessionView() {
     }
   }
 
+  useEffect(() => {
+    const handleModeShortcut = (event: globalThis.KeyboardEvent) => {
+      const action = sessionLoading ? null : sessionModeShortcutAction(event, session, actionBusy, document);
+      if (!action) return;
+      event.preventDefault();
+      if (action.type === "inputMode") void setInputMode(action.mode);
+      else void setFastMode(action.enabled);
+    };
+    document.addEventListener("keydown", handleModeShortcut);
+    return () => document.removeEventListener("keydown", handleModeShortcut);
+  }, [session, sessionLoading, actionBusy]);
+
   async function copyAttachCommand() {
     if (!session) return;
     const command = runtimeAttachCommand(session);
@@ -5159,7 +5191,7 @@ export function ModeToggle({
         className={`mode-toggle-normal${mode === "default" ? " selected" : ""}`}
         disabled={busy}
         aria-label="Normal"
-        title="Normal"
+        title="Normal (N)"
         onClick={() => onChange("default")}
       >
         <MessageSquare className="mode-toggle-icon" size={15} aria-hidden="true" />
@@ -5170,7 +5202,7 @@ export function ModeToggle({
         className={`mode-toggle-plan${mode === "plan" ? " selected" : ""}`}
         disabled={busy}
         aria-label="Plan"
-        title="Plan"
+        title="Plan (P)"
         onClick={() => onChange("plan")}
       >
         <ListChecks className="mode-toggle-icon" size={15} aria-hidden="true" />
@@ -5201,8 +5233,8 @@ export function FastModeToggle({
     : !allowed
       ? "Fast mode cannot be changed in the session's current state"
       : enabled
-        ? "Disable Fast mode (also updates the default for future Codex sessions)"
-        : "Enable Fast mode (uses more credits and updates the default for future Codex sessions)";
+        ? "Disable Fast mode (F; also updates the default for future Codex sessions)"
+        : "Enable Fast mode (F; uses more credits and updates the default for future Codex sessions)";
   return (
     <button
       type="button"

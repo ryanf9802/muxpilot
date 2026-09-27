@@ -83,6 +83,7 @@ import {
   loadVimModePreference,
   sessionWithPendingInputMode,
   sessionWithPendingFastMode,
+  sessionModeShortcutAction,
   saveComposerDraft,
   saveQuestionAnswerDraft,
   saveVimModePreference,
@@ -1055,6 +1056,47 @@ describe("session back shortcut", () => {
   });
 });
 
+describe("session mode shortcuts", () => {
+  const ownerDocument = { querySelector: () => null } as unknown as Pick<Document, "querySelector">;
+  const keyEvent = (key: string, overrides: Partial<KeyboardEvent> = {}) => ({
+    key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+    repeat: false, isComposing: false, defaultPrevented: false,
+    target: shortcutTarget(null), ...overrides
+  });
+
+  it("selects Plan and Normal and toggles Fast in both directions", () => {
+    const normal = managedSession({ inputMode: "default", fastMode: false, fastModeAvailable: true, status: "waiting" });
+    expect(sessionModeShortcutAction(keyEvent("p"), normal, null, ownerDocument)).toEqual({ type: "inputMode", mode: "plan" });
+    expect(sessionModeShortcutAction(keyEvent("n"), { ...normal, inputMode: "plan" }, null, ownerDocument)).toEqual({ type: "inputMode", mode: "default" });
+    expect(sessionModeShortcutAction(keyEvent("f"), normal, null, ownerDocument)).toEqual({ type: "fastMode", enabled: true });
+    expect(sessionModeShortcutAction(keyEvent("f"), { ...normal, fastMode: true }, null, ownerDocument)).toEqual({ type: "fastMode", enabled: false });
+    expect(sessionModeShortcutAction(keyEvent("n"), normal, null, ownerDocument)).toBeNull();
+  });
+
+  it("ignores typing, interactive controls, overlays, modifiers, repeats, and composition", () => {
+    const session = managedSession({ inputMode: "default" });
+    for (const target of ["input", "textarea", "button", ".cm-editor", "[contenteditable]"]) {
+      expect(sessionModeShortcutAction(keyEvent("p", { target: shortcutTarget(target) }), session, null, ownerDocument)).toBeNull();
+    }
+    for (const override of [{ ctrlKey: true }, { metaKey: true }, { altKey: true }, { shiftKey: true }, { repeat: true }, { isComposing: true }, { defaultPrevented: true }]) {
+      expect(sessionModeShortcutAction(keyEvent("p", override), session, null, ownerDocument)).toBeNull();
+    }
+    const overlay = { querySelector: () => ({}) } as unknown as Pick<Document, "querySelector">;
+    expect(sessionModeShortcutAction(keyEvent("p"), session, null, overlay)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("P"), session, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("x"), session, null, ownerDocument)).toBeNull();
+  });
+
+  it("respects action and session availability", () => {
+    const session = managedSession({ inputMode: "default", fastModeAvailable: true, status: "waiting" });
+    expect(sessionModeShortcutAction(keyEvent("p"), session, "setFastMode", ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("p"), { ...session, initializing: true }, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("p"), { ...session, startupError: "failed" }, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("f"), { ...session, fastModeAvailable: false }, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("f"), { ...session, status: "approval" }, null, ownerDocument)).toBeNull();
+  });
+});
+
 function sessionBackKeyEvent(
   overrides: Partial<Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target">> = {}
 ): Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "target"> {
@@ -1692,6 +1734,7 @@ describe("Fast mode controls", () => {
 
     expect(enabled).toContain('aria-pressed="true"');
     expect(enabled).toContain('aria-label="Disable Fast mode"');
+    expect(enabled).toContain("Fast mode (F;");
     expect(enabled).toContain("fast-mode-toggle selected");
     expect(unavailable).toContain("disabled");
     expect(unavailable).toContain("unavailable for this model");
@@ -1708,6 +1751,8 @@ describe("ModeToggle", () => {
 
     expect(html).toContain('aria-label="Normal"');
     expect(html).toContain('aria-label="Plan"');
+    expect(html).toContain('title="Normal (N)"');
+    expect(html).toContain('title="Plan (P)"');
     expect(html).toContain("mode-toggle-icon");
     expect(html).toContain('class="mode-toggle-text"');
   });
