@@ -59,6 +59,46 @@ describe("CodexUsageService", () => {
     expect(requests).toBe(2);
   });
 
+  it("retains a verified account when limits fail and marks a failed account read unknown", async () => {
+    const partial = new CodexUsageService({
+      codexHome: "/tmp/codex",
+      client: {
+        request: async <T>(method: string): Promise<T> => {
+          if (method === "account/read") return account({ email: "engineer@example.com", planType: "plus" }) as T;
+          throw new Error("limits delayed");
+        },
+        stop: () => undefined
+      }
+    });
+    expect(await partial.summary()).toMatchObject({ available: false, accountStatus: "authenticated", account: { email: "engineer@example.com" }, error: "limits delayed" });
+
+    const unknown = new CodexUsageService({ codexHome: "/tmp/codex", client: { request: async () => { throw new Error("offline"); }, stop: () => undefined } });
+    expect(await unknown.summary()).toMatchObject({ available: false, accountStatus: "unknown", account: null });
+
+    const signedOut = new CodexUsageService({ codexHome: "/tmp/codex", client: { request: async () => ({ account: null, requiresOpenaiAuth: true }), stop: () => undefined } });
+    expect(await signedOut.summary()).toMatchObject({ available: false, accountStatus: "signed_out", account: null });
+  });
+
+  it("applies the longer isolated deadline only to usage reads", async () => {
+    const calls: Array<{ method: string; timeoutMs: number | undefined; stopOnTimeout: boolean | undefined }> = [];
+    const service = new CodexUsageService({ codexHome: "/tmp/codex", client: {
+      request: async <T>(method: string, _params?: unknown, timeoutMs?: number, options?: { stopOnTimeout?: boolean }): Promise<T> => {
+        calls.push({ method, timeoutMs, stopOnTimeout: options?.stopOnTimeout });
+        if (method === "account/read") return account({ email: "engineer@example.com", planType: "plus" }) as T;
+        if (method === "account/rateLimits/read") return rateLimits({ rateLimits: snapshot("codex", "codex usage", 10, 20), rateLimitsByLimitId: null }) as T;
+        return { summary: {}, dailyUsageBuckets: [] } as T;
+      },
+      stop: () => undefined
+    } });
+    await service.summary();
+    await service.tokenUsage(7);
+    expect(calls).toEqual([
+      { method: "account/read", timeoutMs: 15_000, stopOnTimeout: false },
+      { method: "account/rateLimits/read", timeoutMs: 15_000, stopOnTimeout: false },
+      { method: "account/usage/read", timeoutMs: 15_000, stopOnTimeout: false }
+    ]);
+  });
+
   it("reads and caches account token activity independently", async () => {
     let requests = 0;
     const service = new CodexUsageService({
@@ -143,6 +183,29 @@ describe("CodexUsageService", () => {
     await older;
 
     expect(refreshed.limits.fiveHour?.usedPercent).toBe(5);
+    expect((await service.summary()).limits.fiveHour?.usedPercent).toBe(5);
+  });
+
+  it("does not cache a read completed after authentication invalidation", async () => {
+    let resolveOld!: (value: RateLimitsReadResponse) => void;
+    const oldRateLimits = new Promise<RateLimitsReadResponse>((resolve) => { resolveOld = resolve; });
+    let reads = 0;
+    const service = new CodexUsageService({ codexHome: "/tmp/codex", client: {
+      request: async <T>(method: string): Promise<T> => {
+        if (method === "account/read") return account({ email: "engineer@example.com", planType: "plus" }) as T;
+        reads += 1;
+        return (reads === 1 ? oldRateLimits : Promise.resolve(rateLimits({ rateLimits: snapshot("codex", "codex usage", 5, 10), rateLimitsByLimitId: null }))) as T;
+      },
+      stop: () => undefined
+    } });
+    const older = service.summary();
+    await Promise.resolve();
+    await Promise.resolve();
+    service.invalidateAuthentication();
+    const fresh = await service.summary();
+    resolveOld(rateLimits({ rateLimits: snapshot("codex", "codex usage", 90, 95), rateLimitsByLimitId: null }));
+    await older;
+    expect(fresh.limits.fiveHour?.usedPercent).toBe(5);
     expect((await service.summary()).limits.fiveHour?.usedPercent).toBe(5);
   });
 });

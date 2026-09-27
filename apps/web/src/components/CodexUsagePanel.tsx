@@ -30,6 +30,7 @@ export function CodexUsagePanel({
   const historyRequestIdRef = useRef(0);
   const historyInFlightRef = useRef<Promise<void> | null>(null);
   const accountLabel = summary ? formatCodexAccount(summary) : "loading";
+  const stale = Boolean(usageMonitor.refreshError) || Boolean(summary && !summary.available);
   const planLabel = summary?.account?.planType ? summary.account.planType : null;
   const { pendingAttempt, resetAction, resetError, resetOutcome, resetObservation, resetRevision, consumeReset, refreshError } = usageMonitor;
 
@@ -112,6 +113,7 @@ export function CodexUsagePanel({
   const resetBusy = resetAction !== null;
 
   function confirmReset() {
+    if (stale) return;
     const attempt = {
       idempotencyKey: createIdempotencyKey(),
       creditId: selectedCredit?.id ?? null,
@@ -132,7 +134,7 @@ export function CodexUsagePanel({
       <div className="usage-panel-head">
         <div>
           <h2>Codex usage</h2>
-          <p>{summary?.available ? "Account limits" : summary?.error ?? "Account limits"}</p>
+          <p>{stale && summary?.accountStatus !== "signed_out" ? "Unable to refresh; retrying" : summary?.available ? "Account limits" : summary?.error ?? "Account limits"}</p>
         </div>
         <div className="usage-panel-controls">
           <div className="usage-total">
@@ -165,12 +167,12 @@ export function CodexUsagePanel({
                   {credit.description ? <p>{credit.description}</p> : null}
                   <span>{formatCreditExpiration(credit.expiresAt, now)}</span>
                 </div>
-                <Button variant="secondary" onClick={() => setSelectedCredit(credit)} disabled={resetBusy || Boolean(pendingAttempt) || credit.status !== "available" || isExpired(credit.expiresAt, now)}>Use token</Button>
+                <Button variant="secondary" onClick={() => setSelectedCredit(credit)} disabled={stale || resetBusy || Boolean(pendingAttempt) || credit.status !== "available" || isExpired(credit.expiresAt, now)}>Use token</Button>
               </div>
             ))}
           </div>
         ) : availableCount && availableCount > 0 ? (
-          <Button variant="secondary" onClick={() => setSelectedCredit(null)} disabled={resetBusy || Boolean(pendingAttempt)}>Use next token</Button>
+          <Button variant="secondary" onClick={() => setSelectedCredit(null)} disabled={stale || resetBusy || Boolean(pendingAttempt)}>Use next token</Button>
         ) : null}
 
         {pendingAttempt && resetAction && !resetOutcome ? (
@@ -202,7 +204,7 @@ export function CodexUsagePanel({
           {summary.available ? null : <span>Unavailable</span>}
         </div>
       ) : null}
-      {refreshError || historyRefreshError ? <p className="usage-note usage-error" role="alert">{refreshError ?? historyRefreshError}</p> : null}
+      {historyRefreshError ? <p className="usage-note usage-error" role="alert">{historyRefreshError}</p> : null}
 
       {selectedCredit !== undefined ? (
         <Modal open title="Use usage reset token?" onClose={() => setSelectedCredit(undefined)} dismissible={!resetBusy} panelClassName="codex-reset-dialog">
@@ -210,7 +212,7 @@ export function CodexUsagePanel({
           {selectedCredit ? <p className="dialog-help">{selectedCredit.title ?? "Rate-limit reset"} · {formatCreditExpiration(selectedCredit.expiresAt, now)}</p> : null}
           <DialogActions>
             <Button variant="ghost" onClick={() => setSelectedCredit(undefined)} disabled={resetBusy}>Cancel</Button>
-            <Button variant="primary" onClick={confirmReset} disabled={resetBusy} busy={resetBusy} busyLabel="Using token">Use reset token</Button>
+            <Button variant="primary" onClick={confirmReset} disabled={stale || resetBusy} busy={resetBusy} busyLabel="Using token">Use reset token</Button>
           </DialogActions>
         </Modal>
       ) : null}
@@ -323,7 +325,7 @@ function isExpired(value: number | null, now: number): boolean {
 }
 
 function formatCodexAccount(summary: CodexUsageSummaryResponse): string {
-  if (!summary.account) return "Not signed in";
+  if (!summary.account) return summary.accountStatus === "signed_out" ? "Not signed in" : "Account status unavailable";
   if (summary.account.kind === "chatgpt") return summary.account.email ?? "ChatGPT";
   if (summary.account.kind === "apiKey") return "API key";
   if (summary.account.kind === "amazonBedrock") return "Amazon Bedrock";

@@ -13,6 +13,7 @@ import { nowIso } from "../utils/time.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 3000;
 const RESET_REQUEST_TIMEOUT_MS = 15_000;
+const USAGE_REQUEST_TIMEOUT_MS = 15_000;
 const FIVE_HOUR_WINDOW_MINS = 5 * 60;
 const WEEKLY_WINDOW_MINS = 7 * 24 * 60;
 const MODEL_CACHE_TTL_MS = 60_000;
@@ -30,6 +31,7 @@ interface JsonRpcFailure {
   id: string | number;
   error: {
     message?: unknown;
+    code?: unknown;
   };
 }
 
@@ -45,6 +47,9 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  method: string;
+  startedAt: number;
+  timeoutMs: number;
 }
 
 export interface CodexAppServerClientOptions {
@@ -223,7 +228,7 @@ export class CodexUsageService {
       this.tokenUsageGeneration += 1;
     }
     const generation = this.tokenUsageGeneration;
-    const request = this.client.request<AccountTokenUsageResponse>("account/usage/read");
+    const request = this.client.request<AccountTokenUsageResponse>("account/usage/read", undefined, USAGE_REQUEST_TIMEOUT_MS, { stopOnTimeout: false });
     this.tokenUsageInFlight = request;
     try {
       const response = await request;
@@ -238,17 +243,19 @@ export class CodexUsageService {
 
   private async loadSummary(): Promise<CodexUsageSummaryResponse> {
     const refreshedAt = nowIso();
+    let knownAccount: CodexUsageAccount | null = null;
     try {
-      const account = await this.client.request<AccountReadResponse>("account/read", { refreshToken: false });
+      const account = await this.client.request<AccountReadResponse>("account/read", { refreshToken: false }, USAGE_REQUEST_TIMEOUT_MS, { stopOnTimeout: false });
       if (!account.account) {
-        return unavailable("Codex account authentication required.", refreshedAt, normalizeAccount(account.account));
+        return unavailable("Codex account authentication required.", refreshedAt, null, "signed_out");
       }
 
-      const rateLimits = await this.client.request<RateLimitsReadResponse>("account/rateLimits/read");
+      knownAccount = normalizeAccount(account.account);
+      const rateLimits = await this.client.request<RateLimitsReadResponse>("account/rateLimits/read", undefined, USAGE_REQUEST_TIMEOUT_MS, { stopOnTimeout: false });
       const normalized = normalizeCodexUsage(account, rateLimits, refreshedAt);
       return normalized;
     } catch (error) {
-      return unavailable(error instanceof Error ? error.message : "Codex usage is unavailable.", refreshedAt);
+      return unavailable(error instanceof Error ? error.message : "Codex usage is unavailable.", refreshedAt, knownAccount);
     }
   }
 
@@ -261,6 +268,8 @@ export class CodexUsageService {
     this.tokenUsageGeneration += 1;
     this.cache = null;
     this.tokenUsageCache = null;
+    this.inFlight = null;
+    this.tokenUsageInFlight = null;
     this.client.stop();
   }
 }
@@ -342,9 +351,9 @@ export class CodexAppServerClient {
     this.logger = options.logger;
   }
 
-  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number): Promise<T> {
+  async request<T = unknown>(method: string, params?: unknown, timeoutMs?: number, options?: { stopOnTimeout?: boolean }): Promise<T> {
     await this.ensureInitialized(timeoutMs);
-    return this.send<T>(method, params, timeoutMs);
+    return this.send<T>(method, params, timeoutMs, options);
   }
 
   async initialize(): Promise<void> {
@@ -423,22 +432,27 @@ export class CodexAppServerClient {
     child.on("exit", (code, signal) => this.handleExit(child, new Error(`Codex app-server exited (${signal ?? code ?? "unknown"}).`)));
   }
 
-  private send<T = unknown>(method: string, params?: unknown, timeoutMs = this.timeoutMs): Promise<T> {
+  private send<T = unknown>(method: string, params?: unknown, timeoutMs = this.timeoutMs, options?: { stopOnTimeout?: boolean }): Promise<T> {
     const child = this.child;
     if (!child) return Promise.reject(new Error("Codex app-server is not running."));
     const id = this.nextRequestId++;
     const request = params === undefined ? { id, method } : { id, method, params };
     return new Promise<T>((resolve, reject) => {
+      const startedAt = Date.now();
       const timer = setTimeout(() => {
         this.pending.delete(id);
         const error = new Error(`Codex app-server request timed out: ${method}`);
+        this.logger?.warn({ method, elapsedMs: Date.now() - startedAt, timeoutMs }, "codex app-server request timed out");
         reject(error);
-        this.stop(error);
+        if (options?.stopOnTimeout !== false) this.stop(error);
       }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => resolve(value as T),
         reject,
-        timer
+        timer,
+        method,
+        startedAt,
+        timeoutMs
       });
       this.write(request);
     });
@@ -476,7 +490,14 @@ export class CodexAppServerClient {
         this.pending.delete(message.id);
         clearTimeout(pending.timer);
         if ("error" in message) {
-          pending.reject(new Error(typeof message.error.message === "string" ? message.error.message : "Codex app-server request failed."));
+          const rpcError = recordValue(message.error);
+          this.logger?.warn({
+            method: pending.method,
+            elapsedMs: Date.now() - pending.startedAt,
+            timeoutMs: pending.timeoutMs,
+            code: typeof rpcError?.code === "number" ? rpcError.code : undefined
+          }, "codex app-server request failed");
+          pending.reject(new Error(typeof rpcError?.message === "string" ? rpcError.message : "Codex app-server request failed."));
         } else {
           pending.resolve(message.result);
         }
@@ -577,6 +598,7 @@ export function normalizeCodexUsage(
     available: true,
     error: null,
     refreshedAt,
+    accountStatus: "authenticated",
     account: normalizeAccount(accountResponse.account),
     limits: {
       fiveHour: snapshot ? selectLimit(snapshot, "5h limit", "fiveHour") : null,
@@ -636,11 +658,12 @@ function normalizeAccount(account: CodexAccount | null): CodexUsageAccount | nul
   return { kind: "unknown", email: null, planType: null };
 }
 
-function unavailable(error: string, refreshedAt: string, account: CodexUsageAccount | null = null): CodexUsageSummaryResponse {
+function unavailable(error: string, refreshedAt: string, account: CodexUsageAccount | null = null, accountStatus: "signed_out" | "unknown" | "authenticated" = account ? "authenticated" : "unknown"): CodexUsageSummaryResponse {
   return {
     available: false,
     error,
     refreshedAt,
+    accountStatus,
     account,
     limits: { fiveHour: null, weekly: null },
     resetCredits: null

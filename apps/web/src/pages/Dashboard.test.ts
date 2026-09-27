@@ -700,6 +700,7 @@ describe("CodexUsagePanel", () => {
           available: false,
           error: "Codex account authentication required.",
           refreshedAt: "2026-07-07T12:00:00.000Z",
+          accountStatus: "signed_out",
           account: null,
           limits: { fiveHour: null, weekly: null },
           resetCredits: null

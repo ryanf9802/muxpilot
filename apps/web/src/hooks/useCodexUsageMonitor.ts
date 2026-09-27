@@ -63,7 +63,15 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
     const requestId = ++requestIdRef.current;
     try {
       const next = await api.codexUsageSummary(force);
-      if (!next.available) throw new Error(next.error ?? "Codex usage is unavailable.");
+      if (next.accountStatus === "signed_out") {
+        if (requestId === requestIdRef.current) acceptSummary(next);
+        return next;
+      }
+      if (!next.available && requestId === requestIdRef.current && next.account && summaryRef.current?.account && !sameAccount(next.account, summaryRef.current.account)) {
+        summaryRef.current = next;
+        setSummary(next);
+      }
+      if (!next.available) throw new UsageResponseError(next);
       if (requestId === requestIdRef.current) acceptSummary(next);
       return next;
     } catch (error) {
@@ -71,7 +79,7 @@ export function useCodexUsageMonitor(): CodexUsageMonitor {
         const message = error instanceof Error ? error.message : "Codex usage could not be refreshed.";
         setRefreshError(message);
         if (!summaryRef.current) {
-          setSummary(unavailableSummary(message));
+          setSummary(nextUnavailableSummary(error, message));
           setInitialLoading(false);
         }
       }
@@ -352,7 +360,22 @@ function sameAttempt(left: PendingResetAttempt | null, right: PendingResetAttemp
 }
 
 function unavailableSummary(error: string): CodexUsageSummaryResponse {
-  return { available: false, error, refreshedAt: new Date().toISOString(), account: null, limits: { fiveHour: null, weekly: null }, resetCredits: null };
+  return { available: false, error, refreshedAt: new Date().toISOString(), accountStatus: "unknown", account: null, limits: { fiveHour: null, weekly: null }, resetCredits: null };
+}
+
+function nextUnavailableSummary(error: unknown, message: string): CodexUsageSummaryResponse {
+  if (error instanceof UsageResponseError) return error.summary;
+  return unavailableSummary(message);
+}
+
+class UsageResponseError extends Error {
+  constructor(readonly summary: CodexUsageSummaryResponse) {
+    super(summary.error ?? "Codex usage is unavailable.");
+  }
+}
+
+function sameAccount(left: NonNullable<CodexUsageSummaryResponse["account"]>, right: NonNullable<CodexUsageSummaryResponse["account"]>): boolean {
+  return left.kind === right.kind && left.email === right.email;
 }
 
 function delay(ms: number): Promise<void> {

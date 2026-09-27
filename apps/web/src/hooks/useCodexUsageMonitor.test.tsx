@@ -91,6 +91,30 @@ describe("useCodexUsageMonitor", () => {
     expect(apiMocks.codexUsageSummary).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps verified limits during a failed refresh, recovers, and clears them on sign-out", async () => {
+    apiMocks.codexUsageSummary.mockResolvedValueOnce(summary(40))
+      .mockResolvedValueOnce({ ...summary(40), available: false, error: "limits delayed", limits: { fiveHour: null, weekly: null } })
+      .mockResolvedValueOnce(summary(35))
+      .mockResolvedValueOnce({ ...summary(35), available: false, accountStatus: "signed_out", account: null, limits: { fiveHour: null, weekly: null }, resetCredits: null });
+    await renderMonitor((monitor) => { current = monitor; });
+    const first = current!.summary;
+    await act(async () => { await vi.advanceTimersByTimeAsync(CODEX_USAGE_POLL_INTERVAL_MS); });
+    expect(current!.summary).toBe(first);
+    expect(current!.refreshError).toBe("limits delayed");
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(current!.summary?.limits.fiveHour?.usedPercent).toBe(35);
+    expect(current!.refreshError).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(CODEX_USAGE_POLL_INTERVAL_MS); });
+    expect(current!.summary).toMatchObject({ accountStatus: "signed_out", account: null, limits: { fiveHour: null } });
+  });
+
+  it("shows an unknown account after the first transport failure", async () => {
+    apiMocks.codexUsageSummary.mockResolvedValueOnce({ ...summary(40), available: false, accountStatus: "unknown", account: null, error: "offline", limits: { fiveHour: null, weekly: null } });
+    await renderMonitor((monitor) => { current = monitor; });
+    expect(current!.summary).toMatchObject({ accountStatus: "unknown", account: null });
+    expect(current!.refreshError).toBe("offline");
+  });
+
   it("uses one token attempt and confirms success when refreshed capacity is full", async () => {
     apiMocks.codexUsageSummary.mockResolvedValue(summary(60));
     apiMocks.consumeCodexResetCredit.mockResolvedValue({ outcome: "reset", summary: summary(0) });

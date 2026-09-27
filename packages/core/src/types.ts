@@ -1154,6 +1154,7 @@ export interface CodexUsageSummaryResponse {
   available: boolean;
   error: string | null;
   refreshedAt: string;
+  accountStatus?: "authenticated" | "signed_out" | "unknown";
   account: CodexUsageAccount | null;
   limits: {
     fiveHour: CodexUsageLimit | null;

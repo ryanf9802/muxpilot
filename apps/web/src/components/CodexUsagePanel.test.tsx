@@ -103,6 +103,19 @@ describe("CodexUsagePanel interactions", () => {
     expect(buttonLabels).not.toContain("30d");
   });
 
+  it("keeps stale limits visible with a quiet retry status and disables reset tokens", async () => {
+    apiMocks.codexUsageSummary.mockRejectedValueOnce(new Error("limits delayed"));
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Unable to refresh; retrying");
+    expect(container.textContent).toContain("60% remaining");
+    expect(container.textContent).toContain("engineer@example.com");
+    expect(container.querySelector(".codex-reset-row button")?.hasAttribute("disabled")).toBe(true);
+    expect(container.querySelector('.usage-error[role="alert"]')).toBeNull();
+  });
+
   it("confirms an uncertain attempt immediately with the same identifiers", async () => {
     apiMocks.consumeCodexResetCredit
       .mockRejectedValueOnce(new ApiError("Internal Server Error", 500))
