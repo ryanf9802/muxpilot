@@ -40,7 +40,8 @@ export interface ApprovalReviewerSettings {
 }
 
 export interface ApprovalReviewerSettingsResponse {
-  settings: ApprovalReviewerSettings;
+  /** Null when the provider has no automated reviewer. */
+  settings: ApprovalReviewerSettings | null;
 }
 
 export interface SessionModelSettings {
@@ -53,50 +54,9 @@ export interface SessionModelSelections {
   plan: SessionModelSettings;
 }
 
-export type CodexSkillSource = "user" | "system" | "plugin" | "workspace";
-
-export interface CodexSkill {
-  name: string;
-  description: string;
-  source: CodexSkillSource;
-  pluginName?: string;
-}
-
-export interface CodexSkillsResponse {
-  skills: CodexSkill[];
-}
-
 export interface MuxpilotGitSkillStatus {
   status: "missing" | "outdated" | "current";
   path: string;
-}
-
-export interface CodexModel {
-  id: string;
-  model: string;
-  displayName: string;
-  description: string;
-  hidden: boolean;
-  isDefault: boolean;
-  supportedReasoningEfforts: CodexReasoningEffortOption[];
-  defaultReasoningEffort: string | null;
-  serviceTiers: CodexServiceTier[];
-}
-
-export interface CodexServiceTier {
-  id: string;
-  name: string;
-  description: string;
-}
-
-export interface CodexReasoningEffortOption {
-  reasoningEffort: string;
-  description: string;
-}
-
-export interface CodexModelCatalogResponse {
-  models: CodexModel[];
-  defaults: SessionModelSelections;
 }
 
 export interface GlobalModelSettingsResponse {
@@ -120,7 +80,19 @@ export type MessageType =
   | "status"
   | "approval_request"
   | "question_request"
-  | "parser_notice";
+  | "parser_notice"
+  /** Model reasoning (Claude thinking blocks, Codex reasoning summaries); collapsed by default. */
+  | "reasoning";
+
+export type TranscriptTaskStatus = "pending" | "in_progress" | "completed";
+
+/**
+ * Normalized agent task list carried on a `tool_call` message as `payload.taskList`
+ * (Claude TodoWrite, Codex plan updates).
+ */
+export interface TranscriptTaskList {
+  items: Array<{ text: string; status: TranscriptTaskStatus }>;
+}
 
 export interface AgentProviderRef {
   kind: AgentProviderKind;
@@ -684,7 +656,9 @@ export interface NotificationTriggeredPayload {
 
 export interface UsageLimitNotificationTriggeredPayload {
   deviceId: string;
-  limit: "fiveHour" | "weekly";
+  provider: AgentProviderKind;
+  /** Provider usage limit id, e.g. `five_hour` or `weekly`. */
+  limit: string;
   limitLabel: string;
   remainingPercent: number;
   threshold: UsageLimitThreshold;
@@ -1111,81 +1085,4 @@ export interface TranscriptSearchResponse {
   query: string;
   matches: TranscriptSearchMatch[];
   total: number;
-}
-
-export type CodexAccountKind = "chatgpt" | "apiKey" | "amazonBedrock" | "unknown";
-
-export interface CodexUsageAccount {
-  kind: CodexAccountKind;
-  email: string | null;
-  planType: string | null;
-}
-
-export interface CodexUsageLimit {
-  label: string;
-  limitName: string | null;
-  usedPercent: number | null;
-  remainingPercent: number | null;
-  windowDurationMins: number | null;
-  resetsAt: number | null;
-}
-
-export interface CodexRateLimitResetCredit {
-  id: string;
-  resetType: string;
-  status: string;
-  grantedAt: number;
-  expiresAt: number | null;
-  title: string | null;
-  description: string | null;
-}
-
-export interface CodexRateLimitResetCredits {
-  availableCount: number;
-  credits: CodexRateLimitResetCredit[] | null;
-}
-
-export interface CodexUsageSummaryResponse {
-  available: boolean;
-  error: string | null;
-  refreshedAt: string;
-  accountStatus?: "authenticated" | "signed_out" | "unknown";
-  account: CodexUsageAccount | null;
-  limits: {
-    fiveHour: CodexUsageLimit | null;
-    weekly: CodexUsageLimit | null;
-  };
-  resetCredits: CodexRateLimitResetCredits | null;
-}
-
-export interface CodexTokenUsageDailyPoint {
-  date: string;
-  tokens: number;
-}
-
-export interface CodexTokenUsageResponse {
-  available: boolean;
-  error: string | null;
-  refreshedAt: string;
-  days: 7 | 30;
-  summary: {
-    lifetimeTokens: number | null;
-    peakDailyTokens: number | null;
-    longestRunningTurnSec: number | null;
-    currentStreakDays: number | null;
-    longestStreakDays: number | null;
-  } | null;
-  points: CodexTokenUsageDailyPoint[] | null;
-}
-
-export interface ConsumeCodexResetCreditRequest {
-  idempotencyKey: string;
-  creditId?: string | null;
-}
-
-export type ConsumeCodexResetCreditOutcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
-
-export interface ConsumeCodexResetCreditResponse {
-  outcome: ConsumeCodexResetCreditOutcome;
-  summary: CodexUsageSummaryResponse;
 }

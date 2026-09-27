@@ -1,12 +1,18 @@
 import { join } from "node:path";
-import type { ProviderCapabilities, ProviderCompatibility } from "@muxpilot/core";
+import type { Logger } from "pino";
+import type { ApprovalReviewerSettings, ProviderCapabilities, ProviderCompatibility } from "@muxpilot/core";
 import type { AppDatabase } from "../../db/database.js";
 import type { EventBus } from "../../services/eventBus.js";
 import { sessionRuntimeCapabilityId } from "../../runtime/capabilityId.js";
 import { ProtocolJournal, protocolJournalPath } from "../../runtime/protocolJournal.js";
 import { shellQuote, SystemdSessionSupervisor } from "../../runtime/systemdSessionSupervisor.js";
 import { ProjectionReconciler } from "../shared/projectionReconciler.js";
-import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig, ProviderAuthGate } from "../types.js";
+import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig } from "../types.js";
+import { muxpilotGitWorkflowSkillStatus } from "../../services/bundledSkills.js";
+import { discoverCodexSkills } from "../../services/skillDiscovery.js";
+import { ApprovalReviewer } from "./approvalReviewer.js";
+import { CodexAuthLifecycle } from "./authLifecycle.js";
+import { CodexModelsService, CodexUsageService } from "./usage.js";
 import { CodexAppServerConnectionManager } from "./connectionManager.js";
 import { CodexAppServerDriver } from "./driver.js";
 import { codexProjectionAdapter } from "./reconciler.js";
@@ -31,10 +37,14 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = {
   rawTranscriptEvidence: true
 };
 
+export const CODEX_DEFAULT_REVIEWER: ApprovalReviewerSettings = { model: "gpt-5.6-luna", reasoningEffort: "low" };
+
 export interface CodexProviderOptions {
   compatibility: ProviderCompatibility;
-  auth: ProviderAuthGate;
   dataDir: string;
+  /** Root holding the bundled muxpilot skills (`<skillHome>/skills/<name>`). */
+  skillHome?: string;
+  logger?: Pick<Logger, "warn" | "debug" | "info">;
   runtimeDir?: string;
   codexHome: string;
   environment: Record<string, string>;
@@ -44,25 +54,50 @@ export interface CodexProviderOptions {
   };
   db: AppDatabase;
   events: EventBus;
-  onAuthenticationFailure?: (sessionId: string, error: string) => void;
-  onAccountUpdated?: () => void;
   clientVersion?: string;
 }
 
-export function createCodexProvider(options: CodexProviderOptions): AgentProvider {
+/** The Codex provider plus its concrete services for composition-root wiring. */
+export interface CodexProvider extends AgentProvider {
+  readonly authLifecycle: CodexAuthLifecycle;
+  readonly usage: CodexUsageService;
+  readonly models: CodexModelsService;
+  readonly approvalReview: ApprovalReviewer;
+}
+
+export function createCodexProvider(options: CodexProviderOptions): CodexProvider {
+  const authLifecycle = new CodexAuthLifecycle(options.db, options.events, options.codexHome, options.dataDir, options.logger);
+  const skillHome = options.skillHome ?? options.codexHome;
   return {
     kind: "codex",
     displayName: "Codex",
     capabilities: CODEX_CAPABILITIES,
     skillInvocation: { prefix: "$", position: "anywhere" },
     compatibility: () => options.compatibility,
-    driver: createCodexDriver(options),
-    auth: options.auth
+    driver: createCodexDriver(options, {
+      onAuthenticationFailure: (_sessionId, error) => authLifecycle.reportAuthenticationFailure(error),
+      onAccountUpdated: () => authLifecycle.reportAccountUpdated()
+    }),
+    auth: authLifecycle,
+    authLifecycle,
+    usage: new CodexUsageService({ codexHome: options.codexHome, logger: options.logger }),
+    models: new CodexModelsService({ codexHome: options.codexHome, logger: options.logger }),
+    skills: {
+      discover: (workspaceRoots) => discoverCodexSkills(options.codexHome, workspaceRoots),
+      gitWorkflowSkillStatus: () => muxpilotGitWorkflowSkillStatus(skillHome)
+    },
+    approvalReview: new ApprovalReviewer(options.codexHome, options.logger),
+    defaultReviewerSettings: CODEX_DEFAULT_REVIEWER
   };
 }
 
+interface CodexDriverHooks {
+  onAuthenticationFailure?: (sessionId: string, error: string) => void;
+  onAccountUpdated?: () => void;
+}
+
 /** Builds side-effect-free app-server services; no process starts until a driver launch is requested. */
-export function createCodexDriver(options: CodexProviderOptions): AgentSessionDriver | null {
+export function createCodexDriver(options: CodexProviderOptions, hooks: CodexDriverHooks = {}): AgentSessionDriver | null {
   if (!options.compatibility.available) return null;
   if (!options.runtimeDir?.trim()) throw new Error("App-server runtime requires XDG_RUNTIME_DIR");
   const capabilityNamespace = options.environment.MUXPILOT_SHADOW === "1" ? "shadow" : "default";
@@ -93,8 +128,8 @@ export function createCodexDriver(options: CodexProviderOptions): AgentSessionDr
     options.db,
     options.events,
     codexProjectionAdapter,
-    options.onAuthenticationFailure,
-    options.onAccountUpdated
+    hooks.onAuthenticationFailure,
+    hooks.onAccountUpdated
   );
   return new CodexAppServerDriver(supervisor, connections, {
     requestStore: options.db,

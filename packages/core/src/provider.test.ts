@@ -39,7 +39,7 @@ describe("normalizeLegacySessionRecord", () => {
 
   it("defaults records without a provider to Codex and uses the legacy transcript path", () => {
     const normalized = normalizeLegacySessionRecord({ id: "old", codexSessionId: "t", codexJsonlPath: "/p.jsonl" });
-    expect(normalized.provider).toEqual({ kind: "codex", threadId: "t", transcriptPath: "/p.jsonl" });
+    expect((normalized as Record<string, unknown>).provider).toEqual({ kind: "codex", threadId: "t", transcriptPath: "/p.jsonl" });
     expect(sessionThreadId(normalized as never)).toBe("t");
     expect(sessionTranscriptPath(normalized as never)).toBe("/p.jsonl");
   });

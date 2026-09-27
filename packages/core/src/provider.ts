@@ -1,4 +1,4 @@
-import type { CodexRateLimitResetCredits } from "./types.js";
+import type { SessionModelSelections } from "./types.js";
 
 export const AGENT_PROVIDER_KINDS = ["codex", "claude"] as const;
 
@@ -130,6 +130,21 @@ export interface ProviderUsageLimit {
   resetsAt: number | null;
 }
 
+export interface CodexRateLimitResetCredit {
+  id: string;
+  resetType: string;
+  status: string;
+  grantedAt: number;
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+}
+
+export interface CodexRateLimitResetCredits {
+  availableCount: number;
+  credits: CodexRateLimitResetCredit[] | null;
+}
+
 export interface ProviderUsageSummary {
   provider: AgentProviderKind;
   available: boolean;
@@ -163,6 +178,18 @@ export interface ProviderTokenUsageResponse {
   points: ProviderTokenUsageDailyPoint[] | null;
 }
 
+export interface ConsumeCodexResetCreditRequest {
+  idempotencyKey: string;
+  creditId?: string | null;
+}
+
+export type ConsumeCodexResetCreditOutcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
+
+export interface ConsumeCodexResetCreditResponse {
+  outcome: ConsumeCodexResetCreditOutcome;
+  summary: ProviderUsageSummary;
+}
+
 export interface ReasoningEffortOption {
   reasoningEffort: string;
   description: string;
@@ -178,6 +205,12 @@ export interface AgentModel {
   supportedReasoningEfforts: ReasoningEffortOption[];
   defaultReasoningEffort: string | null;
   supportsFastMode: boolean;
+}
+
+export interface ProviderModelCatalogResponse {
+  provider: AgentProviderKind;
+  models: AgentModel[];
+  defaults: SessionModelSelections;
 }
 
 export type AgentSkillSource = "user" | "system" | "plugin" | "workspace" | "project";

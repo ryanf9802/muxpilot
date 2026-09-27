@@ -37,6 +37,7 @@ import {
   buildTranscriptItems,
   DEFAULT_AGENT_PROVIDER,
   hasCompleteProposedPlan,
+  isAgentProviderKind,
   isDisplayableUserPromptText,
   normalizeApprovalDecisionEvent,
   normalizeGitWorkspaceSummary,
@@ -58,10 +59,17 @@ const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
 const PROVIDER_NEUTRAL_SESSIONS_SETTING = "provider_neutral_sessions_v1";
+const DEFAULT_AGENT_PROVIDER_SETTING = "default_agent_provider_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
-const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
-const APPROVAL_REVIEWER_SETTINGS = "approval_reviewer_settings_v1";
+/** Codex keeps the settings keys written before multi-provider support. */
+function providerModelSettingsKey(provider: AgentProviderKind): string {
+  return provider === "codex" ? "global_model_settings_v1" : `${provider}_model_settings_v1`;
+}
+
+function approvalReviewerSettingsKey(provider: AgentProviderKind): string {
+  return provider === "codex" ? "approval_reviewer_settings_v1" : `${provider}_approval_reviewer_settings_v1`;
+}
 const CODEX_AUTH_PROFILES = "codex_auth_profiles_v1";
 /** `codex_auth_reconciled_principal_v1` predates multi-provider support; the key shape is kept for every provider. */
 function providerAuthReconciledPrincipalKey(provider: AgentProviderKind): string {
@@ -728,29 +736,38 @@ export class AppDatabase {
     return this.call("clearSessionTranscript", sessionId) as Promise<void>;
   }
 
-  getGlobalModelSettings(): Promise<SessionModelSelections> {
-    return this.call("getGlobalModelSettings") as Promise<SessionModelSelections>;
+  getProviderModelSettings(provider: AgentProviderKind): Promise<SessionModelSelections> {
+    return this.call("getProviderModelSettings", provider) as Promise<SessionModelSelections>;
   }
 
-  setGlobalModelSettings(
+  setProviderModelSettings(
+    provider: AgentProviderKind,
     mode: CollaborationMode,
     model: string,
     reasoningEffort: string | null,
     updatedAt: string
   ): Promise<SessionModelSelections> {
-    return this.call("setGlobalModelSettings", mode, model, reasoningEffort, updatedAt) as Promise<SessionModelSelections>;
+    return this.call("setProviderModelSettings", provider, mode, model, reasoningEffort, updatedAt) as Promise<SessionModelSelections>;
   }
 
-  getApprovalReviewerSettings(): Promise<ApprovalReviewerSettings> {
-    return this.call("getApprovalReviewerSettings") as Promise<ApprovalReviewerSettings>;
+  getApprovalReviewerSettings(provider: AgentProviderKind): Promise<ApprovalReviewerSettings | null> {
+    return this.call("getApprovalReviewerSettings", provider) as Promise<ApprovalReviewerSettings | null>;
   }
 
-  setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): Promise<ApprovalReviewerSettings> {
-    return this.call("setApprovalReviewerSettings", settings, updatedAt) as Promise<ApprovalReviewerSettings>;
+  setApprovalReviewerSettings(provider: AgentProviderKind, settings: ApprovalReviewerSettings, updatedAt: string): Promise<ApprovalReviewerSettings> {
+    return this.call("setApprovalReviewerSettings", provider, settings, updatedAt) as Promise<ApprovalReviewerSettings>;
   }
 
   clearCodexAuthProfiles(): Promise<void> {
     return this.call("clearCodexAuthProfiles") as Promise<void>;
+  }
+
+  getDefaultAgentProvider(): Promise<AgentProviderKind | null> {
+    return this.call("getDefaultAgentProvider") as Promise<AgentProviderKind | null>;
+  }
+
+  setDefaultAgentProvider(provider: AgentProviderKind, updatedAt: string): Promise<void> {
+    return this.call("setDefaultAgentProvider", provider, updatedAt) as Promise<void>;
   }
 
   getProviderAuthReconciledPrincipal(provider: AgentProviderKind): Promise<string | null> {
@@ -2696,23 +2713,25 @@ export class SyncAppDatabase {
       .run(sessionId);
   }
 
-  getGlobalModelSettings(): SessionModelSelections {
-    return sessionModels(parseStoredJson<unknown>(this.getSetting(GLOBAL_MODEL_SETTINGS)));
+  getProviderModelSettings(provider: AgentProviderKind): SessionModelSelections {
+    return sessionModels(parseStoredJson<unknown>(this.getSetting(providerModelSettingsKey(provider))));
   }
 
-  setGlobalModelSettings(
+  setProviderModelSettings(
+    provider: AgentProviderKind,
     mode: CollaborationMode,
     model: string,
     reasoningEffort: string | null,
     updatedAt: string
   ): SessionModelSelections {
-    const settings = withSessionModelSettings(this.getGlobalModelSettings(), mode, model, reasoningEffort);
-    this.setSetting(GLOBAL_MODEL_SETTINGS, JSON.stringify(settings), updatedAt);
+    const settings = withSessionModelSettings(this.getProviderModelSettings(provider), mode, model, reasoningEffort);
+    this.setSetting(providerModelSettingsKey(provider), JSON.stringify(settings), updatedAt);
     return settings;
   }
 
-  getApprovalReviewerSettings(): ApprovalReviewerSettings {
-    const stored = parseStoredJson<unknown>(this.getSetting(APPROVAL_REVIEWER_SETTINGS));
+  /** Stored reviewer settings, or null when the provider's default reviewer applies. */
+  getApprovalReviewerSettings(provider: AgentProviderKind): ApprovalReviewerSettings | null {
+    const stored = parseStoredJson<unknown>(this.getSetting(approvalReviewerSettingsKey(provider)));
     if (stored && typeof stored === "object" && !Array.isArray(stored)) {
       const value = stored as Record<string, unknown>;
       if (typeof value.model === "string" && value.model.trim()) {
@@ -2722,16 +2741,25 @@ export class SyncAppDatabase {
         };
       }
     }
-    return { model: "gpt-5.6-luna", reasoningEffort: "low" };
+    return null;
   }
 
-  setApprovalReviewerSettings(settings: ApprovalReviewerSettings, updatedAt: string): ApprovalReviewerSettings {
-    this.setSetting(APPROVAL_REVIEWER_SETTINGS, JSON.stringify(settings), updatedAt);
+  setApprovalReviewerSettings(provider: AgentProviderKind, settings: ApprovalReviewerSettings, updatedAt: string): ApprovalReviewerSettings {
+    this.setSetting(approvalReviewerSettingsKey(provider), JSON.stringify(settings), updatedAt);
     return settings;
   }
 
   clearCodexAuthProfiles(): void {
     this.db.prepare("DELETE FROM app_settings WHERE key = ?").run(CODEX_AUTH_PROFILES);
+  }
+
+  getDefaultAgentProvider(): AgentProviderKind | null {
+    const value = this.getSetting(DEFAULT_AGENT_PROVIDER_SETTING);
+    return isAgentProviderKind(value) ? value : null;
+  }
+
+  setDefaultAgentProvider(provider: AgentProviderKind, updatedAt: string): void {
+    this.setSetting(DEFAULT_AGENT_PROVIDER_SETTING, provider, updatedAt);
   }
 
   getProviderAuthReconciledPrincipal(provider: AgentProviderKind): string | null {

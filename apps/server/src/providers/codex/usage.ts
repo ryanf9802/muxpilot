@@ -1,13 +1,14 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Logger } from "pino";
 import type {
-  CodexModel,
-  CodexModelCatalogResponse,
+  AgentModel,
   CodexRateLimitResetCredits,
-  CodexTokenUsageResponse,
-  CodexUsageAccount,
-  CodexUsageLimit,
-  CodexUsageSummaryResponse
+  ConsumeCodexResetCreditResponse,
+  ProviderModelCatalogResponse,
+  ProviderTokenUsageResponse,
+  ProviderUsageAccount,
+  ProviderUsageLimit,
+  ProviderUsageSummary
 } from "@muxpilot/core";
 import { nowIso } from "../../utils/time.js";
 
@@ -121,8 +122,8 @@ export interface RateLimitWindow {
 export class CodexUsageService {
   private readonly client: Pick<CodexAppServerClient, "request" | "stop">;
   private readonly now: () => number;
-  private cache: { summary: CodexUsageSummaryResponse; expiresAt: number } | null = null;
-  private inFlight: Promise<CodexUsageSummaryResponse> | null = null;
+  private cache: { summary: ProviderUsageSummary; expiresAt: number } | null = null;
+  private inFlight: Promise<ProviderUsageSummary> | null = null;
   private tokenUsageCache: { response: AccountTokenUsageResponse; expiresAt: number } | null = null;
   private tokenUsageInFlight: Promise<AccountTokenUsageResponse> | null = null;
   private summaryGeneration = 0;
@@ -133,7 +134,7 @@ export class CodexUsageService {
     this.now = options.now ?? (() => Date.now());
   }
 
-  async summary(force = false): Promise<CodexUsageSummaryResponse> {
+  async summary(force = false): Promise<ProviderUsageSummary> {
     if (force) {
       this.summaryGeneration += 1;
       this.cache = null;
@@ -170,11 +171,12 @@ export class CodexUsageService {
     }
   }
 
-  async tokenUsage(days: 7 | 30, force = false): Promise<CodexTokenUsageResponse> {
+  async tokenUsage(days: 7 | 30, force = false): Promise<ProviderTokenUsageResponse> {
     const refreshedAt = nowIso();
     try {
       const response = await this.loadTokenUsage(force);
       return {
+        provider: "codex",
         available: true,
         error: null,
         refreshedAt,
@@ -187,6 +189,7 @@ export class CodexUsageService {
       };
     } catch (error) {
       return {
+        provider: "codex",
         available: false,
         error: error instanceof Error ? error.message : "Codex token usage is unavailable.",
         refreshedAt,
@@ -197,7 +200,7 @@ export class CodexUsageService {
     }
   }
 
-  async consumeResetCredit(idempotencyKey: string, creditId?: string | null) {
+  async consumeResetCredit(idempotencyKey: string, creditId?: string | null): Promise<ConsumeCodexResetCreditResponse> {
     const response = await this.client.request<{ outcome: "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit" }>(
       "account/rateLimitResetCredit/consume",
       { idempotencyKey, ...(creditId ? { creditId } : {}) },
@@ -241,9 +244,9 @@ export class CodexUsageService {
     }
   }
 
-  private async loadSummary(): Promise<CodexUsageSummaryResponse> {
+  private async loadSummary(): Promise<ProviderUsageSummary> {
     const refreshedAt = nowIso();
-    let knownAccount: CodexUsageAccount | null = null;
+    let knownAccount: ProviderUsageAccount | null = null;
     try {
       const account = await this.client.request<AccountReadResponse>("account/read", { refreshToken: false }, USAGE_REQUEST_TIMEOUT_MS, { stopOnTimeout: false });
       if (!account.account) {
@@ -276,22 +279,22 @@ export class CodexUsageService {
 
 export class CodexModelsService {
   private readonly client: CodexAppServerClient;
-  private cache: { catalog: CodexModelCatalogResponse; expiresAt: number } | null = null;
+  private cache: { catalog: ProviderModelCatalogResponse; expiresAt: number } | null = null;
 
   constructor(options: CodexAppServerClientOptions) {
     this.client = new CodexAppServerClient(options);
   }
 
-  async listModels(): Promise<CodexModel[]> {
+  async listModels(): Promise<AgentModel[]> {
     return (await this.catalog()).models;
   }
 
-  async catalog(): Promise<CodexModelCatalogResponse> {
+  async catalog(): Promise<ProviderModelCatalogResponse> {
     const now = Date.now();
     if (this.cache && this.cache.expiresAt > now) return this.cache.catalog;
 
     try {
-      const models: CodexModel[] = [];
+      const models: AgentModel[] = [];
       let cursor: string | null = null;
       do {
         const response: RawModelListResponse = await this.client.request<RawModelListResponse>("model/list", { cursor, includeHidden: false });
@@ -301,7 +304,7 @@ export class CodexModelsService {
 
       const modes = await this.client.request<RawCollaborationModeListResponse>("collaborationMode/list", {})
         .catch(() => ({ data: [] }));
-      const catalog = { models, defaults: normalizeCodexModelDefaults(models, modes) };
+      const catalog: ProviderModelCatalogResponse = { provider: "codex", models, defaults: normalizeCodexModelDefaults(models, modes) };
       this.cache = { catalog, expiresAt: now + MODEL_CACHE_TTL_MS };
       return catalog;
     } catch {
@@ -540,9 +543,9 @@ interface RawCollaborationModeListResponse {
 }
 
 export function normalizeCodexModelDefaults(
-  models: CodexModel[],
+  models: AgentModel[],
   response: RawCollaborationModeListResponse
-): CodexModelCatalogResponse["defaults"] {
+): ProviderModelCatalogResponse["defaults"] {
   const defaultModel = models.find((model) => model.isDefault) ?? null;
   const presets = Array.isArray(response.data) ? response.data : [];
   const settings = (mode: "default" | "plan") => {
@@ -555,8 +558,9 @@ export function normalizeCodexModelDefaults(
   return { default: settings("default"), plan: settings("plan") };
 }
 
-function emptyCodexModelCatalog(): CodexModelCatalogResponse {
+function emptyCodexModelCatalog(): ProviderModelCatalogResponse {
   return {
+    provider: "codex",
     models: [],
     defaults: {
       default: { model: null, reasoningEffort: null },
@@ -565,7 +569,7 @@ function emptyCodexModelCatalog(): CodexModelCatalogResponse {
   };
 }
 
-export function normalizeCodexModels(response: RawModelListResponse): CodexModel[] {
+export function normalizeCodexModels(response: RawModelListResponse): AgentModel[] {
   if (!Array.isArray(response.data)) return [];
   return response.data
     .map((value) => {
@@ -581,10 +585,13 @@ export function normalizeCodexModels(response: RawModelListResponse): CodexModel
         isDefault: Boolean(model?.isDefault),
         supportedReasoningEfforts: reasoningEffortOptions(model?.supportedReasoningEfforts),
         defaultReasoningEffort: stringValue(model?.defaultReasoningEffort),
-        serviceTiers: serviceTierOptions(model?.serviceTiers)
-      } satisfies CodexModel;
+        supportsFastMode: serviceTierOptions(model?.serviceTiers).some((tier) => {
+          const id = tier.id.toLowerCase();
+          return id === "fast" || id === "priority";
+        })
+      } satisfies AgentModel;
     })
-    .filter((model): model is CodexModel => Boolean(model))
+    .filter((model): model is AgentModel => Boolean(model))
     .filter((model) => !model.hidden);
 }
 
@@ -592,18 +599,20 @@ export function normalizeCodexUsage(
   accountResponse: AccountReadResponse,
   rateLimitsResponse: RateLimitsReadResponse,
   refreshedAt: string
-): CodexUsageSummaryResponse {
+): ProviderUsageSummary {
   const snapshot = selectCodexRateLimitSnapshot(rateLimitsResponse);
+  const limits = snapshot
+    ? [selectLimit(snapshot, "5h limit", "fiveHour"), selectLimit(snapshot, "Weekly limit", "weekly")]
+      .filter((limit): limit is ProviderUsageLimit => limit !== null)
+    : [];
   return {
+    provider: "codex",
     available: true,
     error: null,
     refreshedAt,
     accountStatus: "authenticated",
     account: normalizeAccount(accountResponse.account),
-    limits: {
-      fiveHour: snapshot ? selectLimit(snapshot, "5h limit", "fiveHour") : null,
-      weekly: snapshot ? selectLimit(snapshot, "Weekly limit", "weekly") : null
-    },
+    limits,
     resetCredits: normalizeResetCredits(rateLimitsResponse.rateLimitResetCredits)
   };
 }
@@ -620,7 +629,7 @@ export function selectCodexRateLimitSnapshot(response: RateLimitsReadResponse): 
   return response.rateLimitsByLimitId?.codex ?? response.rateLimits ?? null;
 }
 
-function selectLimit(snapshot: RateLimitSnapshot, label: string, kind: "fiveHour" | "weekly"): CodexUsageLimit | null {
+function selectLimit(snapshot: RateLimitSnapshot, label: string, kind: "fiveHour" | "weekly"): ProviderUsageLimit | null {
   const candidates = [
     { window: snapshot.primary, limitName: snapshot.limitName },
     { window: snapshot.secondary, limitName: snapshot.limitName }
@@ -633,6 +642,7 @@ function selectLimit(snapshot: RateLimitSnapshot, label: string, kind: "fiveHour
   if (!selected?.window) return null;
   const usedPercent = clampPercent(selected.window.usedPercent);
   return {
+    id: kind === "fiveHour" ? "five_hour" : "weekly",
     label,
     limitName: selected.limitName,
     usedPercent,
@@ -650,7 +660,7 @@ function matchesLimitName(name: string | null, kind: "fiveHour" | "weekly"): boo
     : normalized.includes("weekly") || normalized.includes("week");
 }
 
-function normalizeAccount(account: CodexAccount | null): CodexUsageAccount | null {
+function normalizeAccount(account: CodexAccount | null): ProviderUsageAccount | null {
   if (!account) return null;
   if (account.type === "chatgpt" && "email" in account) return { kind: "chatgpt", email: account.email, planType: account.planType };
   if (account.type === "apiKey") return { kind: "apiKey", email: null, planType: null };
@@ -658,14 +668,15 @@ function normalizeAccount(account: CodexAccount | null): CodexUsageAccount | nul
   return { kind: "unknown", email: null, planType: null };
 }
 
-function unavailable(error: string, refreshedAt: string, account: CodexUsageAccount | null = null, accountStatus: "signed_out" | "unknown" | "authenticated" = account ? "authenticated" : "unknown"): CodexUsageSummaryResponse {
+function unavailable(error: string, refreshedAt: string, account: ProviderUsageAccount | null = null, accountStatus: "signed_out" | "unknown" | "authenticated" = account ? "authenticated" : "unknown"): ProviderUsageSummary {
   return {
+    provider: "codex",
     available: false,
     error,
     refreshedAt,
     accountStatus,
     account,
-    limits: { fiveHour: null, weekly: null },
+    limits: [],
     resetCredits: null
   };
 }
@@ -692,7 +703,7 @@ function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function reasoningEffortOptions(value: unknown): CodexModel["supportedReasoningEfforts"] {
+function reasoningEffortOptions(value: unknown): AgentModel["supportedReasoningEfforts"] {
   if (!Array.isArray(value)) return [];
   return value
     .map((option) => {
@@ -704,10 +715,10 @@ function reasoningEffortOptions(value: unknown): CodexModel["supportedReasoningE
         description: stringValue(record?.description) ?? ""
       };
     })
-    .filter((option): option is CodexModel["supportedReasoningEfforts"][number] => Boolean(option));
+    .filter((option): option is AgentModel["supportedReasoningEfforts"][number] => Boolean(option));
 }
 
-function serviceTierOptions(value: unknown): CodexModel["serviceTiers"] {
+function serviceTierOptions(value: unknown): Array<{ id: string; name: string; description: string }> {
   if (!Array.isArray(value)) return [];
   return value
     .map((candidate) => {
@@ -720,5 +731,5 @@ function serviceTierOptions(value: unknown): CodexModel["serviceTiers"] {
         description: stringValue(option?.description) ?? ""
       };
     })
-    .filter((option): option is CodexModel["serviceTiers"][number] => Boolean(option));
+    .filter((option): option is { id: string; name: string; description: string } => Boolean(option));
 }

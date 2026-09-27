@@ -2,7 +2,15 @@ import type { Readable, Writable } from "node:stream";
 import type {
   AgentProviderKind,
   AgentProviderRef,
+  AgentSkill,
   ApprovalDecision,
+  ApprovalRequest,
+  ApprovalReviewerSettings,
+  ConsumeCodexResetCreditResponse,
+  MuxpilotGitSkillStatus,
+  ProviderModelCatalogResponse,
+  ProviderTokenUsageResponse,
+  ProviderUsageSummary,
   CollaborationMode,
   ManagedSession,
   PlanActionChoice,
@@ -176,6 +184,48 @@ export interface AgentProvider {
   compatibility(): ProviderCompatibility;
   readonly driver: AgentSessionDriver | null;
   readonly auth: ProviderAuthGate;
+  readonly models: ProviderModelCatalog;
+  readonly usage: ProviderUsageService;
+  readonly skills: ProviderSkillCatalog;
+  /** Automated reviewer for `auto` approval mode; null when the provider cannot review its own requests. */
+  readonly approvalReview: ApprovalReviewEngine | null;
+  /** Reviewer model used until the operator stores reviewer settings for this provider. */
+  readonly defaultReviewerSettings: ApprovalReviewerSettings | null;
+}
+
+export interface ProviderModelCatalog {
+  catalog(): Promise<ProviderModelCatalogResponse>;
+  invalidateAuthentication(): void;
+  stop(): void;
+}
+
+export interface ProviderUsageService {
+  summary(force?: boolean): Promise<ProviderUsageSummary>;
+  /** Daily token history; absent when the provider has no history source. */
+  tokenUsage?(days: 7 | 30, force?: boolean): Promise<ProviderTokenUsageResponse>;
+  /** Codex usage reset tokens. */
+  consumeResetCredit?(idempotencyKey: string, creditId?: string | null): Promise<ConsumeCodexResetCreditResponse>;
+  invalidateAuthentication(): void;
+  stop(): void;
+}
+
+export interface ProviderSkillCatalog {
+  /** Skills visible to a session rooted at the given workspace directories. */
+  discover(workspaceRoots: string[]): Promise<AgentSkill[]>;
+  /** Installation state of the bundled muxpilot Git workflow skill for this provider. */
+  gitWorkflowSkillStatus(): Promise<MuxpilotGitSkillStatus>;
+}
+
+export interface ApprovalReviewResult {
+  decision: "approve" | "deny" | "escalate";
+  explanation: string;
+}
+
+export interface ApprovalReviewEngine {
+  review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult>;
+  start(): void;
+  stop(): void;
+  invalidateAuthentication(): void;
 }
 
 /** The authentication surface SessionManager and routes use; implemented by ProviderAuthLifecycle. */

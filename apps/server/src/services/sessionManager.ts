@@ -8,8 +8,8 @@ import type {
   ApprovalRequest,
   ApprovalReviewerSettings,
   ChatMessage,
-  CodexModel,
-  CodexModelCatalogResponse,
+  AgentModel,
+  ProviderModelCatalogResponse,
   CollaborationMode,
   CreateSessionRequest,
   GitWorkspaceSummary,
@@ -67,13 +67,9 @@ import {
   type BtwDocumentChanges,
   type SessionDocumentSnapshot
 } from "./sessionDocuments.js";
-import type { ApprovalReviewResult } from "../providers/codex/approvalReviewer.js";
+import type { ApprovalReviewResult } from "../providers/types.js";
 import type { SessionEnvironmentService } from "./sessionEnvironment.js";
 
-interface ApprovalReviewProvider {
-  review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult>;
-  stop(): void;
-}
 
 interface TranscriptInteractionOutcome {
   kind: "plan" | "approval" | "question";
@@ -87,11 +83,6 @@ interface TranscriptInteractionOutcome {
   reviewerExplanation?: string;
 }
 
-interface CodexMetadataLookup {
-  listModels(): Promise<CodexModel[]>;
-  catalog(): Promise<CodexModelCatalogResponse>;
-  effectiveServiceTier(cwd: string): Promise<string | null>;
-}
 
 export interface SessionManagerOptions {
   db: AppDatabase;
@@ -101,12 +92,10 @@ export interface SessionManagerOptions {
   codexStore: CodexSessionStore;
   discoveryIntervalMs?: number;
   parserIntervalMs?: number;
-  approvalReviewer?: ApprovalReviewProvider | null;
   gitWorkspaces?: GitWorkspaceManager | null;
   codexHome?: string | null;
   gitWorktreeRoot?: string | null;
   managedEnvironment?: Record<string, string>;
-  codexMetadata?: CodexMetadataLookup | null;
   appServerHibernateMs?: number;
   imagePath?: ((sessionId: string, imageId: string) => string) | null;
   sessionEnvironment?: SessionEnvironmentService | null;
@@ -222,12 +211,10 @@ export class SessionManager {
   private readonly discoveryIntervalMs: number;
   private readonly parserIntervalMs: number;
   private readonly documents: SessionDocumentService;
-  private readonly approvalReviewer: ApprovalReviewProvider | null;
   private readonly gitWorkspaces: GitWorkspaceManager | null;
   private readonly codexHome: string | null;
   private readonly gitWorktreeRoot: string | null;
   private readonly managedEnvironment: Record<string, string>;
-  private readonly codexMetadata: CodexMetadataLookup | null;
   private readonly appServerHibernateMs: number;
   private readonly imagePath: ((sessionId: string, imageId: string) => string) | null;
   private readonly sessionEnvironment: SessionEnvironmentService | null;
@@ -240,12 +227,10 @@ export class SessionManager {
     this.discoveryIntervalMs = options.discoveryIntervalMs ?? 60_000;
     this.parserIntervalMs = options.parserIntervalMs ?? 60_000;
     this.documents = options.documents;
-    this.approvalReviewer = options.approvalReviewer ?? null;
     this.gitWorkspaces = options.gitWorkspaces ?? null;
     this.codexHome = options.codexHome === undefined ? process.env.CODEX_HOME ?? null : options.codexHome;
     this.gitWorktreeRoot = options.gitWorktreeRoot ?? null;
     this.managedEnvironment = options.managedEnvironment ?? {};
-    this.codexMetadata = options.codexMetadata ?? null;
     this.appServerHibernateMs = options.appServerHibernateMs ?? 900_000;
     this.imagePath = options.imagePath ?? null;
     this.sessionEnvironment = options.sessionEnvironment ?? null;
@@ -963,32 +948,30 @@ export class SessionManager {
     }
   }
 
-  async codexModelCatalog(): Promise<CodexModelCatalogResponse> {
-    this.requireAuthenticationAvailable("codex");
-    return await this.codexMetadata?.catalog() ?? {
-      models: [],
-      defaults: emptySessionModels()
-    };
+  async modelCatalog(provider: AgentProviderKind): Promise<ProviderModelCatalogResponse> {
+    this.requireAuthenticationAvailable(provider);
+    return this.providers.get(provider).models.catalog();
   }
 
-  async globalModelSettings(): Promise<SessionModelSelections> {
+  async globalModelSettings(provider: AgentProviderKind): Promise<SessionModelSelections> {
     const [stored, catalog] = await Promise.all([
-      this.db.getGlobalModelSettings(),
-      this.codexModelCatalog()
+      this.db.getProviderModelSettings(provider),
+      this.modelCatalog(provider)
     ]);
     return effectiveModelSelections(stored, catalog.defaults);
   }
 
   async updateGlobalModelSettings(
+    provider: AgentProviderKind,
     mode: CollaborationMode,
     requestedModel: string,
     reasoningEffort: string | null
   ): Promise<SessionModelSelections> {
-    const catalog = await this.codexModelCatalog();
+    const catalog = await this.modelCatalog(provider);
     const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
     const updatedAt = nowIso();
-    const settings = await this.db.setGlobalModelSettings(mode, model.model, reasoningEffort, updatedAt);
-    await this.db.addAudit("local", "set_global_model_settings", "global", JSON.stringify({
+    const settings = await this.db.setProviderModelSettings(provider, mode, model.model, reasoningEffort, updatedAt);
+    await this.db.addAudit("local", "set_global_model_settings", provider, JSON.stringify({
       mode,
       model: model.model,
       reasoningEffort
@@ -996,19 +979,20 @@ export class SessionManager {
     return effectiveModelSelections(settings, catalog.defaults);
   }
 
-  async approvalReviewerSettings(): Promise<ApprovalReviewerSettings> {
-    return this.db.getApprovalReviewerSettings();
+  async approvalReviewerSettings(provider: AgentProviderKind): Promise<ApprovalReviewerSettings | null> {
+    return await this.db.getApprovalReviewerSettings(provider) ?? this.providers.get(provider).defaultReviewerSettings;
   }
 
   async updateApprovalReviewerSettings(
+    provider: AgentProviderKind,
     requestedModel: string,
     reasoningEffort: string | null
   ): Promise<ApprovalReviewerSettings> {
-    const catalog = await this.codexModelCatalog();
+    const catalog = await this.modelCatalog(provider);
     const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
     const updatedAt = nowIso();
-    const settings = await this.db.setApprovalReviewerSettings({ model: model.model, reasoningEffort }, updatedAt);
-    await this.db.addAudit("local", "set_approval_reviewer_settings", "global", JSON.stringify(settings), updatedAt);
+    const settings = await this.db.setApprovalReviewerSettings(provider, { model: model.model, reasoningEffort }, updatedAt);
+    await this.db.addAudit("local", "set_approval_reviewer_settings", provider, JSON.stringify(settings), updatedAt);
     return settings;
   }
 
@@ -1020,7 +1004,6 @@ export class SessionManager {
     this.unsubscribeQueueReadiness();
     this.unsubscribeNotLoadedRecovery();
     this.codexStore.stop();
-    this.approvalReviewer?.stop();
   }
 
   async discover(): Promise<void> {
@@ -2508,12 +2491,14 @@ export class SessionManager {
         await this.resolveApproval(sessionId, { decision: "approve_once", messageId }, { resolvedBy: "full" });
         return;
       }
-      if (!this.approvalReviewer) return;
-      const settings = await this.db.getApprovalReviewerSettings();
+      // Auto mode reviews with the session's own provider so the reviewer can fork the session context.
+      const reviewer = this.providers.maybe(session.provider.kind)?.approvalReview ?? null;
+      const settings = reviewer ? await this.approvalReviewerSettings(session.provider.kind) : null;
+      if (!reviewer || !settings) return;
       await this.recordApprovalReview(sessionId, messageId, "reviewing", settings.model);
       let review: ApprovalReviewResult;
       try {
-        review = await this.approvalReviewer.review(session, approval, settings);
+        review = await reviewer.review(session, approval, settings);
       } catch (error) {
         const explanation = error instanceof Error ? error.message : String(error);
         await this.recordApprovalReview(sessionId, messageId, "escalated", settings.model, explanation);
@@ -2724,7 +2709,7 @@ export class SessionManager {
     const sessionName = requireSessionName(name);
     this.providers.driver(provider);
     const preferences = launchSettings === undefined
-      ? await this.defaultAppServerPreferences()
+      ? await this.defaultAppServerPreferences(provider)
       : undefined;
     const resolvedLaunchSettings = launchSettings ?? (preferences ? {
       ...preferences.models.default,
@@ -2780,7 +2765,7 @@ export class SessionManager {
     });
     const controlPath = await this.gitWorkspaces.ensureControlPath(workspace);
     const preferences = launchSettings === undefined
-      ? await this.defaultAppServerPreferences()
+      ? await this.defaultAppServerPreferences(provider)
       : undefined;
     const resolvedLaunchSettings = launchSettings ?? (preferences ? {
       ...preferences.models.default,
@@ -3931,7 +3916,10 @@ export class SessionManager {
 
   private async setFastMode(session: ManagedSession, enabled: boolean): Promise<void> {
     if (!canToggleFastMode(session.status)) throw new FastModeSwitchError("Fast mode cannot be changed in the sessions current state");
-    if (session.fastModeAvailable === false) throw new FastModeSwitchError("Fast mode is not available for the active Codex model");
+    if (!this.providers.get(session.provider.kind).capabilities.fastMode) {
+      throw new FastModeSwitchError(`Fast mode is not available for ${providerDisplayName(session.provider.kind)} sessions`);
+    }
+    if (session.fastModeAvailable === false) throw new FastModeSwitchError("Fast mode is not available for the active model");
     try {
       await this.requireDriver(session).setPreferences(session, { fastMode: enabled });
     } catch (error) {
@@ -3950,15 +3938,14 @@ export class SessionManager {
   ): Promise<void> {
     this.requireAuthenticationReady(session.provider.kind);
     const driver = this.requireDriver(session);
-    if (!driver) throw new ModelSettingsError("Model selection is available only for app-server sessions");
-    const catalog = await this.codexModelCatalog();
+    const catalog = await this.modelCatalog(session.provider.kind);
     const model = requireCatalogModel(catalog, requestedModel, reasoningEffort);
     const current = requireSession(await this.db.getSession(session.id));
     const active = current.inputMode === mode;
     if (active && current.runtime?.kind === "systemd_service" && current.runtime.state === "hibernated") {
       throw new ModelSettingsError("Wake this session before changing its active model");
     }
-    const fastModeAvailable = active ? codexFastModeAvailable(catalog.models, model.model) ?? false : undefined;
+    const fastModeAvailable = active ? modelFastModeAvailable(catalog.models, model.model) ?? false : undefined;
     const disableFastMode = active && current.fastMode === true && fastModeAvailable === false;
     if (active) {
       await driver.setPreferences(current, {
@@ -3977,7 +3964,7 @@ export class SessionManager {
       fastModeAvailable,
       disableFastMode ? false : undefined
     );
-    if (!updated) throw new ModelSettingsError("The session disappeared after Codex accepted the model change");
+    if (!updated) throw new ModelSettingsError("The session disappeared after the runtime accepted the model change");
     await this.db.addAudit("local", "set_model_settings", session.id, JSON.stringify({
       mode,
       model: model.model,
@@ -3987,17 +3974,19 @@ export class SessionManager {
     }), updatedAt);
   }
 
-  private async defaultAppServerPreferences(): Promise<Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">> {
+  private async defaultAppServerPreferences(
+    provider: AgentProviderKind
+  ): Promise<Pick<ManagedSession, "inputMode" | "models" | "fastMode" | "fastModeAvailable">> {
     const [stored, catalog] = await Promise.all([
-      this.db.getGlobalModelSettings(),
-      this.codexModelCatalog()
+      this.db.getProviderModelSettings(provider),
+      this.modelCatalog(provider)
     ]);
     const models = effectiveModelSelections(stored, catalog.defaults);
     return {
       inputMode: "default",
       models,
       fastMode: null,
-      fastModeAvailable: codexFastModeAvailable(catalog.models, models.default.model)
+      fastModeAvailable: modelFastModeAvailable(catalog.models, models.default.model)
     };
   }
   private async findLiveSessionByRecoveryIdentity(identity: string): Promise<ManagedSession | null> {
@@ -4941,15 +4930,16 @@ function effectiveModelSelections(
 }
 
 function requireCatalogModel(
-  catalog: CodexModelCatalogResponse,
+  catalog: ProviderModelCatalogResponse,
   requestedModel: string,
   reasoningEffort: string | null
-): CodexModel {
+): AgentModel {
+  const providerName = providerDisplayName(catalog.provider);
   if (catalog.models.length === 0) {
-    throw new ModelSettingsError("Codex model options are temporarily unavailable", 503);
+    throw new ModelSettingsError(`${providerName} model options are temporarily unavailable`, 503);
   }
   const model = catalog.models.find((candidate) => candidate.model === requestedModel || candidate.id === requestedModel);
-  if (!model) throw new ModelSettingsError("The selected Codex model is unavailable");
+  if (!model) throw new ModelSettingsError(`The selected ${providerName} model is unavailable`);
   const efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
   if ((reasoningEffort === null && efforts.length > 0) || (reasoningEffort !== null && !efforts.includes(reasoningEffort))) {
     throw new ModelSettingsError("The selected reasoning effort is unavailable for this model");
@@ -4961,14 +4951,10 @@ function activeSessionModel(models: SessionModelSelections, mode: CollaborationM
   return models[mode].model ?? models.default.model ?? models.plan.model;
 }
 
-function codexFastModeAvailable(models: CodexModel[], activeModel: string | null): boolean | null {
+function modelFastModeAvailable(models: AgentModel[], activeModel: string | null): boolean | null {
   if (!activeModel || models.length === 0) return null;
   const model = models.find((candidate) => candidate.model === activeModel || candidate.id === activeModel);
-  if (!model) return null;
-  return model.serviceTiers.some((tier) => {
-    const id = tier.id.toLowerCase();
-    return id === "fast" || id === "priority";
-  });
+  return model ? model.supportsFastMode : null;
 }
 
 function serviceTierFastMode(serviceTier: string | null): boolean | null {

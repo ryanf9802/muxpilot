@@ -1605,7 +1605,7 @@ describe("SessionManager app-server helpers", () => {
         getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
         addAudit
       },
-      approvalReviewer: { review: vi.fn(async () => ({ decision: "escalate", explanation: "High impact" })) },
+      providers: reviewerProviders(vi.fn(async () => ({ decision: "escalate", explanation: "High impact" }))),
       automatedApprovalMessageIds: new Set(),
       recordApprovalReview: vi.fn(async () => undefined),
       getPendingApproval: vi.fn(async () => approval),
@@ -1631,7 +1631,7 @@ describe("SessionManager app-server helpers", () => {
         getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
         addAudit: vi.fn(async () => undefined)
       },
-      approvalReviewer: { review: vi.fn(async () => ({ decision: "approve", explanation: "In scope" })) },
+      providers: reviewerProviders(vi.fn(async () => ({ decision: "approve", explanation: "In scope" }))),
       automatedApprovalMessageIds: new Set(),
       recordApprovalReview: vi.fn(async () => undefined),
       getPendingApproval: vi.fn(async () => approval),
@@ -1657,7 +1657,7 @@ describe("SessionManager app-server helpers", () => {
         getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
         addAudit: vi.fn(async () => undefined)
       },
-      approvalReviewer: { review },
+      providers: reviewerProviders(review),
       automatedApprovalMessageIds: new Set<string>(),
       approvalAutomationGenerations: new Map<string, number>(),
       recordApprovalReview: vi.fn(async () => undefined),
@@ -1689,7 +1689,7 @@ describe("SessionManager app-server helpers", () => {
         getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
         addAudit: vi.fn(async () => undefined)
       },
-      approvalReviewer: { review: vi.fn(async () => ({ decision: "deny", explanation: "Unrelated to the task" })) },
+      providers: reviewerProviders(vi.fn(async () => ({ decision: "deny", explanation: "Unrelated to the task" }))),
       automatedApprovalMessageIds: new Set(),
       recordApprovalReview: vi.fn(async () => undefined),
       getPendingApproval: vi.fn(async () => approval),
@@ -1717,7 +1717,7 @@ describe("SessionManager app-server helpers", () => {
         getApprovalReviewerSettings: vi.fn(async () => ({ model: "gpt-5.6-luna", reasoningEffort: "low" })),
         addAudit: vi.fn(async () => undefined)
       },
-      approvalReviewer: { review },
+      providers: reviewerProviders(review),
       automatedApprovalMessageIds: new Set(),
       recordApprovalReview,
       getPendingApproval: vi.fn(async () => approval),
@@ -2352,6 +2352,17 @@ function gitWorkspace(targetBranch: string, id: string): NonNullable<ManagedSess
     updatedAt: "2026-09-09T11:00:00.000Z",
     dependencyLinks: []
   };
+}
+
+function reviewerProviders(review: unknown): ProviderRegistry {
+  return new ProviderRegistry([testProvider("codex", {}, {
+    approvalReview: {
+      review: review as never,
+      start: () => undefined,
+      stop: () => undefined,
+      invalidateAuthentication: () => undefined
+    }
+  })]);
 }
 
 function managedSession(): ManagedSession {

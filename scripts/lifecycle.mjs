@@ -466,8 +466,9 @@ function printStatus(mode, details, status) {
   console.log(`  web: ${urls.webUrl} ${status.webActive ? "healthy" : "not healthy"}`);
   console.log(`  backend: ${urls.backendUrl} ${status.backendActive ? "healthy" : "not healthy"}`);
   console.log(`  runtime: ${state.dir}`);
-  const appServerCompatibility = status.backendHealth?.appServerCompatibility;
-  if (appServerCompatibility) console.log(`  app-server: ${appServerCompatibility.available ? "available" : appServerCompatibility.status}`);
+  for (const provider of status.backendHealth?.providers ?? []) {
+    console.log(`  ${provider.provider}: ${provider.available ? "available" : provider.status}`);
+  }
   if (mode === "shadow") {
     console.log(`  isolation: active (loopback-only; new shadow sessions only)`);
     console.log(`  data: ${process.env.MUXPILOT_DATA_DIR}`);

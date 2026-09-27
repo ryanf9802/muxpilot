@@ -52,21 +52,23 @@ describe("AppDatabase session visibility", () => {
     await db.close();
   });
 
-  it("stores the app-wide approval reviewer settings", async () => {
+  it("stores approval reviewer settings per provider", async () => {
     const db = await tempDb();
-    expect(await db.getApprovalReviewerSettings()).toEqual({ model: "gpt-5.6-luna", reasoningEffort: "low" });
-    await db.setApprovalReviewerSettings({ model: "gpt-5.6-sol", reasoningEffort: "medium" }, "2026-09-10T00:00:00.000Z");
-    expect(await db.getApprovalReviewerSettings()).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "medium" });
+    expect(await db.getApprovalReviewerSettings("codex")).toBeNull();
+    await db.setApprovalReviewerSettings("codex", { model: "gpt-5.6-sol", reasoningEffort: "medium" }, "2026-09-10T00:00:00.000Z");
+    expect(await db.getApprovalReviewerSettings("codex")).toEqual({ model: "gpt-5.6-sol", reasoningEffort: "medium" });
+    expect(await db.getApprovalReviewerSettings("claude")).toBeNull();
     await db.close();
   });
 
   it("persists the reconciled Codex authentication principal", async () => {
     const db = await tempDb();
-    expect(await db.getCodexAuthReconciledPrincipal()).toBeNull();
+    expect(await db.getProviderAuthReconciledPrincipal("codex")).toBeNull();
 
-    await db.setCodexAuthReconciledPrincipal("principal-v1", "2026-09-17T00:00:00.000Z");
+    await db.setProviderAuthReconciledPrincipal("codex", "principal-v1", "2026-09-17T00:00:00.000Z");
 
-    expect(await db.getCodexAuthReconciledPrincipal()).toBe("principal-v1");
+    expect(await db.getProviderAuthReconciledPrincipal("codex")).toBe("principal-v1");
+    expect(await db.getProviderAuthReconciledPrincipal("claude")).toBeNull();
     await db.close();
   });
 
@@ -1240,14 +1242,14 @@ describe("AppDatabase session prompts", () => {
   it("persists global Normal and Plan model defaults", async () => {
     const db = await tempDb();
 
-    expect(db.getGlobalModelSettings()).toEqual({
+    expect(db.getProviderModelSettings("codex")).toEqual({
       default: { model: null, reasoningEffort: null },
       plan: { model: null, reasoningEffort: null }
     });
-    db.setGlobalModelSettings("default", "gpt-normal", "medium", "2026-07-07T00:00:01.000Z");
-    db.setGlobalModelSettings("plan", "gpt-plan", "high", "2026-07-07T00:00:02.000Z");
+    db.setProviderModelSettings("codex", "default", "gpt-normal", "medium", "2026-07-07T00:00:01.000Z");
+    db.setProviderModelSettings("codex", "plan", "gpt-plan", "high", "2026-07-07T00:00:02.000Z");
 
-    expect(db.getGlobalModelSettings()).toEqual({
+    expect(db.getProviderModelSettings("codex")).toEqual({
       default: { model: "gpt-normal", reasoningEffort: "medium" },
       plan: { model: "gpt-plan", reasoningEffort: "high" }
     });

@@ -9,7 +9,6 @@ import { EventBus } from "./services/eventBus.js";
 import { SessionManager } from "./services/sessionManager.js";
 import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
-import { CodexModelsService, CodexUsageService } from "./providers/codex/usage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
@@ -33,9 +32,7 @@ import { createCodexProvider } from "./providers/codex/provider.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { CodexGoalStore } from "./providers/codex/goalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
-import { ApprovalReviewer } from "./providers/codex/approvalReviewer.js";
 import { SessionImageService } from "./services/sessionImages.js";
-import { CodexAuthLifecycle } from "./providers/codex/authLifecycle.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -60,9 +57,6 @@ const db = new AppDatabase(config.dbPath);
 const sessionImages = new SessionImageService(config.dataDir, db);
 const codex = new CodexSessionStore(config.codexHome);
 const events = new EventBus();
-const codexAuth = new CodexAuthLifecycle(db, events, config.codexHome, config.dataDir, app.log);
-const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
-const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const gitWorkflowBrokerSocketPath = join(config.dataDir, "runtime", "git-workflow-broker", "broker.sock");
 const gitWorkflowBroker = new GitWorkflowBroker(db, gitWorkflowBrokerSocketPath, app.log);
@@ -72,17 +66,16 @@ const gitWorkspaces = new GitWorkspaceManager(db, {
   sessionRoot: config.gitSessionRoot,
   publishCapability: (workspace) => gitWorkflowBroker.publishCapability(workspace)
 });
-const approvalReviewer = new ApprovalReviewer(config.codexHome, app.log);
 let dockerProxy: DockerResourceProxy | null = null;
 const userSystemd = await detectSessionScopeCapability(true);
 const sessionScopes = config.resourceGovernor === "off"
   ? { ...userSystemd, configured: false, available: false, unavailableReason: "disabled" as const }
   : userSystemd;
-const appServerCompatibility = await probeAppServerCompatibility(userSystemd.available);
-if (!appServerCompatibility.available) {
+const codexCompatibility = await probeAppServerCompatibility(userSystemd.available);
+if (!codexCompatibility.available) {
   app.log.warn(
-    { status: appServerCompatibility.status, detail: appServerCompatibility.detail },
-    "Codex app-server is unavailable; muxpilot is running in read-only history mode"
+    { status: codexCompatibility.status, detail: codexCompatibility.detail },
+    "Codex app-server is unavailable; Codex sessions are read-only history"
   );
 }
 const heavyLaunchToken = randomBytes(32).toString("hex");
@@ -132,19 +125,18 @@ const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
 await sessionEnvironment.initialize();
 const codexProvider = createCodexProvider({
-  compatibility: appServerCompatibility,
-  auth: codexAuth,
+  compatibility: codexCompatibility,
+  skillHome: config.skillHome,
+  logger: app.log,
   dataDir: config.dataDir,
   runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
   codexHome: config.codexHome,
   environment: managedEnvironment,
   sessionEnvironment,
   db,
-  events,
-  onAuthenticationFailure: (_sessionId, error) => codexAuth.reportAuthenticationFailure(error),
-  onAccountUpdated: () => codexAuth.reportAccountUpdated()
+  events
 });
-const providers = new ProviderRegistry([codexProvider], "codex");
+const providers = new ProviderRegistry([codexProvider], await db.getDefaultAgentProvider() ?? "codex");
 const manager = new SessionManager({
   db,
   providers,
@@ -153,31 +145,29 @@ const manager = new SessionManager({
   discoveryIntervalMs: config.discoveryIntervalMs,
   parserIntervalMs: config.parserIntervalMs,
   documents: sessionDocuments,
-  approvalReviewer,
   gitWorkspaces,
   codexHome: config.codexHome,
   gitWorktreeRoot: config.gitWorktreeRoot,
   managedEnvironment,
-  codexMetadata: codexModels,
   appServerHibernateMs: config.appServerHibernateMs,
   imagePath: (sessionId, imageId) => sessionImages.path(sessionId, imageId),
   sessionEnvironment
 });
 const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
-btw.setAuthenticationGuard(() => codexAuth.assertReady());
-codexAuth.setRuntimeHooks({
+btw.setAuthenticationGuard(() => codexProvider.auth.assertReady());
+codexProvider.authLifecycle.setRuntimeHooks({
   blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("codex"), ...btw.authenticationBlockers()])],
   reconcile: (sessionIds) => manager.reconcileProviderAuthentication("codex", sessionIds),
   suspend: () => manager.suspendForProviderSignOut("codex"),
   invalidateConsumers: () => {
-    codexUsage.invalidateAuthentication();
-    codexModels.invalidateAuthentication();
-    approvalReviewer.invalidateAuthentication();
+    codexProvider.usage.invalidateAuthentication();
+    codexProvider.models.invalidateAuthentication();
+    codexProvider.approvalReview.invalidateAuthentication();
     btw.invalidateAuthentication();
   },
   admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("codex")
 });
-await codexAuth.start();
+await codexProvider.authLifecycle.start();
 const rawSessionEvidence = new RawSessionEvidenceReader(
   config.codexHome,
   undefined,
@@ -213,7 +203,9 @@ await heavyCommands.start(manager);
 const notifications = new NotificationService(db, events, app.log, {
   pendingAutomaticWork: (sessionId) => manager.notificationPendingWorkReasons(sessionId),
   completionEvidence: (sessionId) => manager.notificationCompletionEvidence(sessionId),
-  usageSummary: () => codexUsage.summary()
+  usageSummaries: () => Promise.all(providers.list()
+    .filter((provider) => provider.capabilities.usageLimits)
+    .map((provider) => provider.usage.summary()))
 });
 const resourceGovernor = new ResourceGovernor({
   configured: sessionScopes.configured,
@@ -272,12 +264,25 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, providers, sessionImages, codexAuth, sessionEnvironment);
+registerRoutes(app, {
+  manager,
+  events,
+  db,
+  config,
+  access,
+  providers,
+  notificationService: notifications,
+  sessionTransfers,
+  heavyCommands,
+  btw,
+  sessionImages,
+  sessionEnvironment
+});
 
 app.get("/healthz", async () => ({
   ok: true,
   shadowMode: process.env.MUXPILOT_SHADOW === "1",
-  appServerCompatibility,
+  providers: providers.list().map((provider) => provider.compatibility()),
   resourceGovernor: resourceGovernor.snapshot(),
   dockerGuardActive: Boolean(dockerProxy)
 }));
@@ -286,7 +291,7 @@ let closing = false;
 
 await manager.prepareStartupRecovery();
 await btw.start();
-approvalReviewer.start();
+for (const provider of providers.list()) provider.approvalReview?.start();
 events.subscribe((event) => {
   if (event.type !== "message.appended") return;
   const message = event.payload && typeof event.payload === "object" ? event.payload as { id?: unknown; type?: unknown } : null;
@@ -297,7 +302,7 @@ events.subscribe((event) => {
 await manager.discoverNow();
 await manager.finishStartupRecovery();
 await manager.recoverAppServerSessions();
-await codexAuth.reconcileAfterStartup();
+await codexProvider.authLifecycle.reconcileAfterStartup();
 await manager.recoverAutomatedApprovals();
 manager.start({ runInitialTick: false, recoverAppServerSessions: false });
 resourceGovernor.start();
@@ -325,9 +330,12 @@ const close = async () => {
   await resourceGovernor.stop();
   notifications.stop();
   await btw.stop();
-  await codexAuth.stop();
-  codexUsage.stop();
-  codexModels.stop();
+  await codexProvider.authLifecycle.stop();
+  for (const provider of providers.list()) {
+    provider.usage.stop();
+    provider.models.stop();
+    provider.approvalReview?.stop();
+  }
   await pwaTrustServer.close();
   await dockerProxy?.close();
   await gitWorkflowBroker.close();

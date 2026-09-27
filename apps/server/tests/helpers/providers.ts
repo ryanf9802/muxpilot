@@ -44,6 +44,31 @@ export function testProvider(
     }),
     driver: driver as AgentSessionDriver | null,
     auth: readyAuth(kind),
+    models: {
+      catalog: async () => ({ provider: kind, models: [], defaults: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } } }),
+      invalidateAuthentication: () => undefined,
+      stop: () => undefined
+    },
+    usage: {
+      summary: async () => ({
+        provider: kind,
+        available: false,
+        error: null,
+        refreshedAt: "2026-09-27T00:00:00.000Z",
+        accountStatus: "unknown",
+        account: null,
+        limits: [],
+        resetCredits: null
+      }),
+      invalidateAuthentication: () => undefined,
+      stop: () => undefined
+    },
+    skills: {
+      discover: async () => [],
+      gitWorkflowSkillStatus: async () => ({ status: "current", path: "/skills" })
+    },
+    approvalReview: null,
+    defaultReviewerSettings: null,
     ...overrides
   };
 }
