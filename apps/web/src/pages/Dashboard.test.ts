@@ -497,7 +497,8 @@ describe("SessionCard", () => {
   it("labels forked conversations with their origin", () => {
     const session = testSession({ id: "fork", paneId: "%120", windowName: "alternate-route" });
     session.forkedFrom = {
-      codexSessionId: "codex-parent",
+      provider: "codex",
+      threadId: "codex-parent",
       sessionId: "parent",
       sessionName: "original-route"
     };
@@ -878,10 +879,8 @@ function testSession(
     id: input.id,
     name: input.windowName,
     cwd: "/repo",
-    provider: { kind: "codex", threadId: null, rolloutPath: null },
+    provider: { kind: "codex", threadId: null, transcriptPath: null },
     repo: { root: input.repoRoot ?? "/repo", name: input.repoName ?? "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: null,
-    codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
     initializing: input.initializing ?? false,

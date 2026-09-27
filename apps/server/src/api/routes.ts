@@ -997,8 +997,6 @@ export function dashboardSessionSummary(session: ManagedSession): DashboardSessi
       dirty: session.repo.dirty,
       worktree: null
     },
-    codexSessionId: session.codexSessionId,
-    codexJsonlPath: null,
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
     initializing: session.initializing,

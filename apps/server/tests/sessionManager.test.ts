@@ -717,14 +717,12 @@ describe("SessionManager app-server helpers", () => {
       ...managedSession(),
       cwd: directory,
       status: "idle" as const,
-      provider: { kind: "codex" as const, threadId: "thread-unpersisted", rolloutPath: missingRollout },
-      codexSessionId: "thread-unpersisted",
-      codexJsonlPath: missingRollout,
+      provider: { kind: "codex" as const, threadId: "thread-unpersisted", transcriptPath: missingRollout },
       transcriptSize: 27,
       lastActivityAt: "2026-09-23T16:50:38.000Z",
       documentScopeId: "scope-1"
     };
-    const replacementProvider = { kind: "codex" as const, threadId: "thread-replacement", rolloutPath: null };
+    const replacementProvider = { kind: "codex" as const, threadId: "thread-replacement", transcriptPath: null };
     const connectedRuntime = { ...current.runtime!, state: "connected" as const };
     const driver = {
       start: vi.fn(async () => ({
@@ -766,7 +764,6 @@ describe("SessionManager app-server helpers", () => {
     await expect((manager as unknown as {
       performAppServerResume(session: ManagedSession): Promise<ManagedSession>;
     }).performAppServerResume(current)).resolves.toMatchObject({
-      codexSessionId: "thread-replacement",
       provider: replacementProvider,
       runtime: { state: "connected" }
     });
@@ -1171,7 +1168,7 @@ describe("SessionManager app-server helpers", () => {
 
   it("does not promote a rejected transcript-only question to actionable status", async () => {
     const path = await rejectedQuestionRollout();
-    const session = { ...managedSession(), codexJsonlPath: path, provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path } };
+    const session = { ...managedSession(), provider: { kind: "codex" as const, threadId: "thread-1", transcriptPath: path } };
     const setSessionStatus = vi.fn(async () => undefined);
     const publish = vi.fn();
     const manager = ingestManager(session, { setSessionStatus }, publish);
@@ -1191,8 +1188,7 @@ describe("SessionManager app-server helpers", () => {
     const session = {
       ...managedSession(),
       status: "question" as const,
-      codexJsonlPath: path,
-      provider: { kind: "codex" as const, threadId: "thread-1", rolloutPath: path },
+      provider: { kind: "codex" as const, threadId: "thread-1", transcriptPath: path },
       transcriptSyncing: true
     };
     const latestQuestionMessage = vi.fn(async () => null);
@@ -1844,8 +1840,7 @@ describe("SessionManager app-server helpers", () => {
 
   it("reconciles managed Git targets without live runtime or rollout activity", async () => {
     const hibernated = managedSession();
-    hibernated.codexSessionId = null;
-    hibernated.codexJsonlPath = null;
+    hibernated.provider = { ...hibernated.provider, threadId: null, transcriptPath: null };
     hibernated.runtime = { ...hibernated.runtime!, state: "hibernated" };
     hibernated.gitWorkspace = gitWorkspace("dev", "workspace-1");
     const unchangedRollout = {
@@ -2166,9 +2161,7 @@ describe("SessionManager Codex authentication runtime safety", () => {
     const admitted = {
       ...managedSession(),
       id: "session-admitted-during-reconciliation",
-      provider: { kind: "codex" as const, threadId: "thread-new", rolloutPath: null },
-      codexSessionId: "thread-new",
-      codexJsonlPath: null
+      provider: { kind: "codex" as const, threadId: "thread-new", transcriptPath: null }
     };
     const harness = authenticationManager(captured);
     harness.db.listSessions.mockResolvedValue([captured, admitted]);
@@ -2306,11 +2299,9 @@ function managedSession(): ManagedSession {
     id: "session-1",
     name: "work",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "thread-1", rolloutPath: "/codex/rollout.jsonl" },
-    runtime: { kind: "systemd_service", unit: "muxpilot-session-0123456789abcdef01234567.service", socketPath: "/run/user/1000/muxpilot/session.sock", state: "connected", codexVersion: "0.152.0" },
+    provider: { kind: "codex", threadId: "thread-1", transcriptPath: "/codex/rollout.jsonl" },
+    runtime: { kind: "systemd_service", unit: "muxpilot-session-0123456789abcdef01234567.service", socketPath: "/run/user/1000/muxpilot/session.sock", state: "connected", agentVersion: "0.152.0" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "thread-1",
-    codexJsonlPath: "/codex/rollout.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,

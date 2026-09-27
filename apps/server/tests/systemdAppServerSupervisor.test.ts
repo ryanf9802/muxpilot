@@ -29,7 +29,7 @@ describe("SystemdAppServerSupervisor", () => {
       const owned = runtimePaths(root, capabilityId).socketPath;
       await mkdir(runtimePaths(root, capabilityId).directory);
       await symlink(socketPath, owned);
-      const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: owned, state: "connected" as const, codexVersion: null };
+      const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: owned, state: "connected" as const, agentVersion: null };
       expect((await supervisor.inspect({ ...runtime, socketPath: owned })).socketPresent).toBe(true);
       await writeFile(join(root, "regular"), "not a socket");
       const otherId = "fedcba9876543210fedcba98";
@@ -87,7 +87,7 @@ describe("SystemdAppServerSupervisor", () => {
       unit: appServerServiceUnit(capabilityId),
       socketPath: paths.socketPath,
       state: "connected",
-      codexVersion: "0.152.0",
+      agentVersion: "0.152.0",
       launchDisposition: "started"
     });
     expect(calls.find((call) => call.command === "systemd-run")?.args).toEqual(expect.arrayContaining([
@@ -152,7 +152,7 @@ describe("SystemdAppServerSupervisor", () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-stop-"));
     const run = vi.fn(async () => ({ stdout: "" }));
     const supervisor = new SystemdAppServerSupervisor(root, { run });
-    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "connected" as const, codexVersion: "0.152.0" };
+    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "connected" as const, agentVersion: "0.152.0" };
 
     await expect(supervisor.stop(runtime)).resolves.toEqual({ ...runtime, state: "stopped" });
     expect(run).toHaveBeenCalledWith("systemctl", ["--user", "stop", runtime.unit]);
@@ -160,7 +160,7 @@ describe("SystemdAppServerSupervisor", () => {
 
   it("treats an already-absent owned service as stopped but preserves unrelated failures", async () => {
     const root = await mkdtemp(join(tmpdir(), "muxpilot-app-server-absent-stop-"));
-    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "hibernated" as const, codexVersion: "0.152.0" };
+    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "hibernated" as const, agentVersion: "0.152.0" };
     const absent = Object.assign(new Error(`Command failed: systemctl --user stop ${runtime.unit}`), {
       stderr: `Failed to stop ${runtime.unit}: Unit ${runtime.unit} not loaded.\n`
     });
@@ -181,7 +181,7 @@ describe("SystemdAppServerSupervisor", () => {
       run: vi.fn(async () => ({ stdout: "ActiveState=inactive\nSubState=dead\nMainPID=0\n" })),
       socketReady: vi.fn(async () => false)
     });
-    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "stopped" as const, codexVersion: null };
+    const runtime = { kind: "systemd_service" as const, unit: appServerServiceUnit(capabilityId), socketPath: runtimePaths(root, capabilityId).socketPath, state: "stopped" as const, agentVersion: null };
     await expect(supervisor.reconnect(runtime)).rejects.toThrow("App-server runtime is not connectable");
     await expect(supervisor.stop({ ...runtime, unit: "ssh.service" })).rejects.toThrow("Refusing non-muxpilot app-server unit");
     await expect(supervisor.stop({ ...runtime, socketPath: "/tmp/other.sock" })).rejects.toThrow("outside its owned runtime path");
@@ -207,7 +207,7 @@ describe("SystemdAppServerSupervisor", () => {
       unit: appServerServiceUnit(capabilityId),
       socketPath: runtimePaths(root, capabilityId).socketPath,
       state: "stopped" as const,
-      codexVersion: null
+      agentVersion: null
     };
     const supervisor = new SystemdAppServerSupervisor(root, {
       run: vi.fn(async () => ({ stdout: "ActiveState=inactive\nSubState=dead\nMainPID=0\n" })),

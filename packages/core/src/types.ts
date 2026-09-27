@@ -1,3 +1,5 @@
+import type { AgentProviderKind } from "./provider.js";
+
 export type SessionStatus =
   | "idle"
   | "generating"
@@ -120,12 +122,12 @@ export type MessageType =
   | "question_request"
   | "parser_notice";
 
-export type AgentProviderKind = "codex";
-
 export interface AgentProviderRef {
   kind: AgentProviderKind;
+  /** Provider-native conversation id (Codex thread id, Claude session id). */
   threadId: string | null;
-  rolloutPath: string | null;
+  /** Provider-native transcript file (Codex rollout JSONL, Claude project JSONL). */
+  transcriptPath: string | null;
 }
 
 export interface SessionRuntimeRef {
@@ -133,7 +135,9 @@ export interface SessionRuntimeRef {
   unit: string;
   socketPath: string;
   state: "starting" | "connected" | "hibernated" | "stopped" | "failed";
-  codexVersion: string | null;
+  agentVersion: string | null;
+  /** Shell command that attaches a terminal to this runtime, when supported. */
+  attachCommand?: string | null;
 }
 
 export interface SessionCapabilities {
@@ -335,7 +339,8 @@ export interface HeavyCommandOutputResponse {
 }
 
 export interface SessionForkOrigin {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionId: string | null;
   sessionName: string;
 }
@@ -350,8 +355,6 @@ export interface ManagedSession {
   runtime?: SessionRuntimeRef;
   capabilities?: SessionCapabilities;
   repo: RepoMetadata;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
   discoveryConfidence: "high" | "medium" | "low";
   status: SessionStatus;
   initializing?: boolean;
@@ -549,8 +552,8 @@ export interface QueuedInput {
   mode: CollaborationMode;
   status: QueuedInputStatus;
   error: string | null;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  threadId: string | null;
+  transcriptPath: string | null;
   actorSessionId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -823,8 +826,9 @@ export interface SessionHistoryPromptMatch {
 
 export interface SessionHistoryResult {
   sessionId: string;
-  codexSessionId: string;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string;
+  transcriptPath: string | null;
   status: SessionStatus;
   archived: boolean;
   sessionName: string;
@@ -837,8 +841,8 @@ export interface SessionHistoryResult {
   gitWorkspace: Pick<GitWorkspaceSummary, "id" | "worktreePath" | "sessionBranch" | "targetBranch"> | null;
 }
 
-export function sessionHistoryIdentity(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
-  return result.gitWorkspace ? `workspace:${result.gitWorkspace.id}` : `codex:${result.codexSessionId || result.sessionId}`;
+export function sessionHistoryIdentity(result: Pick<SessionHistoryResult, "sessionId" | "provider" | "threadId" | "gitWorkspace">): string {
+  return result.gitWorkspace ? `workspace:${result.gitWorkspace.id}` : `${result.provider}:${result.threadId || result.sessionId}`;
 }
 
 export interface SessionHistoryResponse {
@@ -889,7 +893,8 @@ export interface SessionTransferExportRequest {
 }
 
 export interface SessionTransferPreviewSession {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionName: string;
   sourceCwd: string;
   repoName: string;
@@ -922,7 +927,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3 | 4 | 5 | 6 | 7;
+  formatVersion: 2 | 3 | 4 | 5 | 6 | 7 | 8;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
@@ -939,7 +944,8 @@ export interface SessionTransferImportRequest {
 }
 
 export interface SessionTransferImportResult {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionName: string;
   status: "resumed" | "reused_live" | "kept_existing" | "resume_failed";
   sessionId: string | null;
@@ -1090,8 +1096,9 @@ export type TranscriptItem = TranscriptMessageItem | TranscriptUserActionItem | 
 
 export interface TranscriptPageResponse {
   sessionId: string;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string | null;
+  transcriptPath: string | null;
   items: TranscriptItem[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
@@ -1111,8 +1118,9 @@ export interface TranscriptSearchMatch {
 
 export interface TranscriptSearchResponse {
   sessionId: string;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string | null;
+  transcriptPath: string | null;
   query: string;
   matches: TranscriptSearchMatch[];
   total: number;

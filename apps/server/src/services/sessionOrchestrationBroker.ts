@@ -392,11 +392,11 @@ function summarizeSession(session: ManagedSession, allSessions: ManagedSession[]
 }
 
 function codexThreadIds(sessions: ManagedSession[]): string[] {
-  return sessions.flatMap((session) => session.codexSessionId ? [session.codexSessionId] : []);
+  return sessions.flatMap((session) => session.provider.kind === "codex" && session.provider.threadId ? [session.provider.threadId] : []);
 }
 
 function goalForSession(session: ManagedSession, telemetry: CodexGoalTelemetry): CodexGoalSnapshot | null {
-  return session.codexSessionId ? telemetry.goals.get(session.codexSessionId) ?? null : null;
+  return session.provider.kind === "codex" && session.provider.threadId ? telemetry.goals.get(session.provider.threadId) ?? null : null;
 }
 
 function goalTelemetrySummary(telemetry: CodexGoalTelemetry) {

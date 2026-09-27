@@ -10,7 +10,7 @@ const runtime: SystemdSessionRuntimeRef = {
   unit: "muxpilot-session-0123456789abcdef01234567.service",
   socketPath: "/runtime/app-server.sock",
   state: "connected",
-  codexVersion: "0.152.0"
+  agentVersion: "0.152.0"
 };
 
 describe("CodexAppServerConnectionManager", () => {

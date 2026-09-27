@@ -32,7 +32,7 @@ describe("dashboard session summaries", () => {
     expect(summary.provider).toEqual(session.provider);
     expect(summary).not.toHaveProperty("runtime");
     expect(summary).not.toHaveProperty("resourceUnit");
-    expect(summary.codexJsonlPath).toBeNull();
+    expect(summary.provider.transcriptPath).toBe("/tmp/codex.jsonl");
     expect(summary.models).toEqual({
       default: { model: null, reasoningEffort: null },
       plan: { model: null, reasoningEffort: null }
@@ -81,10 +81,8 @@ function testSession(): ManagedSession {
     id: "session-1",
     name: "Session",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
+    provider: { kind: "codex", threadId: "codex-session", transcriptPath: "/tmp/codex.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "codex-session",
-    codexJsonlPath: null,
     discoveryConfidence: "high",
     status: "idle",
     lastActivityAt: null,

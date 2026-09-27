@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
+  AgentProviderKind,
   AgentSessionOwnership,
   ApprovalMode,
   ApprovalDecision,
@@ -39,7 +40,7 @@ import type {
   TranscriptPageResponse,
   TranscriptSearchResponse
 } from "@muxpilot/core";
-import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity } from "@muxpilot/core";
+import { canToggleFastMode, hasCompleteProposedPlan, highestPrioritySession, isValidSessionName, normalizeGitWorkspaceSummary, normalizeSessionName, sessionHistoryIdentity, sessionThreadId, sessionTranscriptPath } from "@muxpilot/core";
 import { serializeApprovalDecisionEvent } from "@muxpilot/core";
 import type { AppDatabase, AppServerReconciliationState, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../codex/codexSessionStore.js";
@@ -815,7 +816,7 @@ export class SessionManager {
       ? previous.sessionIds
           .map((id) => sessions.find((session) => session.id === id) ?? null)
           .filter((session): session is ManagedSession => Boolean(
-            session && !session.archived && session.status !== "missing" && session.codexSessionId
+            session && !session.archived && session.status !== "missing" && sessionThreadId(session)
           ))
           .map(recoveryCandidateFromSession)
       : [];
@@ -994,13 +995,13 @@ export class SessionManager {
     const now = nowIso();
     await this.refreshManagedGitWorkspaces();
     for (const session of await this.db.listSessions(true)) {
-      if (!session.codexSessionId) continue;
-      const rollout = codexFiles.find((file) => file.sessionId === session.codexSessionId);
-      if (!rollout || (session.codexJsonlPath === rollout.path && session.provider.rolloutPath === rollout.path)) continue;
+      const threadId = sessionThreadId(session);
+      if (session.provider.kind !== "codex" || !threadId) continue;
+      const rollout = codexFiles.find((file) => file.sessionId === threadId);
+      if (!rollout || session.provider.transcriptPath === rollout.path) continue;
       const updated = {
         ...session,
-        provider: { kind: "codex" as const, threadId: session.codexSessionId, rolloutPath: rollout.path },
-        codexJsonlPath: rollout.path,
+        provider: { kind: "codex" as const, threadId, transcriptPath: rollout.path },
         transcriptSyncing: true
       };
       await this.db.upsertSession(updated, now, true);
@@ -1076,11 +1077,11 @@ export class SessionManager {
   }
 
   private async listIngestSessions(): Promise<ManagedSession[]> {
-    const sessions = (await this.db.listSessions(true)).filter((session) => session.codexJsonlPath && !session.archived);
+    const sessions = (await this.db.listSessions(true)).filter((session) => session.provider.transcriptPath && !session.archived);
     const offsets = await this.db.listParserOffsets();
     const targets = await Promise.all(
       sessions.map(async (session): Promise<IngestTarget | null> => {
-        const source = session.codexJsonlPath!;
+        const source = session.provider.transcriptPath!;
         const metadata = await sessionSourceMetadata(session);
         const offset = offsets[parserOffsetKey(session.id, source)];
         const needsIngest =
@@ -1107,14 +1108,14 @@ export class SessionManager {
       if (!result.incomplete || !result.progressed) break;
       const refreshed = await this.db.getSession(session.id);
       session =
-        refreshed && refreshed.codexJsonlPath === initialSession.codexJsonlPath && !refreshed.archived
+        refreshed && refreshed.provider.transcriptPath === initialSession.provider.transcriptPath && !refreshed.archived
           ? refreshed
           : null;
     }
   }
 
   private async ingestSession(session: ManagedSession): Promise<IngestSessionResult> {
-    const source = session.codexJsonlPath;
+    const source = session.provider.transcriptPath;
     if (!source) return { incomplete: false, progressed: false };
 
     try {
@@ -1190,7 +1191,7 @@ export class SessionManager {
       }
       await this.processQueuedInputs(session.id);
       const currentSession = await this.db.getSession(session.id);
-      if (!currentSession || currentSession.codexJsonlPath !== source) {
+      if (!currentSession || currentSession.provider.transcriptPath !== source) {
         return { incomplete: false, progressed: false };
       }
       if (!hasOffset || result.nextOffset !== offset) {
@@ -1218,7 +1219,7 @@ export class SessionManager {
       return { incomplete: !result.complete, progressed: result.nextOffset > offset };
     } catch (error) {
       const currentSession = await this.db.getSession(session.id);
-      if (!currentSession || currentSession.codexJsonlPath !== source) {
+      if (!currentSession || currentSession.provider.transcriptPath !== source) {
         return { incomplete: false, progressed: false };
       }
       const text = error instanceof Error ? error.message : String(error);
@@ -1317,7 +1318,9 @@ export class SessionManager {
       : session;
     const origin = canonicalSession.forkedFrom;
     const source = origin
-      ? preferredForkSource(allSessions.filter((candidate) => candidate.codexSessionId === origin.codexSessionId))
+      ? preferredForkSource(allSessions.filter((candidate) =>
+        candidate.provider.kind === origin.provider && sessionThreadId(candidate) === origin.threadId
+      ))
       : null;
     const withOrigin = origin
       ? {
@@ -1354,7 +1357,7 @@ export class SessionManager {
   async restoreSession(sessionId: string): Promise<{ session: ManagedSession; restored: boolean }> {
     const initial = await this.db.getSession(sessionId);
     if (!initial) throw new SessionNotFoundError("Session not found");
-    if (!initial.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
+    if (!sessionThreadId(initial)) throw new SessionRestoreError("Session does not have a provider conversation id to resume");
     const key = recoveryIdentityForSession(initial);
     const prior = this.restoreLocks.get(key) ?? Promise.resolve();
     const restore = prior.catch(() => undefined).then(() => this.restoreSessionUnlocked(sessionId, key));
@@ -1375,7 +1378,7 @@ export class SessionManager {
     const source = await this.db.getSession(sessionId) ??
       (await this.db.listSessions(true)).find((session) => recoveryIdentityForSession(session) === restoreIdentity) ?? null;
     if (!source) throw new SessionNotFoundError("Session not found");
-    if (!source.codexSessionId) throw new SessionRestoreError("Session does not have a Codex session id to resume");
+    if (!sessionThreadId(source)) throw new SessionRestoreError("Session does not have a provider conversation id to resume");
 
     const live = await this.findLiveSessionByRecoveryIdentity(restoreIdentity);
     if (live) {
@@ -1407,20 +1410,24 @@ export class SessionManager {
   ): Promise<SessionTransferImportResult> {
     this.requireAppServerDriver();
     const destination = await requireExistingDirectory(mapping.destinationCwd);
-    const existing = (await this.db.listSessions(true)).find((session) => session.codexSessionId === portable.codexSessionId) ?? null;
+    const existing = (await this.db.listSessions(true)).find((session) =>
+      session.provider.kind === portable.provider && sessionThreadId(session) === portable.threadId
+    ) ?? null;
     let selectedTranscript = transcript;
     let selectedDocuments = importedDocuments;
     let keptExisting = false;
     if (existing) {
-      const live = await this.findLiveSessionByCodexSessionId(portable.codexSessionId);
+      const live = await this.findLiveSessionByThreadId(portable.provider, portable.threadId);
       if (live) return {
-        codexSessionId: portable.codexSessionId,
+        provider: portable.provider,
+        threadId: portable.threadId,
         sessionName: portable.sessionName,
         status: "reused_live",
         sessionId: live.id,
         error: null
       };
-      const existingTranscript = existing.codexJsonlPath ? await readFile(existing.codexJsonlPath).catch(() => null) : null;
+      const existingTranscriptPath = sessionTranscriptPath(existing);
+      const existingTranscript = existingTranscriptPath ? await readFile(existingTranscriptPath).catch(() => null) : null;
       if (existingTranscript && compareTranscripts(existingTranscript, transcript) >= 0) {
         selectedTranscript = completeTranscriptPrefix(existingTranscript);
         keptExisting = true;
@@ -1432,7 +1439,7 @@ export class SessionManager {
     }
 
     if (!this.codexHome) throw new SessionRestoreError("Codex home is unavailable");
-    const transcriptPath = join(this.codexHome, "sessions", "imported", `rollout-imported-${portable.codexSessionId}.jsonl`);
+    const transcriptPath = join(this.codexHome, "sessions", "imported", `rollout-imported-${portable.threadId}.jsonl`);
     await atomicWrite(transcriptPath, selectedTranscript);
     const placeholderId = `imported:${eventId()}`;
     const repo = await loadRepoMetadata(destination);
@@ -1442,10 +1449,8 @@ export class SessionManager {
       id: placeholderId,
       name: portableName,
       cwd: destination,
-      provider: { kind: "codex", threadId: portable.codexSessionId, rolloutPath: transcriptPath },
+      provider: { kind: portable.provider, threadId: portable.threadId, transcriptPath },
       repo,
-      codexSessionId: portable.codexSessionId,
-      codexJsonlPath: transcriptPath,
       discoveryConfidence: "high",
       status: "missing",
       lastActivityAt: portable.lastActivityAt,
@@ -1485,7 +1490,8 @@ export class SessionManager {
     await this.ingestSession(session);
     const restored = await this.restoreSession(placeholderId);
     return {
-      codexSessionId: portable.codexSessionId,
+      provider: portable.provider,
+      threadId: portable.threadId,
       sessionName: portable.sessionName,
       status: keptExisting ? "kept_existing" : "resumed",
       sessionId: restored.session.id,
@@ -1532,8 +1538,8 @@ export class SessionManager {
       mode: mode ?? session.inputMode,
       status: "queued",
       error: null,
-      codexSessionId: session.codexSessionId,
-      codexJsonlPath: session.codexJsonlPath,
+      threadId: sessionThreadId(session),
+      transcriptPath: sessionTranscriptPath(session),
       actorSessionId,
       createdAt: now,
       updatedAt: now,
@@ -1928,8 +1934,9 @@ export class SessionManager {
         ...(content?.length ? { content } : {}),
         collaborationMode: mode,
         muxpilotSubmission: {
-          codexSessionId: session.codexSessionId,
-          codexJsonlPath: session.codexJsonlPath,
+          provider: session.provider.kind,
+          threadId: sessionThreadId(session),
+          transcriptPath: sessionTranscriptPath(session),
           state: "pending",
           deliveryPhase: "persisted",
           attemptCount: 1,
@@ -2769,11 +2776,12 @@ export class SessionManager {
     const source = await this.db.getSession(sessionId);
     if (!source) throw new SessionNotFoundError("Session not found");
     if (source.authenticationResumeRequired) throw new AgentSessionError("Resume this session after its authentication failure before forking it.");
-    const sourceThreadId = source.provider?.threadId ?? source.codexSessionId;
-    if (!sourceThreadId) throw new CreateSessionError("Session does not have a Codex session id to fork");
+    const sourceThreadId = sessionThreadId(source);
+    if (!sourceThreadId) throw new CreateSessionError("Session does not have a provider conversation id to fork");
     const sessionNameValue = requireSessionName(name);
     const forkedFrom: SessionForkOrigin = {
-      codexSessionId: sourceThreadId,
+      provider: source.provider.kind,
+      threadId: sourceThreadId,
       sessionId: source.id,
       sessionName: sessionName(source)
     };
@@ -3113,8 +3121,6 @@ export class SessionManager {
       await this.db.upsertSession({
         ...current,
         provider: result.provider,
-        codexSessionId: result.provider.threadId,
-        codexJsonlPath: result.provider.rolloutPath,
         inputMode: "default",
         status: "working"
       }, now);
@@ -3204,8 +3210,8 @@ export class SessionManager {
 
   private async performAppServerResume(session: ManagedSession): Promise<ManagedSession> {
     const startFreshThread = await isDisposableEmptyAppServerThread(session, await this.db.latestUserMessage(session.id));
-    const sourceThreadId = session.provider?.threadId ?? session.codexSessionId;
-    if (!startFreshThread && !sourceThreadId) throw new Error("App-server session does not have a Codex thread id to resume");
+    const sourceThreadId = sessionThreadId(session);
+    if (!startFreshThread && !sourceThreadId) throw new Error("Session does not have a provider conversation id to resume");
     const driver = this.requireAppServerDriver();
     const documentScopeId = await this.ensureDocumentScope(session);
     const activeModel = session.models[session.inputMode];
@@ -3266,18 +3272,16 @@ export class SessionManager {
       await launch.ready;
       const current = requireSession(await this.db.getSession(session.id));
       const currentActiveModel = current.models[current.inputMode];
-      const rolloutPath = startFreshThread
-        ? launch.provider.rolloutPath
-        : launch.provider.rolloutPath ?? current.provider?.rolloutPath ?? current.codexJsonlPath;
+      const transcriptPath = startFreshThread
+        ? launch.provider.transcriptPath
+        : launch.provider.transcriptPath ?? sessionTranscriptPath(current);
       const resumedSession: ManagedSession = {
         ...current,
         name: session.name ?? sessionName(session),
         cwd: directory,
-        provider: { ...launch.provider, rolloutPath },
+        provider: { ...launch.provider, transcriptPath },
         runtime: launch.runtime,
         capabilities: launch.capabilities,
-        codexSessionId: launch.provider.threadId,
-        codexJsonlPath: rolloutPath,
         resourceUnit: launch.runtime.unit,
         startupError: null,
         authenticationError: null
@@ -3352,8 +3356,6 @@ export class SessionManager {
       runtime: launch.runtime,
       capabilities: launch.capabilities,
       repo: await loadRepoMetadata(repoPath),
-      codexSessionId: launch.provider.threadId,
-      codexJsonlPath: launch.provider.rolloutPath,
       discoveryConfidence: "high",
       status: "unknown",
       initializing: true,
@@ -3961,9 +3963,9 @@ export class SessionManager {
     return null;
   }
 
-  private async findLiveSessionByCodexSessionId(codexSessionId: string): Promise<ManagedSession | null> {
+  private async findLiveSessionByThreadId(provider: AgentProviderKind, threadId: string): Promise<ManagedSession | null> {
     for (const session of await this.db.listSessions(true)) {
-      if (session.codexSessionId === codexSessionId && await this.isLiveAppServerRuntime(session)) return session;
+      if (session.provider.kind === provider && sessionThreadId(session) === threadId && await this.isLiveAppServerRuntime(session)) return session;
     }
     return null;
   }
@@ -4022,8 +4024,9 @@ export class SessionManager {
     return {
       ...page,
       sessionId: session.id,
-      codexSessionId: session.codexSessionId,
-      codexJsonlPath: session.codexJsonlPath
+      provider: session.provider.kind,
+      threadId: sessionThreadId(session),
+      transcriptPath: sessionTranscriptPath(session)
     };
   }
 }
@@ -4360,7 +4363,7 @@ function collapseHistoryByIdentity(results: SessionHistoryResult[], limit: numbe
 
 function recoverableLiveSessionIds(sessions: ManagedSession[]): string[] {
   return sessions
-    .filter((session) => !session.archived && session.status !== "missing" && Boolean(session.codexSessionId))
+    .filter((session) => !session.archived && session.status !== "missing" && Boolean(sessionThreadId(session)))
     .map((session) => session.id);
 }
 
@@ -4368,8 +4371,9 @@ function recoveryCandidateFromSession(session: ManagedSession): SessionRecoveryC
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   return {
     sessionId: session.id,
-    codexSessionId: session.codexSessionId ?? "",
-    codexJsonlPath: session.codexJsonlPath,
+    provider: session.provider.kind,
+    threadId: sessionThreadId(session) ?? "",
+    transcriptPath: sessionTranscriptPath(session),
     status: "missing",
     previousStatus: session.status,
     archived: false,
@@ -4395,7 +4399,7 @@ function recoveryCandidateFromSession(session: ManagedSession): SessionRecoveryC
 
 function recoveryIdentityForSession(session: ManagedSession): string {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
-  return workspace ? `workspace:${workspace.id}` : `codex:${session.codexSessionId ?? session.id}`;
+  return workspace ? `workspace:${workspace.id}` : `${session.provider.kind}:${sessionThreadId(session) ?? session.id}`;
 }
 
 function mergeRecoveryCandidates(
@@ -4515,7 +4519,7 @@ function isDeliveryAcknowledgingStatus(status: SessionStatus): boolean {
 }
 
 function queuedInputMatchesSession(input: QueuedInput, session: ManagedSession): boolean {
-  return input.codexSessionId === session.codexSessionId && input.codexJsonlPath === session.codexJsonlPath;
+  return input.threadId === sessionThreadId(session) && input.transcriptPath === sessionTranscriptPath(session);
 }
 
 function isPlanModeUserMessage(message: ChatMessage | null): boolean {
@@ -4828,8 +4832,7 @@ function sessionDiscoverySnapshot(session: ManagedSession): Record<string, unkno
     cwd: session.cwd,
     runtime: session.runtime ?? null,
     repo: session.repo,
-    codexSessionId: session.codexSessionId,
-    codexJsonlPath: session.codexJsonlPath,
+    provider: session.provider,
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
     initializing: session.initializing === true,
@@ -4866,9 +4869,9 @@ function compareIngestTargets(first: IngestTarget, second: IngestTarget): number
 }
 
 async function sessionSourceMetadata(session: ManagedSession): Promise<{ sizeBytes: number | null; updatedAtMs: number | null }> {
-  if (!session.codexJsonlPath) return { sizeBytes: null, updatedAtMs: null };
+  if (!session.provider.transcriptPath) return { sizeBytes: null, updatedAtMs: null };
   try {
-    const details = await stat(session.codexJsonlPath);
+    const details = await stat(session.provider.transcriptPath);
     return { sizeBytes: details.size, updatedAtMs: details.mtimeMs };
   } catch {
     return { sizeBytes: null, updatedAtMs: null };
@@ -4985,7 +4988,7 @@ function isRecoverableAppServerSession(session: ManagedSession): boolean {
       || session.runtime.state === "starting"
       || (session.runtime.state === "stopped" && session.initializing === true)
     )
-    && Boolean(session.provider?.threadId ?? session.codexSessionId);
+    && Boolean(sessionThreadId(session));
 }
 
 function compareAppServerRecoveryOrder(left: ManagedSession, right: ManagedSession): number {
@@ -5269,7 +5272,7 @@ function notLoadedProjectionAt(state: AppServerReconciliationState | null, obser
 
 async function isDisposableEmptyAppServerThread(session: ManagedSession, latestUserMessage: ChatMessage | null): Promise<boolean> {
   if (latestUserMessage) return false;
-  const paths = new Set([session.provider?.rolloutPath, session.codexJsonlPath].filter((path): path is string => Boolean(path)));
+  const paths = new Set([sessionTranscriptPath(session)].filter((path): path is string => Boolean(path)));
   for (const path of paths) {
     try {
       await stat(path);

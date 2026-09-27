@@ -17,7 +17,7 @@ const runtime: SystemdSessionRuntimeRef = {
   unit: "muxpilot-session-0123456789abcdef01234567.service",
   socketPath: "/run/muxpilot/app.sock",
   state: "connected",
-  codexVersion: "0.152.0"
+  agentVersion: "0.152.0"
 };
 
 describe("CodexAppServerDriver", () => {
@@ -1300,12 +1300,10 @@ function managedSession(): ManagedSession {
     id: "session-1",
     name: "Session",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
+    provider: { kind: "codex", threadId: "thread-1", transcriptPath: null },
     runtime,
     capabilities: {} as ManagedSession["capabilities"],
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "thread-1",
-    codexJsonlPath: null,
     discoveryConfidence: "high",
     status: "idle",
     lastActivityAt: null,

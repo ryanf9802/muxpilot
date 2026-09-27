@@ -82,7 +82,7 @@ export class SystemdAppServerSupervisor implements RuntimeSupervisor {
       unit: paths.unit,
       socketPath: paths.socketPath,
       state: "starting",
-      codexVersion: spec.codexVersion
+      agentVersion: spec.codexVersion
     };
     const existing = await this.inspect(runtime);
     // Recovery reconnects to a healthy runtime even when the desired launch

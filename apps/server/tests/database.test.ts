@@ -1,4 +1,5 @@
 import { mkdtemp } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -82,7 +83,7 @@ describe("AppDatabase session visibility", () => {
     expect(session).toMatchObject({
       name: original.name,
       cwd: original.cwd,
-      provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
+      provider: { kind: "codex", threadId: "codex-session", transcriptPath: "/tmp/codex.jsonl" },
       runtime: original.runtime,
       resourceUnit: null
     });
@@ -396,7 +397,7 @@ describe("AppDatabase session prompts", () => {
       payload: {
         collaborationMode: "plan",
         muxpilotSubmission: {
-          codexSessionId: "codex-session",
+          threadId: "codex-session",
           state: "pending",
           lastAttemptAt: "2026-07-07T00:00:01.000Z"
         }
@@ -656,8 +657,7 @@ describe("AppDatabase session prompts", () => {
     const db = await tempDb();
     const session = {
       ...testSession("session-delayed-rollout-echo"),
-      codexSessionId: "thread-app",
-      provider: { kind: "codex" as const, threadId: "thread-app", rolloutPath: "/tmp/codex.jsonl" }
+      provider: { kind: "codex" as const, threadId: "thread-app", transcriptPath: "/tmp/codex.jsonl" }
     };
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     const submitted = {
@@ -742,8 +742,7 @@ describe("AppDatabase session prompts", () => {
     const db = new AppDatabase(path);
     const session = {
       ...testSession("session-image-replayed-echo"),
-      codexSessionId: "thread-image",
-      provider: { kind: "codex" as const, threadId: "thread-image", rolloutPath: "/tmp/codex.jsonl" }
+      provider: { kind: "codex" as const, threadId: "thread-image", transcriptPath: "/tmp/codex.jsonl" }
     };
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     const rolloutIdentity = { turnId: "turn-image", itemId: "item-rollout", clientMessageId: null };
@@ -779,7 +778,7 @@ describe("AppDatabase session prompts", () => {
 
   it("keeps delayed same-turn text ambiguous when multiple submissions match", async () => {
     const db = await tempDb();
-    const session = { ...testSession("session-ambiguous-rollout-echo"), codexSessionId: "thread-app" };
+    const session = { ...withThread(testSession("session-ambiguous-rollout-echo"), "thread-app") };
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     for (const sequence of [1, 2]) {
       expect(await db.appendMessage({
@@ -880,7 +879,7 @@ describe("AppDatabase session prompts", () => {
     await db.upsertSession(session, "2026-07-07T00:00:00.000Z");
     const submitted = {
       ...testMessage(session.id, 1, "user", "Repeat this", "2026-07-07T00:00:01.000Z"),
-      payload: { muxpilotSubmission: { codexSessionId: "codex-session" } }
+      payload: { muxpilotSubmission: { threadId: "codex-session" } }
     };
     const later = testMessage(session.id, 2, "user", "Repeat this", "2026-07-07T00:01:01.000Z");
 
@@ -960,12 +959,12 @@ describe("AppDatabase session prompts", () => {
 
   it("searches restorable session history through the prompt index", async () => {
     const db = await tempDb();
-    const active = { ...testSession("session-history-active"), codexSessionId: "codex-active" };
+    const active = { ...withThread(testSession("session-history-active"), "codex-active") };
     const missingBase = testSession("session-history-missing");
     const missing = {
       ...missingBase,
       repo: { ...missingBase.repo, branch: "muxpilot/session-task" },
-      codexSessionId: "codex-missing",
+      provider: { ...missingBase.provider, threadId: "codex-missing" },
       status: "missing" as const
     };
     const noCodex = testSession("session-history-no-codex");
@@ -979,7 +978,7 @@ describe("AppDatabase session prompts", () => {
 
     const history = await db.listSessionHistory("indexed history", 10);
 
-    expect(history.map((result) => result.codexSessionId).sort()).toEqual(["codex-active", "codex-missing"]);
+    expect(history.map((result) => result.threadId).sort()).toEqual(["codex-active", "codex-missing"]);
     expect(history.flatMap((result) => result.matchedPrompts.map((prompt) => prompt.text))).toEqual(
       expect.arrayContaining(["Build indexed session history", "Restore indexed session history"])
     );
@@ -998,12 +997,12 @@ describe("AppDatabase session prompts", () => {
     const named = {
       ...testSession("session-history-named"),
       name: "codex-app-server-runtime",
-      codexSessionId: "codex-named"
+      provider: { kind: "codex" as const, threadId: "codex-named", transcriptPath: "/tmp/codex.jsonl" }
     };
     const promptOnly = {
       ...testSession("session-history-prompt-only"),
       name: "unrelated-session",
-      codexSessionId: "codex-prompt-only"
+      provider: { kind: "codex" as const, threadId: "codex-prompt-only", transcriptPath: "/tmp/codex.jsonl" }
     };
     db.upsertSession(named, "2026-07-07T00:00:00.000Z");
     db.upsertSession(promptOnly, "2026-07-07T00:00:00.000Z");
@@ -1020,8 +1019,8 @@ describe("AppDatabase session prompts", () => {
 
   it("keeps the same Codex session distinct across managed worktrees", async () => {
     const db = await tempDb();
-    const first = { ...testSession("history-workspace-first"), codexSessionId: "shared-codex", lastActivityAt: "2026-07-07T00:00:01.000Z" };
-    const second = { ...testSession("history-workspace-second"), codexSessionId: "shared-codex", lastActivityAt: "2026-07-07T00:00:02.000Z" };
+    const first = { ...withThread(testSession("history-workspace-first"), "shared-codex"), lastActivityAt: "2026-07-07T00:00:01.000Z" };
+    const second = { ...withThread(testSession("history-workspace-second"), "shared-codex"), lastActivityAt: "2026-07-07T00:00:02.000Z" };
     db.upsertSession(first, first.lastActivityAt);
     db.upsertSession(second, second.lastActivityAt);
     db.upsertGitWorkspace(testGitWorkspace(first.id, "workspace-first"), first.lastActivityAt);
@@ -1047,8 +1046,8 @@ describe("AppDatabase session prompts", () => {
 
   it("continues collapsing unmanaged history by Codex session", async () => {
     const db = await tempDb();
-    const older = { ...testSession("history-unmanaged-old"), codexSessionId: "shared-unmanaged", lastActivityAt: "2026-07-07T00:00:01.000Z" };
-    const newer = { ...testSession("history-unmanaged-new"), codexSessionId: "shared-unmanaged", lastActivityAt: "2026-07-07T00:00:02.000Z" };
+    const older = { ...withThread(testSession("history-unmanaged-old"), "shared-unmanaged"), lastActivityAt: "2026-07-07T00:00:01.000Z" };
+    const newer = { ...withThread(testSession("history-unmanaged-new"), "shared-unmanaged"), lastActivityAt: "2026-07-07T00:00:02.000Z" };
     db.upsertSession(older, older.lastActivityAt);
     db.upsertSession(newer, newer.lastActivityAt);
 
@@ -1061,7 +1060,7 @@ describe("AppDatabase session prompts", () => {
 
   it("rekeys a managed session without duplicating transcript history", async () => {
     const db = await tempDb();
-    const oldSession = { ...testSession("session-rekey-old"), codexSessionId: "codex-rekey", codexJsonlPath: "/tmp/rekey.jsonl" };
+    const oldSession = { ...withThread(testSession("session-rekey-old"), "codex-rekey", "/tmp/rekey.jsonl") };
     const newSession = {
       ...oldSession,
       id: "session-rekey-new",
@@ -1859,6 +1858,58 @@ describe("AppDatabase session prompts", () => {
   });
 });
 
+describe("AppDatabase provider-neutral migration", () => {
+  it("rewrites legacy Codex session records and queued-input columns once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-db-legacy-"));
+    const path = join(dir, "legacy.db");
+    const legacy = new DatabaseSync(path);
+    const { provider: _provider, runtime, ...base } = testSession("legacy-session");
+    legacy.exec(`
+      CREATE TABLE managed_sessions (id TEXT PRIMARY KEY, data_json TEXT NOT NULL, status TEXT NOT NULL, last_activity_at TEXT,
+        preview TEXT NOT NULL DEFAULT '', unread_count INTEGER NOT NULL DEFAULT 0, archived INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+      CREATE TABLE queued_inputs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, text TEXT NOT NULL, content_json TEXT, mode TEXT NOT NULL,
+        status TEXT NOT NULL, error TEXT, codex_session_id TEXT, codex_jsonl_path TEXT, actor_session_id TEXT, created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL, sent_at TEXT);
+    `);
+    legacy.prepare("INSERT INTO managed_sessions (id, data_json, status, updated_at) VALUES (?, ?, 'idle', ?)").run(
+      "legacy-session",
+      JSON.stringify({
+        ...base,
+        provider: { kind: "codex", threadId: null, rolloutPath: "/codex/rollout.jsonl" },
+        runtime: { ...runtime, agentVersion: undefined, codexVersion: "0.150.0" },
+        codexSessionId: "legacy-thread",
+        codexJsonlPath: "/codex/legacy.jsonl",
+        forkedFrom: { codexSessionId: "parent-thread", sessionId: null, sessionName: "parent" }
+      }),
+      "2026-07-07T00:00:00.000Z"
+    );
+    legacy.prepare(`INSERT INTO queued_inputs (id, session_id, text, mode, status, codex_session_id, codex_jsonl_path, created_at, updated_at)
+      VALUES ('queued-1', 'legacy-session', 'hello', 'default', 'queued', 'legacy-thread', '/codex/rollout.jsonl', 't', 't')`).run();
+    legacy.close();
+
+    const db = new AppDatabase(path);
+    const session = await db.getSession("legacy-session");
+    expect(session?.provider).toEqual({ kind: "codex", threadId: "legacy-thread", transcriptPath: "/codex/rollout.jsonl" });
+    expect(session?.runtime?.agentVersion).toBe("0.150.0");
+    expect(session?.forkedFrom).toEqual({ provider: "codex", threadId: "parent-thread", sessionId: null, sessionName: "parent" });
+    expect(session).not.toHaveProperty("codexSessionId");
+    expect(await db.listQueuedInputs("legacy-session")).toEqual([
+      expect.objectContaining({ id: "queued-1", threadId: "legacy-thread", transcriptPath: "/codex/rollout.jsonl" })
+    ]);
+    db.close();
+
+    const raw = new DatabaseSync(path);
+    const stored = JSON.parse((raw.prepare("SELECT data_json FROM managed_sessions WHERE id = 'legacy-session'").get() as { data_json: string }).data_json);
+    expect(stored.provider).toEqual({ kind: "codex", threadId: "legacy-thread", transcriptPath: "/codex/rollout.jsonl" });
+    expect(stored).not.toHaveProperty("codexJsonlPath");
+    raw.close();
+
+    const reopened = new AppDatabase(path);
+    expect((await reopened.getSession("legacy-session"))?.provider.threadId).toBe("legacy-thread");
+    reopened.close();
+  });
+});
+
 describe("AppDatabase remote access settings", () => {
   it("defaults unrestricted remote access to disabled", async () => {
     const db = await tempDb();
@@ -2421,13 +2472,13 @@ function testSession(id: string): ManagedSession {
     id,
     name: id,
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex.jsonl" },
+    provider: { kind: "codex", threadId: "codex-session", transcriptPath: "/tmp/codex.jsonl" },
     runtime: {
       kind: "systemd_service",
       unit: `muxpilot-codex-${id}.service`,
       socketPath: `/tmp/${id}.sock`,
       state: "connected",
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     },
     repo: {
       root: "/repo",
@@ -2436,8 +2487,6 @@ function testSession(id: string): ManagedSession {
       dirty: false,
       worktree: null
     },
-    codexSessionId: "codex-session",
-    codexJsonlPath: "/tmp/codex.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,
@@ -2453,11 +2502,16 @@ function testSession(id: string): ManagedSession {
   };
 }
 
+function withThread(session: ManagedSession, threadId: string, transcriptPath = session.provider.transcriptPath): ManagedSession {
+  return { ...session, provider: { ...session.provider, threadId, transcriptPath } };
+}
+
 function sessionHistoryResult(session: ManagedSession): SessionHistoryResult {
   return {
     sessionId: session.id,
-    codexSessionId: session.codexSessionId ?? "",
-    codexJsonlPath: session.codexJsonlPath,
+    provider: session.provider.kind,
+    threadId: session.provider.threadId ?? "",
+    transcriptPath: session.provider.transcriptPath,
     status: session.status,
     archived: session.archived,
     sessionName: session.name,
@@ -2496,8 +2550,8 @@ function testQueuedInput(sessionId: string, input: Partial<QueuedInput> & Pick<Q
     sessionId,
     mode: "default",
     error: null,
-    codexSessionId: "codex-session",
-    codexJsonlPath: "/tmp/codex.jsonl",
+    threadId: "codex-session",
+    transcriptPath: "/tmp/codex.jsonl",
     actorSessionId: null,
     createdAt: "2026-07-07T00:00:01.000Z",
     updatedAt: "2026-07-07T00:00:01.000Z",

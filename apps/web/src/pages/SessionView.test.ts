@@ -358,7 +358,8 @@ describe("SessionHeaderMeta", () => {
           repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
           gitWorkspace: null,
           forkedFrom: {
-            codexSessionId: "019f-parent-session-abcdef",
+            provider: "codex",
+            threadId: "019f-parent-session-abcdef",
             sessionId: "parent-session",
             sessionName: "original-chat"
           }
@@ -403,7 +404,7 @@ describe("SessionHeaderMeta", () => {
           state: "connected",
           unit: "muxpilot-session.service",
           socketPath: "/run/muxpilot-session.sock",
-          codexVersion: null
+          agentVersion: null
         },
         resourceUsage: {
           memoryCurrentBytes: 128 * 1024 ** 2,
@@ -1285,7 +1286,7 @@ describe("canSteerComposerInput", () => {
       unit: "muxpilot-session-0123456789abcdef01234567.service",
       socketPath: "/tmp/app.sock",
       state: "connected",
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     }
   });
 
@@ -1976,19 +1977,18 @@ describe("session scroll behavior", () => {
   it("detects transcript source changes before merging transcript pages", () => {
     const session = managedSession({
       id: "session-a",
-      codexSessionId: "codex-a",
-      codexJsonlPath: "/tmp/codex-a.jsonl"
+      provider: { kind: "codex", threadId: "codex-a", transcriptPath: "/tmp/codex-a.jsonl" }
     });
     const currentSource = transcriptSourceKey(sessionTranscriptSource(session));
     const sameSource = transcriptSourceKey({
       sessionId: "session-a",
-      codexSessionId: "codex-a",
-      codexJsonlPath: "/tmp/codex-a.jsonl"
+      threadId: "codex-a",
+      transcriptPath: "/tmp/codex-a.jsonl"
     });
     const reboundSource = transcriptSourceKey({
       sessionId: "session-a",
-      codexSessionId: "codex-b",
-      codexJsonlPath: "/tmp/codex-b.jsonl"
+      threadId: "codex-b",
+      transcriptPath: "/tmp/codex-b.jsonl"
     });
 
     expect(shouldReplaceTranscriptForSource(null, currentSource)).toBe(false);
@@ -2959,8 +2959,8 @@ function queuedInput(overrides: Partial<QueuedInput> = {}): QueuedInput {
     mode: "plan",
     status: "queued",
     error: null,
-    codexSessionId: "codex-a",
-    codexJsonlPath: "/tmp/codex-a.jsonl",
+    threadId: "codex-a",
+    transcriptPath: "/tmp/codex-a.jsonl",
     actorSessionId: null,
     createdAt: "2026-07-07T00:00:00.000Z",
     updatedAt: "2026-07-07T00:00:00.000Z",
@@ -3605,10 +3605,8 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
     id: "session-a",
     name: "codex",
     cwd: "/workspace/muxpilot",
-    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex-session.jsonl" },
+    provider: { kind: "codex", threadId: "codex-session", transcriptPath: "/tmp/codex-session.jsonl" },
     repo: repo("muxpilot", "main"),
-    codexSessionId: "codex-session",
-    codexJsonlPath: "/tmp/codex-session.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,

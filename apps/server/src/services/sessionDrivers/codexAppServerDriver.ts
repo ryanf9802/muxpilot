@@ -501,7 +501,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
     this.sessionThreads.set(session.id, connection.threadId);
     this.activeTurns.set(session.id, response.turn.id);
     return {
-      provider: { kind: "codex", threadId: connection.threadId, rolloutPath: null },
+      provider: { kind: "codex", threadId: connection.threadId, transcriptPath: null },
       receipt: receipt(connection.threadId, response.turn.id, request.clientMessageId, this.now())
     };
   }
@@ -612,7 +612,7 @@ export class CodexAppServerDriver implements AgentSessionDriver {
         provider: {
           kind: "codex",
           threadId: connection.threadId,
-          rolloutPath: directString(connection.reconciliation.current.thread, "path")
+          transcriptPath: directString(connection.reconciliation.current.thread, "path")
         },
         runtime,
         launchDisposition,
@@ -933,14 +933,14 @@ function requireAppServerSession(session: ManagedSession): SystemdSessionRuntime
 }
 
 function requireThreadId(session: ManagedSession): string {
-  const threadId = session.provider?.threadId ?? session.codexSessionId;
+  const threadId = session.provider.threadId;
   if (!threadId) throw new Error("App-server session has no Codex thread id");
   return threadId;
 }
 
 function requireProvider(session: ManagedSession): ManagedSession["provider"] & { kind: "codex"; threadId: string } {
   const threadId = requireThreadId(session);
-  return { kind: "codex", threadId, rolloutPath: session.provider?.rolloutPath ?? session.codexJsonlPath };
+  return { kind: "codex", threadId, transcriptPath: session.provider.transcriptPath };
 }
 
 function requireSourceThread(spec: AgentSessionLaunchSpec): string {

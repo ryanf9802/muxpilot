@@ -566,7 +566,7 @@ describe("CodexAppServerReconciler", () => {
       id: "session-1",
       status: "blocked",
       inputMode: "default",
-      provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
+      provider: { kind: "codex", threadId: "thread-1", transcriptPath: null },
       agentOwnership: {
         parentSessionId: "parent",
         rootSessionId: "parent",
@@ -747,7 +747,7 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
     id: "session-1",
     status,
     inputMode,
-    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
+    provider: { kind: "codex", threadId: "thread-1", transcriptPath: null }
   };
   let state: AppServerReconciliationState | null = null;
   const intentionalInterruptions = new Map<string, "operator" | "budget_guard">();

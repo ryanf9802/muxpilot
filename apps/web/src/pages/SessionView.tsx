@@ -124,6 +124,7 @@ import {
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
+  providerDisplayName,
   serializeApprovalDecisionEvent,
   serializeSessionWaitEvent,
   sessionWaitEventFromPayload,
@@ -1522,19 +1523,19 @@ function formatHeavyCachePaths(command: HeavyCommand): string {
 
 interface TranscriptSourceIdentity {
   sessionId: string;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  threadId: string | null;
+  transcriptPath: string | null;
 }
 
 export function transcriptSourceKey(source: TranscriptSourceIdentity): string {
-  return [source.sessionId, source.codexSessionId ?? "", source.codexJsonlPath ?? ""].join("\u0000");
+  return [source.sessionId, source.threadId ?? "", source.transcriptPath ?? ""].join("\u0000");
 }
 
 export function sessionTranscriptSource(session: ManagedSession): TranscriptSourceIdentity {
   return {
     sessionId: session.id,
-    codexSessionId: session.codexSessionId,
-    codexJsonlPath: session.codexJsonlPath
+    threadId: session.provider.threadId,
+    transcriptPath: session.provider.transcriptPath
   };
 }
 
@@ -3429,7 +3430,7 @@ export function SessionView() {
           <SessionTitleHeading
             name={sessionDisplayName(readySession)}
             onFork={() => openForkSession(readySession)}
-            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !readySession.codexSessionId}
+            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !readySession.provider.threadId}
           />
           <div className="session-title-meta">
             <SessionHeaderMeta session={readySession} />
@@ -3592,7 +3593,7 @@ export function SessionView() {
             type="button"
             className="btw-button"
             onClick={openBtwDrawer}
-            disabled={readySession.initializing === true || !readySession.codexSessionId || Boolean(readySession.startupError) || Boolean(readySession.runtimeUnavailableReason)}
+            disabled={readySession.initializing === true || !readySession.provider.threadId || Boolean(readySession.startupError) || Boolean(readySession.runtimeUnavailableReason)}
             aria-haspopup="dialog"
             aria-expanded={btwOpen}
             aria-label="Open BTW side questions"
@@ -5381,9 +5382,10 @@ export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime">>):
   return session.runtime.state === "hibernated" ? "App server · sleeping" : `App server · ${session.runtime.state}`;
 }
 
-function runtimeDetail(session: Partial<Pick<ManagedSession, "runtime">>): string {
+function runtimeDetail(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string {
   if (session.runtime?.kind !== "systemd_service") return runtimeLabel(session);
-  return `${runtimeLabel(session)} · ${session.runtime.unit}${session.runtime.codexVersion ? ` · Codex ${session.runtime.codexVersion}` : ""}`;
+  const version = session.runtime.agentVersion ? ` · ${providerDisplayName(session.provider?.kind ?? "codex")} ${session.runtime.agentVersion}` : "";
+  return `${runtimeLabel(session)} · ${session.runtime.unit}${version}`;
 }
 
 function formatRuntimeBytes(value: number): string {

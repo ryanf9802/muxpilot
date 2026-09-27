@@ -54,7 +54,7 @@ export class ApprovalReviewer {
   }
 
   async review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult> {
-    const sourceThreadId = session.provider?.kind === "codex" ? session.provider.threadId : session.codexSessionId;
+    const sourceThreadId = session.provider.kind === "codex" ? session.provider.threadId : null;
     if (!sourceThreadId) throw new Error("Session has no Codex thread to review");
     const fork = await this.client.request<{ thread?: { id?: unknown } }>("thread/fork", {
       threadId: sourceThreadId,

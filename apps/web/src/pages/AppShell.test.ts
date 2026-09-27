@@ -93,8 +93,9 @@ describe("shell connection state", () => {
       detectedAt: "2026-08-17T20:00:00.000Z",
       sessions: [{
         sessionId: "session-1",
-        codexSessionId: "codex-1",
-        codexJsonlPath: "/codex/session.jsonl",
+        provider: "codex",
+        threadId: "codex-1",
+        transcriptPath: "/codex/session.jsonl",
         status: "missing",
         previousStatus: "working",
         archived: false,
@@ -372,7 +373,8 @@ describe("prompt history helpers", () => {
 describe("session history helpers", () => {
   const managed = {
     sessionId: "pane-1",
-    codexSessionId: "codex-1",
+    provider: "codex" as const,
+    threadId: "codex-1",
     repoName: "muxpilot",
     repoBranch: "main",
     cwd: "/repo",
@@ -966,7 +968,7 @@ function testSession(
     id: input.id,
     name: input.repoName ?? "repo",
     cwd: input.cwd ?? "/repo",
-    provider: { kind: "codex", threadId: null, rolloutPath: null },
+    provider: { kind: "codex", threadId: null, transcriptPath: null },
     repo: {
       root: input.repoRoot === undefined ? "/repo" : input.repoRoot,
       name: input.repoName ?? "repo",
@@ -974,8 +976,6 @@ function testSession(
       dirty: false,
       worktree: null
     },
-    codexSessionId: null,
-    codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
     initializing: input.initializing,

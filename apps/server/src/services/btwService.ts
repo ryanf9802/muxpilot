@@ -4,6 +4,7 @@ import type {
   BtwExchange,
   BtwExchangeStatus
 } from "@muxpilot/core";
+import { sessionThreadId } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
 import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
@@ -192,7 +193,8 @@ export class BtwService {
     try {
       const session = await this.db.getSession(sessionId);
       if (!session) throw new BtwError("Session not found", 404);
-      if (!session.codexSessionId) throw new BtwError("This session does not have a Codex conversation to snapshot", 409);
+      const threadId = sessionThreadId(session);
+      if (!threadId) throw new BtwError("This session does not have a conversation to snapshot", 409);
       if (await this.db.activeBtwExchange(sessionId)) {
         throw new BtwError("Wait for the active BTW question to finish or cancel it first", 409);
       }
@@ -210,7 +212,7 @@ export class BtwService {
         completedAt: null,
         documentOperation: null
       };
-      const run = this.newRun(exchange, session.codexSessionId);
+      const run = this.newRun(exchange, threadId);
       await this.db.putBtwExchange(exchange);
       this.activeBySession.set(sessionId, run);
       this.publish("btw.started", exchange);
@@ -267,8 +269,9 @@ export class BtwService {
 
   private async restoreDocumentHandoff(exchange: BtwExchange): Promise<ActiveBtwRun | null> {
     const session = await this.db.getSession(exchange.sessionId);
-    if (!session?.codexSessionId) return null;
-    return this.newRun(exchange, session.codexSessionId);
+    const threadId = session ? sessionThreadId(session) : null;
+    if (!threadId) return null;
+    return this.newRun(exchange, threadId);
   }
 
   private async runAttempt(run: ActiveBtwRun): Promise<void> {

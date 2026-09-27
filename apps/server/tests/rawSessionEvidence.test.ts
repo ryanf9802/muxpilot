@@ -92,13 +92,13 @@ function appServerSession(id: string): ManagedSession {
     id,
     name: id,
     cwd: "/repo",
-    provider: { kind: "codex", threadId: id, rolloutPath: null },
+    provider: { kind: "codex", threadId: id, transcriptPath: null },
     runtime: {
       kind: "systemd_service",
       unit: "muxpilot-session-0123456789abcdef01234567.service",
       socketPath: `/tmp/${id}.sock`,
       state: "connected",
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     },
     resourceUnit: "muxpilot-session-0123456789abcdef01234567.service"
   } as ManagedSession;

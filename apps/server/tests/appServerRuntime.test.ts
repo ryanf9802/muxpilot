@@ -57,7 +57,7 @@ describe("app-server runtime composition", () => {
       unit: "muxpilot-session-0123456789abcdef01234567.service",
       socketPath: "/run/muxpilot/app.sock",
       state: "connected" as const,
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     };
     vi.spyOn(SystemdAppServerSupervisor.prototype, "start")
       .mockResolvedValueOnce({ ...runtime, launchDisposition: "reused" })

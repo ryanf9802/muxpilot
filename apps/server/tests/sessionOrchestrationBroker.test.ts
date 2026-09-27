@@ -278,7 +278,7 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     const readGoals = vi.fn(() => ({
       available: true,
       sampledAt: goal.sampledAt,
-      goals: new Map([[session.codexSessionId!, goal]])
+      goals: new Map([[session.provider.threadId!, goal]])
     }));
     const goalReader: CodexGoalReader = { read: readGoals };
     const broker = new SessionOrchestrationBroker(
@@ -315,7 +315,7 @@ describe("SessionOrchestrationBroker raw evidence", () => {
     await expect(call("read_session", { sessionId: session.id, limit: 5 })).resolves.toMatchObject({
       goalTelemetry: { available: true, sampledAt: goal.sampledAt },
       session: { id: session.id, goal },
-      muxpilotRecord: { id: session.id, codexSessionId: session.codexSessionId },
+      muxpilotRecord: { id: session.id, provider: session.provider },
       queuedInputs: [{ id: "queued-1", text: "pending" }],
       messages: [{ text: "task_complete", payload: { rawLifecycle: { type: "task_complete" } } }]
     });
@@ -367,10 +367,8 @@ function managedSession(): ManagedSession {
     id: "session-1",
     name: "work",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "codex-1", rolloutPath: "/codex/sessions/rollout.jsonl" },
+    provider: { kind: "codex", threadId: "codex-1", transcriptPath: "/codex/sessions/rollout.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "codex-1",
-    codexJsonlPath: "/codex/sessions/rollout.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: "2026-08-25T00:00:00.000Z",

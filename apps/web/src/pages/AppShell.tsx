@@ -2283,7 +2283,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
     }
   }
 
-  const portableSessions = sessions.filter((session) => Boolean(session.codexSessionId && session.codexJsonlPath));
+  const portableSessions = sessions.filter((session) => Boolean(session.provider.threadId && session.provider.transcriptPath));
   const expandedSelectedIds = expandedTransferSelection(selected, sessions);
   const mappingComplete = preview?.mappings.every((requirement) => {
     const value = mappings[requirement.sourceCwd];
@@ -2430,7 +2430,7 @@ function SessionTransferDialog({ compatibility, onClose }: {
             </> : null}
             {result ? <><div className="session-transfer-results">
               {result.branches.map((item) => <div className="session-transfer-result" key={`${item.destinationCwd}:${item.branchName}`}><strong>{item.branchName}</strong><span>{item.status.replaceAll("_", " ")} · upstream {item.upstreamStatus.replaceAll("_", " ")}{item.warning ? ` · ${item.warning}` : ""}</span></div>)}
-              {result.results.map((item) => <div className="session-transfer-result" key={item.codexSessionId} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
+              {result.results.map((item) => <div className="session-transfer-result" key={`${item.provider}:${item.threadId}`} data-status={item.status}><strong>{item.sessionName}</strong><span>{item.status.replaceAll("_", " ")}{item.error ? `: ${item.error}` : ""}</span></div>)}
             </div><DialogActions><Button variant="primary" onClick={onClose}>Done</Button></DialogActions></> : null}
           </div>
         )}
@@ -2656,7 +2656,7 @@ export function sessionHistoryResultMeta(result: Pick<SessionHistoryResult, "rep
   return `${repo || result.cwd} · ${state} · ${time}`;
 }
 
-export function sessionHistoryResultKey(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
+export function sessionHistoryResultKey(result: Pick<SessionHistoryResult, "sessionId" | "provider" | "threadId" | "gitWorkspace">): string {
   return sessionHistoryIdentity(result);
 }
 

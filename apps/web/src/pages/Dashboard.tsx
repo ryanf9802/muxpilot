@@ -490,7 +490,7 @@ export function Dashboard() {
               setMenu(null);
               openForkSession(menu.session);
             }}
-            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.codexSessionId}
+            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.provider.threadId}
           >
             Fork session
           </ContextMenuItem>

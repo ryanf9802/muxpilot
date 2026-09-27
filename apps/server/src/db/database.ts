@@ -34,14 +34,18 @@ import {
   approvalDecisionEventSummary,
   buildExpandedTranscriptItems,
   buildTranscriptItems,
+  DEFAULT_AGENT_PROVIDER,
   hasCompleteProposedPlan,
   isDisplayableUserPromptText,
   normalizeApprovalDecisionEvent,
   normalizeGitWorkspaceSummary,
+  normalizeLegacySessionRecord,
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
   sessionHistoryIdentity,
+  sessionThreadId,
+  sessionTranscriptPath,
   sessionWaitEventFromPayload,
   sessionWaitEventSummary,
   withApprovalDecisionEventPayload,
@@ -52,6 +56,7 @@ import { codexTurnFailure, type CodexTurnFailure } from "../utils/codexTurnFailu
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
 const PROMPT_INDEX_BACKFILLED_SETTING = "prompt_index_backfilled_v1";
+const PROVIDER_NEUTRAL_SESSIONS_SETTING = "provider_neutral_sessions_v1";
 const SESSION_RECOVERY_RUNTIME_SETTING = "session_recovery_runtime_v1";
 const SESSION_RECOVERY_INCIDENT_SETTING = "session_recovery_incident_v1";
 const GLOBAL_MODEL_SETTINGS = "global_model_settings_v1";
@@ -153,8 +158,8 @@ interface QueuedInputRow {
   mode: string;
   status: string;
   error: string | null;
-  codex_session_id: string | null;
-  codex_jsonl_path: string | null;
+  thread_id: string | null;
+  transcript_path: string | null;
   actor_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1164,7 +1169,7 @@ export class SyncAppDatabase {
   private rekeyAgentRelationships(oldSessionId: string, newSessionId: string): void {
     const rows = this.db.prepare("SELECT id, data_json FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json">>;
     for (const row of rows) {
-      const session = JSON.parse(row.data_json) as ManagedSession;
+      const session = parseStoredSession(row.data_json);
       const ownership = session.agentOwnership;
       if (!ownership || (ownership.parentSessionId !== oldSessionId && ownership.rootSessionId !== oldSessionId)) continue;
       session.agentOwnership = {
@@ -2266,8 +2271,8 @@ export class SyncAppDatabase {
 
     const bySession = new Map<string, { row: SessionHistoryMatchRow; prompts: SessionHistoryResult["matchedPrompts"] }>();
     for (const row of rows) {
-      const session = JSON.parse(row.session_data_json) as ManagedSession;
-      if (!session.codexSessionId) continue;
+      const session = parseStoredSession(row.session_data_json);
+      if (!sessionThreadId(session)) continue;
       const current = bySession.get(row.session_id);
       const prompt = {
         sequence: row.match_sequence,
@@ -2298,8 +2303,8 @@ export class SyncAppDatabase {
       .all() as unknown as SessionHistoryNameRow[];
     const nameMatches = nameRows
       .filter((row) => {
-        const session = JSON.parse(row.session_data_json) as ManagedSession;
-        return Boolean(session.codexSessionId) && sessionNameMatchesQuery(session.name, query);
+        const session = parseStoredSession(row.session_data_json);
+        return Boolean(sessionThreadId(session)) && sessionNameMatchesQuery(session.name, query);
       })
       .map(sessionHistoryResultFromNameRow);
 
@@ -2310,7 +2315,7 @@ export class SyncAppDatabase {
     const pageItems = this.scanTranscriptItemsBackward(sessionId, Number.MAX_SAFE_INTEGER, limit, "items");
     const firstSequence = pageItems[0]?.firstSequence ?? Number.MAX_SAFE_INTEGER;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: this.hasMessageBefore(sessionId, firstSequence),
       hasMoreAfter: false
     });
@@ -2329,7 +2334,7 @@ export class SyncAppDatabase {
     const pageItems = [...olderItems, ...activePageItems];
     const firstLoadedSequence = pageItems[0]?.firstSequence ?? prompt.sequence;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: this.hasTopLevelTranscriptItemBefore(sessionId, firstLoadedSequence),
       hasMoreAfter: false
     });
@@ -2339,7 +2344,7 @@ export class SyncAppDatabase {
     const pageItems = this.scanTranscriptItemsForward(sessionId, 0, limit, false);
     const lastSequence = pageItems.at(-1)?.lastSequence ?? 0;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: false,
       hasMoreAfter: this.hasMessageAfter(sessionId, lastSequence)
     });
@@ -2424,7 +2429,7 @@ export class SyncAppDatabase {
     const pageItems = this.scanTranscriptItemsBackward(sessionId, boundarySequence, limit, "topLevel");
     const firstSequence = pageItems[0]?.firstSequence ?? boundarySequence;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: this.hasTopLevelTranscriptItemBefore(sessionId, firstSequence),
       hasMoreAfter: pageItems.length > 0
     });
@@ -2434,7 +2439,7 @@ export class SyncAppDatabase {
     const pageItems = this.scanTranscriptItemsForward(sessionId, afterSequence, limit, false);
     const lastSequence = pageItems.at(-1)?.lastSequence ?? afterSequence;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: pageItems.length > 0,
       hasMoreAfter: this.hasMessageAfter(sessionId, lastSequence)
     });
@@ -2455,7 +2460,7 @@ export class SyncAppDatabase {
     const items = [...beforeItems, ...targetItems, ...afterItems];
     const targetIndex = items.findIndex((item) => item.firstSequence <= aroundSequence && item.lastSequence >= aroundSequence);
     if (targetIndex < 0) {
-      return transcriptItemsPage(sessionId, [], {
+      return transcriptItemsPage(this.transcriptIdentity(sessionId), [], {
         hasMoreBefore: this.hasMessageBefore(sessionId, aroundSequence),
         hasMoreAfter: this.hasMessageAfter(sessionId, aroundSequence)
       });
@@ -2468,7 +2473,7 @@ export class SyncAppDatabase {
     const firstSequence = pageItems[0]?.firstSequence ?? aroundSequence;
     const lastSequence = pageItems.at(-1)?.lastSequence ?? aroundSequence;
 
-    return transcriptItemsPage(sessionId, pageItems, {
+    return transcriptItemsPage(this.transcriptIdentity(sessionId), pageItems, {
       hasMoreBefore: this.hasMessageBefore(sessionId, firstSequence),
       hasMoreAfter: this.hasMessageAfter(sessionId, lastSequence)
     });
@@ -2619,9 +2624,7 @@ export class SyncAppDatabase {
       .all(sessionId, start, end) as unknown as MessageRow[];
 
     return {
-      sessionId,
-      codexSessionId: null,
-      codexJsonlPath: null,
+      ...this.transcriptIdentity(sessionId),
       items: buildExpandedTranscriptItems(rows.map(hydrateMessage)),
       hasMoreBefore: false,
       hasMoreAfter: false
@@ -2632,9 +2635,7 @@ export class SyncAppDatabase {
     const normalizedQuery = normalizeTranscriptSearchText(query);
     if (!normalizedQuery) {
       return {
-        sessionId,
-        codexSessionId: null,
-        codexJsonlPath: null,
+        ...this.transcriptIdentity(sessionId),
         query: "",
         matches: [],
         total: 0
@@ -2668,9 +2669,7 @@ export class SyncAppDatabase {
     });
 
     return {
-      sessionId,
-      codexSessionId: null,
-      codexJsonlPath: null,
+      ...this.transcriptIdentity(sessionId),
       query: query.trim(),
       matches: matches.slice(0, limit),
       total: matches.length
@@ -3025,7 +3024,7 @@ export class SyncAppDatabase {
     this.db
       .prepare(
         `INSERT INTO queued_inputs
-          (id, session_id, text, content_json, mode, status, error, codex_session_id, codex_jsonl_path, actor_session_id, created_at, updated_at, sent_at)
+          (id, session_id, text, content_json, mode, status, error, thread_id, transcript_path, actor_session_id, created_at, updated_at, sent_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
@@ -3036,8 +3035,8 @@ export class SyncAppDatabase {
         input.mode,
         input.status,
         input.error,
-        input.codexSessionId,
-        input.codexJsonlPath,
+        input.threadId,
+        input.transcriptPath,
         input.actorSessionId,
         input.createdAt,
         input.updatedAt,
@@ -3210,7 +3209,7 @@ export class SyncAppDatabase {
         messageChanged = write.changed;
       }
       if (targetStatus !== null) {
-        const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
+        const sessionData = normalizeLegacySessionRecord(JSON.parse(existingSession.data_json) as Record<string, unknown>);
         this.db.prepare(
           "UPDATE managed_sessions SET status = ?, data_json = ?, updated_at = ? WHERE id = ?"
         ).run(
@@ -3341,7 +3340,7 @@ export class SyncAppDatabase {
           row.observed_at
         );
         if (matched && existingSession.status !== "input_failed") {
-          const sessionData = JSON.parse(existingSession.data_json) as Record<string, unknown>;
+          const sessionData = normalizeLegacySessionRecord(JSON.parse(existingSession.data_json) as Record<string, unknown>);
           this.db.prepare("UPDATE managed_sessions SET status = ?, data_json = ?, updated_at = ? WHERE id = ?")
             .run("input_failed", JSON.stringify({ ...sessionData, status: "input_failed" }), row.observed_at, row.session_id);
         }
@@ -3484,8 +3483,8 @@ export class SyncAppDatabase {
              mode = ?,
              status = ?,
              error = ?,
-             codex_session_id = ?,
-             codex_jsonl_path = ?,
+             thread_id = ?,
+             transcript_path = ?,
              actor_session_id = ?,
              updated_at = ?,
              sent_at = ?
@@ -3497,8 +3496,8 @@ export class SyncAppDatabase {
         input.mode,
         input.status,
         input.error,
-        input.codexSessionId,
-        input.codexJsonlPath,
+        input.threadId,
+        input.transcriptPath,
         input.actorSessionId,
         input.updatedAt,
         input.sentAt,
@@ -3603,7 +3602,7 @@ export class SyncAppDatabase {
 
   private recentRestorableSessionHistory(limit: number): SessionHistoryResult[] {
     return this.listSessions(true)
-      .filter((session) => Boolean(session.codexSessionId))
+      .filter((session) => Boolean(sessionThreadId(session)))
       .slice(0, limit)
       .map((session) => sessionHistoryResultFromSession(
         session,
@@ -3632,7 +3631,7 @@ export class SyncAppDatabase {
   }
 
   private hydrateSession(row: SessionRow): ManagedSession {
-    const session = JSON.parse(row.data_json) as ManagedSession;
+    const session = parseStoredSession(row.data_json);
     const gitWorkspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
     const recentUserPrompts = this.recentUserPrompts(row.id);
     return {
@@ -3668,7 +3667,7 @@ export class SyncAppDatabase {
       const row = this.db.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(parentId) as Pick<SessionRow, "data_json"> | undefined;
       if (!row) return "ask";
       try {
-        current = JSON.parse(row.data_json) as ManagedSession;
+        current = parseStoredSession(row.data_json);
       } catch {
         return "ask";
       }
@@ -3797,8 +3796,8 @@ export class SyncAppDatabase {
         mode TEXT NOT NULL,
         status TEXT NOT NULL,
         error TEXT,
-        codex_session_id TEXT,
-        codex_jsonl_path TEXT,
+        thread_id TEXT,
+        transcript_path TEXT,
         actor_session_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -3975,6 +3974,9 @@ export class SyncAppDatabase {
     this.addColumnIfMissing("btw_exchanges", "document_operation_json", "TEXT");
     this.addColumnIfMissing("btw_exchanges", "document_warning", "TEXT");
     this.addColumnIfMissing("notification_device_settings", "usage_limit_thresholds_json", "TEXT NOT NULL DEFAULT '[75,50,25,10,0]'");
+    this.renameColumnIfPresent("queued_inputs", "codex_session_id", "thread_id");
+    this.renameColumnIfPresent("queued_inputs", "codex_jsonl_path", "transcript_path");
+    this.migrateProviderNeutralSessionsIfNeeded();
     this.removePersistedContextGuards();
     this.normalizePersistedApprovalDecisionMessages();
     this.normalizePersistedSessionWaitMessages();
@@ -4006,7 +4008,7 @@ export class SyncAppDatabase {
     const rows = this.db.prepare("SELECT id, data_json, status FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json" | "status">>;
     const update = this.db.prepare("UPDATE managed_sessions SET data_json = ?, status = ? WHERE id = ?");
     for (const row of rows) {
-      const session = JSON.parse(row.data_json) as ManagedSession;
+      const session = parseStoredSession(row.data_json);
       const ownership = session.agentOwnership as (AgentSessionOwnership & Record<string, unknown>) | null | undefined;
       if (!ownership || (!("contextPausedAt" in ownership) && !("highContextApprovedAt" in ownership))) continue;
       const wasContextPaused = typeof ownership.contextPausedAt === "string" && ownership.contextPausedAt.length > 0;
@@ -4412,7 +4414,7 @@ export class SyncAppDatabase {
        VALUES (?, ?, ?, ?, ?, ?)`
     );
     for (const row of rows) {
-      const session = JSON.parse(row.data_json) as ManagedSession;
+      const session = parseStoredSession(row.data_json);
       const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
       const path = session.repo.root ?? session.cwd;
       if (!path) continue;
@@ -4425,6 +4427,42 @@ export class SyncAppDatabase {
         row.updated_at
       );
     }
+  }
+
+  private renameColumnIfPresent(table: string, from: string, to: string): void {
+    const columns = new Set((this.db.prepare(`PRAGMA table_info(${table})`).all() as unknown as Array<{ name: string }>).map((row) => row.name));
+    if (!columns.has(from) || columns.has(to)) return;
+    this.db.exec(`ALTER TABLE ${table} RENAME COLUMN ${from} TO ${to}`);
+  }
+
+  /** Rewrites pre-multi-provider session records into the provider-neutral shape once. */
+  private migrateProviderNeutralSessionsIfNeeded(): void {
+    if (this.getSetting(PROVIDER_NEUTRAL_SESSIONS_SETTING) === "true") return;
+    const rows = this.db.prepare("SELECT id, data_json FROM managed_sessions").all() as unknown as Array<Pick<SessionRow, "id" | "data_json">>;
+    const update = this.db.prepare("UPDATE managed_sessions SET data_json = ? WHERE id = ?");
+    this.db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const normalized = JSON.stringify(normalizeLegacySessionRecord(JSON.parse(row.data_json) as Record<string, unknown>));
+        if (normalized !== row.data_json) update.run(normalized, row.id);
+      }
+      this.setSetting(PROVIDER_NEUTRAL_SESSIONS_SETTING, "true", new Date().toISOString());
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private transcriptIdentity(sessionId: string): TranscriptIdentity {
+    const row = this.db.prepare("SELECT data_json FROM managed_sessions WHERE id = ?").get(sessionId) as Pick<SessionRow, "data_json"> | undefined;
+    const session = row ? parseStoredSession(row.data_json) : null;
+    return {
+      sessionId,
+      provider: session?.provider.kind ?? DEFAULT_AGENT_PROVIDER,
+      threadId: session ? sessionThreadId(session) : null,
+      transcriptPath: session ? sessionTranscriptPath(session) : null
+    };
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -4517,7 +4555,7 @@ function normalizePreviewText(text: string): string {
 }
 
 function promptHistoryResult(row: PromptHistoryRow): PromptHistoryResult {
-  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const session = parseStoredSession(row.session_data_json);
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   return {
     id: row.id,
@@ -4550,7 +4588,7 @@ function sessionHistoryResultFromMatchRow(
   row: SessionHistoryMatchRow,
   matchedPrompts: SessionHistoryResult["matchedPrompts"]
 ): SessionHistoryResult {
-  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const session = parseStoredSession(row.session_data_json);
   const workspace = row.git_workspace_data_json ? (JSON.parse(row.git_workspace_data_json) as StoredGitWorkspace).summary : null;
   return sessionHistoryResultFromSession(
     {
@@ -4565,7 +4603,7 @@ function sessionHistoryResultFromMatchRow(
 }
 
 function sessionHistoryResultFromNameRow(row: SessionHistoryNameRow): SessionHistoryResult {
-  const session = JSON.parse(row.session_data_json) as ManagedSession;
+  const session = parseStoredSession(row.session_data_json);
   const workspace = row.git_workspace_data_json ? (JSON.parse(row.git_workspace_data_json) as StoredGitWorkspace).summary : null;
   return sessionHistoryResultFromSession(
     {
@@ -4587,8 +4625,9 @@ function sessionHistoryResultFromSession(
   const workspace = normalizeGitWorkspaceSummary(gitWorkspace);
   return {
     sessionId: session.id,
-    codexSessionId: session.codexSessionId ?? "",
-    codexJsonlPath: session.codexJsonlPath,
+    provider: session.provider.kind,
+    threadId: sessionThreadId(session) ?? "",
+    transcriptPath: sessionTranscriptPath(session),
     status: session.status,
     archived: session.archived,
     sessionName: session.name,
@@ -4610,7 +4649,7 @@ function sessionHistoryResultFromSession(
 function collapseSessionHistory(results: SessionHistoryResult[], limit: number): SessionHistoryResult[] {
   const byIdentity = new Map<string, SessionHistoryResult>();
   for (const result of results) {
-    if (!result.codexSessionId) continue;
+    if (!result.threadId) continue;
     const identity = sessionHistoryIdentity(result);
     const current = byIdentity.get(identity);
     if (!current || compareSessionHistoryPreference(result, current) < 0) {
@@ -4792,8 +4831,8 @@ function hydrateQueuedInput(row: QueuedInputRow): QueuedInput {
     mode: collaborationMode(row.mode) ?? "default",
     status: queuedInputStatus(row.status),
     error: row.error,
-    codexSessionId: row.codex_session_id,
-    codexJsonlPath: row.codex_jsonl_path,
+    threadId: row.thread_id,
+    transcriptPath: row.transcript_path,
     actorSessionId: row.actor_session_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -5018,19 +5057,23 @@ function sameAppServerRequest(existing: AppServerRequestRow, request: ReceivedAp
   return existingItemId === null && receivedItemId === null ? true : existingItemId === receivedItemId;
 }
 
+type TranscriptIdentity = Pick<TranscriptPageResponse, "sessionId" | "provider" | "threadId" | "transcriptPath">;
+
+function parseStoredSession(dataJson: string): ManagedSession {
+  return normalizeLegacySessionRecord(JSON.parse(dataJson) as Record<string, unknown>) as unknown as ManagedSession;
+}
+
 function nonemptyStringValue(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function transcriptItemsPage(
-  sessionId: string,
+  identity: TranscriptIdentity,
   items: TranscriptPageResponse["items"],
   page: Pick<TranscriptPageResponse, "hasMoreBefore" | "hasMoreAfter">
 ): TranscriptPageResponse {
   return {
-    sessionId,
-    codexSessionId: null,
-    codexJsonlPath: null,
+    ...identity,
     items,
     hasMoreBefore: page.hasMoreBefore,
     hasMoreAfter: page.hasMoreAfter
