@@ -211,6 +211,19 @@ export class HostSession {
     if (params.replace && this.active) {
       throw new HostOperationError(HOST_ERROR.turnActive, "Cannot replace the session while a turn is active");
     }
+    if (params.inheritLaunch && this.launch) {
+      params = {
+        ...params,
+        launch: {
+          ...this.launch,
+          model: params.launch.model,
+          effort: params.launch.effort,
+          fastMode: params.launch.fastMode,
+          permissionMode: params.launch.permissionMode,
+          approvalMode: params.launch.approvalMode ?? this.launch.approvalMode
+        }
+      };
+    }
     await this.closeQuery();
     const sessionId = params.mode === "resume" ? requireString(params.sourceSessionId, "sourceSessionId") : params.sessionId;
     this.sessionIdValue = sessionId;

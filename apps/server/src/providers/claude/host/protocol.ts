@@ -196,6 +196,11 @@ export interface SessionOpenParams {
   launch: HostLaunchConfig;
   /** Replace an already-open session (clear-context implementation). */
   replace?: boolean;
+  /**
+   * Keep the open session's runtime wiring (MCP servers, system prompt, writable roots, plugins) and take only the
+   * model settings from `launch`; a fresh conversation in the same muxpilot session needs the same tools.
+   */
+  inheritLaunch?: boolean;
 }
 
 export interface TurnStartParams {

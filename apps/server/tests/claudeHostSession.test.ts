@@ -605,6 +605,18 @@ describe("HostSession", () => {
     expect(state).toMatchObject({ sessionId: "new", latestTurn: null });
   });
 
+  it("keeps MCP servers and instructions when a fresh conversation replaces the session", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    const bare = launch({ mcpServers: [], systemPromptAppend: null, writableRoots: [], model: "claude-haiku", permissionMode: "default" });
+    await h.session.open(openParams({ sessionId: "fresh", replace: true, inheritLaunch: true, launch: bare }));
+    const options = h.queries.latest().options;
+    expect(options.mcpServers).toEqual({ muxpilot_sessions: { type: "stdio", command: "node", args: ["mcp.js"] } });
+    expect(options.systemPrompt).toMatchObject({ append: "muxpilot instructions" });
+    expect(options.additionalDirectories).toEqual(["/shared/docs"]);
+    expect(options.model).toBe("claude-haiku");
+  });
+
   it("throttles stream events into transient liveness notifications", async () => {
     const h = harness();
     await h.session.open(openParams());

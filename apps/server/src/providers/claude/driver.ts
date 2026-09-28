@@ -283,7 +283,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       sessionId: randomUUID(),
       cwd: session.cwd,
       launch: this.options.hostLaunch({ cwd: session.cwd, options: request.launchOptions }),
-      replace: true
+      replace: true,
+      inheritLaunch: true
     } satisfies SessionOpenParams);
     const previousTranscriptPath = connection.transcriptPath;
     await this.options.archive?.mirror(previousThreadId, previousTranscriptPath);
@@ -303,7 +304,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
         sourceSessionId: previousThreadId,
         cwd: session.cwd,
         launch: this.options.hostLaunch({ cwd: session.cwd, options: request.launchOptions }),
-        replace: true
+        replace: true,
+        inheritLaunch: true
       } satisfies SessionOpenParams).catch(() => undefined);
       connection.threadId = previousThreadId;
       connection.transcriptPath = previousTranscriptPath;
