@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
 import { effectivePermissionMode, HostOperationError, HostSession, InputQueue, type PersistedHostState } from "../src/providers/claude/host/hostSession.js";
@@ -535,6 +538,25 @@ describe("HostSession", () => {
     h.queries.latest().push(result([TURN_UUID]));
     await flush();
     expect(h.of(HOST_NOTIFICATION.turnCompleted)[0]).toMatchObject({ turn: { status: "completed", items: [{ type: "plan" }] } });
+  });
+
+  it("reads the plan from the plan file when ExitPlanMode has no inline plan", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "muxpilot-plans-"));
+    const planPath = join(dir, "plans", "quiet-river.md");
+    mkdirSync(join(dir, "plans"));
+    const h = harness();
+    await h.session.open(openParams());
+    await startTurn(h);
+    h.queries.latest().push({
+      type: "assistant", uuid: "a-plan", session_id: SESSION_ID, parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "tool_use", id: "w-1", name: "Write", input: { file_path: planPath, content: "# Plan" } }] }
+    });
+    await flush();
+    // The Write can land just after ExitPlanMode is checked.
+    setTimeout(() => writeFileSync(planPath, "# Plan\n1. Create plan-test.txt"), 50);
+    await h.canUseTool()("ExitPlanMode", {}, toolOptions("plan-2"));
+    expect(h.of(HOST_NOTIFICATION.planProposed)).toEqual([{ threadId: SESSION_ID, turnId: TURN_UUID, itemId: "plan-2", plan: "# Plan\n1. Create plan-test.txt" }]);
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it("cancels a request when the SDK aborts the tool call and when the turn ends", async () => {

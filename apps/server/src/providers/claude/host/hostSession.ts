@@ -95,6 +95,9 @@ interface PendingRequestEntry extends HostPendingRequest {
 const MAX_REMEMBERED_INPUTS = 500;
 const MAX_REMEMBERED_TOOL_USES = 2_000;
 const MAX_REMEMBERED_AGENTS = 200;
+const PLAN_WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]);
+const PLAN_FILE_ATTEMPTS = 15;
+const PLAN_FILE_RETRY_MS = 200;
 const STREAM_NOTIFICATION_INTERVAL_MS = 750;
 /** A wakeup is considered fired once an autonomous turn starts near its due time; stale ones expire. */
 const WAKEUP_GRACE_MS = 5 * 60_000;
@@ -609,7 +612,7 @@ export class HostSession {
     if (decision.kind === "allow") return { behavior: "allow", updatedInput: toolInput };
     if (decision.kind === "deny") return { behavior: "deny", message: decision.message };
     if (decision.kind === "plan") {
-      const plan = typeof toolInput.plan === "string" ? toolInput.plan : "";
+      const plan = await this.proposedPlanText(toolInput);
       if (this.active) this.active.planProposed = true;
       this.options.notify(HOST_NOTIFICATION.planProposed, { threadId, turnId, itemId: options.toolUseID, plan });
       return {
@@ -648,6 +651,28 @@ export class HostSession {
       updatedPermissions: approvalPermissionUpdates(toolName, toolInput, response, decision.prefixRule) as never
     } satisfies PermissionResult;
   };
+
+  /**
+   * Current Claude Code writes the plan to a file under its plans directory and calls ExitPlanMode with no input;
+   * older versions pass the plan inline. Read the plan file Claude most recently wrote when the input is empty.
+   */
+  private async proposedPlanText(input: Record<string, unknown>): Promise<string> {
+    if (typeof input.plan === "string" && input.plan.trim()) return input.plan;
+    const planFile = [...this.toolUses.values()].reverse().find((use) => {
+      const path = (use.input as { file_path?: unknown } | null)?.file_path;
+      return PLAN_WRITE_TOOLS.has(use.name) && typeof path === "string" && /[\\/]plans[\\/][^\\/]+\.md$/.test(path);
+    });
+    const path = (planFile?.input as { file_path?: string } | undefined)?.file_path;
+    if (!path) return "";
+    // Claude may send the plan-file Write and ExitPlanMode together, so the file can land a moment later.
+    for (let attempt = 0; attempt < PLAN_FILE_ATTEMPTS; attempt += 1) {
+      const text = await readFile(path, "utf8").catch(() => "");
+      if (text.trim()) return text;
+      await new Promise((resolve) => setTimeout(resolve, PLAN_FILE_RETRY_MS));
+    }
+    this.options.log?.("plan file unreadable", path);
+    return "";
+  }
 
   /** Folds Claude Code's task lifecycle events into the agent list the Agents view shows. */
   private observeTask(message: Extract<SDKMessage, { type: "system" }>): void {
