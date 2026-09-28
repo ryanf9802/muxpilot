@@ -11,23 +11,40 @@ import {
 export { parseApprovalReview, type ApprovalReviewResult };
 
 const REVIEW_TIMEOUT_MS = 60_000;
+/**
+ * The reviewer runs in a fork of the session, so without a schema the model tends to continue the session's own
+ * task and answer in prose. Codex constrains the final assistant message to this shape.
+ */
+const REVIEW_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decision", "explanation"],
+  properties: {
+    decision: { type: "string", enum: ["approve", "deny", "escalate"] },
+    explanation: { type: "string" }
+  }
+} as const;
 interface ActiveReview {
   threadId: string | null;
   turnId: string | null;
   text: string;
+  /** The completed final-answer message, which carries the schema-constrained decision. */
+  finalText: string | null;
   resolve: (result: ApprovalReviewResult) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
+type ReviewerClient = Pick<CodexAppServerClient, "initialize" | "request" | "respondError" | "subscribe" | "subscribeClose" | "stop">;
+
 export class ApprovalReviewer {
-  private readonly client: CodexAppServerClient;
+  private readonly client: ReviewerClient;
   private readonly reviews = new Map<string, ActiveReview>();
   private readonly unsubscribe: () => void;
   private readonly unsubscribeClose: () => void;
 
-  constructor(codexHome: string, private readonly logger?: Pick<Logger, "warn" | "debug">) {
-    this.client = new CodexAppServerClient({ codexHome, timeoutMs: 10_000, logger });
+  constructor(codexHome: string, private readonly logger?: Pick<Logger, "warn" | "debug">, client?: ReviewerClient) {
+    this.client = client ?? new CodexAppServerClient({ codexHome, timeoutMs: 10_000, logger });
     this.unsubscribe = this.client.subscribe((message) => this.handleMessage(message));
     this.unsubscribeClose = this.client.subscribeClose((error) => this.failAll(error));
   }
@@ -64,7 +81,7 @@ export class ApprovalReviewer {
     if (!threadId) throw new Error("Approval reviewer did not receive a thread id");
     const result = new Promise<ApprovalReviewResult>((resolve, reject) => {
       const timer = setTimeout(() => this.fail(threadId, new Error("Approval review timed out")), REVIEW_TIMEOUT_MS);
-      this.reviews.set(threadId, { threadId, turnId: null, text: "", resolve, reject, timer });
+      this.reviews.set(threadId, { threadId, turnId: null, text: "", finalText: null, resolve, reject, timer });
     });
     try {
       const turn = await this.client.request<{ turn?: { id?: unknown } }>("turn/start", {
@@ -74,7 +91,8 @@ export class ApprovalReviewer {
         effort: settings.reasoningEffort,
         summary: "none",
         approvalPolicy: "never",
-        sandboxPolicy: { type: "readOnly", networkAccess: false }
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+        outputSchema: REVIEW_OUTPUT_SCHEMA
       });
       const active = this.reviews.get(threadId);
       if (active) active.turnId = typeof turn.turn?.id === "string" ? turn.turn.id : null;
@@ -100,6 +118,14 @@ export class ApprovalReviewer {
       review.text += params.delta;
       return;
     }
+    if (message.method === "item/completed") {
+      const item = params.item && typeof params.item === "object" && !Array.isArray(params.item)
+        ? params.item as Record<string, unknown>
+        : null;
+      // Commentary messages precede the answer; only the final answer holds the decision.
+      if (item?.type === "agentMessage" && typeof item.text === "string" && item.phase !== "commentary") review.finalText = item.text;
+      return;
+    }
     if (message.method !== "turn/completed") return;
     const turn = params.turn && typeof params.turn === "object" && !Array.isArray(params.turn)
       ? params.turn as Record<string, unknown>
@@ -109,7 +135,7 @@ export class ApprovalReviewer {
       return;
     }
     try {
-      this.complete(threadId, parseApprovalReview(review.text));
+      this.complete(threadId, parseApprovalReview(review.finalText ?? review.text));
     } catch (error) {
       this.fail(threadId, error instanceof Error ? error : new Error(String(error)));
     }
