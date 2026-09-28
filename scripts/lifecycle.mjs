@@ -1025,14 +1025,16 @@ function applyShadowIsolation(config) {
 export function shadowOwnedSystemdUnits(dataDir) {
   const root = resolve(dataDir);
   const units = new Set();
-  const appServerRoot = join(root, "runtime", "app-server-sessions");
-  for (const capabilityId of safeReadDir(appServerRoot)) {
-    if (!APP_SERVER_CAPABILITY_ID.test(capabilityId)) continue;
-    const runtimeDir = join(appServerRoot, capabilityId);
-    if (!safeDirectory(runtimeDir)) continue;
-    const marker = safeRegularFile(join(runtimeDir, "environment"));
-    if (!marker.split(/\r?\n/).includes('MUXPILOT_SHADOW="1"')) continue;
-    units.add(`muxpilot-session-${capabilityId}.service`);
+  for (const sessionRoot of ["app-server-sessions", "claude-sessions"]) {
+    const runtimeRoot = join(root, "runtime", sessionRoot);
+    for (const capabilityId of safeReadDir(runtimeRoot)) {
+      if (!APP_SERVER_CAPABILITY_ID.test(capabilityId)) continue;
+      const runtimeDir = join(runtimeRoot, capabilityId);
+      if (!safeDirectory(runtimeDir)) continue;
+      const marker = safeRegularFile(join(runtimeDir, "environment"));
+      if (!marker.split(/\r?\n/).includes('MUXPILOT_SHADOW="1"')) continue;
+      units.add(`muxpilot-session-${capabilityId}.service`);
+    }
   }
   const heavyRoot = join(root, "heavy", "runs");
   for (const runId of safeReadDir(heavyRoot)) {
