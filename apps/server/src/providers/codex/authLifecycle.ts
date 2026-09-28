@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { lstat, readFile, realpath, rm } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import type { Logger } from "pino";
@@ -115,7 +115,7 @@ function normalizeAccount(account: AccountReadResponse["account"]): ProviderAuth
   };
 }
 
-async function authPrincipalFingerprint(
+export async function authPrincipalFingerprint(
   path: string,
   account: ProviderAuthAccount | null,
   requiresOpenaiAuth: boolean
@@ -131,7 +131,7 @@ async function authPrincipalFingerprint(
       const accountId = typeof tokens?.account_id === "string" ? tokens.account_id : null;
       if (accountId) return fingerprint(["chatgpt", authMode, accountId]);
       const apiKey = typeof parsed.OPENAI_API_KEY === "string" ? parsed.OPENAI_API_KEY : null;
-      if (apiKey) return fingerprint(["api_key", authMode, fingerprint([apiKey])]);
+      if (apiKey) return fingerprint(["api_key", authMode, apiKeyFingerprint(apiKey)]);
     } catch {
       // Fall back to the normalized account identity below. Invalid files are
       // still surfaced by account/read rather than treated as a token change.
@@ -139,6 +139,14 @@ async function authPrincipalFingerprint(
   }
   if (account) return fingerprint(["account", account.type, account.email ?? ""]);
   return requiresOpenaiAuth ? null : fingerprint(["authentication_not_required"]);
+}
+
+/**
+ * Identifies an API key without keeping a fast hash of the secret. The fixed salt keeps the principal stable across
+ * restarts; the key itself only needs change detection, never verification.
+ */
+function apiKeyFingerprint(apiKey: string): string {
+  return scryptSync(apiKey, "muxpilot-codex-auth-principal-v1", 32).toString("hex");
 }
 
 function fingerprint(parts: string[]): string {

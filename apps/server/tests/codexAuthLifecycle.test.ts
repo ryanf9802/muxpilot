@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexAuthLifecycle } from "../src/providers/codex/authLifecycle.js";
+import { authPrincipalFingerprint, CodexAuthLifecycle } from "../src/providers/codex/authLifecycle.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 const roots: string[] = [];
@@ -339,3 +339,20 @@ function deferred<T>() {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+
+describe("Codex auth principal", () => {
+  it("fingerprints API keys stably without exposing them", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "muxpilot-codex-principal-"));
+    const principal = async (apiKey: string) => {
+      const path = join(dir, "auth.json");
+      await writeFile(path, JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: apiKey }));
+      return authPrincipalFingerprint(path, null, true);
+    };
+    const first = await principal("sk-test-one");
+    expect(first).toMatch(/^[a-f0-9]{64}$/);
+    expect(await principal("sk-test-one")).toBe(first);
+    expect(await principal("sk-test-two")).not.toBe(first);
+    expect(first).not.toContain("sk-test-one");
+    await rm(dir, { recursive: true, force: true });
+  });
+});
