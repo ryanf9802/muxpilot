@@ -19,9 +19,25 @@ export const CLAUDE_QUESTION_METHOD = "claude/question";
 
 export const claudeProjectionAdapter: ProjectionAdapter = {
   project: projectClaudeEvent,
+  expand: expandClaudeEvent,
   authenticationFailure: claudeAuthenticationFailure,
   isInteractiveServerRequest: (event: DriverEvent) => event.method === CLAUDE_APPROVAL_METHOD || event.method === CLAUDE_QUESTION_METHOD
 };
+
+/**
+ * An SDK record can carry several content blocks (parallel tool results, text plus tool use). Each block becomes
+ * its own event so every block is projected live, not only after the transcript is parsed.
+ */
+export function expandClaudeEvent(event: DriverEvent): DriverEvent[] {
+  if (event.method !== "sdk/message") return [event];
+  const params = record(event.params);
+  const message = record(params?.message);
+  if (!params || !message || (message.type !== "assistant" && message.type !== "user")) return [event];
+  const toolUses = record(params.toolUses) as Record<string, ClaudeToolUse> | null;
+  const count = claudeRecordMessages(message, toolUses ?? {}).length;
+  if (count <= 1) return [event];
+  return Array.from({ length: count }, (_, blockIndex) => ({ ...event, params: { ...params, blockIndex } }));
+}
 
 /** Projects one Claude host notification (or driver-synthesized request event) into muxpilot state. */
 export function projectClaudeEvent(notification: JsonRpcNotification, receivedAt: string): AppServerEventProjection | null {
@@ -70,7 +86,8 @@ function sdkMessageProjection(
   if (message.type === "system") return systemMessageProjection(notification, message, threadId, turnId, receivedAt);
   if (message.type !== "assistant" && message.type !== "user") return null;
   const toolUses = record(params.toolUses) as Record<string, ClaudeToolUse> | null;
-  const [mapped] = claudeRecordMessages(message, toolUses ?? {});
+  const blockIndex = typeof params.blockIndex === "number" ? params.blockIndex : 0;
+  const mapped = claudeRecordMessages(message, toolUses ?? {})[blockIndex];
   if (!mapped) return null;
   const eventIdentity = identity(threadId, turnId, mapped.itemId, null);
   return projection(notification, eventIdentity, turnId ? mapped.status : null, false, {

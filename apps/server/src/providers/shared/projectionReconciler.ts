@@ -26,6 +26,8 @@ export interface ProjectionAdapter {
   project(event: { method: string; params: unknown }, receivedAt: string): AppServerEventProjection | null;
   /** A sanitized operator-facing message when the event proves the provider account needs re-authentication. */
   authenticationFailure(method: string, params: unknown): string | null;
+  /** Splits one runtime event that carries several transcript items into one event per item. */
+  expand?(event: DriverEvent): DriverEvent[];
   /** Server requests that may legitimately carry a child thread id (approvals, questions). */
   isInteractiveServerRequest(event: DriverEvent): boolean;
   /** Event that reports the provider account changed outside muxpilot. */
@@ -92,6 +94,18 @@ export class ProjectionReconciler implements DriverEventSink {
       this.publish("session.updated", sessionId, updated, event.receivedAt);
       this.onAuthenticationFailure?.(sessionId, authenticationError);
     }
+    for (const item of this.adapter.expand?.(event) ?? [event]) {
+      if (!await this.projectExclusive(sessionId, item, recoveryGuard, restoring)) return false;
+    }
+    return true;
+  }
+
+  private async projectExclusive(
+    sessionId: string,
+    event: DriverEvent,
+    recoveryGuard: { threadKey: string; turnId: string } | undefined,
+    restoring: boolean
+  ): Promise<boolean> {
     const projection = this.adapter.project({ method: event.method, params: event.params }, event.receivedAt);
     if (!projection || projection.transient) return true;
     const existingSession = await this.requireSession(sessionId);

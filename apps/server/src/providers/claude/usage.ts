@@ -138,9 +138,13 @@ export class ClaudeUsageService implements ProviderUsageService {
     return this.history.tokenUsage(days, force);
   }
 
-  /** Records a `rate_limit_event` reported by a live Claude session. */
+  /**
+   * Records a `rate_limit_event` reported by a live Claude session. The SDK reports one window per event
+   * (`rateLimitType`, `utilization`, `resetsAt`); a `unifiedWindows` map is also accepted.
+   */
   observeRateLimit(info: Record<string, unknown>): void {
-    const windows = objectValue(info.unifiedWindows);
+    const windows = objectValue(info.unifiedWindows)
+      ?? (typeof info.rateLimitType === "string" ? { [info.rateLimitType]: info } : null);
     const observedAt = this.now();
     for (const limit of LIMITS) {
       const window = objectValue(windows?.[limit.key]);

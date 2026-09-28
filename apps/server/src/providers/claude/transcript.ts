@@ -1,4 +1,4 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChatMessage, SessionContextUsage } from "@muxpilot/core";
 import type { ParseResult } from "../codex/parser.js";
@@ -9,6 +9,7 @@ import { itemIdentity, stableProjectionId } from "./events.js";
 export const CLAUDE_PARSER_VERSION = "claude-jsonl-v1";
 const BATCH_BYTES = 1024 * 1024;
 const MAX_RECORD_BYTES = 64 * 1024 * 1024;
+const USAGE_CARRY_WINDOW_BYTES = 256 * 1024;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
 const EXTENDED_CONTEXT_WINDOW_TOKENS = 1_000_000;
 
@@ -42,7 +43,8 @@ export async function parseClaudeJsonl(path: string, offset: number, context: Cl
     const consumed = lastNewline >= 0 ? lastNewline + 1 : 0;
     const text = buffer.subarray(0, consumed).toString("utf8");
     const nextOffset = start + consumed;
-    const parsed = parseRecords(text.split("\n").filter(Boolean), context, offset === 0);
+    const carriedMessageId = start > 0 ? await lastAssistantMessageId(file, start) : null;
+    const parsed = parseRecords(text.split("\n").filter(Boolean), context, offset === 0, carriedMessageId);
     return {
       messages: parsed.messages,
       nextOffset,
@@ -56,11 +58,36 @@ export async function parseClaudeJsonl(path: string, offset: number, context: Cl
   }
 }
 
-function parseRecords(lines: string[], context: ClaudeTranscriptContext, fromStart: boolean) {
+/**
+ * Claude Code writes one record per content block, repeating the API message's usage on each. The last main-chain
+ * assistant message before `offset` was already counted by the previous parse, so records continuing it after the
+ * offset must not count its usage again.
+ */
+async function lastAssistantMessageId(file: FileHandle, offset: number): Promise<string | null> {
+  const length = Math.min(offset, USAGE_CARRY_WINDOW_BYTES);
+  const buffer = Buffer.alloc(length);
+  const { bytesRead } = await file.read(buffer, 0, length, offset - length);
+  const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
+  // Unless the window starts at the file start, its first line may be a fragment of a longer record.
+  if (length < offset) lines.shift();
+  for (const line of lines.reverse()) {
+    if (!line.includes('"assistant"')) continue;
+    try {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      if (record.type !== "assistant" || record.isSidechain === true) continue;
+      return string(objectValue(record.message)?.id);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function parseRecords(lines: string[], context: ClaudeTranscriptContext, fromStart: boolean, carriedMessageId: string | null) {
   const messages: Omit<ChatMessage, "sessionId" | "sequence">[] = [];
   const notices: string[] = [];
   const toolUses: Record<string, ClaudeToolUse> = {};
-  const usage = new UsageAccumulator(fromStart ? null : context.previousContextUsage);
+  const usage = new UsageAccumulator(fromStart ? null : context.previousContextUsage, carriedMessageId);
   for (const line of lines) {
     let record: Record<string, unknown>;
     try {
@@ -113,7 +140,9 @@ class UsageAccumulator {
   private output: number;
   private changed = false;
 
-  constructor(private readonly previous: SessionContextUsage | null) {
+  constructor(private readonly previous: SessionContextUsage | null, carriedMessageId: string | null) {
+    // Continuing totals already include the carried message; a from-scratch parse must count it.
+    if (previous && carriedMessageId) this.seen.add(carriedMessageId);
     this.input = previous?.lifetimeInputTokens ?? 0;
     this.cached = previous?.lifetimeCachedInputTokens ?? 0;
     this.output = previous?.lifetimeOutputTokens ?? 0;
