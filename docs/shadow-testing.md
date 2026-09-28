@@ -25,7 +25,7 @@ Shadow mode forcibly uses:
 - `data/shadow/heavy/` for heavyweight queue state;
 - a shadow-namespaced session capability identity for both Codex and Claude runtimes, so even a reused session ID cannot select a production unit.
 
-The shadow harness targets the Codex app-server stack. Its unit cleanup on `pnpm app stop shadow` covers shadow-owned app-server and heavyweight units only, so end any Claude sessions created in shadow before stopping it.
+`pnpm app stop shadow` stops shadow-owned Codex app-server, Claude host, and heavyweight units.
 
 
 App-server systemd services receive the launching muxpilot server's executable search path in their private environment file. This is required when `codex` and its Node interpreter are installed through a user-level version manager such as NVM.
