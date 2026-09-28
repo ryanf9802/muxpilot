@@ -7,11 +7,13 @@ import { sessionRuntimeCapabilityId } from "../../runtime/capabilityId.js";
 import { ProtocolJournal, protocolJournalPath } from "../../runtime/protocolJournal.js";
 import { shellQuote, SystemdSessionSupervisor } from "../../runtime/systemdSessionSupervisor.js";
 import { ProjectionReconciler } from "../shared/projectionReconciler.js";
-import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig } from "../types.js";
+import type { AgentProvider, AgentSessionDriver, McpServerLaunchConfig, ProviderTranscriptSource } from "../types.js";
+import { PARSER_VERSION, parseCodexJsonl } from "./parser.js";
 import { muxpilotGitWorkflowSkillStatus } from "../../services/bundledSkills.js";
 import { discoverCodexSkills } from "../../services/skillDiscovery.js";
 import { ApprovalReviewer } from "./approvalReviewer.js";
 import { CodexAuthLifecycle } from "./authLifecycle.js";
+import { CodexBtwEngine } from "./btw.js";
 import { CodexModelsService, CodexUsageService } from "./usage.js";
 import { CodexAppServerConnectionManager } from "./connectionManager.js";
 import { CodexAppServerDriver } from "./driver.js";
@@ -38,6 +40,16 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = {
 };
 
 export const CODEX_DEFAULT_REVIEWER: ApprovalReviewerSettings = { model: "gpt-5.6-luna", reasoningEffort: "low" };
+
+export function codexTranscripts(codexHome: string): ProviderTranscriptSource {
+  return {
+    parserVersion: PARSER_VERSION,
+    parse: (path, offset) => parseCodexJsonl(path, offset),
+    importPath: (threadId) => join(codexHome, "sessions", "imported", `rollout-imported-${threadId}.jsonl`)
+  };
+}
+
+export const CODEX_TRANSCRIPTS = codexTranscripts(process.env.CODEX_HOME ?? join(process.env.HOME ?? "", ".codex"));
 
 export interface CodexProviderOptions {
   compatibility: ProviderCompatibility;
@@ -86,8 +98,10 @@ export function createCodexProvider(options: CodexProviderOptions): CodexProvide
       discover: (workspaceRoots) => discoverCodexSkills(options.codexHome, workspaceRoots),
       gitWorkflowSkillStatus: () => muxpilotGitWorkflowSkillStatus(skillHome)
     },
+    transcripts: codexTranscripts(options.codexHome),
     approvalReview: new ApprovalReviewer(options.codexHome, options.logger),
-    defaultReviewerSettings: CODEX_DEFAULT_REVIEWER
+    defaultReviewerSettings: CODEX_DEFAULT_REVIEWER,
+    btw: CodexBtwEngine.create({ codexHome: options.codexHome, logger: options.logger })
   };
 }
 

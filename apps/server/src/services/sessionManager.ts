@@ -44,7 +44,8 @@ import { canToggleFastMode, hasCompleteProposedPlan, providerDisplayName, highes
 import { serializeApprovalDecisionEvent } from "@muxpilot/core";
 import type { AppDatabase, AppServerReconciliationState, StoredGitWorkspace } from "../db/database.js";
 import { CodexSessionStore, type CodexSessionFile } from "../providers/codex/sessionStore.js";
-import { PARSER_VERSION, appendSkillNamesForDisplay, parseCodexJsonl } from "../providers/codex/parser.js";
+import { appendSkillNamesForDisplay } from "../providers/codex/parser.js";
+import { CODEX_TRANSCRIPTS } from "../providers/codex/provider.js";
 import type { AgentSessionDriver, AgentSessionLaunchOptions, AgentSessionLaunchResult, DriverInputReceipt, McpServerLaunchConfig } from "../providers/types.js";
 import { ProviderRegistry, ProviderUnavailableError } from "../providers/registry.js";
 import {
@@ -1141,7 +1142,11 @@ export class SessionManager {
       const offsetKey = parserOffsetKey(session.id, source);
       const hasOffset = await this.db.hasParserOffset(offsetKey);
       const offset = await this.db.getParserOffset(offsetKey);
-      const result = await parseCodexJsonl(source, offset);
+      const transcripts = this.providers.maybe(session.provider.kind)?.transcripts ?? CODEX_TRANSCRIPTS;
+      const result = await transcripts.parse(source, offset, {
+        threadId: sessionThreadId(session),
+        previousContextUsage: session.contextUsage ?? null
+      });
       if (result.contextUsage) {
         const updated = await this.db.setSessionContextUsage(session.id, result.contextUsage, nowIso());
         if (updated) {
@@ -1214,7 +1219,7 @@ export class SessionManager {
         return { incomplete: false, progressed: false };
       }
       if (!hasOffset || result.nextOffset !== offset) {
-        await this.db.setParserOffset(offsetKey, result.nextOffset, PARSER_VERSION, nowIso());
+        await this.db.setParserOffset(offsetKey, result.nextOffset, transcripts.parserVersion, nowIso());
       }
       if (result.complete && currentSession.transcriptSyncing) {
         const latestQuestionMessage = await this.db.latestQuestionMessage(session.id, true);
@@ -1459,8 +1464,7 @@ export class SessionManager {
       await this.db.markSessionArchived(existing.id, true, nowIso());
     }
 
-    if (!this.codexHome) throw new SessionRestoreError("Codex home is unavailable");
-    const transcriptPath = join(this.codexHome, "sessions", "imported", `rollout-imported-${portable.threadId}.jsonl`);
+    const transcriptPath = this.providers.get(portable.provider).transcripts.importPath(portable.threadId, destination);
     await atomicWrite(transcriptPath, selectedTranscript);
     const placeholderId = `imported:${eventId()}`;
     const repo = await loadRepoMetadata(destination);

@@ -1,4 +1,5 @@
 import type { AgentProviderKind, ProviderCapabilities } from "@muxpilot/core";
+import { CODEX_TRANSCRIPTS } from "../../src/providers/codex/provider.js";
 import { ProviderRegistry } from "../../src/providers/registry.js";
 import type { AgentProvider, AgentSessionDriver } from "../../src/providers/types.js";
 
@@ -67,7 +68,9 @@ export function testProvider(
       discover: async () => [],
       gitWorkflowSkillStatus: async () => ({ status: "current", path: "/skills" })
     },
+    transcripts: CODEX_TRANSCRIPTS,
     approvalReview: null,
+    btw: null,
     defaultReviewerSettings: null,
     ...overrides
   };

@@ -1,4 +1,5 @@
 import type { Readable, Writable } from "node:stream";
+import type { ParseResult as TranscriptParseResult } from "./codex/parser.js";
 import type {
   AgentProviderKind,
   AgentProviderRef,
@@ -16,6 +17,7 @@ import type {
   PlanActionChoice,
   QuestionAnswerRequest,
   SessionCapabilities,
+  SessionContextUsage,
   SessionModelSettings,
   ProviderAuthState,
   ProviderCapabilities,
@@ -23,6 +25,7 @@ import type {
   ProviderSkillInvocation,
   SessionRuntimeRef
 } from "@muxpilot/core";
+import type { BtwEngine } from "./shared/btw.js";
 
 export interface McpServerLaunchConfig {
   name: string;
@@ -187,10 +190,13 @@ export interface AgentProvider {
   readonly models: ProviderModelCatalog;
   readonly usage: ProviderUsageService;
   readonly skills: ProviderSkillCatalog;
+  readonly transcripts: ProviderTranscriptSource;
   /** Automated reviewer for `auto` approval mode; null when the provider cannot review its own requests. */
   readonly approvalReview: ApprovalReviewEngine | null;
   /** Reviewer model used until the operator stores reviewer settings for this provider. */
   readonly defaultReviewerSettings: ApprovalReviewerSettings | null;
+  /** Backend for BTW side questions; null when the provider cannot fork a read-only side conversation. */
+  readonly btw: BtwEngine | null;
 }
 
 export interface ProviderModelCatalog {
@@ -208,6 +214,19 @@ export interface ProviderUsageService {
   invalidateAuthentication(): void;
   stop(): void;
 }
+
+/** Incremental parser for the provider's native transcript file. */
+export interface ProviderTranscriptSource {
+  readonly parserVersion: string;
+  parse(path: string, offset: number, context: {
+    threadId: string | null;
+    previousContextUsage: SessionContextUsage | null;
+  }): Promise<TranscriptParseResult>;
+  /** Where an imported transcript must live so the provider can resume it from `cwd`. */
+  importPath(threadId: string, cwd: string): string;
+}
+
+export type { ParseResult as TranscriptParseResult } from "./codex/parser.js";
 
 export interface ProviderSkillCatalog {
   /** Skills visible to a session rooted at the given workspace directories. */

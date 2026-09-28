@@ -1678,7 +1678,7 @@ export class SyncAppDatabase {
     incoming: ChatMessage,
     identity: CodexItemMessageIdentity
   ): MessageWriteResult {
-    const source = incoming.payload.source === "codex_app_server" ? "app_server" : "rollout";
+    const source = isLiveRuntimeSource(incoming.payload.source) ? "app_server" : "rollout";
     if (source === "app_server" && incoming.type === "question_request") {
       this.rekeyLegacyRolloutQuestion(incoming.sessionId, identity);
     }
@@ -1943,7 +1943,7 @@ export class SyncAppDatabase {
     ) return false;
 
     const muxpilotSubmission = recordValue(submitted.payload.muxpilotSubmission);
-    const source = message.payload.source === "codex_app_server" ? "app_server" : "rollout";
+    const source = isLiveRuntimeSource(message.payload.source) ? "app_server" : "rollout";
     const reconciledPayload = muxpilotSubmission
       ? {
           ...submitted.payload,
@@ -3007,6 +3007,9 @@ export class SyncAppDatabase {
            AND (? = 0 OR (
              json_extract(payload_json, '$.source') = 'codex_app_server'
              AND json_extract(payload_json, '$.method') = 'item/tool/requestUserInput'
+           ) OR (
+             json_extract(payload_json, '$.source') = 'claude_host'
+             AND json_extract(payload_json, '$.method') = 'claude/question'
            ))
          ORDER BY sequence DESC
          LIMIT 1`
@@ -5174,6 +5177,11 @@ function isMatchingRuntimeImageEcho(submission: ChatMessage, candidate: ChatMess
     .replace(/\s*<image\b[^>]*\bpath=(?:"[^"]*"|'[^']*'|[^\s>]+)[^>]*>\s*<\/image>/gi, "")
     .trim();
   return textWithoutImages === submission.text.trim();
+}
+
+/** Messages projected from a live runtime connection, as opposed to a provider transcript file. */
+function isLiveRuntimeSource(source: unknown): boolean {
+  return source === "codex_app_server" || source === "claude_host";
 }
 
 function submissionAttemptTimestamp(message: ChatMessage): string {

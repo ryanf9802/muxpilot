@@ -32,6 +32,16 @@ const schema = z.object({
   dbPath: z.string().default("./data/muxpilot.db"),
   codexHome: z.string().default(join(homedir(), ".codex")),
   skillHome: z.string().default(join(homedir(), ".codex")),
+  providers: z.preprocess((value) => {
+    if (typeof value !== "string" || !value.trim()) return ["codex", "claude"];
+    return [...new Set(value.split(",").map((part) => part.trim().toLowerCase()).filter(Boolean))];
+  }, z.array(z.enum(["codex", "claude"])).min(1)),
+  defaultProvider: z.enum(["codex", "claude"]).default("codex"),
+  claudeConfigDir: z.string().default(join(homedir(), ".claude")),
+  claudeExecutable: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() ? value.trim() : undefined),
+    z.string().optional()
+  ),
   gitWorktreeRoot: z.string().default(join(homedir(), ".muxpilot", "worktrees")),
   gitSessionRoot: z.string().default(join(homedir(), ".muxpilot", "sessions")),
   sessionSecret: z.string().min(16),
@@ -109,6 +119,10 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     dbPath: env.MUXPILOT_DB_PATH,
     codexHome: env.MUXPILOT_CODEX_HOME,
     skillHome: env.MUXPILOT_SKILL_HOME ?? env.MUXPILOT_CODEX_HOME,
+    providers: env.MUXPILOT_PROVIDERS,
+    defaultProvider: env.MUXPILOT_DEFAULT_PROVIDER,
+    claudeConfigDir: env.MUXPILOT_CLAUDE_CONFIG_DIR ?? env.CLAUDE_CONFIG_DIR,
+    claudeExecutable: env.MUXPILOT_CLAUDE_BIN,
     gitWorktreeRoot: env.MUXPILOT_GIT_WORKTREE_ROOT,
     gitSessionRoot: env.MUXPILOT_GIT_SESSION_ROOT,
     sessionSecret: env.MUXPILOT_SESSION_SECRET ?? randomSessionSecret(),
@@ -144,6 +158,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, options: { createDataDir?: b
     dbPath: resolve(parsed.dbPath),
     codexHome: resolve(parsed.codexHome),
     skillHome: resolve(parsed.skillHome),
+    claudeConfigDir: resolve(parsed.claudeConfigDir),
     gitWorktreeRoot: resolve(parsed.gitWorktreeRoot),
     gitSessionRoot: resolve(parsed.gitSessionRoot),
     heavyValidationDir: resolve(parsed.heavyValidationDir),

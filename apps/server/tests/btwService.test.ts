@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ManagedSession, SessionEvent } from "@muxpilot/core";
 import { AppDatabase } from "../src/db/database.js";
 import { BtwService, type BtwError } from "../src/services/btwService.js";
+import { CodexBtwEngine } from "../src/providers/codex/btw.js";
 import type { CodexAppServerMessage } from "../src/providers/codex/usage.js";
 import { EventBus } from "../src/services/eventBus.js";
 import { SessionDocumentError } from "../src/services/sessionDocuments.js";
@@ -18,7 +19,7 @@ describe("BtwService", () => {
     const events = new EventBus();
     const published: SessionEvent[] = [];
     events.subscribe((event) => published.push(event));
-    const service = new BtwService({ db, events, client, documents: coordinator, handoffRetryMs: 0, now: timestampClock() });
+    const service = new BtwService({ db, events, engines: { codex: new CodexBtwEngine(client) }, documents: coordinator, handoffRetryMs: 0, now: timestampClock() });
     await service.start();
 
     const exchange = await service.ask("source", "Create plan.md with an implementation checklist");
@@ -63,7 +64,7 @@ describe("BtwService", () => {
     const client = new FakeAppServerClient();
     const coordinator = new FakeDocumentCoordinator();
     coordinator.changes = { created: [], updated: [] };
-    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, documents: coordinator, now: timestampClock() });
     await service.start();
 
     const exchange = await service.ask("source", "What owns input delivery?");
@@ -86,7 +87,7 @@ describe("BtwService", () => {
     const db = await tempDb();
     await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
     const client = new FakeAppServerClient();
-    const service = new BtwService({ db, events: new EventBus(), client, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, now: timestampClock() });
     await service.start();
     vi.useFakeTimers();
     try {
@@ -118,7 +119,7 @@ describe("BtwService", () => {
     const client = new FakeAppServerClient();
     const coordinator = new FakeDocumentCoordinator();
     coordinator.prepareError = new SessionDocumentError("Document 'INDEX.md' exceeds the 256 KiB limit", 413);
-    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, documents: coordinator, now: timestampClock() });
     await service.start();
 
     const exchange = await service.ask("source", "What should I clean up?");
@@ -152,7 +153,7 @@ describe("BtwService", () => {
     const client = new FakeAppServerClient();
     const coordinator = new FakeDocumentCoordinator();
     coordinator.prepareError = new SessionDocumentError("Session documents directory is invalid", 409);
-    const service = new BtwService({ db, events: new EventBus(), client, documents: coordinator, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, documents: coordinator, now: timestampClock() });
     await service.start();
 
     const exchange = await service.ask("source", "Question");
@@ -176,7 +177,7 @@ describe("BtwService", () => {
     const service = new BtwService({
       db,
       events: new EventBus(),
-      client,
+      engines: { codex: new CodexBtwEngine(client) },
       documents: coordinator,
       handoffRetryMs: 0,
       now: timestampClock()
@@ -222,7 +223,7 @@ describe("BtwService", () => {
     const service = new BtwService({
       db,
       events: new EventBus(),
-      client: new FakeAppServerClient(),
+      engines: { codex: new CodexBtwEngine(new FakeAppServerClient()) },
       documents: coordinator,
       handoffRetryMs: 0,
       now: timestampClock()
@@ -245,7 +246,7 @@ describe("BtwService", () => {
     const service = new BtwService({
       db,
       events: new EventBus(),
-      client,
+      engines: { codex: new CodexBtwEngine(client) },
       documents: coordinator,
       handoffRetryMs: 0,
       now: timestampClock()
@@ -275,7 +276,7 @@ describe("BtwService", () => {
     const events = new EventBus();
     const published: SessionEvent[] = [];
     events.subscribe((event) => published.push(event));
-    const service = new BtwService({ db, events, client, now: timestampClock() });
+    const service = new BtwService({ db, events, engines: { codex: new CodexBtwEngine(client) }, now: timestampClock() });
     await service.start();
 
     const exchange = await service.ask("source", "What file owns input delivery?");
@@ -321,7 +322,7 @@ describe("BtwService", () => {
     const db = await tempDb();
     await db.upsertSession(testSession("source"), "2026-08-26T12:00:00.000Z");
     const client = new FakeAppServerClient();
-    const service = new BtwService({ db, events: new EventBus(), client, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, now: timestampClock() });
     await service.start();
     const exchange = await service.ask("source", "First question");
     await expect(service.ask("source", "Second question")).rejects.toMatchObject({ statusCode: 409 } satisfies Partial<BtwError>);
@@ -352,7 +353,7 @@ describe("BtwService", () => {
       completedAt: null
     });
     const client = new FakeAppServerClient();
-    const service = new BtwService({ db, events: new EventBus(), client, now: timestampClock() });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client) }, now: timestampClock() });
     await service.start();
     expect(await db.getBtwExchange("source", "stale")).toMatchObject({ status: "failed" });
 
@@ -382,7 +383,7 @@ describe("BtwService", () => {
       rejectWarmup = reject;
     });
     const logger = { warn: vi.fn(), debug: vi.fn() };
-    const service = new BtwService({ db, events: new EventBus(), client, logger });
+    const service = new BtwService({ db, events: new EventBus(), engines: { codex: new CodexBtwEngine(client, logger) }, logger });
     let started = false;
 
     const start = service.start().then(() => {

@@ -29,6 +29,8 @@ import { BtwService } from "./services/btwService.js";
 import { probeAppServerCompatibility } from "./providers/codex/compatibility.js";
 import { randomBytes } from "node:crypto";
 import { createCodexProvider } from "./providers/codex/provider.js";
+import { probeClaudeCompatibility } from "./providers/claude/compatibility.js";
+import { createClaudeProvider } from "./providers/claude/provider.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { CodexGoalStore } from "./providers/codex/goalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
@@ -124,6 +126,13 @@ if (config.resourceGovernor !== "off") {
 const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
 await sessionEnvironment.initialize();
+const enabledProviders = new Set(config.providers);
+const claudeCompatibility = enabledProviders.has("claude")
+  ? await probeClaudeCompatibility(userSystemd.available, config.claudeExecutable ?? null)
+  : null;
+if (claudeCompatibility && !claudeCompatibility.available) {
+  app.log.warn({ status: claudeCompatibility.status, detail: claudeCompatibility.detail }, "Claude sessions are unavailable");
+}
 const codexProvider = createCodexProvider({
   compatibility: codexCompatibility,
   skillHome: config.skillHome,
@@ -136,7 +145,25 @@ const codexProvider = createCodexProvider({
   db,
   events
 });
-const providers = new ProviderRegistry([codexProvider], await db.getDefaultAgentProvider() ?? "codex");
+const claudeProvider = claudeCompatibility ? createClaudeProvider({
+  compatibility: claudeCompatibility,
+  dataDir: config.dataDir,
+  runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
+  configDir: config.claudeConfigDir,
+  skillHome: config.skillHome,
+  environment: managedEnvironment,
+  sessionEnvironment,
+  db,
+  events,
+  logger: app.log
+}) : null;
+if (claudeProvider) {
+  await claudeProvider.syncBundledSkills().catch((error) => app.log.warn({ err: error }, "Could not install bundled skills for Claude"));
+}
+const providers = new ProviderRegistry(
+  [...(enabledProviders.has("codex") ? [codexProvider] : []), ...(claudeProvider ? [claudeProvider] : [])],
+  await db.getDefaultAgentProvider() ?? config.defaultProvider
+);
 const manager = new SessionManager({
   db,
   providers,
@@ -153,23 +180,44 @@ const manager = new SessionManager({
   imagePath: (sessionId, imageId) => sessionImages.path(sessionId, imageId),
   sessionEnvironment
 });
-const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
-btw.setAuthenticationGuard(() => codexProvider.auth.assertReady());
+const btw = new BtwService({
+  db,
+  events,
+  engines: Object.fromEntries(providers.list().flatMap((provider) => provider.btw ? [[provider.kind, provider.btw]] : [])),
+  logger: app.log,
+  documents: manager
+});
+btw.setAuthenticationGuard((kind) => providers.get(kind).auth.assertReady());
 codexProvider.authLifecycle.setRuntimeHooks({
-  blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("codex"), ...btw.authenticationBlockers()])],
+  blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("codex"), ...btw.authenticationBlockers("codex")])],
   reconcile: (sessionIds) => manager.reconcileProviderAuthentication("codex", sessionIds),
   suspend: () => manager.suspendForProviderSignOut("codex"),
   invalidateConsumers: () => {
     codexProvider.usage.invalidateAuthentication();
     codexProvider.models.invalidateAuthentication();
     codexProvider.approvalReview.invalidateAuthentication();
-    btw.invalidateAuthentication();
+    btw.invalidateAuthentication("codex");
   },
   admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("codex")
 });
 await codexProvider.authLifecycle.start();
+if (claudeProvider) {
+  claudeProvider.authLifecycle.setRuntimeHooks({
+    blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("claude"), ...btw.authenticationBlockers("claude")])],
+    reconcile: (sessionIds) => manager.reconcileProviderAuthentication("claude", sessionIds),
+    suspend: () => manager.suspendForProviderSignOut("claude"),
+    invalidateConsumers: () => {
+      claudeProvider.usage.invalidateAuthentication();
+      claudeProvider.models.invalidateAuthentication();
+      claudeProvider.approvalReview.invalidateAuthentication();
+      btw.invalidateAuthentication("claude");
+    },
+    admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("claude")
+  });
+  await claudeProvider.authLifecycle.start();
+}
 const rawSessionEvidence = new RawSessionEvidenceReader(
-  { transcripts: { codex: join(config.codexHome, "sessions") } },
+  { transcripts: { codex: join(config.codexHome, "sessions"), claude: join(config.claudeConfigDir, "projects") } },
   undefined,
   undefined,
   config.dataDir
@@ -303,6 +351,7 @@ await manager.discoverNow();
 await manager.finishStartupRecovery();
 await manager.recoverAppServerSessions();
 await codexProvider.authLifecycle.reconcileAfterStartup();
+await claudeProvider?.authLifecycle.reconcileAfterStartup();
 await manager.recoverAutomatedApprovals();
 manager.start({ runInitialTick: false, recoverAppServerSessions: false });
 resourceGovernor.start();
@@ -331,6 +380,7 @@ const close = async () => {
   notifications.stop();
   await btw.stop();
   await codexProvider.authLifecycle.stop();
+  await claudeProvider?.authLifecycle.stop();
   for (const provider of providers.list()) {
     provider.usage.stop();
     provider.models.stop();
