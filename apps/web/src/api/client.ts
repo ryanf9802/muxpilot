@@ -40,6 +40,8 @@ import type {
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
+  SessionAgentMessagesResponse,
+  SessionAgentsResponse,
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionEnvironmentResponse,
@@ -246,6 +248,12 @@ export const api = {
     json<BtwExchangeResponse>(`/api/sessions/${encodeURIComponent(id)}/btw/${encodeURIComponent(exchangeId)}/cancel`, {
       method: "POST"
     }),
+  listSessionAgents: (id: string) =>
+    json<SessionAgentsResponse>(`/api/sessions/${encodeURIComponent(id)}/agents`),
+  getSessionAgentMessages: (id: string, agentId: string) =>
+    json<SessionAgentMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/messages`),
+  stopSessionAgent: (id: string, agentId: string) =>
+    json<{ ok: true }>(`/api/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/stop`, { method: "POST" }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
   enqueueInput: (id: string, text: string, mode?: CollaborationMode, content?: import("@muxpilot/core").MessageContentPart[]) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode, content }) }),

@@ -20,6 +20,7 @@ import {
   activeVariableToken,
   applyPlanActionResponse,
   AgentGuardBanner,
+  AgentsButton,
   ApprovalBanner,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
@@ -60,6 +61,7 @@ import {
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
+  OpenAgentLink,
   ModeToggle,
   pendingActionRefreshForEvent,
   pendingProposedPlanMessage,
@@ -85,6 +87,7 @@ import {
   sessionWithPendingFastMode,
   sessionModeShortcutAction,
   sessionFastModeCapable,
+  sessionNativeAgentsCapable,
   runtimeAttachCommandOrNull,
   saveComposerDraft,
   saveQuestionAnswerDraft,
@@ -573,6 +576,66 @@ function installLocalStorage(): Storage {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("native agents", () => {
+  it("gates the Agents toolbar button on the provider's nativeAgents capability", () => {
+    expect(sessionNativeAgentsCapable(providerDescriptor("claude"))).toBe(true);
+    expect(sessionNativeAgentsCapable(providerDescriptor("codex"))).toBe(false);
+    expect(sessionNativeAgentsCapable(null)).toBe(false);
+  });
+
+  it("renders the Agents button with a running-count badge", () => {
+    const idle = renderToStaticMarkup(createElement(AgentsButton, { open: false, runningCount: 0, onOpen: () => undefined }));
+    expect(idle).toContain('aria-label="Open agents"');
+    expect(idle).toContain("Agents");
+    expect(idle).not.toContain("agents-running-badge");
+    const busy = renderToStaticMarkup(createElement(AgentsButton, { open: true, runningCount: 2, onOpen: () => undefined }));
+    expect(busy).toContain('aria-label="Open agents (2 running)"');
+    expect(busy).toContain('<span class="agents-running-badge" aria-hidden="true">2</span>');
+    expect(busy).toContain('aria-expanded="true"');
+  });
+
+  it("adds an Open agent link to Agent tool-call rows", () => {
+    const toolCall = message("session-a", 4, "Explore the repo", "tool", "tool_call");
+    const html = renderToStaticMarkup(createElement(MessageBubble, {
+      message: { ...toolCall, payload: { toolName: "Agent", toolUseId: "toolu_1" } },
+      agentAction: createElement(OpenAgentLink, { agent: { id: "agent-1", description: "Explore the repo" }, onOpen: () => undefined })
+    }));
+    expect(html).toContain("Tool · Agent");
+    expect(html).toContain('class="agent-open-link"');
+    expect(html).toContain("Open agent");
+  });
+
+  it("labels approvals raised by a subagent", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-sub",
+      sessionId: "session-a",
+      messageId: "message-sub",
+      kind: "command",
+      title: "Allow Bash?",
+      command: "rm -rf build",
+      toolName: "Bash",
+      cwd: null,
+      reason: null,
+      prefixRule: null,
+      options: [{ decision: "approve_once", label: "Allow", description: "" }],
+      createdAt: "2026-09-27T00:00:00.000Z",
+      requestedBy: { agentId: "agent-1", label: "Explore: map the repo" }
+    };
+    const labelled = renderToStaticMarkup(createElement(ApprovalBanner, { approval, busy: null, error: "", onDecision: () => undefined }));
+    expect(labelled).toContain("Requested by Explore: map the repo (subagent)");
+    const fallback = renderToStaticMarkup(createElement(ApprovalBanner, {
+      approval: { ...approval, requestedBy: { agentId: "agent-1", label: null } },
+      busy: null,
+      error: "",
+      onDecision: () => undefined,
+      onOpenAgent: () => undefined
+    }));
+    expect(fallback).toContain('<button type="button">agent-1</button>');
+    const main = renderToStaticMarkup(createElement(ApprovalBanner, { approval: { ...approval, requestedBy: undefined }, busy: null, error: "", onDecision: () => undefined }));
+    expect(main).not.toContain("Requested by");
+  });
 });
 
 describe("ApprovalBanner", () => {

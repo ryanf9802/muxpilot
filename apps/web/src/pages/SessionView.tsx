@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Bot,
   ArrowDownToLine,
   ArrowLeft,
   ArrowUpToLine,
@@ -94,6 +95,7 @@ import type {
   QuestionRequest,
   QueuedInput,
   SessionEvent,
+  SessionAgent,
   SessionDocumentSummary,
   SessionEnvironmentResponse,
   SessionEnvironmentVariable,
@@ -171,6 +173,7 @@ import { findProvider, providerLabel, sessionProvider, sessionThreadId, shouldSh
 import { ProviderBadge } from "../components/ProviderBadge.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
+import { agentForToolCall, AgentsDrawer, runningAgentCount, sessionAgentsErrorMessage } from "../components/AgentsDrawer.js";
 import { effectiveModelSettings, ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { ReasoningBlock, TaskListBlock, transcriptTaskList } from "../components/TranscriptBlocks.js";
 
@@ -541,6 +544,11 @@ export function sessionFastModeCapable(
 ): boolean {
   if (session.capabilities?.fastMode === false) return false;
   return descriptor?.capabilities.fastMode !== false;
+}
+
+/** Native subagents/background tasks are shown only for providers that expose them (Claude). */
+export function sessionNativeAgentsCapable(descriptor: Pick<ProviderDescriptor, "capabilities"> | null | undefined): boolean {
+  return descriptor?.capabilities.nativeAgents === true;
 }
 
 export function fastModeAction(enabled: boolean): SessionAction {
@@ -1452,6 +1460,40 @@ export function DocumentsButton({ open, onOpen }: { open: boolean; onOpen: () =>
   );
 }
 
+export function AgentsButton({ open, runningCount, onOpen }: { open: boolean; runningCount: number; onOpen: () => void }) {
+  return (
+    <button
+      className="session-documents-button agents-button"
+      type="button"
+      onClick={onOpen}
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-label={runningCount > 0 ? `Open agents (${runningCount} running)` : "Open agents"}
+      title="Subagents & background tasks"
+    >
+      {runningCount > 0 ? <LoaderCircle className="spin" size={16} /> : <Bot size={17} />}
+      <span className="session-action-label">Agents</span>
+      {runningCount > 0 ? <span className="agents-running-badge" aria-hidden="true">{runningCount}</span> : null}
+    </button>
+  );
+}
+
+export function OpenAgentLink({ agent, onOpen }: { agent: Pick<SessionAgent, "id" | "description">; onOpen: (agentId: string) => void }) {
+  return (
+    <button
+      type="button"
+      className="agent-open-link"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen(agent.id);
+      }}
+      aria-label={`Open agent transcript: ${agent.description}`}
+    >
+      <Bot size={13} /> Open agent
+    </button>
+  );
+}
+
 function SessionEnvironmentModal({ open, sessionId, sessions, onChange, onClose }: { open: boolean; sessionId: string; sessions: ManagedSession[]; onChange?: (environment: SessionEnvironmentResponse) => void; onClose: () => void }) {
   const [environment, setEnvironment] = useState<SessionEnvironmentResponse | null>(null);
   const [name, setName] = useState("");
@@ -1759,6 +1801,11 @@ export function SessionView() {
   const [btwError, setBtwError] = useState("");
   const [btwSubmitting, setBtwSubmitting] = useState(false);
   const [btwCompletedWhileClosed, setBtwCompletedWhileClosed] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [sessionAgents, setSessionAgents] = useState<SessionAgent[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agentsError, setAgentsError] = useState("");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [heavyCommands, setHeavyCommands] = useState<HeavyCommand[]>([]);
   const [heavyCommandsOpen, setHeavyCommandsOpen] = useState(false);
   const [heavyOutputs, setHeavyOutputs] = useState<Record<string, string>>({});
@@ -1855,6 +1902,7 @@ export function SessionView() {
   }, []);
 
   const providerDescriptor = session ? findProvider(providers?.providers, sessionProvider(session)) : null;
+  const nativeAgentsCapable = sessionNativeAgentsCapable(providerDescriptor);
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const inputDeliveryFailure = useMemo(() => inputDeliveryFailureDetail(loadedMessages), [loadedMessages]);
   const inputDeliveryCode = useMemo(() => inputDeliveryFailureCode(loadedMessages), [loadedMessages]);
@@ -2199,6 +2247,39 @@ export function SessionView() {
     setDocumentsOpen(true);
   }
 
+  function openAgentsDrawer(agentId: string | null = null) {
+    setSelectedAgentId(agentId);
+    setAgentsOpen(true);
+    void loadSessionAgents(id);
+  }
+
+  async function loadSessionAgents(targetId = id) {
+    if (!nativeAgentsCapable) return;
+    setAgentsLoading(true);
+    try {
+      const response = await api.listSessionAgents(targetId);
+      if (activeIdRef.current !== targetId) return;
+      setSessionAgents(response.agents);
+      setAgentsError("");
+    } catch (error) {
+      if (activeIdRef.current === targetId) setAgentsError(sessionAgentsErrorMessage(error));
+    } finally {
+      if (activeIdRef.current === targetId) setAgentsLoading(false);
+    }
+  }
+
+  async function stopSessionAgent(agentId: string) {
+    const targetId = id;
+    await api.stopSessionAgent(targetId, agentId);
+    if (activeIdRef.current === targetId) void loadSessionAgents(targetId);
+  }
+
+  function renderOpenAgentLink(message: ChatMessage): ReactNode {
+    if (!nativeAgentsCapable) return null;
+    const agent = agentForToolCall(message, sessionAgents);
+    return agent ? <OpenAgentLink agent={agent} onOpen={openAgentsDrawer} /> : null;
+  }
+
   function renderTranscriptItem(item: CoreTranscriptItem): ReactNode {
     if (item.type === "message") {
       return (
@@ -2221,10 +2302,12 @@ export function SessionView() {
             ) : null
           }
           planOutcome={interactionOutcome(item.message)}
+          agentAction={renderOpenAgentLink(item.message)}
           approvalAction={
             approval?.messageId === item.message.id ? (
               <ApprovalBanner
                 approval={approval}
+                onOpenAgent={nativeAgentsCapable ? openAgentsDrawer : undefined}
                 automationMode={session?.approvalMode ?? "ask"}
                 busy={approvalBusy}
                 disabled={session?.initializing === true}
@@ -2477,8 +2560,28 @@ export function SessionView() {
   }, [connectionEpoch, id]);
 
   useEffect(() => {
+    setSessionAgents([]);
+    setAgentsError("");
+    setAgentsOpen(false);
+    setSelectedAgentId(null);
+  }, [id]);
+
+  useEffect(() => {
+    if (nativeAgentsCapable) void loadSessionAgents(id);
+  }, [connectionEpoch, id, nativeAgentsCapable]);
+
+  useEffect(() => {
     return subscribeSessionEvents((event) => {
       if (event.sessionId !== id) return;
+      if (event.type === "session.agents.updated") {
+        const agents = (event.payload as { agents?: SessionAgent[] } | null)?.agents;
+        if (Array.isArray(agents)) {
+          setSessionAgents(agents);
+          setAgentsError("");
+          setAgentsLoading(false);
+        }
+        return;
+      }
       if (event.type === "btw.started") {
         setBtwExchanges((current) => upsertBtwExchange(current, event.payload as BtwExchange));
         return;
@@ -3577,6 +3680,22 @@ export function SessionView() {
           showCurrentDocuments(name);
         }}
       />
+      {nativeAgentsCapable ? (
+        <AgentsDrawer
+          open={agentsOpen}
+          agents={sessionAgents}
+          loading={agentsLoading}
+          error={agentsError}
+          selectedAgentId={selectedAgentId}
+          onSelectAgent={setSelectedAgentId}
+          onClose={() => setAgentsOpen(false)}
+          loadMessages={(agentId) => api.getSessionAgentMessages(readySession.id, agentId)}
+          onStop={stopSessionAgent}
+          renderMessage={(message) => (
+            <MessageBubble message={message} onOpenDocument={openDocumentReference} />
+          )}
+        />
+      ) : null}
       <ModelSettingsDrawer
         open={modelSettingsOpen}
         title="Session model settings"
@@ -3637,6 +3756,9 @@ export function SessionView() {
             <span className="session-action-label">BTW</span>
             {btwCompletedWhileClosed ? <span className="btw-unread-dot" aria-label="New BTW answer" /> : null}
           </button>
+          {nativeAgentsCapable ? (
+            <AgentsButton open={agentsOpen} runningCount={runningAgentCount(sessionAgents)} onOpen={() => openAgentsDrawer()} />
+          ) : null}
           {readyWorkspace ? (
             <button
               className="git-workspace-chip"
@@ -3873,6 +3995,7 @@ export function SessionView() {
         {approval && !approvalRenderedInline ? (
           <ApprovalBanner
             approval={approval}
+            onOpenAgent={nativeAgentsCapable ? openAgentsDrawer : undefined}
             automationMode={readySession.approvalMode}
             busy={approvalBusy}
             disabled={readySession.initializing === true}
@@ -5495,7 +5618,8 @@ export function ApprovalBanner({
   busy,
   disabled = false,
   error,
-  onDecision
+  onDecision,
+  onOpenAgent
 }: {
   approval: ApprovalRequest;
   automationMode?: ApprovalMode;
@@ -5503,8 +5627,11 @@ export function ApprovalBanner({
   disabled?: boolean;
   error: string;
   onDecision: (decision: ApprovalDecision) => void;
+  onOpenAgent?: (agentId: string) => void;
 }) {
   const subject = approval.command ?? approval.toolName ?? approval.title;
+  const requestedBy = approval.requestedBy ?? null;
+  const requesterName = requestedBy ? requestedBy.label?.trim() || requestedBy.agentId : null;
   return (
     <section className="approval-banner" aria-live="polite">
       <div className="approval-title">
@@ -5512,6 +5639,15 @@ export function ApprovalBanner({
         <div>
           {approval.source === "muxpilot" ? <span className="approval-source">Muxpilot approval</span> : null}
           <strong>{approval.title}</strong>
+          {requestedBy ? (
+            <span className="approval-requested-by">
+              Requested by{" "}
+              {onOpenAgent ? (
+                <button type="button" onClick={() => onOpenAgent(requestedBy.agentId)}>{requesterName}</button>
+              ) : requesterName}{" "}
+              (subagent)
+            </span>
+          ) : null}
           <p>{subject}</p>
         </div>
       </div>
@@ -6155,6 +6291,7 @@ export function MessageBubble({
   planOutcome = null,
   approvalAction = null,
   questionAction = null,
+  agentAction = null,
   onOpenDocument,
   onOpenMenu,
   onOpenImage,
@@ -6166,6 +6303,7 @@ export function MessageBubble({
   planAction?: ReactNode;
   planOutcome?: TranscriptInteractionOutcome | null;
   approvalAction?: ReactNode;
+  agentAction?: ReactNode;
   questionAction?: ReactNode;
   onOpenDocument?: (reference: SessionDocumentReference) => Promise<boolean> | boolean;
   onOpenMenu?: (message: ChatMessage, x: number, y: number) => void;
@@ -6196,6 +6334,7 @@ export function MessageBubble({
         onOpenImage={onOpenImage}
         onOpenImageMenu={onOpenImageMenu}
       />
+      {agentAction}
       {approvalAction}
       {questionAction}
       {!approvalAction && !questionAction && message.type !== "assistant" ? (

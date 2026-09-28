@@ -43,6 +43,20 @@ describe("api client request headers", () => {
     expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/documents/plan%20%231.md", expect.objectContaining({ credentials: "include" }));
   });
 
+  it("lists, reads, and stops encoded native session agent endpoints", async () => {
+    const fetchMock = mockJsonResponse({ agents: [] });
+    await api.listSessionAgents("session #1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/agents", expect.objectContaining({ credentials: "include" }));
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ agent: null, messages: [] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await api.getSessionAgentMessages("session #1", "agent/1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/agents/agent%2F1/messages", expect.objectContaining({ credentials: "include" }));
+
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    await api.stopSessionAgent("session #1", "agent/1");
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/sessions/session%20%231/agents/agent%2F1/stop", expect.objectContaining({ method: "POST", credentials: "include" }));
+  });
+
   it("sends access keys to the operator access endpoint", async () => {
     const fetchMock = mockJsonResponse({ ok: true });
 
