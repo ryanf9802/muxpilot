@@ -26,6 +26,7 @@ If `MUXPILOT_LAN_ENABLED` is false and the app is bound to loopback, local brows
 - `MUXPILOT_DEFAULT_PROVIDER`: provider preselected for new sessions, `codex` (default) or `claude`. A default saved through `PATCH /api/providers/default` is stored in SQLite and takes precedence.
 - `MUXPILOT_CLAUDE_CONFIG_DIR`: Claude Code configuration directory on the host machine. Falls back to `CLAUDE_CONFIG_DIR`, then `$HOME/.claude`. Claude transcripts are read from `projects/<project-slug>/<session-id>.jsonl` below it.
 - `MUXPILOT_CLAUDE_BIN`: Claude Code executable. Defaults to `claude` on the backend's `PATH`.
+- Claude transcripts are also archived under `MUXPILOT_DATA_DIR/claude-archive/`, because Claude Code's own retention sweep (`cleanupPeriodDays`) would otherwise delete transcripts that muxpilot sessions still resume from. No setting is needed, and your Claude Code configuration is not changed. Claude session hosts set `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` so every model gets Claude Code's task checklist tools, which muxpilot renders as checklists.
 - `MUXPILOT_CLAUDE_ALLOW_API_KEY`: set to `1` to pass `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` through to Claude runtimes. By default both are removed so Claude uses the `claude auth login` session.
 
 Provider sign-in is managed outside muxpilot with `codex login` and `claude auth login`. Claude sessions also require `bwrap` and `socat` for Claude Code's sandbox; without them the provider reports `sandbox_unavailable`. See [Setup](setup.md#providers).

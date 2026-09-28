@@ -6,9 +6,11 @@ Agent-managed sessions continuously inherit their direct parent's approval mode.
 
 ## Choosing a Delegation Mechanism
 
-Use the provider's built-in subagents (Codex subagents or Claude's Task tool) for routine bounded delegation, especially standard code-review passes. They run inside the current session and do not create more muxpilot sessions.
+Use the provider's built-in subagents (Codex subagents or Claude's Agent tool) for routine bounded delegation, especially standard code-review passes. They run inside the current session and do not create more muxpilot sessions.
 
 Create a nested muxpilot session only when the operator explicitly requests one or when durable delegated work benefits from independent monitoring, transcript history, documents, and resource isolation.
+
+Claude sessions stay native for delegation. Claude Code runs long-running and parallel work as background subagents, and muxpilot shows them in the session's Agents view, where the operator can follow each subagent's transcript and stop it. Claude sessions are instructed to create a muxpilot child only when the operator explicitly asks for one or the child must run on a different provider. Claude's cross-session messaging (`SendMessage`, `ListAgents`) is also available to Claude sessions without approval.
 
 ## Session Trees in the UI
 
@@ -113,7 +115,7 @@ Documents are copied into an independent scope when a conversation is forked and
 
 ## BTW Side Questions
 
-BTW runs a separate, non-interrupting turn from a fresh snapshot of the main conversation. For Claude, that turn is an unpersisted fork limited to read-only file tools plus staged document writes. Each question is independent and has its own saved answer, progress state, cancellation control, and copy actions. It cannot request interactive input or approvals, and a run is bounded to two minutes.
+BTW runs a separate, non-interrupting turn from a fresh snapshot of the main conversation. For Claude, that turn is an unpersisted fork limited to read-only file tools plus staged document writes. Each question is independent and has its own saved answer, progress state, cancellation control, and copy actions. It cannot request interactive input or approvals.
 
 A BTW request may also create or edit session documents. It works in isolated staging and cannot delete or rename documents or write elsewhere. muxpilot validates the staged diff, waits for a safe boundary, and applies it atomically. If canonical documents changed meanwhile, BTW regenerates once from the latest state and otherwise reports a conflict without overwriting them. The main agent receives an internal notice and remains responsible for reconciling and maintaining canonical documents.
 

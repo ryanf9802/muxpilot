@@ -16,6 +16,16 @@ muxpilot launches new, resumed, and forked sessions as muxpilot-owned user servi
 
 Claude sessions launch only with Claude Code's sandbox enabled; if `bwrap` or `socat` is missing, the provider reports `sandbox_unavailable` and refuses to start Claude sessions rather than run them unsandboxed.
 
+## Claude Transcript Retention
+
+Claude Code deletes session transcripts, subagent transcripts, and tool results older than `cleanupPeriodDays` (30 by default). Any Claude process on the host runs that sweep, including an interactive `claude` started outside muxpilot, so a per-session setting can't protect muxpilot's sessions. muxpilot keeps its own copy instead:
+
+- **Mirroring.** After every Claude turn, on hibernate, at backend startup, and every six hours, muxpilot copies each Claude transcript and its session directory into `<MUXPILOT_DATA_DIR>/claude-archive/<session-id>/`. Transcripts are append-only, so a copy only ever replaces a shorter one.
+- **Restoring.** Before resuming, waking, forking, answering BTW, reviewing an approval, reconciling input, or exporting a Claude session, muxpilot restores a missing or shorter native transcript from the archive.
+- **History.** Parsed transcript history stays in SQLite regardless, so an old session remains readable even before it is restored.
+
+Your Claude Code configuration is never changed.
+
 ## Provider Authentication
 
 Each provider's sign-in is managed by its CLI on the host (`codex login`, `claude auth login`). muxpilot observes the account, re-checks it periodically and when credential files change, and tracks each provider independently. When the account changes, muxpilot holds new sessions and queued input for that provider, restarts its live sessions under the new account at safe boundaries, and releases admission once every affected runtime is reconciled. When the provider signs out, its live sessions stop at a safe boundary and show a sign-in notice; after signing in, the operator resumes each session before sending it more work. Sessions with pending work, gates, or active turns are deferred until they reach a safe boundary.
@@ -57,7 +67,7 @@ Only one queued item is processed at a time. It advances when the runtime report
 Before shutdown, muxpilot records the non-archived sessions expected to remain available. After an unclean restart, stopped or missing services become recovery candidates. Restoring a candidate resumes its exact provider conversation through a new service while retaining muxpilot metadata, documents, and managed Git bindings.
 
 
-Eligible idle Codex and Claude sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
+Eligible idle Codex and Claude sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. For Claude, running background subagents and a pending `ScheduleWakeup` or cron job also block it, because Claude Code only fires schedules while its runtime is alive. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
 
 ## Heavyweight Command Scheduler
 

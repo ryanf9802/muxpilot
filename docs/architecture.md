@@ -26,13 +26,25 @@ This iteration supports a local session host only: runtime services, provider fi
 
 Provider/thread identity, reconciled provider protocol state (Codex app-server or Claude host), and the muxpilot-owned systemd unit and socket are authoritative for live sessions.
 
-Provider JSONL files are the durable transcript source because they contain structured user, assistant, and tool events: Codex writes them under `~/.codex/sessions`, and Claude Code writes them to `<CLAUDE_CONFIG_DIR>/projects/<project-slug>/<session-id>.jsonl`.
+Provider JSONL files are the durable transcript source because they contain structured user, assistant, and tool events: Codex writes them under `~/.codex/sessions`, and Claude Code writes them to `<CLAUDE_CONFIG_DIR>/projects/<project-slug>/<session-id>.jsonl`, with each session's subagent transcripts and tool results under `<session-id>/`. Claude Code deletes these after its `cleanupPeriodDays` (30 days by default), and any Claude process on the host does the sweep. So muxpilot mirrors every Claude transcript and its session directory into `<MUXPILOT_DATA_DIR>/claude-archive/<session-id>/` and restores missing copies before resuming, forking, answering BTW, reviewing approvals, reconciling input, or exporting a session.
 
 SQLite stores application state: managed-session metadata, parsed messages, parser offsets, prompt search, queued inputs and delivery state, BTW exchanges, orchestration waits and ownership, dashboard settings, notifications, recovery incidents, Git workspace bindings, and audit records. WebSocket events are published live and are not retained as the source of truth.
 
 Session documents, Git worktrees, runtime logs, heavyweight-command logs, and transfer staging are filesystem state with their own bounded roots. They are not stored in SQLite or the web bundle.
 
 Managed Git sessions store the repository entry point, current existing local target branch, dependency link candidates, skill-owned status path, control/worktree roots, and a private broker capability. The launch-time target is an initial fallback; a guard-confirmed agent retarget is persisted through the status file and observed by the backend.
+
+## Native Versus muxpilot-Owned Features
+
+For Claude sessions, muxpilot drives Claude Code's native features and makes them visible instead of re-implementing them:
+
+| Owner | Features |
+| --- | --- |
+| Claude Code, passed through | Subagents and background agents, workflows, compaction, memory, hooks, plugins, skills and slash commands, output styles, user permission rules, the sandbox, task checklists, cross-session messaging, scheduled wakeups and cron jobs, self-entered plan mode, the auto-approval classifier |
+| Claude Code engine with a muxpilot view | The Agents view (status, transcript, stop), approvals naming the requesting subagent, plan-mode state |
+| muxpilot | Documents, database history and the transcript archive, BTW, approval routing and notifications, usage dashboards, transfer, Git workflow and heavyweight queue, hibernation and resource scopes, child sessions (on explicit request or for a different provider) |
+
+Claude Code's worktree tools, remote triggers, and push notifications stay disabled, because muxpilot's Git workflow and notification routing own those jobs.
 
 ## Components
 
@@ -43,6 +55,10 @@ Managed Git sessions store the repository entry point, current existing local ta
 - Approval reviewer: evaluates Auto-mode runtime requests with the session's provider in an isolated context, a read-only Codex thread or a tool-less Claude query, and returns structured decisions or escalations.
 - Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
 - Claude driver and session host: each Claude session runs a muxpilot host process as a muxpilot-owned user service. The host holds one streaming Claude Agent SDK query, speaks JSON-RPC to the backend over a private Unix socket, applies muxpilot's tool permission policy, and holds interactive requests while the backend is disconnected. Claude Code's sandbox (bubblewrap and socat) is mandatory; without it the provider reports `sandbox_unavailable`.
+  - The host maps muxpilot's modes to Claude permission modes. Normal is `acceptEdits`, Plan is `plan`, and Normal with Auto approval is Claude's native `auto` classifier, falling back to `acceptEdits` plus muxpilot's reviewer. It reports mode changes Claude makes itself.
+  - It tracks Claude Code's tasks (subagents, background shells, monitors, workflows) from `task_*` events, with progress summaries, and pushes `agents/changed`.
+  - It tracks pending `ScheduleWakeup` and cron jobs, which block hibernation.
+  - Session routes `GET /api/sessions/:id/agents`, `GET /api/sessions/:id/agents/:agentId/messages` (read from the subagent's own transcript), and `POST /api/sessions/:id/agents/:agentId/stop` back the Agents view.
 - Provider authentication lifecycle: observes each provider's CLI-managed login (`codex login`, `claude auth login`) and credential files independently, holds session admission during an account change, and suspends or restarts that provider's live sessions at safe boundaries.
 - Transcript parsers: map Codex or Claude JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
 - Database adapter: local SQLite via `node:sqlite`, isolated so libSQL/Turso can be added later.

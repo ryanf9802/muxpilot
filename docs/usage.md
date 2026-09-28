@@ -39,10 +39,21 @@ The session view also provides:
 - Context-window use, managed Git state, documents, BTW side questions, and active heavyweight-command details
 - A copyable local runtime attachment command for Codex sessions
 - Interrupt, fork, new-session, and kill actions
+- For Claude sessions, an **Agents** view of the subagents and background tasks Claude Code is running
 
 The permissions selector in the session model-settings drawer is stored per root session and always starts at **Ask for approval**. Agent-managed child sessions continuously inherit their parent's setting; their selector shows the effective mode but cannot be changed independently. Detaching a child resets its mode to Ask. **Auto approval** uses the provider's app-wide reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure each provider's Auto reviewer model and reasoning effort with the reviewer apply action in the dashboard's model-defaults drawer; the Claude reviewer defaults to `haiku`.
 
-Claude sessions always run inside Claude Code's sandbox. Reads, sandboxed commands, and file edits inside the session's writable roots proceed without a prompt. A command that asks to run outside the sandbox, an edit outside the writable roots, and other tool use become approval requests handled by the selected permissions mode.
+For Claude sessions, muxpilot's modes map onto Claude Code's own permission modes:
+
+| muxpilot | Claude Code |
+| --- | --- |
+| Normal, with Ask or Full approval | `acceptEdits`: file edits in the session's writable roots apply without a prompt |
+| Normal, with Auto approval | `auto`: Claude Code's own classifier approves or denies permission prompts |
+| Plan | `plan` |
+
+If Claude Code's auto mode isn't available for the signed-in account or model, the session falls back to `acceptEdits`. A transcript notice says so, and muxpilot's Auto reviewer handles the remaining prompts instead. Claude can also enter plan mode on its own; muxpilot's Plan toggle follows it.
+
+Claude sessions always run inside Claude Code's sandbox. Reads and sandboxed commands proceed without a prompt. A command that asks to run outside the sandbox, an edit outside the writable roots, and other tool use become approval requests handled by the selected permissions mode. An approval raised inside a subagent names the subagent that asked.
 
 User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.
 
@@ -62,6 +73,8 @@ Directory suggestions come from active sessions and recently touched repositorie
 The provider choice shows each provider's readiness and skips providers that cannot start sessions; a signed-out provider shows the host login command. The initial choice is the current session's provider, then the last provider used, then the server default. Muxpilot creates and owns a user service and Unix socket for each live session: a Codex app-server for Codex, or a muxpilot Claude session host for Claude.
 
 Some features are provider-specific. Claude sessions do not support terminal attachment, Codex thread goals, or usage-reset tokens. Claude skills are invoked with `/name` at the start of a message rather than `$name`.
+
+For Claude, muxpilot passes through what Claude Code already does natively rather than re-implementing it: subagents and background agents, workflows, compaction, memory (`CLAUDE.md` and auto memory), hooks, plugins, skills and slash commands, task checklists, cross-session messaging, and scheduled wakeups (`/loop`, `ScheduleWakeup`, and cron jobs). A pending wakeup or cron job keeps the session from hibernating, because those only fire while the Claude runtime is alive. Claude Code's own worktree tools stay disabled because muxpilot's Git workflow manages worktrees.
 
 ### Managed Git sessions
 
@@ -130,7 +143,9 @@ A fork receives an independent snapshot of the source session's documents. A for
 
 Routine bounded delegation, including standard code-review passes, uses the provider's built-in subagents and does not create nested muxpilot sessions. If built-in subagents are unavailable, the review remains in the current session.
 
-Nested muxpilot sessions are reserved for work the operator explicitly requests as a separate session or durable delegated work that benefits from independent monitoring and its own resource scope. Those sessions remain visible in muxpilot and use the session-orchestration lifecycle and resource guardrails.
+Claude sessions prefer Claude Code's native subagents even for long-running or parallel work. The session's **Agents** view lists the subagents, background shells, monitors, and workflows Claude Code is running or has run. Each entry shows its status, type, progress summary, last tool, and token use. Open a subagent to read its own transcript, which refreshes while it runs, or stop it. A Task tool row in the main transcript links to the subagent it started. Subagent transcripts are kept in muxpilot's transcript archive with the rest of the session, so they stay readable after Claude Code's retention sweep.
+
+Nested muxpilot sessions are reserved for work the operator explicitly requests as a separate session or durable delegated work that benefits from independent monitoring and its own resource scope. From a Claude session, that means an explicit request or a child on a different provider. Those sessions remain visible in muxpilot and use the session-orchestration lifecycle and resource guardrails.
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
