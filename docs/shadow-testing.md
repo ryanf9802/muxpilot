@@ -39,7 +39,7 @@ Create new sessions in the shadow UI. Do not copy the production database, resto
 
 The harness isolates muxpilot-owned state; it does not make an arbitrary working directory read-only. A directory-mode session pointed at `../teamweave` will intentionally edit that real checkout and trigger its HMR. Use a scratch checkout or a managed Git session when the codebase must also remain isolated.
 
-`pnpm app stop shadow` stops the shadow supervisor and only systemd units proven by metadata inside the shadow data tree. It preserves the shadow database and evidence so restart/recovery tests can continue later. It does not stop production or delete shadow data.
+`pnpm app stop shadow` stops the shadow supervisor and only systemd units proven to be shadow-owned. A session unit qualifies when the shadow data tree holds its state directory and its environment marker, written beside the session socket under `$XDG_RUNTIME_DIR/muxpilot/`, records `MUXPILOT_SHADOW="1"`; a heavyweight unit qualifies through its queue metadata in the shadow data tree. It preserves the shadow database and evidence so restart/recovery tests can continue later. It does not stop production or delete shadow data.
 
 Resource governance and systemd-scoped child/heavy orchestration can be enabled for tests that need them:
 
@@ -62,4 +62,4 @@ Use newly created shadow sessions for each check:
 7. Restart only the shadow backend with `pnpm app restart shadow`; verify session recovery, pending gates, failed-input handling, and hibernate/wake.
 8. Export and import a disposable shadow session, then verify transfer mappings without involving an active production thread.
 9. Compare memory for warm-idle, hibernated, active, background-terminal, and several concurrent shadow app-server sessions.
-10. Run `pnpm app stop shadow`, confirm `pnpm app status prod` is unchanged, and verify no shadow-owned app-server or heavy unit remains active.
+10. Run `pnpm app stop shadow`, confirm `pnpm app status prod` is unchanged, and verify no shadow-owned app-server, Claude host, or heavy unit remains active.

@@ -232,9 +232,38 @@ describe("shadow lifecycle isolation", () => {
     await writeFile(join(outside, "environment"), 'MUXPILOT_SHADOW="1"\n');
     await symlink(outside, join(appRoot, "fedcba9876543210fedcba98"));
 
-    expect(shadowOwnedSystemdUnits(dataDir)).toEqual([
+    expect(shadowOwnedSystemdUnits(dataDir, null)).toEqual([
       "muxpilot-heavy-workspace-0123456789ab-abcdef.service",
       `muxpilot-session-${markedId}.service`,
+      `muxpilot-session-${claudeId}.service`
+    ]);
+  });
+
+  it("reads shadow markers beside session sockets in the runtime directory", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "muxpilot-shadow-data-"));
+    const runtimeDir = await mkdtemp(join(tmpdir(), "muxpilot-shadow-runtime-"));
+    const codexId = "0123456789abcdef01234567";
+    const claudeId = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    const productionId = "bbbbbbbbbbbbbbbbbbbbbbbb";
+    const unmarkedId = "cccccccccccccccccccccccc";
+    // State directories under the shadow data dir prove which sessions this checkout launched.
+    await mkdir(join(dataDir, "runtime", "app-server-sessions", codexId), { recursive: true });
+    await mkdir(join(dataDir, "runtime", "claude-sessions", claudeId), { recursive: true });
+    await mkdir(join(dataDir, "runtime", "claude-sessions", unmarkedId), { recursive: true });
+    await writeFile(join(dataDir, "runtime", "claude-sessions", claudeId, "host-state.json"), "{}");
+    // Runtimes write their environment marker beside the socket.
+    const marker = async (kind: string, id: string, value: string) => {
+      await mkdir(join(runtimeDir, "muxpilot", kind, id), { recursive: true });
+      await writeFile(join(runtimeDir, "muxpilot", kind, id, "environment"), `CODEX_HOME="/tmp/codex"\nMUXPILOT_SHADOW="${value}"\n`);
+    };
+    await marker("app-server-sessions", codexId, "1");
+    await marker("claude-sessions", claudeId, "1");
+    await marker("claude-sessions", unmarkedId, "0");
+    // A production session shares the runtime directory but has no state under the shadow data dir.
+    await marker("claude-sessions", productionId, "1");
+
+    expect(shadowOwnedSystemdUnits(dataDir, runtimeDir)).toEqual([
+      `muxpilot-session-${codexId}.service`,
       `muxpilot-session-${claudeId}.service`
     ]);
   });

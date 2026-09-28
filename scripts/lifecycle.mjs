@@ -1022,17 +1022,24 @@ function applyShadowIsolation(config) {
   applyRuntimeDefaults(config);
 }
 
-export function shadowOwnedSystemdUnits(dataDir) {
+/**
+ * Session units owned by the shadow data directory. A session's state directory under the shadow data dir proves the
+ * shadow checkout launched it; its `environment` marker (written beside the session socket under
+ * `$XDG_RUNTIME_DIR/muxpilot/<kind>/<id>/`, or in the state directory by older layouts) proves it runs as shadow.
+ */
+export function shadowOwnedSystemdUnits(dataDir, runtimeDir = defaultRuntimeDir()) {
   const root = resolve(dataDir);
   const units = new Set();
   for (const sessionRoot of ["app-server-sessions", "claude-sessions"]) {
-    const runtimeRoot = join(root, "runtime", sessionRoot);
-    for (const capabilityId of safeReadDir(runtimeRoot)) {
+    const stateRoot = join(root, "runtime", sessionRoot);
+    const socketRoot = runtimeDir ? join(resolve(runtimeDir), "muxpilot", sessionRoot) : null;
+    for (const capabilityId of safeReadDir(stateRoot)) {
       if (!APP_SERVER_CAPABILITY_ID.test(capabilityId)) continue;
-      const runtimeDir = join(runtimeRoot, capabilityId);
-      if (!safeDirectory(runtimeDir)) continue;
-      const marker = safeRegularFile(join(runtimeDir, "environment"));
-      if (!marker.split(/\r?\n/).includes('MUXPILOT_SHADOW="1"')) continue;
+      const stateDir = join(stateRoot, capabilityId);
+      if (!safeDirectory(stateDir)) continue;
+      const markers = [join(stateDir, "environment")];
+      if (socketRoot && safeDirectory(join(socketRoot, capabilityId))) markers.push(join(socketRoot, capabilityId, "environment"));
+      if (!markers.some((path) => safeRegularFile(path).split(/\r?\n/).includes('MUXPILOT_SHADOW="1"'))) continue;
       units.add(`muxpilot-session-${capabilityId}.service`);
     }
   }
@@ -1051,6 +1058,11 @@ export function shadowOwnedSystemdUnits(dataDir) {
     }
   }
   return [...units].sort();
+}
+
+function defaultRuntimeDir() {
+  if (process.env.XDG_RUNTIME_DIR) return process.env.XDG_RUNTIME_DIR;
+  return typeof process.getuid === "function" ? `/run/user/${process.getuid()}` : null;
 }
 
 function stopShadowSystemdUnits(dataDir) {
