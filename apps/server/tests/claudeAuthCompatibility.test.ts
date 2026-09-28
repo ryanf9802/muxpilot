@@ -51,6 +51,20 @@ describe("ClaudeAuthObserver", () => {
     expect(await principal({ ...SIGNED_IN, apiProvider: "bedrock" })).not.toBe(base);
   });
 
+  it("re-reads an OAuth login that transiently reports no account identity", async () => {
+    const statuses = [{ loggedIn: true, authMethod: "claude.ai" }, { loggedIn: true, authMethod: "claude.ai" }, SIGNED_IN];
+    const run = vi.fn(async () => JSON.stringify(statuses.shift() ?? SIGNED_IN));
+    const sleep = vi.fn(async () => undefined);
+    const observation = await new ClaudeAuthObserver("/c", run, sleep).observe();
+    expect(run).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(observation.principal).toBe((await new ClaudeAuthObserver("/c", runner(SIGNED_IN)).observe()).principal);
+    // API-key logins legitimately have no account identity and are not re-read.
+    const apiKey = runner({ loggedIn: true, authMethod: "api_key" });
+    await new ClaudeAuthObserver("/c", apiKey, sleep).observe();
+    expect(apiKey).toHaveBeenCalledTimes(1);
+  });
+
   it("fails when the CLI output is not JSON", async () => {
     await expect(new ClaudeAuthObserver("/c", async () => "not json").observe()).rejects.toThrow();
   });

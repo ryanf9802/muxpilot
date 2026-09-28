@@ -13,6 +13,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const STATUS_TIMEOUT_MS = 15_000;
+const IDENTITY_RETRY_DELAYS_MS = [250, 750, 1_500];
 
 export type ClaudeCommandRunner = (args: string[]) => Promise<string>;
 
@@ -27,13 +28,21 @@ export class ClaudeAuthObserver implements ProviderAuthObserver {
 
   constructor(
     configDir: string,
-    private readonly run: ClaudeCommandRunner
+    private readonly run: ClaudeCommandRunner,
+    private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
   ) {
     this.credentialWatch = { directory: configDir, filenames: [".credentials.json", ".claude.json"] };
   }
 
   async observe(): Promise<ProviderAuthObservation> {
-    const status = JSON.parse(await this.run(["auth", "status", "--json"])) as Record<string, unknown>;
+    let status = await this.status();
+    // Claude Code rewrites its account file often; a read that races a rewrite reports an OAuth login without
+    // its account. Re-read before fingerprinting so a transient gap never looks like an account change.
+    for (const delay of IDENTITY_RETRY_DELAYS_MS) {
+      if (!missingOAuthIdentity(status)) break;
+      await this.sleep(delay);
+      status = await this.status();
+    }
     if (status.loggedIn !== true) {
       return {
         status: "signed_out",
@@ -59,6 +68,10 @@ export class ClaudeAuthObserver implements ProviderAuthObserver {
       ]),
       error: null
     };
+  }
+
+  private async status(): Promise<Record<string, unknown>> {
+    return JSON.parse(await this.run(["auth", "status", "--json"])) as Record<string, unknown>;
   }
 
   isAuthenticationError(message: string): boolean {
@@ -97,6 +110,13 @@ export function claudeCommandRunner(claudePath: string, environment: Record<stri
     });
     return stdout;
   };
+}
+
+function missingOAuthIdentity(status: Record<string, unknown>): boolean {
+  return status.loggedIn === true
+    && stringValue(status.authMethod) === "claude.ai"
+    && !stringValue(status.email)
+    && !stringValue(status.orgId);
 }
 
 function fingerprint(parts: string[]): string {

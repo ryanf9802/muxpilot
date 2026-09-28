@@ -38,6 +38,8 @@ export interface ClaudeControlOptions {
   logger?: Pick<Logger, "warn" | "debug">;
 }
 
+class ControlSessionReplacedError extends Error {}
+
 /**
  * An idle Claude SDK session used only for control requests (account, models, plan usage). No user message is
  * ever sent, so it makes no model calls and persists no transcript.
@@ -50,6 +52,16 @@ export class ClaudeControlClient {
   constructor(private readonly options: ClaudeControlOptions) {}
 
   async run<T>(operation: (query: Query) => Promise<T>): Promise<T> {
+    try {
+      return await this.runOnce(operation);
+    } catch (error) {
+      if (!(error instanceof ControlSessionReplacedError)) throw error;
+      // An account change restarted the control session mid-request; ask the new session once.
+      return (await this.runOnce(operation, false));
+    }
+  }
+
+  private async runOnce<T>(operation: (query: Query) => Promise<T>, retryable = true): Promise<T> {
     const query = await this.ensureQuery();
     this.touch();
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -61,6 +73,10 @@ export class ClaudeControlClient {
         })
       ]);
     } catch (error) {
+      if (this.query !== query) {
+        if (retryable) throw new ControlSessionReplacedError();
+        throw error;
+      }
       this.stop();
       throw error;
     } finally {

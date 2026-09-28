@@ -159,6 +159,25 @@ describe("ClaudeControlClient", () => {
   });
 });
 
+describe("ClaudeControlClient invalidation", () => {
+  it("retries once on a fresh session when an invalidation closes the query mid-request", async () => {
+    const queries = fakeQueryFactory();
+    const client = new ClaudeControlClient({ claudePath: "/usr/bin/claude", configDir: "/cfg", environment: {}, workDir: join(tempDir(), "control"), queryFactory: queries.factory });
+    let calls = 0;
+    const result = client.run(async () => {
+      calls += 1;
+      if (calls === 1) {
+        client.invalidate();
+        throw new Error("Query closed before response received");
+      }
+      return "fresh";
+    });
+    await expect(result).resolves.toBe("fresh");
+    expect(queries.queries).toHaveLength(2);
+    client.stop();
+  });
+});
+
 describe("ClaudeModelsService", () => {
   it("maps supported models and falls back to an empty catalog", async () => {
     const service = new ClaudeModelsService(fakeControl({
