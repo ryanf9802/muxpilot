@@ -16,6 +16,7 @@ import { openUnixJsonLineConnection } from "../../runtime/unixJsonLineConnection
 import { ProjectionReconciler } from "../shared/projectionReconciler.js";
 import type { AgentProvider, AgentSessionDriver, AgentSessionLaunchOptions, ProviderTranscriptSource } from "../types.js";
 import { ClaudeApprovalReviewer } from "./approvalReviewer.js";
+import { eventId } from "../../utils/ids.js";
 import { ClaudeBtwEngine } from "./btw.js";
 import { ClaudeTranscriptArchive } from "./transcriptArchive.js";
 import { ClaudeAuthLifecycle, claudeCommandRunner } from "./auth.js";
@@ -45,7 +46,8 @@ export const CLAUDE_CAPABILITIES: ProviderCapabilities = {
   backgroundTerminals: true,
   transcriptTransfer: true,
   imageInput: true,
-  rawTranscriptEvidence: true
+  rawTranscriptEvidence: true,
+  nativeAgents: true
 };
 
 export function claudeTranscripts(configDir: string, archive?: ClaudeTranscriptArchive): ProviderTranscriptSource {
@@ -191,6 +193,13 @@ function createClaudeDriver(options: ClaudeProviderOptions, context: ClaudeDrive
     eventSink: reconciler,
     onRateLimit: context.onRateLimit,
     archive: context.archive,
+    onAgentsChanged: (sessionId, agents) => options.events.publish({
+      id: eventId(),
+      type: "session.agents.updated",
+      sessionId,
+      payload: { agents },
+      timestamp: new Date().toISOString()
+    }),
     clientVersion: options.clientVersion,
     journalFor: (sessionId) => {
       const existing = journals.get(sessionId);
@@ -267,7 +276,13 @@ export function adaptInstructionsForClaude(text: string): string {
   return text
     .replace(/\$(muxpilot-[a-z0-9-]+)/g, "the $1 skill")
     .replace(/\$skill-name/g, "/skill-name")
-    .replace(/built-in Codex subagents/g, "Claude's built-in subagents (the Task tool)")
+    .replace(/built-in Codex subagents/g, "Claude's built-in subagents (the Agent tool)")
+    // Claude Code runs durable and parallel work natively as background subagents, which muxpilot shows in its
+    // Agents view; nested muxpilot sessions are only for explicit operator requests.
+    .replace(
+      /the work is durable and benefits from independent monitoring and its own resource scope/g,
+      "a child must run on a different provider. Run long-running or parallel work as Claude background subagents instead; the operator watches and stops them in muxpilot's Agents view"
+    )
     .replace(/Codex subagents/g, "Claude subagents")
     .replace(/Codex file evidence/g, "Claude transcript evidence");
 }

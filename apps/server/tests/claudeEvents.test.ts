@@ -325,6 +325,17 @@ describe("projectClaudeEvent", () => {
     expect(projectClaudeEvent({ method: "plan/proposed", params: { threadId: THREAD, itemId: "x", plan: "  " } }, AT)).toBeNull();
   });
 
+  it("names the subagent that requested an approval", () => {
+    const params = {
+      threadId: THREAD, turnId: "turn-1", itemId: "tu-2", toolName: "Bash", category: "command", title: "Run rm", command: "rm x",
+      cwd: "/repo", reason: null, prefixRule: null, agentId: "agent-a", agentLabel: "Clean build output", input: {}
+    };
+    const projection = projectClaudeEvent({ method: "claude/approval", params: { requestId: "req:tu-2", params, openedAt: AT } }, AT);
+    expect(projection?.message?.payload?.approval).toMatchObject({ requestedBy: { agentId: "agent-a", label: "Clean build output" } });
+    const main = projectClaudeEvent({ method: "claude/approval", params: { requestId: "req:tu-3", params: { ...params, itemId: "tu-3", agentId: null }, openedAt: AT } }, AT);
+    expect(main?.message?.payload?.approval).not.toHaveProperty("requestedBy");
+  });
+
   it("projects approval requests with scope options", () => {
     const params = {
       threadId: THREAD,

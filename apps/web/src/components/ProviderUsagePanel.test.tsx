@@ -418,7 +418,7 @@ function claudeDescriptor(status: ProviderDescriptor["auth"]["status"]): Provide
     capabilities: {
       fastMode: false, reasoningEffort: true, planMode: true, steer: true, fork: true, btw: true, approvalReview: false, hibernate: true,
       terminalAttach: false, resetCredits: false, tokenUsageHistory: true, usageLimits: true, goals: false, backgroundTerminals: false,
-      transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true
+      transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true, nativeAgents: true
     },
     auth: { provider: "claude", status, account: null, revision: 1, observedAt: "2026-09-09T12:00:00.000Z", error: null, admissionHeld: false, pendingSessionIds: [] },
     skillInvocation: { prefix: "/", position: "start" },

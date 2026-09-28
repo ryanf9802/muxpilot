@@ -36,7 +36,8 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = {
   backgroundTerminals: true,
   transcriptTransfer: true,
   imageInput: true,
-  rawTranscriptEvidence: true
+  rawTranscriptEvidence: true,
+  nativeAgents: false
 };
 
 export const CODEX_DEFAULT_REVIEWER: ApprovalReviewerSettings = { model: "gpt-5.6-luna", reasoningEffort: "low" };

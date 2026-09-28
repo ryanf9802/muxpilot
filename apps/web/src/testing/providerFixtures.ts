@@ -4,12 +4,12 @@ const capabilities: Record<AgentProviderKind, ProviderCapabilities> = {
   codex: {
     fastMode: true, reasoningEffort: true, planMode: true, steer: true, fork: true, btw: true, approvalReview: true, hibernate: true,
     terminalAttach: true, resetCredits: true, tokenUsageHistory: true, usageLimits: true, goals: true, backgroundTerminals: true,
-    transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true
+    transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true, nativeAgents: false
   },
   claude: {
     fastMode: true, reasoningEffort: true, planMode: true, steer: true, fork: true, btw: true, approvalReview: false, hibernate: true,
     terminalAttach: false, resetCredits: false, tokenUsageHistory: true, usageLimits: true, goals: false, backgroundTerminals: false,
-    transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true
+    transcriptTransfer: true, imageInput: true, rawTranscriptEvidence: true, nativeAgents: true
   }
 };
 

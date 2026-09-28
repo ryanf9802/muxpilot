@@ -21,6 +21,7 @@ import {
   claudeProjectSlug,
   HOST_ERROR,
   HOST_NOTIFICATION,
+  type HostAgent,
   type HostApprovalMode,
   type HostApprovalParams,
   type HostApprovalResponse,
@@ -69,6 +70,7 @@ export interface PersistedHostState {
   activeTurn: HostTurn | null;
   latestTurn: HostTurn | null;
   inputs: Array<{ clientMessageId: string; messageUuid: string; turnId: string }>;
+  agents?: HostAgent[];
 }
 
 interface ActiveTurnState {
@@ -92,6 +94,7 @@ interface PendingRequestEntry extends HostPendingRequest {
 
 const MAX_REMEMBERED_INPUTS = 500;
 const MAX_REMEMBERED_TOOL_USES = 2_000;
+const MAX_REMEMBERED_AGENTS = 200;
 const STREAM_NOTIFICATION_INTERVAL_MS = 750;
 /** A wakeup is considered fired once an autonomous turn starts near its due time; stale ones expire. */
 const WAKEUP_GRACE_MS = 5 * 60_000;
@@ -112,7 +115,7 @@ export class HostSession {
   private latestTurn: HostTurn | null = null;
   private readonly pending = new Map<string, PendingRequestEntry>();
   private readonly inputs = new Map<string, { messageUuid: string; turnId: string }>();
-  private readonly backgroundTasks = new Map<string, HostBackgroundTask>();
+  private readonly agents = new Map<string, HostAgent>();
   /** Tool calls by id, so tool results can be classified without re-reading the transcript. */
   private readonly toolUses = new Map<string, { name: string; input: unknown }>();
   private readonly tasks: ClaudeTaskState = new Map();
@@ -150,6 +153,10 @@ export class HostSession {
       ? { ...state.activeTurn, status: "interrupted" }
       : state.latestTurn;
     for (const input of state.inputs) this.inputs.set(input.clientMessageId, { messageUuid: input.messageUuid, turnId: input.turnId });
+    // Tasks die with the Claude process that ran them.
+    for (const agent of state.agents ?? []) {
+      this.agents.set(agent.taskId, agent.status === "running" || agent.status === "paused" ? { ...agent, status: "stopped" } : agent);
+    }
   }
 
   isOpen(): boolean {
@@ -166,7 +173,8 @@ export class HostSession {
       activeTurn: this.active ? { ...this.active.turn } : null,
       latestTurn: this.latestTurn ? { ...this.latestTurn } : null,
       pendingRequests: [...this.pending.values()].map(({ requestId, method, params, openedAt }) => ({ requestId, method, params, openedAt })),
-      backgroundTasks: [...this.backgroundTasks.values()],
+      backgroundTasks: this.listTasks(),
+      agents: this.listAgents(),
       permissionMode: this.permissionMode,
       effectivePermissionMode: this.effectiveMode,
       approvalMode: this.approvalMode,
@@ -319,8 +327,15 @@ export class HostSession {
     await this.requireQuery().stopTask(taskId);
   }
 
+  /** Running, non-ambient tasks: the work that keeps the runtime from hibernating. */
   listTasks(): HostBackgroundTask[] {
-    return [...this.backgroundTasks.values()];
+    return [...this.agents.values()]
+      .filter((agent) => (agent.status === "running" || agent.status === "paused") && !agent.ambient)
+      .map((agent) => ({ taskId: agent.taskId, toolUseId: agent.toolUseId, turnId: null, description: agent.description }));
+  }
+
+  listAgents(): HostAgent[] {
+    return [...this.agents.values()].map((agent) => ({ ...agent }));
   }
 
   async contextUsage(): Promise<unknown> {
@@ -353,6 +368,8 @@ export class HostSession {
       permissionMode: this.effectiveMode,
       settingSources: launch.settingSources,
       includePartialMessages: true,
+      // One-line summaries for the Agents view, the same ones the Claude Code CLI shows in its task panel.
+      agentProgressSummaries: true,
       thinking: { type: "adaptive", display: "summarized" },
       additionalDirectories: launch.writableRoots,
       disallowedTools: [...DISALLOWED_TOOLS],
@@ -467,16 +484,7 @@ export class HostSession {
     }
     if (message.type === "system") {
       if (message.subtype === "status" && message.permissionMode) this.observePermissionMode(message.permissionMode);
-      if (message.subtype === "task_started") {
-        this.backgroundTasks.set(message.task_id, {
-          taskId: message.task_id,
-          toolUseId: message.tool_use_id ?? null,
-          turnId,
-          description: message.description
-        });
-      } else if (message.subtype === "task_notification") {
-        this.backgroundTasks.delete(message.task_id);
-      }
+      if (message.subtype.startsWith("task_")) this.observeTask(message);
     }
     if (message.type === "assistant") this.rememberToolUses(message);
     if (message.type === "user") {
@@ -626,6 +634,8 @@ export class HostSession {
       cwd: this.cwd,
       reason: decision.reason,
       prefixRule: decision.prefixRule,
+      agentId: options.agentID ?? null,
+      agentLabel: options.agentID ? this.agents.get(options.agentID)?.description ?? null : null,
       input: toolInput
     };
     const response = await this.openRequest("claude/approval", params, toolName, toolInput, options.signal) as HostApprovalResponse;
@@ -638,6 +648,83 @@ export class HostSession {
       updatedPermissions: approvalPermissionUpdates(toolName, toolInput, response, decision.prefixRule) as never
     } satisfies PermissionResult;
   };
+
+  /** Folds Claude Code's task lifecycle events into the agent list the Agents view shows. */
+  private observeTask(message: Extract<SDKMessage, { type: "system" }>): void {
+    const event = message as unknown as Record<string, unknown>;
+    const taskId = typeof event.task_id === "string" ? event.task_id : null;
+    if (!taskId) return;
+    const nowIso = this.now().toISOString();
+    const current = this.agents.get(taskId);
+    const usage = taskUsage(event.usage) ?? current?.usage ?? null;
+    let next: HostAgent | null = null;
+    if (event.subtype === "task_started") {
+      next = {
+        taskId,
+        toolUseId: stringField(event.tool_use_id),
+        taskType: stringField(event.task_type),
+        subagentType: stringField(event.subagent_type),
+        description: stringField(event.description) ?? stringField(event.workflow_name) ?? "Task",
+        status: "running",
+        backgrounded: event.is_backgrounded === true,
+        depth: typeof event.spawn_depth === "number" ? event.spawn_depth : null,
+        lastToolName: null,
+        summary: null,
+        error: null,
+        usage: null,
+        ambient: event.ambient === true || event.skip_transcript === true,
+        startedAt: nowIso,
+        updatedAt: nowIso
+      };
+    } else if (current && event.subtype === "task_progress") {
+      next = {
+        ...current,
+        usage,
+        lastToolName: stringField(event.last_tool_name) ?? current.lastToolName,
+        summary: stringField(event.summary) ?? current.summary,
+        updatedAt: nowIso
+      };
+    } else if (current && event.subtype === "task_updated") {
+      const patch = (event.patch ?? {}) as Record<string, unknown>;
+      next = {
+        ...current,
+        status: taskStatus(patch.status) ?? current.status,
+        description: stringField(patch.description) ?? current.description,
+        backgrounded: typeof patch.is_backgrounded === "boolean" ? patch.is_backgrounded : current.backgrounded,
+        error: stringField(patch.error) ?? current.error,
+        updatedAt: nowIso
+      };
+    } else if (event.subtype === "task_notification") {
+      const base: HostAgent = current ?? {
+        taskId,
+        toolUseId: stringField(event.tool_use_id),
+        taskType: null,
+        subagentType: null,
+        description: "Task",
+        status: "running",
+        backgrounded: true,
+        depth: null,
+        lastToolName: null,
+        summary: null,
+        error: null,
+        usage: null,
+        ambient: event.ambient === true,
+        startedAt: nowIso,
+        updatedAt: nowIso
+      };
+      next = { ...base, status: taskStatus(event.status) ?? "completed", summary: stringField(event.summary) ?? base.summary, usage, updatedAt: nowIso };
+    }
+    if (!next) return;
+    this.agents.delete(taskId);
+    this.agents.set(taskId, next);
+    while (this.agents.size > MAX_REMEMBERED_AGENTS) {
+      const oldest = this.agents.keys().next().value;
+      if (oldest === undefined) break;
+      this.agents.delete(oldest);
+    }
+    this.options.notify(HOST_NOTIFICATION.agentsChanged, { threadId: this.sessionIdValue, agents: this.listAgents() });
+    if (event.subtype !== "task_progress") void this.persist();
+  }
 
   /**
    * muxpilot's (mode, approval) pair decides Claude's permission mode: Plan is plan, Normal is acceptEdits, and
@@ -857,7 +944,8 @@ export class HostSession {
       launch: this.launch,
       activeTurn: this.active ? { ...this.active.turn } : null,
       latestTurn: this.latestTurn,
-      inputs: [...this.inputs].map(([clientMessageId, value]) => ({ clientMessageId, ...value }))
+      inputs: [...this.inputs].map(([clientMessageId, value]) => ({ clientMessageId, ...value })),
+      agents: this.listAgents()
     }).catch((error) => this.options.log?.("persist state failed", error));
   }
 
@@ -977,4 +1065,24 @@ export function effectivePermissionMode(
 function structuredId(value: unknown): string | null {
   const id = value && typeof value === "object" ? (value as Record<string, unknown>).id : null;
   return typeof id === "string" && id ? id : null;
+}
+
+function taskStatus(value: unknown): HostAgent["status"] | null {
+  if (value === "running" || value === "pending") return "running";
+  if (value === "paused") return "paused";
+  if (value === "completed") return "completed";
+  if (value === "failed") return "failed";
+  if (value === "stopped" || value === "killed") return "stopped";
+  return null;
+}
+
+function taskUsage(value: unknown): HostAgent["usage"] {
+  if (!value || typeof value !== "object") return null;
+  const usage = value as Record<string, unknown>;
+  const number = (field: unknown) => typeof field === "number" && Number.isFinite(field) ? field : 0;
+  return { totalTokens: number(usage.total_tokens), toolUses: number(usage.tool_uses), durationMs: number(usage.duration_ms) };
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }

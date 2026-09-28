@@ -85,6 +85,7 @@ export async function runClaudeHost(args: HostArguments): Promise<void> {
         return {};
       }
       case "tasks/list": return { tasks: session.listTasks() };
+      case "agents/list": return { agents: session.listAgents() };
       case "tasks/stop": {
         await session.stopTask(String(params.taskId ?? ""));
         return {};

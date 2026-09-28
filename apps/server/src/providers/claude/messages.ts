@@ -69,11 +69,14 @@ export interface ClaudeRecordMessage {
  */
 export function claudeRecordMessages(
   record: Record<string, unknown>,
-  toolUses: Record<string, ClaudeToolUse> = {}
+  toolUses: Record<string, ClaudeToolUse> = {},
+  options: { includeSidechain?: boolean } = {}
 ): ClaudeRecordMessage[] {
   const uuid = string(record.uuid);
   if (!uuid) return [];
-  if (string(record.parent_tool_use_id) || record.isSidechain === true || record.isMeta === true) return [];
+  if (record.isMeta === true) return [];
+  // Subagent work stays out of the main transcript; the Agents view reads it from the subagent's own transcript.
+  if (!options.includeSidechain && (string(record.parent_tool_use_id) || record.isSidechain === true)) return [];
   const message = objectValue(record.message);
   const content = message?.content;
   if (record.type === "assistant") {

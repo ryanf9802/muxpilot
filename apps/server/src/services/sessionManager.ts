@@ -28,6 +28,8 @@ import type {
   RestoreSessionRecoveryResponse,
   RestoreSessionRecoveryResult,
   SessionAction,
+  SessionAgent,
+  SessionAgentMessagesResponse,
   SessionCapabilities,
   SessionDocumentResponse,
   SessionDocumentsResponse,
@@ -2834,6 +2836,34 @@ export class SessionManager {
     return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
   }
 
+  /** Native subagents and background tasks (Claude Code) for the Agents view. */
+  async listAgents(sessionId: string): Promise<SessionAgent[]> {
+    const { session, driver } = await this.requireAgentSession(sessionId);
+    return driver.listAgents!(session);
+  }
+
+  async agentMessages(sessionId: string, agentId: string): Promise<SessionAgentMessagesResponse> {
+    const { session, driver } = await this.requireAgentSession(sessionId);
+    const [agents, messages] = await Promise.all([driver.listAgents!(session), driver.agentMessages!(session, agentId)]);
+    return { agent: agents.find((agent) => agent.id === agentId) ?? null, messages };
+  }
+
+  async stopAgent(sessionId: string, agentId: string): Promise<void> {
+    const { session, driver } = await this.requireAgentSession(sessionId);
+    await driver.stopAgent!(session, agentId);
+    await this.db.addAudit("local", "stop_agent", sessionId, agentId, nowIso());
+  }
+
+  private async requireAgentSession(sessionId: string): Promise<{ session: ManagedSession; driver: AgentSessionDriver }> {
+    const session = await this.db.getSession(sessionId);
+    if (!session) throw new SessionNotFoundError("Session not found");
+    const driver = this.providers.maybe(session.provider.kind)?.driver;
+    if (!driver?.listAgents || !driver.agentMessages || !driver.stopAgent) {
+      throw new AgentSessionError(`${providerDisplayName(session.provider.kind)} sessions do not report native agents`);
+    }
+    return { session, driver };
+  }
+
   /** Restores a transcript the provider CLI may have swept, before it is resumed, forked or exported. */
   async ensureTranscriptAvailable(session: ManagedSession): Promise<void> {
     // A failed restore surfaces as the resume, fork or export failure that follows.
@@ -5184,8 +5214,15 @@ function materializeApproval(message: ChatMessage): ApprovalRequest | null {
     createdAt: stringValue(approval.createdAt) ?? message.timestamp,
     reviewStatus: approval.reviewStatus === "reviewing" || approval.reviewStatus === "escalated" ? approval.reviewStatus : undefined,
     reviewerModel: stringValue(approval.reviewerModel) ?? undefined,
-    reviewerExplanation: stringValue(approval.reviewerExplanation) ?? undefined
+    reviewerExplanation: stringValue(approval.reviewerExplanation) ?? undefined,
+    requestedBy: approvalRequester(approval.requestedBy)
   };
+}
+
+function approvalRequester(value: unknown): ApprovalRequest["requestedBy"] {
+  const requester = recordValue(value);
+  const agentId = stringValue(requester?.agentId);
+  return agentId ? { agentId, label: stringValue(requester?.label) } : undefined;
 }
 
 function muxpilotApprovalDecisionMessage(approval: ApprovalRequest, decision: "approve_once" | "deny"): string {

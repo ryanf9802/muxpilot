@@ -37,6 +37,8 @@ export interface ProviderCapabilities {
   transcriptTransfer: boolean;
   imageInput: boolean;
   rawTranscriptEvidence: boolean;
+  /** The provider runs its own subagents and background tasks, shown in muxpilot's Agents view. */
+  nativeAgents: boolean;
 }
 
 export type ProviderCompatibilityStatus =

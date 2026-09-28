@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import type {
   ApprovalDecision,
   ApprovalMode,
+  ChatMessage,
+  SessionAgent,
   ManagedSession,
   MessageContentPart,
   QuestionAnswerRequest,
@@ -35,10 +37,13 @@ import type {
 } from "../types.js";
 import type { ProtocolJournal } from "../../runtime/protocolJournal.js";
 import type { ClaudeTranscriptArchive } from "./transcriptArchive.js";
+import { agentTranscriptMessages, mergeAgents, recordedAgents, sessionAgent } from "./agents.js";
 import { CLAUDE_APPROVAL_METHOD, CLAUDE_QUESTION_METHOD } from "./events.js";
 import {
   CLAUDE_HOST_PROTOCOL_VERSION,
   HOST_ERROR,
+  HOST_NOTIFICATION,
+  type HostAgent,
   submissionMessageUuid,
   type HostApprovalResponse,
   type HostInputPart,
@@ -79,6 +84,8 @@ export interface ClaudeDriverOptions {
   eventSink?: DriverEventSink;
   /** Live rate-limit reports from `rate_limit_event`, used to keep usage current between probes. */
   onRateLimit?(info: Record<string, unknown>): void;
+  /** The session's native subagent/background task list changed. */
+  onAgentsChanged?(sessionId: string, agents: SessionAgent[]): void;
   /** Durable transcript copies: mirrored after turns, restored before anything resumes a conversation. */
   archive?: Pick<ClaudeTranscriptArchive, "mirror" | "ensureRestored">;
   clientVersion?: string;
@@ -110,6 +117,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly subscribers = new Map<string, Set<(event: DriverEvent) => void>>();
   private readonly launchTails = new Map<string, Promise<unknown>>();
+  /** Last agent list each host reported, so the Agents view survives a hibernated or restarted host. */
+  private readonly knownAgents = new Map<string, SessionAgent[]>();
   private readonly now: () => Date;
 
   constructor(
@@ -313,6 +322,28 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
     });
   }
 
+  async listAgents(session: ManagedSession): Promise<SessionAgent[]> {
+    let live = this.knownAgents.get(session.id) ?? [];
+    if (this.connections.has(session.id) && session.provider.threadId === this.connections.get(session.id)?.threadId) {
+      const { agents } = await this.connectionFor(session).rpc.request<{ agents: HostAgent[] }>("agents/list", {});
+      live = agents.map(sessionAgent);
+      this.knownAgents.set(session.id, live);
+    }
+    await this.options.archive?.ensureRestored(session.provider.threadId, session.provider.transcriptPath);
+    return mergeAgents(live, await recordedAgents(session.provider.transcriptPath));
+  }
+
+  async agentMessages(session: ManagedSession, agentId: string): Promise<ChatMessage[]> {
+    const { threadId, transcriptPath } = session.provider;
+    if (!threadId || !transcriptPath) return [];
+    await this.options.archive?.ensureRestored(threadId, transcriptPath);
+    return agentTranscriptMessages(session.id, threadId, transcriptPath, agentId);
+  }
+
+  async stopAgent(session: ManagedSession, agentId: string): Promise<void> {
+    await this.connectionFor(session).rpc.request("tasks/stop", { taskId: agentId });
+  }
+
   async setApprovalMode(session: ManagedSession, approvalMode: ApprovalMode): Promise<void> {
     if (!this.connections.has(session.id)) return;
     await this.connectionFor(session).rpc.request("settings/update", { approvalMode });
@@ -436,6 +467,10 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       if (!turnId || this.activeTurns.get(sessionId) === turnId) this.activeTurns.delete(sessionId);
       const connection = this.connections.get(sessionId);
       if (connection) void this.options.archive?.mirror(connection.threadId, connection.transcriptPath);
+    } else if (notification.method === HOST_NOTIFICATION.agentsChanged) {
+      const agents = Array.isArray(params.agents) ? (params.agents as HostAgent[]).map(sessionAgent) : [];
+      this.knownAgents.set(sessionId, agents);
+      this.options.onAgentsChanged?.(sessionId, agents);
     } else if (notification.method === "sdk/message") {
       const message = record(params.message);
       if (message?.type === "rate_limit_event") {

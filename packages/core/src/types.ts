@@ -440,6 +440,8 @@ export interface ApprovalRequest {
   reviewStatus?: "reviewing" | "escalated";
   reviewerModel?: string;
   reviewerExplanation?: string;
+  /** The native subagent that asked, when the request did not come from the main conversation. */
+  requestedBy?: { agentId: string; label: string | null };
 }
 
 export interface ResolveApprovalRequest {
@@ -576,6 +578,37 @@ export interface BtwDeltaPayload {
   firstTokenAt: string | null;
 }
 
+/** A subagent, background shell, monitor or workflow the session's agent runs natively (Claude Code tasks). */
+export interface SessionAgent {
+  id: string;
+  /** The tool call in the main transcript that started it. */
+  toolUseId: string | null;
+  kind: "subagent" | "shell" | "monitor" | "workflow" | "other";
+  /** Subagent type (Explore, general-purpose, a custom agent) when it is a subagent. */
+  agentType: string | null;
+  description: string;
+  status: "running" | "paused" | "completed" | "failed" | "stopped";
+  background: boolean;
+  depth: number | null;
+  lastToolName: string | null;
+  summary: string | null;
+  error: string | null;
+  usage: { totalTokens: number; toolUses: number; durationMs: number } | null;
+  /** Housekeeping work the agent CLI hides from activity indicators. */
+  ambient: boolean;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface SessionAgentsResponse {
+  agents: SessionAgent[];
+}
+
+export interface SessionAgentMessagesResponse {
+  agent: SessionAgent | null;
+  messages: ChatMessage[];
+}
+
 export interface SessionEvent {
   id: string;
   type:
@@ -591,7 +624,8 @@ export interface SessionEvent {
     | "btw.updated"
     | "btw.finished"
     | "documents.updated"
-    | "provider.auth.updated";
+    | "provider.auth.updated"
+    | "session.agents.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;

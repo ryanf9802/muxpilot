@@ -342,6 +342,7 @@ function requestProjection(
         cwd: approval.cwd,
         reason: approval.reason,
         prefixRule,
+        ...(approval.agentId ? { requestedBy: { agentId: approval.agentId, label: approval.agentLabel ?? null } } : {}),
         options: [
           { decision: "approve_once", label: "Approve once", description: "Allow this action and continue." },
           { decision: "approve_for_session", label: "Approve for session", description: "Allow matching actions for the rest of this Claude session." },

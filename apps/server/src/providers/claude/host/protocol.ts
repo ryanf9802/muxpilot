@@ -48,6 +48,9 @@ export interface HostApprovalParams {
   reason: string | null;
   /** Bash command prefix that can be remembered for the session, when the CLI suggested one. */
   prefixRule: string[] | null;
+  /** The subagent that asked, when the request did not come from the main conversation. */
+  agentId?: string | null;
+  agentLabel?: string | null;
   input: Record<string, unknown>;
 }
 
@@ -81,6 +84,8 @@ export interface HostSessionState {
   latestTurn: HostTurn | null;
   pendingRequests: HostPendingRequest[];
   backgroundTasks: HostBackgroundTask[];
+  /** Subagents, background shells and workflows Claude Code started in this session, newest last. */
+  agents: HostAgent[];
   permissionMode: "default" | "plan";
   /** The Claude Code permission mode actually in effect (acceptEdits, plan or auto). */
   effectivePermissionMode: HostPermissionMode;
@@ -102,6 +107,30 @@ export type HostPermissionMode = "acceptEdits" | "plan" | "auto" | "default";
 export interface HostSchedules {
   wakeupDueAt: string | null;
   cronJobIds: string[];
+}
+
+/** One Claude Code task (subagent, background shell, monitor or workflow) as reported by `task_*` events. */
+export interface HostAgent {
+  /** Task id; for subagents it is also the agent id of `subagents/agent-<id>.jsonl`. */
+  taskId: string;
+  /** The Agent/Task (or Bash) tool call that started it. */
+  toolUseId: string | null;
+  /** Claude Code task type, e.g. local_agent, local_bash, monitor, local_workflow. */
+  taskType: string | null;
+  subagentType: string | null;
+  description: string;
+  status: "running" | "paused" | "completed" | "failed" | "stopped";
+  backgrounded: boolean;
+  depth: number | null;
+  lastToolName: string | null;
+  /** Latest one-line progress summary, or the final summary once finished. */
+  summary: string | null;
+  error: string | null;
+  usage: { totalTokens: number; toolUses: number; durationMs: number } | null;
+  /** Housekeeping tasks Claude Code hides from activity indicators. */
+  ambient: boolean;
+  startedAt: string;
+  updatedAt: string;
 }
 
 export interface HostBackgroundTask {
@@ -214,6 +243,8 @@ export const HOST_ERROR = {
 /** Notification methods sent from the host to muxpilot. */
 export const HOST_NOTIFICATION = {
   sdkMessage: "sdk/message",
+  /** The session's subagent and background task list changed; carries the full list. */
+  agentsChanged: "agents/changed",
   /** Claude changed its own mode (EnterPlanMode) or native auto became unavailable. */
   modeChanged: "mode/changed",
   turnStarted: "turn/started",

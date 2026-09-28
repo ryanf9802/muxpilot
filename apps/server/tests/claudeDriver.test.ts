@@ -134,6 +134,7 @@ function harness(options: { initialState?: HostSessionState | null; launchDispos
   };
   const onRateLimit = vi.fn();
   const archive = { mirror: vi.fn(async () => undefined), ensureRestored: vi.fn(async () => true) };
+  const onAgentsChanged = vi.fn();
   const driver = new ClaudeSessionDriver(supervisor as unknown as RuntimeSupervisor, {
     runtimeSpec: (spec) => ({
       sessionId: spec.sessionId,
@@ -149,9 +150,10 @@ function harness(options: { initialState?: HostSessionState | null; launchDispos
     eventSink,
     onRateLimit,
     archive,
+    onAgentsChanged,
     now: () => new Date("2026-09-27T12:00:00.000Z")
   });
-  return { host, supervisor, eventSink, onRateLimit, archive, driver };
+  return { host, supervisor, eventSink, onRateLimit, archive, onAgentsChanged, driver };
 }
 
 function managedSession(threadId: string): ManagedSession {
@@ -364,6 +366,24 @@ describe("ClaudeSessionDriver", () => {
     await h.driver.setApprovalMode(managedSession(provider.threadId!), "auto");
     expect(h.host.last("settings/update")).toEqual({ approvalMode: "auto" });
     await expect(h.driver.setApprovalMode({ ...managedSession("other"), id: "not-running" }, "auto")).resolves.toBeUndefined();
+  });
+
+  it("lists, publishes and stops native agents", async () => {
+    const h = harness();
+    const { provider } = await h.driver.start(spec);
+    const session = managedSession(provider.threadId!);
+    const agent = {
+      taskId: "agent-a", toolUseId: "tu-1", taskType: "local_agent", subagentType: "Explore", description: "Map", status: "running",
+      backgrounded: true, depth: 1, lastToolName: null, summary: null, error: null, usage: null, ambient: false,
+      startedAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z"
+    };
+    await h.host.notify("agents/changed", { threadId: provider.threadId, agents: [agent] });
+    expect(h.onAgentsChanged).toHaveBeenCalledWith("session-1", [expect.objectContaining({ id: "agent-a", kind: "subagent", status: "running" })]);
+    h.host.on("agents/list", () => ({ agents: [{ ...agent, status: "completed" }] }));
+    await expect(h.driver.listAgents(session)).resolves.toEqual([expect.objectContaining({ id: "agent-a", status: "completed" })]);
+    h.host.on("tasks/stop", () => ({}));
+    await h.driver.stopAgent(session, "agent-a");
+    expect(h.host.last("tasks/stop")).toEqual({ taskId: "agent-a" });
   });
 
   it("reports hibernation blockers from host state", async () => {

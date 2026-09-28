@@ -20,7 +20,8 @@ export const TEST_CAPABILITIES: ProviderCapabilities = {
   backgroundTerminals: true,
   transcriptTransfer: true,
   imageInput: true,
-  rawTranscriptEvidence: false
+  rawTranscriptEvidence: false,
+  nativeAgents: false
 };
 
 /** A scripted provider for SessionManager and route tests. */

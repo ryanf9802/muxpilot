@@ -9,6 +9,8 @@ Use your provider's built-in subagents (Codex subagents or Claude Task subagents
 
 Use the tools exposed by `muxpilot_sessions` only when the operator explicitly requests a nested muxpilot session or the delegated work is durable and benefits from independent monitoring and its own resource scope. These tools coordinate independent muxpilot sessions (Codex or Claude); they do not create in-process subagents.
 
+In Claude sessions, prefer Claude's native background subagents even for long-running or parallel work: muxpilot shows them in the session's Agents view, where the operator can follow their transcripts and stop them. Create a muxpilot child from a Claude session only when the operator explicitly asks for one or the child must run on a different provider.
+
 ## Visibility and messaging
 
 - Use `list_sessions` to inspect session IDs, hierarchy, status, context use, delegated work budgets, agent provider, and Codex thread-goal objective, state, elapsed time, and token use when available.

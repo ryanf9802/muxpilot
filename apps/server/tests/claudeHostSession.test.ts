@@ -459,6 +459,8 @@ describe("HostSession", () => {
         cwd: "/repo",
         reason: null,
         prefixRule: ["npm", "publish"],
+        agentId: null,
+        agentLabel: null,
         input: { command: "npm publish" }
       }
     }]);
@@ -627,6 +629,48 @@ describe("HostSession", () => {
     ]);
   });
 
+  it("tracks native subagents through their task lifecycle and names them on approvals", async () => {
+    let persisted: PersistedHostState | null = null;
+    const h = harness({ persistState: async (state) => { persisted = structuredClone(state); } });
+    await h.session.open(openParams());
+    await startTurn(h);
+    const query = h.queries.latest();
+    const base = { type: "system", session_id: SESSION_ID };
+    query.push({ ...base, subtype: "task_started", uuid: "t1", task_id: "agent-a", tool_use_id: "tu-agent", description: "Review the parser", subagent_type: "Explore", is_backgrounded: true, spawn_depth: 1, task_type: "local_agent" });
+    query.push({ ...base, subtype: "task_progress", uuid: "t2", task_id: "agent-a", description: "Review the parser", usage: { total_tokens: 900, tool_uses: 3, duration_ms: 4000 }, last_tool_name: "Grep", summary: "Reading transcript.ts" });
+    await flush();
+    expect(h.session.listAgents()).toEqual([expect.objectContaining({
+      taskId: "agent-a", toolUseId: "tu-agent", taskType: "local_agent", subagentType: "Explore", status: "running", backgrounded: true,
+      depth: 1, lastToolName: "Grep", summary: "Reading transcript.ts", usage: { totalTokens: 900, toolUses: 3, durationMs: 4000 }
+    })]);
+    expect(h.session.state()?.backgroundTasks).toEqual([{ taskId: "agent-a", toolUseId: "tu-agent", turnId: null, description: "Review the parser" }]);
+    expect(h.of(HOST_NOTIFICATION.agentsChanged).at(-1)?.agents).toHaveLength(1);
+
+    // A permission request from inside the subagent names it.
+    void h.canUseTool()("Bash", { command: "rm -rf build" }, { ...toolOptions("tool-9"), agentID: "agent-a" } as never);
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.requestOpened).at(-1)?.params).toMatchObject({ agentId: "agent-a", agentLabel: "Review the parser" });
+
+    query.push({ ...base, subtype: "task_updated", uuid: "t3", task_id: "agent-a", patch: { status: "killed" } });
+    await flush();
+    expect(h.session.listAgents()[0]).toMatchObject({ status: "stopped" });
+    query.push({ ...base, subtype: "task_notification", uuid: "t4", task_id: "agent-a", status: "completed", output_file: "/tmp/out", summary: "Found two issues", usage: { total_tokens: 1200, tool_uses: 5, duration_ms: 6000 } });
+    await flush();
+    expect(h.session.listAgents()[0]).toMatchObject({ status: "completed", summary: "Found two issues", usage: { totalTokens: 1200 } });
+    expect(h.session.state()?.backgroundTasks).toEqual([]);
+    expect(persisted!.agents).toEqual([expect.objectContaining({ taskId: "agent-a", status: "completed" })]);
+  });
+
+  it("reports agents that were running when the host restarted as stopped", () => {
+    const h = harness();
+    h.session.restorePersisted({
+      sessionId: SESSION_ID, cwd: "/repo", launch: launch(), activeTurn: null, latestTurn: null, inputs: [],
+      agents: [{ taskId: "a", toolUseId: null, taskType: "local_agent", subagentType: null, description: "x", status: "running", backgrounded: true,
+        depth: 1, lastToolName: null, summary: null, error: null, usage: null, ambient: false, startedAt: "", updatedAt: "" }]
+    });
+    expect(h.session.listAgents()).toEqual([expect.objectContaining({ taskId: "a", status: "stopped" })]);
+  });
+
   it("forwards SDK messages with tool-use context and tracks background tasks", async () => {
     const h = harness();
     await h.session.open(openParams());
@@ -650,7 +694,7 @@ describe("HostSession", () => {
     query.push(toolResult);
     query.push({ type: "system", subtype: "task_started", task_id: "task-1", tool_use_id: "tu-1", description: "watch logs", uuid: "t1", session_id: SESSION_ID });
     await flush();
-    expect(h.session.listTasks()).toEqual([{ taskId: "task-1", toolUseId: "tu-1", turnId: TURN_UUID, description: "watch logs" }]);
+    expect(h.session.listTasks()).toEqual([{ taskId: "task-1", toolUseId: "tu-1", turnId: null, description: "watch logs" }]);
     query.push({ type: "system", subtype: "task_notification", task_id: "task-1", status: "completed", uuid: "t2", session_id: SESSION_ID });
     query.push({ type: "auth_status", isAuthenticating: false, output: [], error: "token expired", uuid: "au", session_id: SESSION_ID });
     await flush();

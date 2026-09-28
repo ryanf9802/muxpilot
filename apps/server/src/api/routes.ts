@@ -3,6 +3,8 @@ import { z } from "zod";
 import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
+  SessionAgentMessagesResponse,
+  SessionAgentsResponse,
   ProviderCompatibility,
   AgentSkillsResponse,
   CreateSessionRequest,
@@ -126,6 +128,7 @@ const forkSessionSchema = z.object({
 }).strict();
 const queuedInputSchema = inputBodySchema;
 const btwQuestionSchema = z.object({ text: z.string().trim().min(1).max(20_000) });
+const agentParamsSchema = z.object({ id: z.string().min(1), agentId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
 const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
@@ -740,6 +743,34 @@ export function registerRoutes(app: FastifyInstance, dependencies: RouteDependen
       if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
     }
+  });
+
+  const agentRoute = async <T>(reply: FastifyReply, operation: () => Promise<T>): Promise<T | void> => {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof AgentSessionError) return reply.code(409).send({ error: error.message });
+      throw error;
+    }
+  };
+
+  app.get("/api/sessions/:id/agents", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionAgentsResponse | void> => {
+    const { id } = request.params as { id: string };
+    return agentRoute(reply, async () => ({ agents: await manager.listAgents(id) }));
+  });
+
+  app.get("/api/sessions/:id/agents/:agentId/messages", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionAgentMessagesResponse | void> => {
+    const { id, agentId } = agentParamsSchema.parse(request.params);
+    return agentRoute(reply, () => manager.agentMessages(id, agentId));
+  });
+
+  app.post("/api/sessions/:id/agents/:agentId/stop", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, agentId } = agentParamsSchema.parse(request.params);
+    return agentRoute(reply, async () => {
+      await manager.stopAgent(id, agentId);
+      return { ok: true };
+    });
   });
 
   app.get("/api/sessions/:id/btw", { preHandler: access.requireAccess }, async (request, reply): Promise<BtwExchangesResponse | void> => {
