@@ -86,8 +86,12 @@ export function claudeRecordMessages(
     return assistantMessages(uuid, Array.isArray(content) ? content : []);
   }
   if (record.type === "user") {
-    // Prompts Claude Code injects itself (background task notifications and similar) are not operator input.
-    const systemPrompt = record.promptSource === "system";
+    // Prompts Claude Code injects itself (background task notifications, compaction summaries) are not operator
+    // input; the compaction itself is shown as a status row.
+    const systemPrompt = record.promptSource === "system"
+      || record.isSynthetic === true
+      || record.isCompactSummary === true
+      || record.isVisibleInTranscriptOnly === true;
     return userMessages(uuid, content, objectValue(record.tool_use_result ?? record.toolUseResult), toolUses, systemPrompt);
   }
   return [];
