@@ -82,9 +82,26 @@ export interface HostSessionState {
   pendingRequests: HostPendingRequest[];
   backgroundTasks: HostBackgroundTask[];
   permissionMode: "default" | "plan";
+  /** The Claude Code permission mode actually in effect (acceptEdits, plan or auto). */
+  effectivePermissionMode: HostPermissionMode;
+  approvalMode: HostApprovalMode;
+  /** Native auto mode was requested but this account or model cannot use it. */
+  autoUnavailable: boolean;
+  /** Pending ScheduleWakeup / Cron work, which only fires while the runtime is alive. */
+  schedules: HostSchedules;
   model: string | null;
   effort: string | null;
   fastMode: boolean | null;
+}
+
+/** muxpilot's approval routing; `auto` maps to Claude's native auto-approval classifier. */
+export type HostApprovalMode = "ask" | "auto" | "full";
+
+export type HostPermissionMode = "acceptEdits" | "plan" | "auto" | "default";
+
+export interface HostSchedules {
+  wakeupDueAt: string | null;
+  cronJobIds: string[];
 }
 
 export interface HostBackgroundTask {
@@ -106,6 +123,7 @@ export interface HostLaunchConfig {
   effort: string | null;
   fastMode: boolean | null;
   permissionMode: "default" | "plan";
+  approvalMode?: HostApprovalMode;
   systemPromptAppend: string | null;
   mcpServers: HostMcpServer[];
   /** Directories Claude may write without approval (cwd is always included). */
@@ -156,6 +174,7 @@ export interface TurnStartParams {
   messageUuid: string;
   content: HostInputPart[];
   mode: "default" | "plan";
+  approvalMode?: HostApprovalMode;
   model: string | null;
   effort: string | null;
   fastMode: boolean | null;
@@ -179,6 +198,7 @@ export interface SettingsUpdateParams {
   model?: string | null;
   effort?: string | null;
   permissionMode?: "default" | "plan";
+  approvalMode?: HostApprovalMode;
   fastMode?: boolean | null;
 }
 
@@ -194,6 +214,8 @@ export const HOST_ERROR = {
 /** Notification methods sent from the host to muxpilot. */
 export const HOST_NOTIFICATION = {
   sdkMessage: "sdk/message",
+  /** Claude changed its own mode (EnterPlanMode) or native auto became unavailable. */
+  modeChanged: "mode/changed",
   turnStarted: "turn/started",
   turnCompleted: "turn/completed",
   threadStatus: "thread/status/changed",

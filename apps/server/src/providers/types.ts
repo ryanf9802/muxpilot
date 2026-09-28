@@ -3,6 +3,7 @@ import type { ParseResult as TranscriptParseResult } from "./codex/parser.js";
 import type {
   AgentProviderKind,
   AgentProviderRef,
+  ApprovalMode,
   AgentSkill,
   ApprovalDecision,
   ApprovalRequest,
@@ -136,6 +137,8 @@ export interface AgentSessionDriver {
     fastMode?: boolean;
   }): Promise<void>;
   rename(session: ManagedSession, name: string): Promise<void>;
+  /** Providers whose permission mode follows muxpilot's approval mode (Claude's native auto classifier). */
+  setApprovalMode?(session: ManagedSession, approvalMode: ApprovalMode): Promise<void>;
 }
 
 export type SystemdSessionRuntimeRef = Extract<SessionRuntimeRef, { kind: "systemd_service" }>;

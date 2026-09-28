@@ -1,4 +1,4 @@
-import type { ChatMessage, ManagedSession } from "@muxpilot/core";
+import type { ChatMessage, CollaborationMode, ManagedSession } from "@muxpilot/core";
 import type {
   AppServerProjectionInput,
   AppServerProjectionRepairResult,
@@ -28,6 +28,8 @@ export interface ProjectionAdapter {
   authenticationFailure(method: string, params: unknown): string | null;
   /** Splits one runtime event that carries several transcript items into one event per item. */
   expand?(event: DriverEvent): DriverEvent[];
+  /** The collaboration mode the provider switched to on its own (Claude entering plan mode), if any. */
+  inputMode?(event: DriverEvent): CollaborationMode | null;
   /** Server requests that may legitimately carry a child thread id (approvals, questions). */
   isInteractiveServerRequest(event: DriverEvent): boolean;
   /** Event that reports the provider account changed outside muxpilot. */
@@ -77,6 +79,15 @@ export class ProjectionReconciler implements DriverEventSink {
     recoveryGuard?: { threadKey: string; turnId: string },
     restoring = false
   ): Promise<boolean> {
+    const inputMode = this.adapter.inputMode?.(event) ?? null;
+    if (inputMode) {
+      const existing = await this.requireSession(sessionId);
+      if (existing.inputMode !== inputMode) {
+        const updated: ManagedSession = { ...existing, inputMode };
+        await this.store.upsertSession(updated, event.receivedAt);
+        this.publish("session.updated", sessionId, updated, event.receivedAt);
+      }
+    }
     if (this.adapter.accountUpdatedMethod && event.method === this.adapter.accountUpdatedMethod) {
       this.onAccountUpdated?.();
       return true;

@@ -96,6 +96,10 @@ function hostState(overrides: Partial<HostSessionState> = {}): HostSessionState 
     pendingRequests: [],
     backgroundTasks: [],
     permissionMode: "default",
+    effectivePermissionMode: "acceptEdits",
+    approvalMode: "ask",
+    autoUnavailable: false,
+    schedules: { wakeupDueAt: null, cronJobIds: [] },
     model: null,
     effort: null,
     fastMode: null,
@@ -249,6 +253,7 @@ describe("ClaudeSessionDriver", () => {
       messageUuid: expectedUuid,
       content: [{ type: "text", value: "hello" }],
       mode: "plan",
+      approvalMode: "ask",
       model: "claude-opus",
       effort: "max",
       fastMode: true
@@ -352,6 +357,15 @@ describe("ClaudeSessionDriver", () => {
     expect(events).toHaveLength(count);
   });
 
+  it("forwards approval mode changes to a live host only", async () => {
+    const h = harness();
+    const { provider } = await h.driver.start(spec);
+    h.host.on("settings/update", () => ({}));
+    await h.driver.setApprovalMode(managedSession(provider.threadId!), "auto");
+    expect(h.host.last("settings/update")).toEqual({ approvalMode: "auto" });
+    await expect(h.driver.setApprovalMode({ ...managedSession("other"), id: "not-running" }, "auto")).resolves.toBeUndefined();
+  });
+
   it("reports hibernation blockers from host state", async () => {
     const h = harness();
     const { provider } = await h.driver.start(spec);
@@ -359,9 +373,10 @@ describe("ClaudeSessionDriver", () => {
     h.host.on("state/read", () => hostState({
       activeTurn: { id: "t", status: "inProgress" },
       pendingRequests: [{ requestId: "r", method: "claude/approval", params: {} as never, openedAt: "" }],
-      backgroundTasks: [{ taskId: "task", toolUseId: null, turnId: null, description: "" }]
+      backgroundTasks: [{ taskId: "task", toolUseId: null, turnId: null, description: "" }],
+      schedules: { wakeupDueAt: "2026-09-27T12:05:00.000Z", cronJobIds: [] }
     }));
-    await expect(h.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn", "interactive_request", "background_terminal"]);
+    await expect(h.driver.hibernationBlockers(session)).resolves.toEqual(["active_turn", "interactive_request", "background_terminal", "scheduled_wakeup"]);
     await expect(h.driver.hibernate(session)).rejects.toThrow("cannot hibernate");
 
     h.host.on("state/read", () => hostState());

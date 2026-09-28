@@ -21,6 +21,7 @@ import {
   claudeProjectSlug,
   HOST_ERROR,
   HOST_NOTIFICATION,
+  type HostApprovalMode,
   type HostApprovalParams,
   type HostApprovalResponse,
   type HostBackgroundTask,
@@ -28,8 +29,10 @@ import {
   type HostInterruptOutcome,
   type HostLaunchConfig,
   type HostPendingRequest,
+  type HostPermissionMode,
   type HostQuestionParams,
   type HostQuestionResponse,
+  type HostSchedules,
   type HostSessionState,
   type HostThreadStatus,
   type HostTurn,
@@ -90,6 +93,8 @@ interface PendingRequestEntry extends HostPendingRequest {
 const MAX_REMEMBERED_INPUTS = 500;
 const MAX_REMEMBERED_TOOL_USES = 2_000;
 const STREAM_NOTIFICATION_INTERVAL_MS = 750;
+/** A wakeup is considered fired once an autonomous turn starts near its due time; stale ones expire. */
+const WAKEUP_GRACE_MS = 5 * 60_000;
 const WAITING_FLAGS: Record<HostPendingRequest["method"], "waitingOnApproval" | "waitingOnUserInput"> = {
   "claude/approval": "waitingOnApproval",
   "claude/question": "waitingOnUserInput"
@@ -112,6 +117,11 @@ export class HostSession {
   private readonly toolUses = new Map<string, { name: string; input: unknown }>();
   private readonly tasks: ClaudeTaskState = new Map();
   private permissionMode: "default" | "plan" = "default";
+  private approvalMode: HostApprovalMode = "ask";
+  private effectiveMode: HostPermissionMode = "acceptEdits";
+  private autoUnavailable = false;
+  private wakeupDueAt: number | null = null;
+  private readonly cronJobs = new Set<string>();
   private model: string | null = null;
   private effort: string | null = null;
   private fastMode: boolean | null = null;
@@ -132,6 +142,7 @@ export class HostSession {
     this.cwd = state.cwd;
     this.launch = state.launch;
     this.permissionMode = state.launch.permissionMode;
+    this.approvalMode = state.launch.approvalMode ?? "ask";
     this.model = state.launch.model;
     this.effort = state.launch.effort;
     this.fastMode = state.launch.fastMode;
@@ -157,6 +168,10 @@ export class HostSession {
       pendingRequests: [...this.pending.values()].map(({ requestId, method, params, openedAt }) => ({ requestId, method, params, openedAt })),
       backgroundTasks: [...this.backgroundTasks.values()],
       permissionMode: this.permissionMode,
+      effectivePermissionMode: this.effectiveMode,
+      approvalMode: this.approvalMode,
+      autoUnavailable: this.autoUnavailable,
+      schedules: this.schedules(),
       model: this.model,
       effort: this.effort,
       fastMode: this.fastMode
@@ -191,11 +206,13 @@ export class HostSession {
     this.cwd = params.cwd;
     this.launch = params.launch;
     this.permissionMode = params.launch.permissionMode;
+    this.approvalMode = params.launch.approvalMode ?? "ask";
     this.model = params.launch.model;
     this.effort = params.launch.effort;
     this.fastMode = params.launch.fastMode;
     this.latestTurn = params.replace ? null : this.latestTurn;
     this.startQuery(params);
+    await this.applyEffectiveMode();
     await this.persist();
     return this.state()!;
   }
@@ -270,10 +287,9 @@ export class HostSession {
 
   async updateSettings(params: SettingsUpdateParams): Promise<void> {
     const query = this.requireQuery();
-    if (params.permissionMode && params.permissionMode !== this.permissionMode) {
-      await query.setPermissionMode(params.permissionMode);
-      this.permissionMode = params.permissionMode;
-    }
+    if (params.permissionMode) this.permissionMode = params.permissionMode;
+    if (params.approvalMode) this.approvalMode = params.approvalMode;
+    await this.applyEffectiveMode();
     if (params.model !== undefined && params.model !== this.model) {
       await query.setModel(params.model ?? undefined);
       this.model = params.model;
@@ -287,7 +303,14 @@ export class HostSession {
       if ("fastMode" in flags) this.fastMode = params.fastMode ?? null;
     }
     if (this.launch) {
-      this.launch = { ...this.launch, permissionMode: this.permissionMode, model: this.model, effort: this.effort, fastMode: this.fastMode };
+      this.launch = {
+        ...this.launch,
+        permissionMode: this.permissionMode,
+        approvalMode: this.approvalMode,
+        model: this.model,
+        effort: this.effort,
+        fastMode: this.fastMode
+      };
       await this.persist();
     }
   }
@@ -319,13 +342,15 @@ export class HostSession {
     const launch = params.launch;
     const input = new InputQueue();
     const writableRoots = [...new Set([params.cwd, ...launch.writableRoots])];
+    // Native auto is switched on after the query starts, so an account without it never fails the launch.
+    this.effectiveMode = effectivePermissionMode(launch.permissionMode, "ask", false);
     const options: Options = {
       cwd: params.cwd,
       pathToClaudeCodeExecutable: launch.claudePath,
       env: { ...this.options.environment, CLAUDE_CONFIG_DIR: this.options.configDir },
       model: launch.model ?? undefined,
       effort: (launch.effort ?? undefined) as Options["effort"],
-      permissionMode: launch.permissionMode,
+      permissionMode: this.effectiveMode,
       settingSources: launch.settingSources,
       includePartialMessages: true,
       thinking: { type: "adaptive", display: "summarized" },
@@ -407,7 +432,10 @@ export class HostSession {
   }
 
   private handleMessage(message: SDKMessage): void {
-    if (!this.active && (message.type === "assistant" || message.type === "stream_event")) this.beginAutonomousTurn(message.uuid);
+    // Subagents keep streaming after the parent turn ends; only main-thread output starts an autonomous turn.
+    if (!this.active && (message.type === "assistant" || message.type === "stream_event") && message.parent_tool_use_id === null) {
+      this.beginAutonomousTurn(message.uuid);
+    }
     const turnId = this.active?.turn.id ?? null;
     if (message.type === "result") {
       this.options.notify(HOST_NOTIFICATION.sdkMessage, { threadId: this.sessionIdValue, turnId, message });
@@ -438,6 +466,7 @@ export class HostSession {
       return;
     }
     if (message.type === "system") {
+      if (message.subtype === "status" && message.permissionMode) this.observePermissionMode(message.permissionMode);
       if (message.subtype === "task_started") {
         this.backgroundTasks.set(message.task_id, {
           taskId: message.task_id,
@@ -451,6 +480,7 @@ export class HostSession {
     }
     if (message.type === "assistant") this.rememberToolUses(message);
     if (message.type === "user") {
+      this.observeSchedules(message);
       this.options.notify(HOST_NOTIFICATION.sdkMessage, {
         threadId: this.sessionIdValue,
         turnId,
@@ -482,6 +512,7 @@ export class HostSession {
   private beginAutonomousTurn(uuid: string | undefined): void {
     if (this.active || !this.sessionIdValue) return;
     const turnId = `auto-${uuid ?? randomUUID()}`;
+    if (this.wakeupDueAt !== null && this.wakeupDueAt <= this.now().getTime() + WAKEUP_GRACE_MS) this.wakeupDueAt = null;
     this.active = {
       turn: { id: turnId, status: "inProgress" },
       inputs: new Set(),
@@ -608,6 +639,80 @@ export class HostSession {
     } satisfies PermissionResult;
   };
 
+  /**
+   * muxpilot's (mode, approval) pair decides Claude's permission mode: Plan is plan, Normal is acceptEdits, and
+   * Normal with Auto approval uses Claude's own auto classifier when the account supports it.
+   */
+  private async applyEffectiveMode(): Promise<void> {
+    const query = this.query;
+    if (!query) return;
+    const desired = effectivePermissionMode(this.permissionMode, this.approvalMode, this.autoUnavailable);
+    if (desired === this.effectiveMode) return;
+    try {
+      await query.setPermissionMode(desired);
+      this.effectiveMode = desired;
+    } catch (error) {
+      if (desired !== "auto") throw error;
+      this.options.log?.("native auto mode unavailable", error instanceof Error ? error.message : String(error));
+      this.autoUnavailable = true;
+      const fallback = effectivePermissionMode(this.permissionMode, this.approvalMode, true);
+      if (fallback !== this.effectiveMode) await query.setPermissionMode(fallback);
+      this.effectiveMode = fallback;
+      this.notifyModeChanged();
+    }
+  }
+
+  /** Claude switched modes itself (EnterPlanMode, or leaving plan); mirror it into muxpilot's mode. */
+  private observePermissionMode(mode: string): void {
+    if (mode === this.effectiveMode) return;
+    this.effectiveMode = mode as HostPermissionMode;
+    const collaboration = mode === "plan" ? "plan" : "default";
+    if (collaboration === this.permissionMode) return;
+    this.permissionMode = collaboration;
+    if (this.launch) this.launch = { ...this.launch, permissionMode: collaboration };
+    this.notifyModeChanged();
+    void this.persist();
+  }
+
+  private notifyModeChanged(): void {
+    this.options.notify(HOST_NOTIFICATION.modeChanged, {
+      threadId: this.sessionIdValue,
+      mode: this.permissionMode,
+      effectivePermissionMode: this.effectiveMode,
+      autoUnavailable: this.autoUnavailable
+    });
+  }
+
+  /** Tracks ScheduleWakeup and Cron results; pending schedules keep the runtime from hibernating. */
+  private observeSchedules(message: Extract<SDKMessage, { type: "user" }>): void {
+    const content = message.message.content;
+    if (!Array.isArray(content)) return;
+    const structured = (message as { tool_use_result?: unknown }).tool_use_result;
+    for (const block of content) {
+      if (block.type !== "tool_result" || block.is_error === true) continue;
+      const known = this.toolUses.get(block.tool_use_id);
+      if (!known) continue;
+      const input = (known.input ?? {}) as Record<string, unknown>;
+      if (known.name === "ScheduleWakeup") {
+        const delay = typeof input.delaySeconds === "number" ? Math.min(3_600, Math.max(60, input.delaySeconds)) : null;
+        this.wakeupDueAt = input.stop === true || delay === null ? null : this.now().getTime() + delay * 1_000;
+      } else if (known.name === "CronCreate") {
+        const id = structuredId(structured) ?? /\b(?:id|ID)[:\s]+([A-Za-z0-9_-]+)/.exec(toolResultText(block.content))?.[1];
+        if (id) this.cronJobs.add(id);
+      } else if (known.name === "CronDelete" && typeof input.id === "string") {
+        this.cronJobs.delete(input.id);
+      }
+    }
+  }
+
+  private schedules(): HostSchedules {
+    if (this.wakeupDueAt !== null && this.wakeupDueAt < this.now().getTime() - WAKEUP_GRACE_MS) this.wakeupDueAt = null;
+    return {
+      wakeupDueAt: this.wakeupDueAt === null ? null : new Date(this.wakeupDueAt).toISOString(),
+      cronJobIds: [...this.cronJobs]
+    };
+  }
+
   private openRequest(
     method: HostPendingRequest["method"],
     params: HostApprovalParams | HostQuestionParams,
@@ -663,6 +768,7 @@ export class HostSession {
   private async applyTurnSettings(params: TurnStartParams): Promise<void> {
     await this.updateSettings({
       permissionMode: params.mode,
+      ...(params.approvalMode ? { approvalMode: params.approvalMode } : {}),
       ...(params.model ? { model: params.model } : {}),
       ...(params.effort ? { effort: params.effort } : {}),
       ...(params.fastMode !== null && params.fastMode !== this.fastMode ? { fastMode: params.fastMode } : {})
@@ -857,4 +963,18 @@ function imageMediaType(part: HostInputPart): "image/png" | "image/jpeg" | "imag
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) throw new HostOperationError(HOST_ERROR.invalidParams, `${name} is required`);
   return value;
+}
+
+export function effectivePermissionMode(
+  mode: "default" | "plan",
+  approvalMode: HostApprovalMode,
+  autoUnavailable: boolean
+): HostPermissionMode {
+  if (mode === "plan") return "plan";
+  return approvalMode === "auto" && !autoUnavailable ? "auto" : "acceptEdits";
+}
+
+function structuredId(value: unknown): string | null {
+  const id = value && typeof value === "object" ? (value as Record<string, unknown>).id : null;
+  return typeof id === "string" && id ? id : null;
 }

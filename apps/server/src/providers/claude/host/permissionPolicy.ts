@@ -24,25 +24,30 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "TaskOutput",
   "Monitor",
   "BashOutput",
-  "KillShell"
+  "KillShell",
+  // Native Claude Code features muxpilot passes through rather than re-implementing.
+  "EnterPlanMode",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "ScheduleWakeup",
+  "SendMessage",
+  "ListAgents",
+  "Workflow"
 ]);
 
 const FILE_WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
 /**
- * Claude Code product features that conflict with muxpilot's session model (scheduling, remote triggers,
- * self-managed worktrees and plan mode). They are removed from the model's tool list at launch.
+ * Claude Code features that conflict with muxpilot's session model: muxpilot's git workflow owns worktrees (and
+ * moving the cwd would move the transcript), and cloud triggers or phone pushes bypass muxpilot's own routing.
+ * They are removed from the model's tool list at launch.
  */
 export const DISALLOWED_TOOLS = [
-  "CronCreate",
-  "CronDelete",
-  "CronList",
   "RemoteTrigger",
-  "ScheduleWakeup",
   "PushNotification",
   "EnterWorktree",
-  "ExitWorktree",
-  "EnterPlanMode"
+  "ExitWorktree"
 ] as const;
 
 export const MUXPILOT_MCP_TOOL_PREFIX = "mcp__muxpilot_sessions__";

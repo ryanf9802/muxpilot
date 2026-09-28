@@ -3595,6 +3595,8 @@ export class SessionManager {
     if (action.type === "setApprovalMode") {
       for (const affected of [requireSession(updatedSession), ...agentDescendants(await this.db.listSessions(true), sessionId)]) {
         this.bumpApprovalAutomationGeneration(affected.id);
+        // Claude runs Auto on its native classifier, so its live permission mode follows the approval mode.
+        await this.providers.maybe(affected.provider.kind)?.driver?.setApprovalMode?.(affected, affected.approvalMode).catch(() => undefined);
         if (affected.id !== sessionId) this.publish("session.updated", affected.id, affected);
         if (affected.approvalMode === "ask") continue;
         const pending = await this.getPendingApproval(affected.id);

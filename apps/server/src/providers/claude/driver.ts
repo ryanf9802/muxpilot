@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type {
   ApprovalDecision,
+  ApprovalMode,
   ManagedSession,
   MessageContentPart,
   QuestionAnswerRequest,
@@ -152,6 +153,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       messageUuid: submissionMessageUuid(session.id, clientMessageId, sha256Hex),
       content: hostInput(text, content),
       mode: session.inputMode,
+      approvalMode: session.approvalMode,
       model: selected.model,
       effort: selected.reasoningEffort,
       fastMode: session.fastMode ?? null
@@ -229,6 +231,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
     if (state.activeTurn) blockers.push("active_turn");
     if (state.pendingRequests.length > 0) blockers.push("interactive_request");
     if (state.backgroundTasks.length > 0) blockers.push("background_terminal");
+    // Scheduled wakeups and cron jobs fire only while the Claude runtime is alive.
+    if (state.schedules?.wakeupDueAt || (state.schedules?.cronJobIds.length ?? 0) > 0) blockers.push("scheduled_wakeup");
     return blockers;
   }
 
@@ -307,6 +311,11 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       ...(selected?.reasoningEffort ? { effort: selected.reasoningEffort } : {}),
       ...(preferences.fastMode !== undefined ? { fastMode: preferences.fastMode } : {})
     });
+  }
+
+  async setApprovalMode(session: ManagedSession, approvalMode: ApprovalMode): Promise<void> {
+    if (!this.connections.has(session.id)) return;
+    await this.connectionFor(session).rpc.request("settings/update", { approvalMode });
   }
 
   async rename(_session: ManagedSession, _name: string): Promise<void> {

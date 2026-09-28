@@ -22,13 +22,16 @@ describe("Claude permission policy", () => {
   });
 
   it("denies product features that conflict with muxpilot sessions", () => {
-    for (const tool of ["CronCreate", "EnterWorktree", "EnterPlanMode", "RemoteTrigger"]) {
+    for (const tool of ["EnterWorktree", "ExitWorktree", "RemoteTrigger", "PushNotification"]) {
       expect(decidePermission(tool, {}, {}, context)).toEqual({ kind: "deny", message: `${tool} is not available in muxpilot sessions.` });
     }
   });
 
-  it("allows read tools and muxpilot MCP tools without approval", () => {
-    for (const tool of ["Read", "Grep", "Glob", "TodoWrite", "Task", "mcp__muxpilot_sessions__send_message"]) {
+  it("allows read tools, native Claude features and muxpilot MCP tools without approval", () => {
+    for (const tool of [
+      "Read", "Grep", "Glob", "TodoWrite", "Task", "mcp__muxpilot_sessions__send_message",
+      "EnterPlanMode", "CronCreate", "CronDelete", "ScheduleWakeup", "SendMessage", "ListAgents", "Workflow"
+    ]) {
       expect(decidePermission(tool, {}, {}, context)).toEqual({ kind: "allow" });
     }
   });

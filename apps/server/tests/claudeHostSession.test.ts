@@ -1,6 +1,6 @@
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { HostOperationError, HostSession, InputQueue, type PersistedHostState } from "../src/providers/claude/host/hostSession.js";
+import { effectivePermissionMode, HostOperationError, HostSession, InputQueue, type PersistedHostState } from "../src/providers/claude/host/hostSession.js";
 import { HOST_ERROR, HOST_NOTIFICATION, type HostLaunchConfig, type SessionOpenParams } from "../src/providers/claude/host/protocol.js";
 import { fakeQueryFactory, flush } from "./helpers/claudeFakes.js";
 
@@ -92,7 +92,7 @@ describe("HostSession", () => {
       env: { PATH: "/usr/bin", CLAUDE_CONFIG_DIR: "/home/user/.muxpilot/claude" },
       model: "claude-opus",
       effort: "high",
-      permissionMode: "default",
+      permissionMode: "acceptEdits",
       includePartialMessages: true,
       sessionId: SESSION_ID,
       additionalDirectories: ["/shared/docs"],
@@ -101,7 +101,8 @@ describe("HostSession", () => {
       plugins: [{ type: "local", path: "/plugins/a" }],
       systemPrompt: { type: "preset", preset: "claude_code", append: "muxpilot instructions", snapshot: false }
     });
-    expect(options.disallowedTools).toContain("EnterPlanMode");
+    expect(options.disallowedTools).toContain("EnterWorktree");
+    expect(options.disallowedTools).not.toContain("EnterPlanMode");
     expect((options.settings as { sandbox: { filesystem: { allowWrite: string[] } } }).sandbox.filesystem.allowWrite).toEqual(["/repo", "/shared/docs"]);
     expect(options).not.toHaveProperty("resume");
     expect(state).toMatchObject({
@@ -227,6 +228,83 @@ describe("HostSession", () => {
     expect(h.of(HOST_NOTIFICATION.threadStatus).at(-1)).toEqual({ threadId: SESSION_ID, status: { type: "idle" } });
     // A later muxpilot turn starts normally.
     await expect(startTurn(h)).resolves.toEqual({ turnId: TURN_UUID, messageUuid: TURN_UUID });
+  });
+
+  it("maps muxpilot modes onto Claude permission modes", () => {
+    expect(effectivePermissionMode("plan", "auto", false)).toBe("plan");
+    expect(effectivePermissionMode("default", "ask", false)).toBe("acceptEdits");
+    expect(effectivePermissionMode("default", "full", false)).toBe("acceptEdits");
+    expect(effectivePermissionMode("default", "auto", false)).toBe("auto");
+    expect(effectivePermissionMode("default", "auto", true)).toBe("acceptEdits");
+  });
+
+  it("switches to native auto for Auto approval and falls back when the account cannot use it", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    const query = h.queries.latest();
+    await h.session.updateSettings({ approvalMode: "auto" });
+    expect(query.setPermissionMode).toHaveBeenLastCalledWith("auto");
+    expect(h.session.state()).toMatchObject({ effectivePermissionMode: "auto", approvalMode: "auto", autoUnavailable: false });
+
+    await h.session.updateSettings({ permissionMode: "plan" });
+    expect(query.setPermissionMode).toHaveBeenLastCalledWith("plan");
+    await h.session.updateSettings({ permissionMode: "default", approvalMode: "ask" });
+    expect(query.setPermissionMode).toHaveBeenLastCalledWith("acceptEdits");
+
+    query.setPermissionMode.mockImplementation(async (mode: string) => {
+      if (mode === "auto") throw new Error("auto mode is not available for this model");
+    });
+    await h.session.updateSettings({ approvalMode: "auto" });
+    expect(h.session.state()).toMatchObject({ effectivePermissionMode: "acceptEdits", autoUnavailable: true });
+    expect(h.of(HOST_NOTIFICATION.modeChanged).at(-1)).toMatchObject({ mode: "default", autoUnavailable: true });
+  });
+
+  it("mirrors Claude entering plan mode on its own", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    h.queries.latest().push({ type: "system", subtype: "status", status: null, permissionMode: "plan", uuid: "st-1", session_id: SESSION_ID });
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.modeChanged)).toEqual([{ threadId: SESSION_ID, mode: "plan", effectivePermissionMode: "plan", autoUnavailable: false }]);
+    expect(h.session.state()?.permissionMode).toBe("plan");
+    // Echoes of the mode muxpilot itself set are not reported again.
+    h.queries.latest().push({ type: "system", subtype: "status", status: null, permissionMode: "plan", uuid: "st-2", session_id: SESSION_ID });
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.modeChanged)).toHaveLength(1);
+  });
+
+  it("tracks scheduled wakeups and cron jobs until they fire or are deleted", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    await startTurn(h);
+    const query = h.queries.latest();
+    const call = (uuid: string, id: string, name: string, input: Record<string, unknown>) => query.push({
+      type: "assistant", uuid, session_id: SESSION_ID, parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] }
+    });
+    const result = (uuid: string, id: string, content: string, structured?: unknown) => query.push({
+      type: "user", uuid, session_id: SESSION_ID, parent_tool_use_id: null, tool_use_result: structured,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content }] }
+    });
+    call("a1", "w-1", "ScheduleWakeup", { delaySeconds: 120, reason: "check", prompt: "again" });
+    result("u1", "w-1", "Scheduled");
+    call("a2", "c-1", "CronCreate", { cron: "*/5 * * * *", prompt: "tick" });
+    result("u2", "c-1", "Created", { id: "job-7", humanSchedule: "every 5 minutes", recurring: true });
+    await flush();
+    expect(h.session.state()?.schedules).toEqual({ wakeupDueAt: "2026-09-27T12:02:00.000Z", cronJobIds: ["job-7"] });
+    call("a3", "c-2", "CronDelete", { id: "job-7" });
+    result("u3", "c-2", "Deleted");
+    call("a4", "w-2", "ScheduleWakeup", { stop: true });
+    result("u4", "w-2", "Stopped");
+    await flush();
+    expect(h.session.state()?.schedules).toEqual({ wakeupDueAt: null, cronJobIds: [] });
+  });
+
+  it("does not start autonomous turns for subagent output", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    h.queries.latest().push({ type: "assistant", uuid: "sub-1", parent_tool_use_id: "tu-agent", session_id: SESSION_ID, message: { role: "assistant", content: [{ type: "text", text: "working" }] } });
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.turnStarted)).toEqual([]);
   });
 
   it("completes a steered turn from one result naming every input", async () => {
@@ -357,7 +435,8 @@ describe("HostSession", () => {
     const canUseTool = h.canUseTool();
 
     await expect(canUseTool("Read", { file_path: "/etc/hosts" }, toolOptions("read-1"))).resolves.toEqual({ behavior: "allow", updatedInput: { file_path: "/etc/hosts" } });
-    await expect(canUseTool("CronCreate", {}, toolOptions("cron-1"))).resolves.toMatchObject({ behavior: "deny" });
+    await expect(canUseTool("EnterWorktree", {}, toolOptions("wt-1"))).resolves.toMatchObject({ behavior: "deny" });
+    await expect(canUseTool("CronCreate", {}, toolOptions("cron-1"))).resolves.toMatchObject({ behavior: "allow" });
 
     const allowed = canUseTool("Bash", { command: "npm publish" }, {
       ...toolOptions("tool-1"),

@@ -12,7 +12,7 @@ import {
   planItemId,
   type ClaudeToolUse
 } from "./messages.js";
-import type { HostApprovalParams, HostQuestionParams } from "./host/protocol.js";
+import { HOST_NOTIFICATION, type HostApprovalParams, type HostQuestionParams } from "./host/protocol.js";
 
 export const CLAUDE_APPROVAL_METHOD = "claude/approval";
 export const CLAUDE_QUESTION_METHOD = "claude/question";
@@ -21,6 +21,11 @@ export const claudeProjectionAdapter: ProjectionAdapter = {
   project: projectClaudeEvent,
   expand: expandClaudeEvent,
   authenticationFailure: claudeAuthenticationFailure,
+  inputMode: (event: DriverEvent) => {
+    if (event.method !== HOST_NOTIFICATION.modeChanged) return null;
+    const mode = record(event.params)?.mode;
+    return mode === "plan" || mode === "default" ? mode : null;
+  },
   isInteractiveServerRequest: (event: DriverEvent) => event.method === CLAUDE_APPROVAL_METHOD || event.method === CLAUDE_QUESTION_METHOD
 };
 
@@ -64,6 +69,17 @@ export function projectClaudeEvent(notification: JsonRpcNotification, receivedAt
       return intentionalInterruptionProjection(notification, params, threadId, receivedAt);
     case "plan/proposed":
       return planProjection(notification, params, threadId, receivedAt);
+    case HOST_NOTIFICATION.modeChanged:
+      return params.autoUnavailable === true
+        ? projection(notification, identity(threadId, null, "auto-unavailable", null), null, false, statusMessage(
+            notification,
+            identity(threadId, null, "auto-unavailable", null),
+            "autoUnavailable",
+            receivedAt,
+            "Claude's native auto mode isn't available for this account or model. muxpilot's reviewer handles Auto approvals instead.",
+            {}
+          ))
+        : null;
     case "sdk/message":
       return sdkMessageProjection(notification, params, threadId, receivedAt);
     default:
