@@ -172,6 +172,7 @@ import { ProviderBadge } from "../components/ProviderBadge.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
 import { effectiveModelSettings, ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
+import { ReasoningBlock, TaskListBlock, transcriptTaskList } from "../components/TranscriptBlocks.js";
 
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
@@ -6442,8 +6443,12 @@ function label(message: ChatMessage): string {
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
   if (gitWorkflowEventFromPayload(message.payload)) return "Git workflow";
   if (isSubagentMessage(message)) return "Subagent";
+  if (message.type === "reasoning") return "Thinking";
   if (isAssistantUpdate(message)) return "Progress";
-  if (message.type === "tool_call") return "Tool";
+  if (message.type === "tool_call") {
+    const toolName = stringRecord(message.payload)?.toolName;
+    return typeof toolName === "string" && toolName.trim() ? `Tool · ${toolName.trim()}` : "Tool";
+  }
   if (message.type === "command_output") return "Command";
   if (message.type === "parser_notice") return "Parser";
   const delegated = delegatedSessionId(message);
@@ -6476,6 +6481,21 @@ function MessageContent({
   onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
 }) {
   const components = fileAwareMarkdownComponentsValue;
+
+  if (message.type === "reasoning") {
+    return (
+      <ReasoningBlock text={message.text}>
+        <MarkdownLinkBehaviorProvider onOpenDocument={onOpenDocument}>
+          <div className="rendered">
+            <MarkdownBlock text={message.text.trim()} components={components} />
+          </div>
+        </MarkdownLinkBehaviorProvider>
+      </ReasoningBlock>
+    );
+  }
+
+  const taskList = message.type === "tool_call" ? transcriptTaskList(message.payload) : null;
+  if (taskList) return <TaskListBlock taskList={taskList} />;
 
   if (isToolOutput(message)) {
     return (
@@ -7278,7 +7298,7 @@ function groupAssistantActivity(messages: ChatMessage[], fallbackKind: "activity
   let hasAssistantMessage = false;
 
   for (const message of messages) {
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || message.type === "reasoning") {
       pendingEvents.push(message);
       continue;
     }
@@ -7428,6 +7448,7 @@ function flushStack(items: TranscriptItem[], stack: ChatMessage[]): void {
 
 function isStackableMessage(message: ChatMessage): boolean {
   if (isStandaloneActionMessage(message)) return false;
+  if (message.type === "reasoning") return true;
   if (message.role === "assistant") return false;
   if (message.role === "tool" || message.role === "system") return true;
   return (
@@ -7454,7 +7475,7 @@ function stackLabel(messages: ChatMessage[]): string {
     (current, message) => {
       if (message.type === "command_output") current.command += 1;
       else if (message.type === "tool_call" || message.type === "tool_output") current.tool += 1;
-      else if (isAssistantUpdate(message)) current.progress += 1;
+      else if (isAssistantUpdate(message) || message.type === "reasoning") current.progress += 1;
       else if (isTurnAbortedStatus(message)) current.aborted += 1;
       else if (isSubagentMessage(message)) current.subagent += 1;
       else current.system += 1;

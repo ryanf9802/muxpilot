@@ -6222,6 +6222,127 @@ select:focus-visible {
   border-radius: 0 0 8px 8px;
 }
 
+.reasoning-block {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-tertiary-soft) 40%, transparent);
+}
+
+.reasoning-block summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.reasoning-block summary:hover {
+  color: var(--color-text);
+}
+
+.reasoning-block-title {
+  font-style: italic;
+  font-weight: 700;
+}
+
+.reasoning-block-meta {
+  font-size: 12px;
+}
+
+.reasoning-block[open] summary {
+  border-bottom: 1px dashed var(--color-border);
+}
+
+.reasoning-block-body {
+  max-height: 50vh;
+  overflow: auto;
+  padding: 4px 12px 8px;
+  color: var(--color-text-muted);
+}
+
+.reasoning-block-text {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.task-list-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--color-input);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.task-list-block-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.task-list-block-head strong {
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.task-list-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-list-block li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.task-list-block-icon {
+  margin-top: 2px;
+  color: var(--color-text-subtle);
+}
+
+.task-list-block-text {
+  overflow-wrap: anywhere;
+}
+
+.task-list-block li[data-status="in_progress"] .task-list-block-icon {
+  color: var(--color-warning);
+}
+
+.task-list-block li[data-status="in_progress"] .task-list-block-text {
+  font-weight: 700;
+}
+
+.task-list-block li[data-status="completed"] .task-list-block-icon {
+  color: var(--color-success);
+}
+
+.task-list-block li[data-status="completed"] .task-list-block-text {
+  color: var(--color-text-muted);
+  text-decoration: line-through;
+}
+
+.task-list-block-empty {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
 .composer-stack {
   grid-row: 4;
   display: flex;

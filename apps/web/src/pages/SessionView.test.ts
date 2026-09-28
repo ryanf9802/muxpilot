@@ -2702,6 +2702,39 @@ describe("UserText", () => {
 });
 
 describe("MessageBubble", () => {
+  it("renders reasoning as a collapsed Thinking block", () => {
+    const reasoning = message("session-a", 2, "Consider the **parser** first.", "assistant", "reasoning");
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(MessageBubble, { message: reasoning })));
+
+    expect(html).toContain("<span>Thinking</span>");
+    expect(html).toContain('<details class="reasoning-block">');
+    expect(html).toContain("<strong>parser</strong>");
+  });
+
+  it("renders a tool call task list as a checklist labelled with the tool name", () => {
+    const todo = message("session-a", 3, "TodoWrite", "tool", "tool_call", {
+      toolName: "TodoWrite",
+      taskList: { items: [{ text: "Write tests", status: "completed" }, { text: "Ship", status: "pending" }] }
+    });
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: todo }));
+
+    expect(html).toContain("<span>Tool · TodoWrite</span>");
+    expect(html).toContain('aria-label="Task list"');
+    expect(html).toContain("1/2 completed");
+    expect(renderToStaticMarkup(createElement(MessageBubble, { message: message("session-a", 4, "ls", "tool", "tool_call") }))).toContain("<span>Tool</span>");
+  });
+
+  it("collapses reasoning into turn activity and counts it as progress", () => {
+    const items = groupStackableMessages([
+      message("session-a", 1, "prompt"),
+      message("session-a", 2, "thinking", "assistant", "reasoning"),
+      message("session-a", 3, "done", "assistant", "assistant")
+    ]);
+    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
+    const stacks = groupEventStacks([message("session-a", 1, "thinking", "assistant", "reasoning")]);
+    expect(stacks[0]).toMatchObject({ type: "stack" });
+  });
+
   it("marks pending user messages as in flight", () => {
     const pending = pendingUserMessageToChatMessage(createPendingUserMessage("session-a", "Ship this", "default", "2026-07-07T00:00:00.000Z"));
     const html = renderToStaticMarkup(createElement(MessageBubble, { message: pending, pending: true }));
