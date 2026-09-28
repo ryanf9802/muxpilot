@@ -1,6 +1,6 @@
 # Local Git Workflow Reference
 
-muxpilot gives Codex sessions a local Git workflow built around short-lived task worktrees. It is designed for concurrent local implementation without letting an agent write directly into the target checkout.
+muxpilot gives Codex and Claude sessions a local Git workflow built around short-lived task worktrees. It is designed for concurrent local implementation without letting an agent write directly into the target checkout.
 
 The workflow integrates commits into an existing local branch. It does not fetch, pull, push, publish, or create a pull request.
 

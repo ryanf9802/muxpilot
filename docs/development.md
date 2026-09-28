@@ -3,9 +3,10 @@
 Workspace layout:
 
 - `apps/web`: React UI for dashboard and agent trees, transcript/composer and interactive gates, documents/BTW, Git/heavy controls, transfer/recovery, notifications, PWA/connection handling, and LAN access.
-- `packages/core`: shared TypeScript API/domain types plus transcript, status, Git/heavy event, proposed-plan, and user-context normalization used by both apps.
-- `scripts`: application lifecycle/supervisor helpers, managed Codex launch/MCP bridges, database maintenance, certificate setup, and Linux/Windows LAN helpers.
-- `skills`: bundled agent procedures and Git/heavy helper implementations installed into the configured Codex home.
+- `apps/server`: Fastify backend. Provider integrations live in `src/providers/` (`codex/`, `claude/` including the per-session Claude host in `claude/host/`, and `shared/`), and provider-neutral runtime infrastructure lives in `src/runtime/`.
+- `packages/core`: shared TypeScript API/domain types, provider kinds and capabilities, plus transcript, status, Git/heavy event, proposed-plan, and user-context normalization used by both apps.
+- `scripts`: application lifecycle/supervisor helpers, managed session launch/MCP bridges, database maintenance, certificate setup, and Linux/Windows LAN helpers.
+- `skills`: bundled agent procedures and Git/heavy helper implementations installed into the configured Codex home and, for Claude, as a local plugin under the muxpilot data directory.
 - `docs`: architecture and operations notes.
 
 The repo is a pnpm workspace. `apps/server` and `apps/web` both depend on `@muxpilot/core` through `workspace:*`.
@@ -28,7 +29,7 @@ pnpm db:compact:dev
 ```
 
 Always use `pnpm app start dev` for the development server. It checks whether the local backend and frontend are already running, reuses a healthy supervised server, starts the dev supervisor when needed, and forces dev state into `./data/dev/muxpilot.db`. Started processes run in the background with PID and log files under `data/runtime/dev/`.
-Codex and other automated development or browser checks must interact only with the dev server. Production is the operator lane; an explicitly requested post-integration restart uses the scoped helper described in [Deployment](deployment.md#updating).
+Codex, Claude, and other automated development or browser checks must interact only with the dev server. Production is the operator lane; an explicitly requested post-integration restart uses the scoped helper described in [Deployment](deployment.md#updating).
 Use `pnpm app stop dev` to stop the dev server only. `pnpm app restart dev` stops and starts it again. `pnpm restart` restarts only environments that are already running, leaving stopped development or production servers down.
 
 
@@ -53,12 +54,12 @@ scripts/linux-lan.sh status --port 5177
 
 On Windows 11 + WSL2, use `scripts/windows-lan.ps1` with `-Port 5177`.
 
-Parser fixtures should be based on small sanitized Codex JSONL snippets. Do not commit full private transcripts.
+Parser fixtures should be based on small sanitized Codex or Claude JSONL snippets. Do not commit full private transcripts.
 
 
 Keep shared transcript/user-context behavior in `packages/core` when both the server parser and web rendering need the same rules. Keep server-only behavior in `apps/server` and UI-only behavior in `apps/web`.
 
-The bundled skill text is part of runtime behavior. Changes to Git targeting rules must stay aligned across the skill, its helper scripts, launch instructions, UI events, and documentation. Orchestration/document contracts must stay aligned with the MCP tool schema, server enforcement, bundled skill, and operator UI. Production startup/restart synchronizes bundled skills into `MUXPILOT_CODEX_HOME`.
+The bundled skill text is part of runtime behavior. Changes to Git targeting rules must stay aligned across the skill, its helper scripts, launch instructions, UI events, and documentation. Orchestration/document contracts must stay aligned with the MCP tool schema, server enforcement, bundled skill, and operator UI. Production startup/restart synchronizes bundled skills into `MUXPILOT_CODEX_HOME`, and backend startup refreshes the Claude plugin copy.
 
 Use the focused reference for the subsystem being changed:
 

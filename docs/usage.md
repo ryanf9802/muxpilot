@@ -1,6 +1,6 @@
 # Usage Guide
 
-muxpilot is an operator console for durable Codex app-server sessions. This guide covers the workflows and controls available after [setup](setup.md).
+muxpilot is an operator console for durable Codex and Claude sessions. This guide covers the workflows and controls available after [setup](setup.md).
 
 ## Dashboard
 
@@ -10,10 +10,14 @@ The dashboard groups sessions by repository and makes their attention state visi
 - Repository, branch, working directory, and dirty-worktree state
 - Recent user prompts
 - Transcript size and runtime availability
-- Codex account and rate-limit information when available
+- A provider badge when more than one provider is enabled or sessions mix providers
 Search matches session names, repository names, branches, working directories, previews, and recent prompts. Use a session's action menu to rename it, configure notifications, fork it, or end it.
 
 Repository groups can be collapsed and remember that choice in the browser. Pinned sessions sort ahead of other sessions in their repository. The three-color stoplight in the top bar shows the current attention totals; selecting a color filters the dashboard to that severity while preserving any parent rows needed to explain matching agent children.
+
+The dashboard shows one usage panel per enabled provider, side by side on wide screens. Each panel shows that provider's sign-in state and, when sign-in is needed, a copyable host login command (`codex login` or `claude auth login`). muxpilot never signs in on the operator's behalf.
+
+The Claude usage panel shows the plan's limit windows reported by Claude Code, such as the five-hour and weekly limits, updated by rate-limit events from live sessions, and daily token activity read from Claude transcripts.
 
 For authenticated ChatGPT accounts, the Codex usage panel shows the current limit windows, earned usage-reset tokens and their expiration details, and daily token activity over the past 30 days. Using a reset token requires confirmation. If the result is interrupted, the panel checks that same redemption once automatically. If it still cannot confirm the outcome, **Retry** checks the same attempt without consuming another token. Refresh reloads account limits, reset tokens, and token activity directly from Codex.
 
@@ -21,7 +25,7 @@ When systemd resource metrics are available, a card shows current memory and CPU
 
 ## Session view
 
-Opening a session shows its structured Codex transcript. muxpilot keeps user prompts, assistant responses, approvals, questions, proposed plans, aborts, and other important events visible while collapsing noisier tool activity and command output.
+Opening a session shows its structured Codex or Claude transcript. muxpilot keeps user prompts, assistant responses, approvals, questions, proposed plans, aborts, and other important events visible while collapsing noisier tool activity and command output.
 
 The session view also provides:
 
@@ -33,10 +37,12 @@ The session view also provides:
 - Normal/Plan collaboration controls and model-dependent Fast mode
 - Transcript search, paging, and jump controls
 - Context-window use, managed Git state, documents, BTW side questions, and active heavyweight-command details
-- A copyable local runtime attachment command
+- A copyable local runtime attachment command for Codex sessions
 - Interrupt, fork, new-session, and kill actions
 
-The permissions selector in the session model-settings drawer is stored per root session and always starts at **Ask for approval**. Agent-managed child sessions continuously inherit their parent's setting; their selector shows the effective mode but cannot be changed independently. Detaching a child resets its mode to Ask. **Auto approval** uses the app-wide Codex reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure the Auto reviewer model and reasoning effort with the reviewer apply action in the dashboard's model-defaults drawer.
+The permissions selector in the session model-settings drawer is stored per root session and always starts at **Ask for approval**. Agent-managed child sessions continuously inherit their parent's setting; their selector shows the effective mode but cannot be changed independently. Detaching a child resets its mode to Ask. **Auto approval** uses the provider's app-wide reviewer to approve clearly in-scope runtime actions, deny clearly out-of-scope actions, and return uncertain or high-impact requests to you. **Full approval** grants runtime requests automatically. Questions and plan choices remain interactive in every mode. Configure each provider's Auto reviewer model and reasoning effort with the reviewer apply action in the dashboard's model-defaults drawer; the Claude reviewer defaults to `haiku`.
+
+Claude sessions always run inside Claude Code's sandbox. Reads, sandboxed commands, and file edits inside the session's writable roots proceed without a prompt. A command that asks to run outside the sandbox, an edit outside the writable roots, and other tool use become approval requests handled by the selected permissions mode.
 
 User prompts render Markdown, including tables, lists, task markers, links, and fenced code. Tool activity, Git lifecycle events, heavyweight queue handoffs, and assistant progress are grouped separately so operational events remain visible without turning the transcript into a terminal log.
 
@@ -46,17 +52,20 @@ Open the new-session dialog or press `Ctrl+N`.
 
 The Create tab asks for:
 
-- **Directory:** the repository or working directory in which Codex should start
+- **Provider:** Codex or Claude, when more than one provider is enabled
+- **Directory:** the repository or working directory in which the agent should start
 - **Name:** the muxpilot display name
 - **Target branch:** an existing local branch used as the integration destination for managed Git work
 
 Directory suggestions come from active sessions and recently touched repositories. Names are normalized to 2–32 lowercase letters, numbers, or hyphens.
 
-New sessions always use Codex app-server. Muxpilot creates and owns a user service and Unix socket for each live session.
+The provider choice shows each provider's readiness and skips providers that cannot start sessions; a signed-out provider shows the host login command. The initial choice is the current session's provider, then the last provider used, then the server default. Muxpilot creates and owns a user service and Unix socket for each live session: a Codex app-server for Codex, or a muxpilot Claude session host for Claude.
+
+Some features are provider-specific. Claude sessions do not support terminal attachment, Codex thread goals, or usage-reset tokens. Claude skills are invoked with `/name` at the start of a message rather than `$name`.
 
 ### Managed Git sessions
 
-For a Git repository, muxpilot starts Codex from a neutral control directory and makes applicable repository skills available there. The bundled Git workflow creates a short-lived task worktree only when a change is needed.
+For a Git repository, muxpilot starts the agent from a neutral control directory and makes applicable repository skills available there. The bundled Git workflow creates a short-lived task worktree only when a change is needed.
 
 The workflow:
 
@@ -77,7 +86,9 @@ See [Local Git Workflow](git-workflow.md) for the helper lifecycle, target guard
 
 ## BTW side questions
 
-Open **BTW** in a session header to ask a separate question without interrupting the main Codex turn. Each request uses a fresh snapshot of the main conversation, runs independently, and keeps its own question, streamed answer, completion state, and copy controls in the drawer. Closing the drawer does not cancel it; a completed answer adds an unread indicator until the drawer is opened.
+Open **BTW** in a session header to ask a separate question without interrupting the main turn. Each request uses a fresh snapshot of the main conversation, runs independently, and keeps its own question, streamed answer, completion state, and copy controls in the drawer. Closing the drawer does not cancel it; a completed answer adds an unread indicator until the drawer is opened.
+
+For Claude sessions, BTW answers from an unpersisted fork of the conversation with read-only file tools, plus document writes when documents are enabled.
 
 BTW cannot pause for interactive input or security approval. A running request can be cancelled. Its saved history is a list of independent side questions, not extra turns injected into the main transcript.
 
@@ -85,11 +96,11 @@ A BTW request can also create or edit session documents. Those changes are stage
 
 ## Session documents
 
-Every session created or restored by muxpilot has a private documents directory available to its Codex agent through `$MUXPILOT_DOCUMENTS_DIR`. The bundled `muxpilot-documents` skill teaches the agent to use flat Markdown files for durable implementation plans, checklists, reminders, decisions, requirements, and acceptance criteria, and to revisit and update them as work progresses. Agents consolidate or retire obsolete working notes at task transitions and milestones, and maintain `INDEX.md` as a concise navigation map rather than a progress log.
+Every session created or restored by muxpilot has a private documents directory available to its agent through `$MUXPILOT_DOCUMENTS_DIR`. The bundled `muxpilot-documents` skill teaches the agent to use flat Markdown files for durable implementation plans, checklists, reminders, decisions, requirements, and acceptance criteria, and to revisit and update them as work progresses. Agents consolidate or retire obsolete working notes at task transitions and milestones, and maintain `INDEX.md` as a concise navigation map rather than a progress log.
 
 The main agent has the same document capabilities in Plan mode as in Default mode. It may autonomously maintain agent working notes, including automatically saved approved plans, and `INDEX.md` identifies documents as agent-managed or user-requested. Explicitly user-requested documents require permission before editing, renaming, or deletion unless the operator already authorized that change. Producing a formal proposed plan does not save it immediately. When the operator selects **Implement** or **Clear context and implement**, muxpilot saves the approved proposal as a separate `plan-<message-sequence>.md` file and indexes it before implementation begins. **Stay in Plan mode** leaves the proposal unsaved.
 
-The environment variable is the only documents directory; the session working directory and repository are not document storage. Agent-created muxpilot child sessions receive private document scopes rather than shared write access. A parent keeps canonical program documents, while muxpilot children keep optional private notes and return proposed document updates for the parent to verify and apply. Built-in Codex subagents share the current session's scope and return proposed updates without editing its documents.
+The environment variable is the only documents directory; the session working directory and repository are not document storage. Agent-created muxpilot child sessions receive private document scopes rather than shared write access. A parent keeps canonical program documents, while muxpilot children keep optional private notes and return proposed document updates for the parent to verify and apply. Built-in provider subagents, such as Codex subagents or Claude's Task tool, share the current session's scope and return proposed updates without editing its documents.
 
 Open **Documents** in the session header to browse the current files and rendered Markdown. Relative links from one listed document to another, such as links in `INDEX.md`, switch the viewer in place; external links open separately. The operator view is read-only; document creation and editing remain agent-managed. Documents persist when a session is missing, archived, killed, or restored.
 
@@ -101,37 +112,37 @@ A session supports at most 100 safe, flat `.md` files, 256 KiB per file, and 10 
 
 The History tab in the new-session dialog searches sessions previously managed by muxpilot. Search covers submitted user prompts, not assistant messages or tool output.
 
-Selecting a live result opens its existing runtime. Selecting a missing or archived result resumes the exact Codex thread through app-server and keeps the same muxpilot session identity.
+Selecting a live result opens its existing runtime. Selecting a missing or archived result resumes the exact provider conversation and keeps the same muxpilot session identity.
 
-If muxpilot stops without a clean shutdown, it records which non-archived Codex runtimes were open. On the next startup, any that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
+If muxpilot stops without a clean shutdown, it records which non-archived session runtimes were open. On the next startup, any that are now missing appear together in a recovery dialog. All candidates are selected by default, so they can be reopened in one batch or reviewed first. Choosing **Not now** dismisses the batch; each conversation remains available from History.
 
-Recovery restores the durable Codex conversation, muxpilot metadata, documents, orchestration ownership, and any managed Git workspace binding. It does not claim that an interrupted shell command was safely resumed; background-terminal evidence is reconciled independently.
+Recovery restores the durable provider conversation, muxpilot metadata, documents, orchestration ownership, and any managed Git workspace binding. It does not claim that an interrupted shell command was safely resumed; background-terminal evidence is reconciled independently.
 
 ## Forking sessions
 
 Use **Fork session** from the session header or dashboard action menu to branch a conversation at its current persisted tip. The child retains a **Forked from** link while the source remains available locally.
 
-Forking is allowed while the source is working, but Codex may record its partial turn as interrupted. Queued inputs, composer drafts, pins, notifications, and other transient UI state are not copied.
+Forking is allowed while the source is working, but the provider may record its partial turn as interrupted. A fork keeps its source's provider. Queued inputs, composer drafts, pins, notifications, and other transient UI state are not copied.
 
 A fork receives an independent snapshot of the source session's documents. A fork of a managed Git session inherits the same target branch but receives its own managed workspace. Unintegrated files from the source worktree are not copied; the fork starts from the current target branch.
 
 ## Agent delegation
 
-Routine bounded delegation, including standard code-review passes, uses Codex's built-in subagents and does not create nested muxpilot sessions. If built-in subagents are unavailable, the review remains in the current session.
+Routine bounded delegation, including standard code-review passes, uses the provider's built-in subagents and does not create nested muxpilot sessions. If built-in subagents are unavailable, the review remains in the current session.
 
 Nested muxpilot sessions are reserved for work the operator explicitly requests as a separate session or durable delegated work that benefits from independent monitoring and its own resource scope. Those sessions remain visible in muxpilot and use the session-orchestration lifecycle and resource guardrails.
 
 An operator can manage a live session's parent from the dashboard action menu or detach a child from its session header. A root tree supports two live agent-managed descendants; finishing a child keeps its history while freeing its live slot. Child attention and completion roll up to the parent, while routine nested status changes are deduplicated for notifications.
 
-Created children use their own app-server service and inherit the source repository/target, model settings, and Fast setting, while starting with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
+Created children use the parent's provider unless the delegating agent names another. They run in their own service and inherit the source repository/target, plus model settings and the Fast setting when the provider matches, while starting with fresh context, their own resource unit, Git identity, and documents. See [Agent Orchestration](agent-orchestration.md) for ownership controls, tool operations, resource prerequisites, context telemetry, work-token budgets, waits, and raw evidence.
 
 ## Moving sessions between hosts
 
-The transfer dialog exports one or more sessions to a format-v6 `.mpsession` archive. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex transcripts, session documents, provider identity, and preferences, then resumes through app-server. Earlier archive formats are not supported.
+The transfer dialog exports one or more sessions to a format-v8 `.mpsession` archive that records each session's provider. On the destination host, map each source repository or directory to its new path and import the archive. muxpilot restores Codex or Claude transcripts, session documents, provider identity, and preferences, then resumes each session through its provider. Format-v6 and v7 archives remain importable as Codex sessions; earlier formats are not supported.
 
 For managed Git sessions, current exports can include the committed local target branch and objects not available from its upstream. Import may create, reuse, or safely fast-forward the same branch name. It never fetches, pulls, pushes, overwrites divergent history, or replaces a conflicting upstream.
 
-Transfer archives do not contain dirty files, staged or untracked changes, stashes, active worktrees, dependencies, Git LFS payloads, submodule repositories, queued input, notification rules, machine-wide Codex configuration, or live processes. Copy or clone the repositories separately.
+Transfer archives do not contain dirty files, staged or untracked changes, stashes, active worktrees, dependencies, Git LFS payloads, submodule repositories, queued input, notification rules, machine-wide Codex or Claude configuration, or live processes. Copy or clone the repositories separately.
 
 Choose a passphrase in the transfer dialog when exporting, then enter the same passphrase before selecting the archive on the importing host. New exports are always encrypted; legacy plaintext archives remain importable.
 
@@ -143,40 +154,40 @@ Changes apply when that session starts its next turn at a safe boundary. An acti
 
 ## Sending and queuing input
 
-muxpilot persists every input before delivery. It sends a structured app-server turn with a stable client message ID and reconciles uncertain delivery before retrying.
+muxpilot persists every input before delivery. It sends a structured provider turn with a stable client message ID and reconciles uncertain delivery before retrying.
 
 - `Ctrl+Enter` submits the composer.
-- Input is sent immediately when Codex is ready.
-- Input is queued while Codex is busy or another item is already queued.
+- Input is sent immediately when the agent is ready.
+- Input is queued while the agent is busy or another item is already queued.
 - Queued messages can be edited or deleted until sending begins.
-- Queued input is bound to the current Codex thread so it cannot leak into a different run after a source change.
+- Queued input is bound to the current provider thread so it cannot leak into a different run after a source change.
 - The next queued item is sent automatically when the session becomes ready.
 
-Every submitted message is persisted before delivery and bound to the current Codex thread. Muxpilot records the app-server receipt and reconciles the stable client ID against authoritative thread state before any retry.
+Every submitted message is persisted before delivery and bound to the current provider thread. Muxpilot records the runtime receipt and reconciles the stable client ID against authoritative thread state before any retry.
 
-If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** first reconciles authoritative app-server state; **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
+If delivery cannot be verified, the session enters `input_failed`, preserves the exact message, and blocks further composer input. **Retry input** first reconciles authoritative runtime state; **Dismiss** clears the blocking state without claiming delivery. Pending deliveries are reconciled after backend restart and transcript rollover so acknowledged input is not replayed. See [Runtime Reliability](runtime-reliability.md#verified-input-delivery).
 
-The Normal/Plan and Fast controls use structured thread settings. If Codex is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
+The Normal/Plan and Fast controls use structured thread settings. If the agent is waiting for a structured question or proposed-plan decision, the general composer remains locked until that prompt is resolved.
 
-When supported by the active model, **Fast** sends Codex's Fast-mode command and also updates the default for future Codex sessions. Fast mode uses more credits. The control is disabled while the session is in a state where Codex cannot accept the change, and dashboard cards show when it is active.
+When supported by the provider and active model, **Fast** turns on the provider's Fast mode and also updates the default for future sessions. Fast mode uses more credits. The control is hidden for providers or models without it, disabled while the session cannot accept the change, and dashboard cards show when it is active.
 
 ## Interactive gates
 
-muxpilot exposes common Codex interactions in the browser:
+muxpilot exposes common agent interactions in the browser:
 
 - Approval prompts can be approved once, approved for an offered prefix, or denied.
-- Connector permission prompts expose the choices supplied by Codex.
+- Connector and tool permission prompts expose the choices supplied by the provider.
 - Structured questions render as form controls.
-- Multiple-choice and free-form answers are returned through the exact app-server request.
+- Multiple-choice and free-form answers are returned through the exact runtime request.
 - Proposed plans can remain in plan mode or move into implementation, with or without clearing context.
 
-Muxpilot answers these requests with their exact app-server JSON-RPC request identity. It does not bypass Codex approval behavior.
+Muxpilot answers these requests with their exact runtime JSON-RPC request identity. It does not bypass provider approval behavior.
 
 ## Prompt history and skills
 
 Press `Ctrl+R` to search previously submitted user prompts. Choosing a result copies it to the clipboard.
 
-Type `$` in the composer to search available Codex skills. Suggestions may include user, system, plugin, and workspace skills. Use Arrow Up/Down to select, `Enter` or `Tab` to accept, and `Escape` to dismiss.
+In a Codex session, type `$` anywhere in the composer to search available Codex skills. In a Claude session, type `/` at the start of a message to search Claude skills. Suggestions may include user, system, plugin, and workspace skills; muxpilot's bundled skills are installed for Claude as a local plugin. Use Arrow Up/Down to select, `Enter` or `Tab` to accept, and `Escape` to dismiss.
 
 ## Keyboard reference
 
@@ -238,37 +249,37 @@ An installed PWA checks for a newer web build at startup and when it returns to 
 
 ## Session discovery
 
-Muxpilot periodically reconciles managed app-server services, persisted thread identities, and recent Codex session files. It tracks:
+Muxpilot periodically reconciles managed session services, persisted thread identities, and recent provider session files. It tracks:
 
-- App-server service, socket, and thread identity
+- Session service, socket, and thread identity
 - Working directory
 - Repository root, branch, worktree, and dirty state
-- Matched Codex session and JSONL file
+- Matched provider session and JSONL file
 - Transcript size and recent prompt activity
 - Inferred working or attention status
 
-When a session begins using a different Codex JSONL source, muxpilot resets the stored transcript for that app session so events from the previous run do not appear under the new one.
+When a session begins using a different JSONL source, muxpilot resets the stored transcript for that app session so events from the previous run do not appear under the new one.
 
 ## Statuses
 
 The dashboard groups statuses into three attention colors:
 
 - **Red:** operator attention is needed.
-- **Yellow:** Codex is active or its state is uncertain.
+- **Yellow:** the agent is active or its state is uncertain.
 - **Green:** the session is ready for input.
 
 Common status labels include:
 
 | Status | Meaning |
 | --- | --- |
-| `working`, `generating`, `executing` | Codex appears busy |
-| `planning` | Codex is working in Plan mode |
+| `working`, `generating`, `executing` | The agent appears busy |
+| `planning` | The agent is working in Plan mode |
 | `queued` | Submitted or scheduled work has not started yet |
 | `waiting`, `idle` | Input is likely safe to send |
 | `approval` | An approval gate is open |
 | `question` | A structured question is waiting |
 | `plan_ready` | A proposed plan needs a choice |
-| `blocked` | Codex reported a blocker |
+| `blocked` | The agent reported a blocker |
 | `input_failed` | The last submitted message is preserved but delivery needs retry or dismissal |
 | `startup_failed` | A managed session could not start |
 | `completed` | An agent-managed session was explicitly finished |

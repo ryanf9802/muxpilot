@@ -1,21 +1,22 @@
 # Architecture Overview
 
-muxpilot is a lightweight developer operator console for durable Codex sessions. Codex app-server is its sole runtime.
+muxpilot is a lightweight developer operator console for durable Codex and Claude sessions. Each session belongs to one provider: Codex runs on Codex app-server, and Claude runs on Claude Code through the Claude Agent SDK.
 
 ```text
-Operator browser -> HTTP/WebSocket -> Backend/API server -> semantic session driver
+Operator browser -> HTTP/WebSocket -> Backend/API server -> provider registry -> semantic session driver
                                                        |-> Codex app-server + systemd service
-                                                       |-> Codex JSONL evidence
+                                                       |-> Claude session host + systemd service
+                                                       |-> Codex or Claude JSONL evidence
                                                        `-> SQLite database
 ```
 
 The Backend/API server owns the runtime integration. The browser uses semantic actions and never shell primitives.
 
-This iteration supports a local session host only: runtime services, Codex files, and the Backend/API server run on the same host machine. Same-network phones connect to the web UI over LAN HTTP and authenticate with the backend-generated remote access key when the server is exposed beyond loopback.
+This iteration supports a local session host only: runtime services, provider files, and the Backend/API server run on the same host machine. Same-network phones connect to the web UI over LAN HTTP and authenticate with the backend-generated remote access key when the server is exposed beyond loopback.
 
 ## Workspace Boundaries
 
-- `apps/server`: trusted host process and source of side effects.
+- `apps/server`: trusted host process and source of side effects. Provider integrations live in `src/providers/` (`codex/`, `claude/`, and `shared/`, behind the contracts in `types.ts` and `registry.ts`); provider-neutral systemd supervision, JSON-RPC connections, and protocol journals live in `src/runtime/`.
 - `apps/web`: browser UI and API client.
 - `packages/core`: shared contracts and deterministic display helpers for code used by both apps.
 
@@ -23,9 +24,9 @@ This iteration supports a local session host only: runtime services, Codex files
 
 ## Sources Of Truth
 
-Provider/thread identity, reconciled app-server protocol state, and the muxpilot-owned systemd unit and socket are authoritative for live sessions.
+Provider/thread identity, reconciled provider protocol state (Codex app-server or Claude host), and the muxpilot-owned systemd unit and socket are authoritative for live sessions.
 
-Codex JSONL files under `~/.codex/sessions` are the durable transcript source because they contain structured user, assistant, and tool events.
+Provider JSONL files are the durable transcript source because they contain structured user, assistant, and tool events: Codex writes them under `~/.codex/sessions`, and Claude Code writes them to `<CLAUDE_CONFIG_DIR>/projects/<project-slug>/<session-id>.jsonl`.
 
 SQLite stores application state: managed-session metadata, parsed messages, parser offsets, prompt search, queued inputs and delivery state, BTW exchanges, orchestration waits and ownership, dashboard settings, notifications, recovery incidents, Git workspace bindings, and audit records. WebSocket events are published live and are not retained as the source of truth.
 
@@ -36,17 +37,20 @@ Managed Git sessions store the repository entry point, current existing local ta
 ## Components
 
 - React Web UI: operator access screen, attention dashboard and agent trees, structured transcript, composer and verified-delivery recovery, queued input controls, interactive gates, documents and BTW views, Git/heavyweight controls, transfer/recovery dialogs, and LAN connection details.
-- Fastify Backend/API server: operator access gate, REST API, WebSocket event stream.
+- Fastify Backend/API server: operator access gate, REST API, WebSocket event stream. `/api/providers` lists enabled providers with compatibility, capabilities, and sign-in state, and `PATCH /api/providers/default` persists the default provider. Provider-scoped routes under `/api/providers/:kind/` serve authentication state and refresh, usage summary and history, Codex usage-reset redemption, models, model defaults, approval-reviewer settings, and skills.
 - Session manager: structured reconciliation, verified input, queues, hibernation/recovery, create/fork/restore, agent ownership, and event publishing.
-- Approval reviewer: evaluates Auto-mode runtime requests in an isolated, read-only Codex thread and returns structured decisions or escalations.
-- Session driver registry and Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
-- Codex parser: maps JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
+- Provider registry: routes each session to its enabled provider by kind and supplies that provider's driver, compatibility probe, authentication lifecycle, usage, models, skills, transcript parser, approval reviewer, and BTW engine.
+- Approval reviewer: evaluates Auto-mode runtime requests with the session's provider in an isolated context, a read-only Codex thread or a tool-less Claude query, and returns structured decisions or escalations.
+- Codex app-server driver: semantic lifecycle/input/gate/settings operations, durable per-session services and sockets, compatibility checks, protocol journals, and exact-thread reconnect/read barriers.
+- Claude driver and session host: each Claude session runs a muxpilot host process as a muxpilot-owned user service. The host holds one streaming Claude Agent SDK query, speaks JSON-RPC to the backend over a private Unix socket, applies muxpilot's tool permission policy, and holds interactive requests while the backend is disconnected. Claude Code's sandbox (bubblewrap and socat) is mandatory; without it the provider reports `sandbox_unavailable`.
+- Provider authentication lifecycle: observes each provider's CLI-managed login (`codex login`, `claude auth login`) and credential files independently, holds session admission during an account change, and suspends or restarts that provider's live sessions at safe boundaries.
+- Transcript parsers: map Codex or Claude JSONL events to typed chat messages, approvals, questions, assistant progress, proposed plans, and user-context markers.
 - Database adapter: local SQLite via `node:sqlite`, isolated so libSQL/Turso can be added later.
-- Codex usage service: optional dashboard data from `codex app-server --stdio`.
-- Skill discovery: reads user, system, plugin, and workspace Codex skills for composer suggestions.
-- Session documents: provisions per-session Markdown storage, exposes it to Codex as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
-- BTW service: forks a bounded app-server turn from a conversation snapshot, streams independent answers, coordinates isolated document staging, and hands safe changes back to the main session.
-- Session orchestration broker: binds a capability-scoped MCP server to each managed Codex launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
+- Usage services: per-provider dashboard data, from `codex app-server --stdio` for Codex and from an idle Claude SDK control session, live rate-limit events, and Claude transcripts for Claude.
+- Skill discovery: reads each provider's user, system, plugin, and workspace skills for composer suggestions. Bundled muxpilot skills are installed into the Codex home and, for Claude, as a local plugin under the muxpilot data directory.
+- Session documents: provisions per-session Markdown storage, exposes it to the agent as an additional writable root, validates safe read-only operator access, and snapshots documents for forks and transfers.
+- BTW service: runs a provider-specific BTW engine, a bounded app-server turn or an unpersisted Claude conversation fork, from a conversation snapshot, streams independent answers, coordinates isolated document staging, and hands safe changes back to the main session.
+- Session orchestration broker: binds a capability-scoped MCP server to each managed session launch and enforces ownership, context, work-token, wait, scope, and security boundaries.
 - Heavy command service: observes shared queue metadata, resumes reserved sessions, serves bounded live output, and terminates exact process groups on operator request.
 - Resource governor and Docker proxy: allocate muxpilot-owned systemd scopes and label/constrain containers created through managed sessions.
 - Session transfer service: packages portable transcript prefixes, preferences, documents, encrypted session variables, and eligible committed Git objects with passphrase-based authenticated encryption.
@@ -60,11 +64,11 @@ The access key is submitted in the request body to `/api/access`. After success,
 
 Cookie signing uses an in-memory random secret by default. Restarting the backend invalidates existing browser access sessions, which is acceptable for this single-operator LAN tool. `MUXPILOT_SESSION_SECRET` is optional for operators who want cookies to survive restarts.
 
-The browser access boundary is separate from session capabilities. A browser action is authorized as the operator; a managed Codex process receives only the Git/orchestration brokers and writable roots injected for that session. Runtime approval automation is selected by the operator per session and cannot be elevated through the orchestration broker.
+The browser access boundary is separate from session capabilities. A browser action is authorized as the operator; a managed agent process receives only the Git/orchestration brokers and writable roots injected for that session. Runtime approval automation is selected by the operator per session and cannot be elevated through the orchestration broker.
 
 ## Persistence
 
-SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, session settings, Codex usage snapshots, and audit events must live outside `dist/`.
+SQLite lives on the Backend/API server host under `MUXPILOT_DB_PATH`. Build output under `dist/` is disposable; persistent state such as parsed messages, session settings, provider usage snapshots, and audit events must live outside `dist/`.
 
 Development uses `./data/dev/muxpilot.db` through `pnpm app start dev`. Production uses `./data/prod/muxpilot.db` through `pnpm app start`.
 
@@ -79,38 +83,38 @@ Remote SSH session hosts, GitHub Pages/static cross-origin hosting, VPN/tunnel g
 Dashboard:
 
 ```text
-app-server runtime evidence + Codex scan -> session manager -> SQLite -> API -> React
+provider runtime evidence + transcript scan -> session manager -> SQLite -> API -> React
 ```
 
 Transcript:
 
 ```text
-Codex JSONL appended -> parser offset read -> new events mapped -> messages stored -> WebSocket pushed
+provider JSONL appended -> parser offset read -> new events mapped -> messages stored -> WebSocket pushed
 ```
 
 Input:
 
 ```text
 React composer -> persist stable client ID -> driver.sendMessage -> turn/start
-Busy app-server turn + Steer now -> persist stable client ID -> driver.steer -> turn/steer
+Busy turn + Steer now -> persist stable client ID -> driver.steer -> turn/steer
 Busy session -> queued input in SQLite -> wake if hibernated -> send when ready
-Mode/Fast toggle -> driver.setPreferences -> thread/settings/update
+Mode/Fast toggle -> driver.setPreferences -> provider settings update
 Interactive gate -> persisted exact request ID -> structured JSON-RPC response
 ```
 
-Active app-server turns expose separate **Steer now** and **Queue** actions. A definitive stale or non-steerable response moves the same persisted submission into the normal queue; an uncertain response is reconciled by client message ID before any retry or fallback.
+Active turns expose separate **Steer now** and **Queue** actions. A definitive stale or non-steerable response moves the same persisted submission into the normal queue; an uncertain response is reconciled by client message ID before any retry or fallback.
 
 Verified delivery:
 
 ```text
 persist user message + provider/thread/client identity -> structured send -> exact receipt/item acknowledgement
-uncertain app-server delivery -> thread/read -> reconcile stable client ID before any retry
+uncertain delivery -> authoritative thread read -> reconcile stable client ID before any retry
 ```
 
 Session actions:
 
 ```text
-React action button -> POST /api/sessions/:id/actions -> SessionManager -> app-server/SQLite -> WebSocket update
+React action button -> POST /api/sessions/:id/actions -> SessionManager -> provider driver/SQLite -> WebSocket update
 ```
 
 Supported actions include interrupt, settings, proposed-plan choice, rename, hibernate/wake, detach notice, runtime kill, and archive transcript.
@@ -118,7 +122,7 @@ Supported actions include interrupt, settings, proposed-plan choice, rename, hib
 BTW and documents:
 
 ```text
-question + main Codex thread snapshot -> independent bounded app-server turn -> streamed BTW history
+question + main conversation snapshot -> independent bounded provider turn -> streamed BTW history
 document request -> isolated staging copy -> validate diff + safe-boundary check -> atomic apply -> private main-session notice
 ```
 
@@ -126,7 +130,7 @@ Agent orchestration:
 
 ```text
 capability-bound MCP call -> ownership/scope/context/budget validation -> SessionManager action
-create child -> fresh Codex app-server session + private resource/documents + inherited repo/target/settings -> initial task
+create child -> fresh session on the parent's or requested provider + private resource/documents + inherited repo/target/settings -> initial task
 wait -> durable SQLite record -> out-of-model event watch -> exact parent resume message
 ```
 
@@ -142,7 +146,7 @@ Heavyweight command continuation:
 
 ```text
 task helper -> shared FIFO lease
-busy -> QUEUED_NOT_RUN + released Codex turn -> muxpilot reservation -> exact automatic resume
+busy -> QUEUED_NOT_RUN + released agent turn -> muxpilot reservation -> exact automatic resume
 running -> process/output/container observation -> session UI -> completion or operator process-group termination
 ```
 
@@ -157,14 +161,14 @@ The history index contains only displayable user prompts from sessions muxpilot 
 Crash recovery:
 
 ```text
-missing candidates -> operator recovery dialog -> codex resume -> restore muxpilot metadata/documents/Git binding
+missing candidates -> operator recovery dialog -> provider resume -> restore muxpilot metadata/documents/Git binding
 ```
 
 Session transfer:
 
 ```text
 selected portable sessions -> manifest + transcript prefixes + documents + eligible Git bundle
-    -> optional AES-GCM archive -> destination mapping/branch inspection -> safe import + Codex resume
+    -> optional AES-GCM archive -> destination mapping/branch inspection -> safe import + provider resume
 ```
 
 For deeper contracts, see [Local Git Workflow](git-workflow.md), [Agent Orchestration](agent-orchestration.md), and [Runtime Reliability](runtime-reliability.md).

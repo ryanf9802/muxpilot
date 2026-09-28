@@ -15,7 +15,9 @@ cp .env.example .env
 pnpm app start
 ```
 
-`pnpm app start` runs the production path. It installs or updates all bundled muxpilot skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits up to five minutes until both endpoints are healthy. Cold database and session recovery can take longer than ordinary startup, so the command reports endpoint readiness every 10 seconds while it waits. Skill synchronization also runs when production is already active.
+`pnpm app start` runs the production path. It installs or updates all bundled muxpilot skills in `MUXPILOT_CODEX_HOME` (default `~/.codex`), builds the workspace, starts a repo-local supervisor in the background, starts the backend and web UI under that supervisor, and waits up to five minutes until both endpoints are healthy. Cold database and session recovery can take longer than ordinary startup, so the command reports endpoint readiness every 10 seconds while it waits. Skill synchronization also runs when production is already active. When the Claude provider is available, the backend also installs the bundled skills as a local Claude plugin under `MUXPILOT_DATA_DIR/claude-plugin/muxpilot` each time it starts.
+
+Before creating sessions, sign in on the host with `codex login` and, for Claude, `claude auth login`. Claude sessions also need `bwrap` and `socat` installed. See [Setup](setup.md#providers).
 
 Production defaults:
 
@@ -27,7 +29,7 @@ Production defaults:
 - PIDs: `supervisor.pid`, `server.pid`, `web.pid`
 
 
-App-server Unix sockets live below `XDG_RUNTIME_DIR` so their paths remain within the platform limit even when muxpilot is installed in a deeply nested checkout. Durable environment metadata and protocol journals remain below `MUXPILOT_DATA_DIR`.
+App-server and Claude session-host Unix sockets live below `XDG_RUNTIME_DIR` so their paths remain within the platform limit even when muxpilot is installed in a deeply nested checkout. Durable environment metadata and protocol journals remain below `MUXPILOT_DATA_DIR`.
 
 You can close the terminal after startup. The supervisor keeps running while the Linux/WSL instance stays running, and it restarts the backend or web process if one crashes. If the WSL distro, Linux session, or host machine stops, start muxpilot again with `pnpm app start`.
 
@@ -59,7 +61,7 @@ pnpm app restart
 
 Run `pnpm app status` after the restart and inspect `pnpm app logs prod --process all --lines 80` if either endpoint is unhealthy.
 
-For an automated Codex change, local integration and production restart are separate operations. After the Git workflow reports `INTEGRATED`, use the repo-owned `$muxpilot-restart-prod` helper with the exact integrated commit. It moves outside the requesting session's resource scope, refuses a dirty or mismatched target checkout, restarts production, and verifies health, commit identity, and non-session cgroup placement. Human operators can continue to use `pnpm app restart prod` directly.
+For an automated agent change, local integration and production restart are separate operations. After the Git workflow reports `INTEGRATED`, use the repo-owned `$muxpilot-restart-prod` helper with the exact integrated commit. It moves outside the requesting session's resource scope, refuses a dirty or mismatched target checkout, restarts production, and verifies health, commit identity, and non-session cgroup placement. Human operators can continue to use `pnpm app restart prod` directly.
 
 ## LAN Run
 
@@ -116,7 +118,7 @@ If the phone will install the certificate over LAN, the trust-server port must a
 scripts/linux-lan.sh install --port 12880
 ```
 
-This production flow is for manual operator use only. Codex and other automated agents should use development mode with `pnpm app start dev`.
+This production flow is for manual operator use only. Codex, Claude, and other automated agents should use development mode with `pnpm app start dev`.
 
 Cross-network access through VPNs, tunnels, reverse proxies, or static-hosted frontends is future work.
 

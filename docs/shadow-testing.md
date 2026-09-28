@@ -23,8 +23,9 @@ Shadow mode forcibly uses:
 - `data/shadow/muxpilot.db` and `data/runtime/shadow/` in the checkout that launched it;
 - `data/shadow/git-worktrees/` and `data/shadow/sessions/` for managed Git and session documents;
 - `data/shadow/heavy/` for heavyweight queue state;
-- a shadow-namespaced app-server capability identity, so even a reused session ID cannot select a production unit;
-- app-server as the sole session runtime.
+- a shadow-namespaced session capability identity for both Codex and Claude runtimes, so even a reused session ID cannot select a production unit.
+
+The shadow harness targets the Codex app-server stack. Its unit cleanup on `pnpm app stop shadow` covers shadow-owned app-server and heavyweight units only, so end any Claude sessions created in shadow before stopping it.
 
 
 App-server systemd services receive the launching muxpilot server's executable search path in their private environment file. This is required when `codex` and its Node interpreter are installed through a user-level version manager such as NVM.
@@ -34,7 +35,7 @@ These values override `.env` and `.env.local`. Shadow mode disables LAN/HTTPS ex
 
 ## Safety boundary
 
-Create new sessions in the shadow UI. Do not copy the production database, restore a currently active production thread, or import a transfer made from an active production session. Any of those actions could create two controllers for the same Codex thread even though the muxpilot services themselves are isolated.
+Create new sessions in the shadow UI. Do not copy the production database, restore a currently active production thread, or import a transfer made from an active production session. Any of those actions could create two controllers for the same provider conversation even though the muxpilot services themselves are isolated.
 
 The harness isolates muxpilot-owned state; it does not make an arbitrary working directory read-only. A directory-mode session pointed at `../teamweave` will intentionally edit that real checkout and trigger its HMR. Use a scratch checkout or a managed Git session when the codebase must also remain isolated.
 

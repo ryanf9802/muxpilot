@@ -1,6 +1,6 @@
 # Configuration Reference
 
-muxpilot is a single-operator developer console. The Web UI runs in a browser, and the Backend/API server is the trusted process that manages Codex app-server services on the host machine.
+muxpilot is a single-operator developer console. The Web UI runs in a browser, and the Backend/API server is the trusted process that manages Codex and Claude session services on the host machine.
 
 ## User Settings
 
@@ -19,6 +19,18 @@ Open the desktop web UI, press the Connect device button, and use the generated 
 By default, the backend generates an in-memory remote access key and cookie signing secret on startup. Existing browser access sessions are invalidated after a backend restart, and remote access can also be revoked immediately from the Connect device modal.
 
 If `MUXPILOT_LAN_ENABLED` is false and the app is bound to loopback, local browser requests are trusted and no access key is required.
+
+## Providers
+
+- `MUXPILOT_PROVIDERS`: comma-separated providers to enable, `codex`, `claude`, or both. Defaults to both.
+- `MUXPILOT_DEFAULT_PROVIDER`: provider preselected for new sessions, `codex` (default) or `claude`. A default saved through `PATCH /api/providers/default` is stored in SQLite and takes precedence.
+- `MUXPILOT_CLAUDE_CONFIG_DIR`: Claude Code configuration directory on the host machine. Falls back to `CLAUDE_CONFIG_DIR`, then `$HOME/.claude`. Claude transcripts are read from `projects/<project-slug>/<session-id>.jsonl` below it.
+- `MUXPILOT_CLAUDE_BIN`: Claude Code executable. Defaults to `claude` on the backend's `PATH`.
+- `MUXPILOT_CLAUDE_ALLOW_API_KEY`: set to `1` to pass `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` through to Claude runtimes. By default both are removed so Claude uses the `claude auth login` session.
+
+Provider sign-in is managed outside muxpilot with `codex login` and `claude auth login`. Claude sessions also require `bwrap` and `socat` for Claude Code's sandbox; without them the provider reports `sandbox_unavailable`. See [Setup](setup.md#providers).
+
+Usage-limit notification thresholds are shared by all providers.
 
 ## Persistence
 
@@ -50,7 +62,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_DATA_DIR`: data directory, default `./data/dev` under `pnpm app start dev`, `./data/prod` under `pnpm app start`, and `./data` when the server is started directly. Shadow mode forcibly uses `./data/shadow` in its launching worktree.
 - `MUXPILOT_DB_PATH`: SQLite database path, default `./data/dev/muxpilot.db` under `pnpm app start dev`, `./data/prod/muxpilot.db` under `pnpm app start`, and `./data/muxpilot.db` when the server is started directly. Shadow mode forcibly uses `./data/shadow/muxpilot.db`.
 - `MUXPILOT_CODEX_HOME`: Codex home on the host machine, default `$HOME/.codex`.
-- `MUXPILOT_SKILL_HOME`: root containing muxpilot's installed `skills/` directory, defaulting to `MUXPILOT_CODEX_HOME`. Shadow mode forces this to its exact checkout so burn-in never updates or executes production's installed workflow helpers.
+- `MUXPILOT_SKILL_HOME`: root containing muxpilot's installed `skills/` directory for Codex, defaulting to `MUXPILOT_CODEX_HOME`. Claude receives the bundled skills as a local plugin under `MUXPILOT_DATA_DIR/claude-plugin/muxpilot`, refreshed at backend startup. Shadow mode forces this to its exact checkout so burn-in never updates or executes production's installed workflow helpers.
 - `MUXPILOT_SESSION_SECRET`: optional HMAC secret of at least 16 characters for persistent operator cookies across restarts.
 - `MUXPILOT_OPERATOR_TOKEN`: optional override of at least 12 characters for the generated remote access key. Normal LAN use should leave this unset.
 - `MUXPILOT_CORS_ORIGINS`: comma-separated allowlist for credentialed cross-origin API use. Not required for the normal LAN flow.
@@ -60,7 +72,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_RUNTIME_LOG_RETAINED_FILES`: number of rotated files retained per runtime log, default `3`. Values must be positive integers.
 - `MUXPILOT_PARSER_INTERVAL_MS`: Codex JSONL parse interval, default `1000`.
 - `MUXPILOT_APP_START_TIMEOUT_MS`: endpoint-health wait after the supervisor launches, default `300000` (five minutes) for production and `30000` for development and shadow. The lifecycle command reports endpoint progress every 10 seconds while it waits. Values must be integers of at least `1000`.
-- `MUXPILOT_APP_SERVER_HIBERNATE_MS`: idle time before an eligible app-server service hibernates, default `900000` (15 minutes). Pending input, gates, child waits, heavyweight work, active turns, and background terminals block hibernation.
+- `MUXPILOT_APP_SERVER_HIBERNATE_MS`: idle time before an eligible Codex or Claude session service hibernates, default `900000` (15 minutes). Pending input, gates, child waits, heavyweight work, active turns, and background terminals block hibernation.
 - `MUXPILOT_RESOURCE_GOVERNOR`: `auto` (default) applies best-effort systemd cgroup and Docker limits to muxpilot-launched sessions; `off` disables both controls.
 - `MUXPILOT_AGENT_MEMORY_SOFT_PERCENT`: shared `MemoryHigh` pool for busy agent sessions, default `50`.
 - `MUXPILOT_AGENT_MEMORY_HARD_PERCENT`: shared `MemoryMax` pool for busy agent sessions, default `60`.
@@ -78,7 +90,7 @@ These are available for unusual local setups but are not needed for normal deskt
 - `MUXPILOT_HEAVY_VALIDATION_TERMINATION_GRACE_MS`: time between process-group `SIGTERM` and `SIGKILL`, default `30000` (30 seconds).
 
 Per-run overrides can be placed before `--`, for example `muxpilot-git-run.mjs --heavy --runtime-timeout 20m --inactivity-timeout 5m -- make lint`. In managed sessions, a busy scheduler returns `QUEUED_NOT_RUN` without running the command; muxpilot reserves the ticket in FIFO order and sends an exact resume command when its slot is available. The runner emits queue/start/heartbeat/warning/termination lifecycle messages, records live state for the session UI, and retains the latest 20 command logs (up to 50 MiB each) in the session control directory.
-- Plan actions, questions, approvals, and connector permissions use structured app-server requests and responses.
+- Plan actions, questions, approvals, and connector permissions use structured provider requests and responses.
 
 All agent and Docker pool percentages must be greater than zero and no more than 100. A hard-memory percentage must be at least its corresponding soft percentage. The heavyweight inactivity timeout must be greater than its warning threshold.
 
@@ -124,7 +136,7 @@ See [Runtime Reliability](runtime-reliability.md#session-resource-controls) for 
 Managed Git session worktrees live outside the repository entry checkout by default:
 
 - `MUXPILOT_GIT_WORKTREE_ROOT` defaults to `~/.muxpilot/worktrees`.
-- `MUXPILOT_GIT_SESSION_ROOT` defaults to `~/.muxpilot/sessions` and contains the small neutral control directories used by live Codex chats.
+- `MUXPILOT_GIT_SESSION_ROOT` defaults to `~/.muxpilot/sessions` and contains the small neutral control directories used by live sessions.
 
 These paths may be overridden when worktrees need to live on a particular filesystem. Do not point them inside a repository working tree.
 
@@ -134,7 +146,7 @@ See [Local Git Workflow](git-workflow.md) for target selection, dependency local
 
 ## Internal And Script-Only Environment
 
-The settings above are the supported operator configuration surface. muxpilot also injects environment variables into managed Codex processes and helper commands. They are protocol state, not `.env` settings:
+The settings above are the supported operator configuration surface. muxpilot also injects environment variables into managed provider processes and helper commands. They are protocol state, not `.env` settings:
 
 - `MUXPILOT_DOCUMENTS_DIR` identifies the current session's private document scope.
 - `MUXPILOT_GIT_ENTRY_PATH`, `MUXPILOT_GIT_REPO_ROOT`, `MUXPILOT_GIT_TARGET_BRANCH`, `MUXPILOT_GIT_STATUS_FILE`, `MUXPILOT_GIT_WORKSPACE_ID`, `MUXPILOT_GIT_HELPER_DIR`, and dependency metadata bind the installed Git skill to one managed workspace.
