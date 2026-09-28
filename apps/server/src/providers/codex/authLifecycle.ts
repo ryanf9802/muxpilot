@@ -131,7 +131,7 @@ export async function authPrincipalFingerprint(
       const accountId = typeof tokens?.account_id === "string" ? tokens.account_id : null;
       if (accountId) return fingerprint(["chatgpt", authMode, accountId]);
       const apiKey = typeof parsed.OPENAI_API_KEY === "string" ? parsed.OPENAI_API_KEY : null;
-      if (apiKey) return fingerprint(["api_key", authMode, apiKeyFingerprint(apiKey)]);
+      if (apiKey) return apiKeyFingerprint(authMode, apiKey);
     } catch {
       // Fall back to the normalized account identity below. Invalid files are
       // still surfaced by account/read rather than treated as a token change.
@@ -145,8 +145,8 @@ export async function authPrincipalFingerprint(
  * Identifies an API key without keeping a fast hash of the secret. The fixed salt keeps the principal stable across
  * restarts; the key itself only needs change detection, never verification.
  */
-function apiKeyFingerprint(apiKey: string): string {
-  return scryptSync(apiKey, "muxpilot-codex-auth-principal-v1", 32).toString("hex");
+function apiKeyFingerprint(authMode: string, apiKey: string): string {
+  return scryptSync(JSON.stringify(["api_key", authMode, apiKey]), "muxpilot-codex-auth-principal-v1", 32).toString("hex");
 }
 
 function fingerprint(parts: string[]): string {
