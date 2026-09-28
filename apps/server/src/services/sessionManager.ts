@@ -2830,7 +2830,21 @@ export class SessionManager {
       sessionName: sessionName(source)
     };
     this.requireDriver(source);
+    await this.ensureTranscriptAvailable(source);
     return this.forkAppServerSession(source, sourceThreadId, sessionNameValue, forkedFrom);
+  }
+
+  /** Restores a transcript the provider CLI may have swept, before it is resumed, forked or exported. */
+  async ensureTranscriptAvailable(session: ManagedSession): Promise<void> {
+    // A failed restore surfaces as the resume, fork or export failure that follows.
+    await this.providers.maybe(session.provider.kind)?.transcripts.ensureAvailable?.(session.provider).catch(() => undefined);
+  }
+
+  /** Copies every session's transcript out of reach of the provider CLI's retention sweep. */
+  async preserveTranscripts(): Promise<void> {
+    for (const session of await this.db.listSessions(true)) {
+      await this.providers.maybe(session.provider.kind)?.transcripts.preserve?.(session.provider);
+    }
   }
 
   private async forkAppServerSession(
@@ -3256,6 +3270,7 @@ export class SessionManager {
   }
 
   private async performAppServerResume(session: ManagedSession): Promise<ManagedSession> {
+    await this.ensureTranscriptAvailable(session);
     const startFreshThread = await isDisposableEmptyAppServerThread(session, await this.db.latestUserMessage(session.id));
     const sourceThreadId = sessionThreadId(session);
     if (!startFreshThread && !sourceThreadId) throw new Error("Session does not have a provider conversation id to resume");

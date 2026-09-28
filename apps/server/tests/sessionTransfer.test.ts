@@ -116,6 +116,7 @@ describe.sequential("SessionTransferService", () => {
     }));
     const manager = {
       snapshotDocuments: async () => documents,
+      ensureTranscriptAvailable: async () => undefined,
       assertPortableRuntimeAvailable: () => undefined,
       validatePortableMapping: async () => undefined,
       importPortableSession
@@ -167,6 +168,7 @@ describe.sequential("SessionTransferService", () => {
     const db = { getSession: async (id: string) => fixture.sessions.find((session) => session.id === id) ?? null } as AppDatabase;
     const manager = {
       snapshotDocuments: async () => [], assertPortableRuntimeAvailable: () => undefined,
+      ensureTranscriptAvailable: async () => undefined,
       validatePortableMapping: async () => undefined,
       importPortableSession: async (session: { provider: "codex" | "claude"; threadId: string; sessionName: string }) => ({ provider: session.provider, threadId: session.threadId, sessionName: session.sessionName, status: "resumed" as const, sessionId: `imported-${session.threadId}`, error: null })
     } as unknown as SessionManager;
@@ -357,7 +359,10 @@ function transferService(
   documents = new Map<string, Array<{ name: string; contents: Buffer; updatedAt: string }>>()
 ): SessionTransferService {
   const db = { getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null } as AppDatabase;
-  const manager = { snapshotDocuments: async (id: string) => documents.get(id) ?? [] } as unknown as SessionManager;
+  const manager = {
+    snapshotDocuments: async (id: string) => documents.get(id) ?? [],
+    ensureTranscriptAvailable: async () => undefined
+  } as unknown as SessionManager;
   return new SessionTransferService(db, manager, key);
 }
 

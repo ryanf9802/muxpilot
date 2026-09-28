@@ -17,6 +17,7 @@ import { ProjectionReconciler } from "../shared/projectionReconciler.js";
 import type { AgentProvider, AgentSessionDriver, AgentSessionLaunchOptions, ProviderTranscriptSource } from "../types.js";
 import { ClaudeApprovalReviewer } from "./approvalReviewer.js";
 import { ClaudeBtwEngine } from "./btw.js";
+import { ClaudeTranscriptArchive } from "./transcriptArchive.js";
 import { ClaudeAuthLifecycle, claudeCommandRunner } from "./auth.js";
 import type { ClaudeCompatibility } from "./compatibility.js";
 import { ClaudeSessionDriver } from "./driver.js";
@@ -47,11 +48,19 @@ export const CLAUDE_CAPABILITIES: ProviderCapabilities = {
   rawTranscriptEvidence: true
 };
 
-export function claudeTranscripts(configDir: string): ProviderTranscriptSource {
+export function claudeTranscripts(configDir: string, archive?: ClaudeTranscriptArchive): ProviderTranscriptSource {
   return {
     parserVersion: CLAUDE_PARSER_VERSION,
     parse: (path, offset, context) => parseClaudeJsonl(path, offset, context),
-    importPath: (threadId, cwd) => join(configDir, "projects", claudeProjectSlug(cwd), `${threadId}.jsonl`)
+    importPath: (threadId, cwd) => join(configDir, "projects", claudeProjectSlug(cwd), `${threadId}.jsonl`),
+    ...(archive
+      ? {
+          ensureAvailable: async (provider) => {
+            await archive.ensureRestored(provider.threadId, provider.transcriptPath);
+          },
+          preserve: (provider) => archive.mirror(provider.threadId, provider.transcriptPath)
+        }
+      : {})
   };
 }
 
@@ -82,6 +91,7 @@ export interface ClaudeProvider extends AgentProvider {
   readonly usage: ClaudeUsageService;
   readonly models: ClaudeModelsService;
   readonly approvalReview: ClaudeApprovalReviewer;
+  readonly archive: ClaudeTranscriptArchive;
   /** Installs the bundled muxpilot skills as a local Claude plugin owned by muxpilot. */
   syncBundledSkills(): Promise<void>;
 }
@@ -91,6 +101,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ClaudeProv
   const claudePath = options.compatibility.claudePath ?? "claude";
   const cliEnvironment = { ...claudeRuntimeEnvironment(process.env), CLAUDE_CONFIG_DIR: options.configDir };
   const pluginRoot = join(options.dataDir, "claude-plugin", PLUGIN_NAME);
+  const archive = new ClaudeTranscriptArchive(join(options.dataDir, "claude-archive"), options.logger);
   const control = new ClaudeControlClient({
     claudePath,
     configDir: options.configDir,
@@ -123,7 +134,8 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ClaudeProv
       claudePath,
       pluginRoot,
       onAuthenticationFailure: (_sessionId, error) => authLifecycle.reportAuthenticationFailure(error),
-      onRateLimit: (info) => usage.observeRateLimit(info)
+      onRateLimit: (info) => usage.observeRateLimit(info),
+      archive
     }),
     auth: authLifecycle,
     authLifecycle,
@@ -133,10 +145,11 @@ export function createClaudeProvider(options: ClaudeProviderOptions): ClaudeProv
       discover: (workspaceRoots) => discoverSkills(skillSources, workspaceRoots),
       gitWorkflowSkillStatus: () => muxpilotGitWorkflowSkillStatus(pluginRoot)
     },
-    transcripts: claudeTranscripts(options.configDir),
-    approvalReview: new ClaudeApprovalReviewer({ claudePath, configDir: options.configDir, environment: cliEnvironment, queryFactory, logger: options.logger }),
+    transcripts: claudeTranscripts(options.configDir, archive),
+    archive,
+    approvalReview: new ClaudeApprovalReviewer({ claudePath, configDir: options.configDir, environment: cliEnvironment, queryFactory, archive, logger: options.logger }),
     defaultReviewerSettings: { model: "haiku", reasoningEffort: null },
-    btw: new ClaudeBtwEngine({ claudePath, configDir: options.configDir, environment: cliEnvironment, queryFactory, logger: options.logger }),
+    btw: new ClaudeBtwEngine({ claudePath, configDir: options.configDir, environment: cliEnvironment, queryFactory, archive, logger: options.logger }),
     syncBundledSkills: async () => {
       await mkdir(join(pluginRoot, ".claude-plugin"), { recursive: true });
       await writeFile(join(pluginRoot, ".claude-plugin", "plugin.json"), `${JSON.stringify({
@@ -154,6 +167,7 @@ interface ClaudeDriverContext {
   pluginRoot: string;
   onAuthenticationFailure(sessionId: string, error: string): void;
   onRateLimit(info: Record<string, unknown>): void;
+  archive: ClaudeTranscriptArchive;
 }
 
 function createClaudeDriver(options: ClaudeProviderOptions, context: ClaudeDriverContext): AgentSessionDriver | null {
@@ -176,6 +190,7 @@ function createClaudeDriver(options: ClaudeProviderOptions, context: ClaudeDrive
     requestStore: options.db,
     eventSink: reconciler,
     onRateLimit: context.onRateLimit,
+    archive: context.archive,
     clientVersion: options.clientVersion,
     journalFor: (sessionId) => {
       const existing = journals.get(sessionId);

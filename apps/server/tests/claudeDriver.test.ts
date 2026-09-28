@@ -129,6 +129,7 @@ function harness(options: { initialState?: HostSessionState | null; launchDispos
     recordIntentionalInterruption: vi.fn(async () => undefined)
   };
   const onRateLimit = vi.fn();
+  const archive = { mirror: vi.fn(async () => undefined), ensureRestored: vi.fn(async () => true) };
   const driver = new ClaudeSessionDriver(supervisor as unknown as RuntimeSupervisor, {
     runtimeSpec: (spec) => ({
       sessionId: spec.sessionId,
@@ -143,9 +144,10 @@ function harness(options: { initialState?: HostSessionState | null; launchDispos
     journalFor: () => ({ append: async () => undefined }),
     eventSink,
     onRateLimit,
+    archive,
     now: () => new Date("2026-09-27T12:00:00.000Z")
   });
-  return { host, supervisor, eventSink, onRateLimit, driver };
+  return { host, supervisor, eventSink, onRateLimit, archive, driver };
 }
 
 function managedSession(threadId: string): ManagedSession {
@@ -217,6 +219,7 @@ describe("ClaudeSessionDriver", () => {
   it("replaces a different host session when resuming", async () => {
     const h = harness({ initialState: hostState({ sessionId: "stale" }) });
     await h.driver.resume({ ...spec, sourceThreadId: "thread-1" });
+    expect(h.archive.ensureRestored).toHaveBeenCalledWith("thread-1");
     expect(h.host.last("session/open")).toMatchObject({ mode: "resume", sessionId: "thread-1", sourceSessionId: "thread-1", replace: true });
     expect(() => h.driver.fork({ ...spec })).toThrow("requires a source session id");
   });
@@ -280,6 +283,7 @@ describe("ClaudeSessionDriver", () => {
     expect(h.onRateLimit).toHaveBeenCalledWith({ status: "allowed", utilization: 0.5 });
 
     await h.host.notify("turn/completed", { threadId, turn: { id: "turn-1", status: "interrupted" } });
+    expect(h.archive.mirror).toHaveBeenCalledWith(threadId, `/cfg/${threadId}.jsonl`);
     expect(events.map((event) => event.method)).toEqual(["turn/started", "sdk/message", "turn/completed"]);
     expect(h.eventSink.handle).toHaveBeenCalledTimes(3);
     h.host.on("turn/interrupt", (params) => ({ outcome: params.turnId ? "interrupted" : "already_idle" }));

@@ -33,6 +33,7 @@ import type {
   SystemdSessionRuntimeRef
 } from "../types.js";
 import type { ProtocolJournal } from "../../runtime/protocolJournal.js";
+import type { ClaudeTranscriptArchive } from "./transcriptArchive.js";
 import { CLAUDE_APPROVAL_METHOD, CLAUDE_QUESTION_METHOD } from "./events.js";
 import {
   CLAUDE_HOST_PROTOCOL_VERSION,
@@ -77,6 +78,8 @@ export interface ClaudeDriverOptions {
   eventSink?: DriverEventSink;
   /** Live rate-limit reports from `rate_limit_event`, used to keep usage current between probes. */
   onRateLimit?(info: Record<string, unknown>): void;
+  /** Durable transcript copies: mirrored after turns, restored before anything resumes a conversation. */
+  archive?: Pick<ClaudeTranscriptArchive, "mirror" | "ensureRestored">;
   clientVersion?: string;
   now?(): Date;
 }
@@ -84,6 +87,7 @@ export interface ClaudeDriverOptions {
 interface HostConnection {
   rpc: JsonRpcConnection;
   threadId: string;
+  transcriptPath: string | null;
   hostInstanceId: string;
 }
 
@@ -162,6 +166,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
     if (known) return receipt(connection.threadId, known.turnId, clientMessageId, this.now());
     // A restarted host forgets its input ledger; the transcript keeps the submission's deterministic uuid.
     const messageUuid = submissionMessageUuid(session.id, clientMessageId, sha256Hex);
+    await this.options.archive?.ensureRestored(session.provider.threadId, session.provider.transcriptPath);
     const transcript = session.provider.transcriptPath ? await readFile(session.provider.transcriptPath, "utf8").catch(() => "") : "";
     return transcript.includes(`"uuid":"${messageUuid}"`)
       ? receipt(connection.threadId, messageUuid, clientMessageId, this.now())
@@ -236,6 +241,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
     await this.closeConnection(session.id);
     const stopped = await this.supervisor.stop(runtime);
     this.forgetSession(session.id);
+    await this.options.archive?.mirror(connection.threadId, connection.transcriptPath);
     return { ...stopped, state: "hibernated" };
   }
 
@@ -266,7 +272,10 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       launch: this.options.hostLaunch({ cwd: session.cwd, options: request.launchOptions }),
       replace: true
     } satisfies SessionOpenParams);
+    const previousTranscriptPath = connection.transcriptPath;
+    await this.options.archive?.mirror(previousThreadId, previousTranscriptPath);
     connection.threadId = opened.sessionId;
+    connection.transcriptPath = opened.transcriptPath;
     try {
       const sent = await this.sendMessage(
         { ...implementation, provider: { kind: "claude", threadId: opened.sessionId, transcriptPath: opened.transcriptPath } },
@@ -284,6 +293,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
         replace: true
       } satisfies SessionOpenParams).catch(() => undefined);
       connection.threadId = previousThreadId;
+      connection.transcriptPath = previousTranscriptPath;
       throw error;
     }
   }
@@ -312,6 +322,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
     try {
       await this.options.runtimeStarted?.(spec.sessionId, launchDisposition);
       await this.closeConnection(spec.sessionId);
+      // Resume and fork read the source transcript, which Claude Code may have swept since it was archived.
+      if (operation !== "start") await this.options.archive?.ensureRestored(requireSourceThread(spec));
       const expectedThreadId = operation === "resume" ? requireSourceThread(spec) : randomUUID();
       const connection = await this.connect(spec.sessionId, runtime, expectedThreadId);
       const initialized = await connection.rpc.request<InitializeResult>("initialize", {
@@ -335,6 +347,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
         throw new Error(`Claude host resumed the wrong session: expected ${expectedThreadId}, received ${state.sessionId}`);
       }
       connection.threadId = state.sessionId;
+      connection.transcriptPath = state.transcriptPath;
       if (state.activeTurn) this.activeTurns.set(spec.sessionId, state.activeTurn.id);
       else this.activeTurns.delete(spec.sessionId);
       if (operation === "resume") await this.reconcileRequestsAfterReconnect(spec.sessionId, connection, state);
@@ -378,7 +391,7 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
       },
       { requestTimeoutMs: HOST_REQUEST_TIMEOUT_MS }
     );
-    const connection: HostConnection = { rpc, threadId, hostInstanceId: "" };
+    const connection: HostConnection = { rpc, threadId, transcriptPath: null, hostInstanceId: "" };
     holder.connection = connection;
     this.connections.set(sessionId, connection);
     return connection;
@@ -412,6 +425,8 @@ export class ClaudeSessionDriver implements AgentSessionDriver {
         }
       }
       if (!turnId || this.activeTurns.get(sessionId) === turnId) this.activeTurns.delete(sessionId);
+      const connection = this.connections.get(sessionId);
+      if (connection) void this.options.archive?.mirror(connection.threadId, connection.transcriptPath);
     } else if (notification.method === "sdk/message") {
       const message = record(params.message);
       if (message?.type === "rate_limit_event") {

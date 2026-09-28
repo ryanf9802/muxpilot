@@ -338,6 +338,12 @@ app.get("/healthz", async () => ({
 let closing = false;
 
 await manager.prepareStartupRecovery();
+// Provider CLIs sweep old transcripts (Claude's cleanupPeriodDays); keep muxpilot's copies current.
+const TRANSCRIPT_PRESERVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const preserveTranscripts = () => manager.preserveTranscripts().catch((error) => app.log.warn({ err: error }, "Transcript preservation sweep failed"));
+void preserveTranscripts();
+const transcriptPreserveTimer = setInterval(() => void preserveTranscripts(), TRANSCRIPT_PRESERVE_INTERVAL_MS);
+transcriptPreserveTimer.unref();
 await btw.start();
 for (const provider of providers.list()) provider.approvalReview?.start();
 events.subscribe((event) => {
@@ -374,6 +380,7 @@ async function startNotificationsAfterStartupCatchup(): Promise<void> {
 
 const close = async () => {
   closing = true;
+  clearInterval(transcriptPreserveTimer);
   manager.stop();
   await heavyCommands.stop();
   await resourceGovernor.stop();

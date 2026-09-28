@@ -224,6 +224,10 @@ export interface ProviderTranscriptSource {
   }): Promise<TranscriptParseResult>;
   /** Where an imported transcript must live so the provider can resume it from `cwd`. */
   importPath(threadId: string, cwd: string): string;
+  /** Restores a transcript the provider CLI may have deleted, before anything reads or resumes it. */
+  ensureAvailable?(provider: AgentProviderRef): Promise<void>;
+  /** Copies the transcript somewhere the provider CLI will not delete it. */
+  preserve?(provider: AgentProviderRef): Promise<void>;
 }
 
 export type { ParseResult as TranscriptParseResult } from "./codex/parser.js";

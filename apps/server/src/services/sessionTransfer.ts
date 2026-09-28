@@ -162,6 +162,7 @@ export class SessionTransferService {
       const identity = providerThreadIdentity(session.provider.kind, threadId);
       if (threadIdentities.has(identity)) throw new SessionTransferError("The selection contains more than one record for the same conversation", 409);
       threadIdentities.add(identity);
+      await this.manager.ensureTranscriptAvailable(session);
       const file = await readFile(transcriptPath).catch(() => null);
       if (!file) throw new SessionTransferError(`Transcript for session '${id}' is unavailable`, 409);
       const transcript = completeJsonlPrefix(file);

@@ -11,6 +11,7 @@ import {
 } from "../shared/btw.js";
 import { InputQueue, type QueryFactory } from "./host/hostSession.js";
 import { isWithinWritableRoots } from "./host/permissionPolicy.js";
+import type { ClaudeTranscriptArchive } from "./transcriptArchive.js";
 
 const READ_TOOLS = ["Read", "Grep", "Glob"];
 const DOCUMENT_TOOLS = ["Write", "Edit"];
@@ -22,6 +23,7 @@ export interface ClaudeBtwEngineOptions {
   configDir: string;
   environment: Record<string, string | undefined>;
   queryFactory: QueryFactory;
+  archive?: Pick<ClaudeTranscriptArchive, "ensureRestored">;
   logger?: Pick<Logger, "warn" | "debug">;
 }
 
@@ -62,6 +64,8 @@ export class ClaudeBtwEngine implements BtwEngine {
         this.active.delete(controller);
       }
     };
+    if (request.signal.aborted) return generation;
+    await this.options.archive?.ensureRestored(request.sourceThreadId, request.session.provider.transcriptPath);
     if (request.signal.aborted) return generation;
     request.signal.addEventListener("abort", () => {
       interrupted = true;

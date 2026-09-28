@@ -4,6 +4,7 @@ import type { SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { approvalReviewInstructions, approvalReviewPrompt, parseApprovalReview } from "../shared/approvalReview.js";
 import type { ApprovalReviewEngine, ApprovalReviewResult } from "../types.js";
 import { InputQueue, type QueryFactory } from "./host/hostSession.js";
+import type { ClaudeTranscriptArchive } from "./transcriptArchive.js";
 
 const REVIEW_TIMEOUT_MS = 60_000;
 
@@ -12,6 +13,7 @@ export interface ClaudeApprovalReviewerOptions {
   configDir: string;
   environment: Record<string, string | undefined>;
   queryFactory: QueryFactory;
+  archive?: Pick<ClaudeTranscriptArchive, "ensureRestored">;
   logger?: Pick<Logger, "warn" | "debug">;
 }
 
@@ -40,6 +42,7 @@ export class ClaudeApprovalReviewer implements ApprovalReviewEngine {
   async review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult> {
     const threadId = session.provider.kind === "claude" ? session.provider.threadId : null;
     if (!threadId) throw new Error("Session has no Claude conversation to review");
+    await this.options.archive?.ensureRestored(threadId, session.provider.transcriptPath);
     const controller = new AbortController();
     this.active.add(controller);
     const timer = setTimeout(() => controller.abort(), REVIEW_TIMEOUT_MS);
