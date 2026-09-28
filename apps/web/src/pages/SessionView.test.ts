@@ -141,11 +141,22 @@ import {
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
-  UserText
+  UserText,
+  runtimeLabel
 } from "./SessionView.js";
 import { ApiError } from "../api/client.js";
 import { childSessionAttentionItems } from "../utils/sessionStatus.js";
 import { providerDescriptor } from "../testing/providerFixtures.js";
+
+describe("runtimeLabel", () => {
+  it("names the runtime after the session provider", () => {
+    const runtime = { kind: "systemd_service", state: "connected" } as never;
+    expect(runtimeLabel({ runtime, provider: { kind: "codex", threadId: null, transcriptPath: null } })).toBe("App server · connected");
+    expect(runtimeLabel({ runtime, provider: { kind: "claude", threadId: null, transcriptPath: null } })).toBe("Claude runtime · connected");
+    expect(runtimeLabel({ runtime: { kind: "systemd_service", state: "hibernated" } as never, provider: { kind: "claude", threadId: null, transcriptPath: null } }))
+      .toBe("Claude runtime · sleeping");
+  });
+});
 
 describe("InputDeliveryFailureBanner", () => {
   it("offers retry and dismissal with the persisted delivery failure detail", () => {

@@ -18,7 +18,7 @@ export function ReasoningBlock({ text, children }: { text: string; children?: Re
   );
 }
 
-/** The validated task list carried on a tool call (`payload.taskList`), or null when absent or malformed. */
+/** The validated task list carried on a tool call or result (`payload.taskList`), or null when absent or malformed. */
 export function transcriptTaskList(payload: unknown): TranscriptTaskList | null {
   const candidate = payload && typeof payload === "object" ? (payload as Record<string, unknown>).taskList : null;
   const items = candidate && typeof candidate === "object" ? (candidate as Record<string, unknown>).items : null;

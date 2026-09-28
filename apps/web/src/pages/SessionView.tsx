@@ -5466,9 +5466,10 @@ export function runtimeAttachCommand(session: Partial<Pick<ManagedSession, "runt
   return command;
 }
 
-export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime">>): string {
-  if (session.runtime?.kind !== "systemd_service") return "App server";
-  return session.runtime.state === "hibernated" ? "App server · sleeping" : `App server · ${session.runtime.state}`;
+export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string {
+  const name = session.provider?.kind === "claude" ? "Claude runtime" : "App server";
+  if (session.runtime?.kind !== "systemd_service") return name;
+  return session.runtime.state === "hibernated" ? `${name} · sleeping` : `${name} · ${session.runtime.state}`;
 }
 
 function runtimeDetail(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string {
@@ -6494,7 +6495,7 @@ function MessageContent({
     );
   }
 
-  const taskList = message.type === "tool_call" ? transcriptTaskList(message.payload) : null;
+  const taskList = message.type === "tool_call" || message.type === "tool_output" ? transcriptTaskList(message.payload) : null;
   if (taskList) return <TaskListBlock taskList={taskList} />;
 
   if (isToolOutput(message)) {

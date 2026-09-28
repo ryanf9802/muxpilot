@@ -1,4 +1,4 @@
-import type { ChatMessage, SessionStatus, TranscriptTaskList } from "@muxpilot/core";
+import type { ChatMessage, SessionStatus, TranscriptTaskList, TranscriptTaskStatus } from "@muxpilot/core";
 
 /**
  * Sentinel turn id for Claude item identities. Live events and transcript records agree on record uuids but not
@@ -17,6 +17,40 @@ const MAX_TOOL_TEXT = 20_000;
 export interface ClaudeToolUse {
   name: string;
   input: unknown;
+  /** Task list after this TaskCreate/TaskUpdate result, tracked by the session host. */
+  taskList?: TranscriptTaskList;
+}
+
+/** Claude Code task tools that change the session task list one entry at a time. */
+export const TASK_LIST_TOOLS = new Set(["TaskCreate", "TaskUpdate"]);
+
+export type ClaudeTaskState = Map<string, { text: string; status: TranscriptTaskStatus }>;
+
+/** Applies one TaskCreate/TaskUpdate result to the session's task list. */
+export function applyTaskToolResult(tasks: ClaudeTaskState, name: string, input: unknown, resultText: string): void {
+  const fields = objectValue(input);
+  if (name === "TaskCreate") {
+    const id = /Task #(\S+) created/.exec(resultText)?.[1];
+    const text = string(fields?.subject) ?? string(fields?.activeForm);
+    if (id && text) tasks.set(id, { text, status: "pending" });
+    return;
+  }
+  if (name !== "TaskUpdate") return;
+  const id = string(fields?.taskId) ?? (typeof fields?.taskId === "number" ? String(fields.taskId) : null);
+  const current = id ? tasks.get(id) : undefined;
+  if (!id || !current) return;
+  if (fields?.status === "deleted") {
+    tasks.delete(id);
+    return;
+  }
+  const status = fields?.status === "completed" || fields?.status === "in_progress" || fields?.status === "pending"
+    ? fields.status
+    : current.status;
+  tasks.set(id, { text: string(fields?.subject) ?? current.text, status });
+}
+
+export function taskStateList(tasks: ClaudeTaskState): TranscriptTaskList {
+  return { items: [...tasks.values()].map((task) => ({ ...task })) };
 }
 
 /** A transcript-visible message derived from one Claude record, independent of whether it arrived live. */
@@ -115,6 +149,13 @@ function toolCallMessage(itemId: string, name: string, input: Record<string, unk
       payload: { ...base.payload, taskList }
     };
   }
+  if (name === "TaskCreate") {
+    return { ...base, text: `Add task: ${string(input.subject) ?? "task"}`, status: "working" };
+  }
+  if (name === "TaskUpdate") {
+    const status = string(input.status);
+    return { ...base, text: `Update task #${String(input.taskId ?? "?")}${status ? ` → ${status.replace("_", " ")}` : ""}`, status: "working" };
+  }
   if (name === "Task" || name === "Agent") {
     const description = string(input.description) ?? string(input.subagent_type) ?? "delegated task";
     return { ...base, text: `Subagent: ${description}`, status: "working" };
@@ -189,6 +230,16 @@ function toolResultMessage(
     }];
   }
   if (name === "TodoWrite") return [];
+  if (name && TASK_LIST_TOOLS.has(name) && toolUse?.taskList && !isError) {
+    return [{
+      itemId,
+      type: "tool_output",
+      role: "tool",
+      text: toolUse.taskList.items.map((item) => `${taskMarker(item.status)} ${item.text}`).join("\n") || "Task list updated",
+      status: null,
+      payload: { ...payload, taskList: toolUse.taskList }
+    }];
+  }
   return [{
     itemId,
     type: "tool_output",
@@ -227,7 +278,7 @@ function inferToolName(structured: Record<string, unknown> | null): string | nul
   return null;
 }
 
-function toolResultText(content: unknown): string {
+export function toolResultText(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.flatMap((entry) => {

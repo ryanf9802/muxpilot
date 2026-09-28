@@ -197,7 +197,13 @@ export function parseHostArguments(argv: string[]): HostArguments {
 export function claudeRuntimeEnvironment(environment: NodeJS.ProcessEnv): Record<string, string | undefined> {
   // Session units have no terminal; without TERM, shell startup files that call tput print an error into every
   // Bash tool result.
-  const result: Record<string, string | undefined> = { TERM: "dumb", ...environment, DISABLE_AUTOUPDATER: "1" };
+  // Claude Code enables its task checklist tools only in interactive mode unless asked; muxpilot renders them.
+  const result: Record<string, string | undefined> = {
+    TERM: "dumb",
+    ...environment,
+    DISABLE_AUTOUPDATER: "1",
+    CLAUDE_CODE_ENABLE_TODO_TOOLS: "1"
+  };
   if (environment.MUXPILOT_CLAUDE_ALLOW_API_KEY !== "1") {
     delete result.ANTHROPIC_API_KEY;
     delete result.ANTHROPIC_AUTH_TOKEN;

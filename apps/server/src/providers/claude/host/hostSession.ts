@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { applyTaskToolResult, TASK_LIST_TOOLS, taskStateList, toolResultText, type ClaudeTaskState, type ClaudeToolUse } from "../messages.js";
 import type {
   CanUseTool,
   McpServerConfig,
@@ -109,6 +110,7 @@ export class HostSession {
   private readonly backgroundTasks = new Map<string, HostBackgroundTask>();
   /** Tool calls by id, so tool results can be classified without re-reading the transcript. */
   private readonly toolUses = new Map<string, { name: string; input: unknown }>();
+  private readonly tasks: ClaudeTaskState = new Map();
   private permissionMode: "default" | "plan" = "default";
   private model: string | null = null;
   private effort: string | null = null;
@@ -709,14 +711,20 @@ export class HostSession {
     }
   }
 
-  private toolUsesFor(message: SDKMessage): Record<string, { name: string; input: unknown }> {
+  private toolUsesFor(message: SDKMessage): Record<string, ClaudeToolUse> {
     const content = message.type === "user" ? message.message.content : null;
     if (!Array.isArray(content)) return {};
-    const result: Record<string, { name: string; input: unknown }> = {};
+    const result: Record<string, ClaudeToolUse> = {};
     for (const block of content) {
       if (block.type !== "tool_result") continue;
       const known = this.toolUses.get(block.tool_use_id);
-      if (known) result[block.tool_use_id] = known;
+      if (!known) continue;
+      if (TASK_LIST_TOOLS.has(known.name) && block.is_error !== true) {
+        applyTaskToolResult(this.tasks, known.name, known.input, toolResultText(block.content));
+        result[block.tool_use_id] = { ...known, taskList: taskStateList(this.tasks) };
+      } else {
+        result[block.tool_use_id] = known;
+      }
     }
     return result;
   }

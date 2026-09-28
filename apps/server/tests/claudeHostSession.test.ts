@@ -523,6 +523,31 @@ describe("HostSession", () => {
     ]);
   });
 
+  it("attaches the running task list to task tool results", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    await startTurn(h);
+    const query = h.queries.latest();
+    const call = (uuid: string, id: string, name: string, input: Record<string, unknown>) => query.push({
+      type: "assistant", uuid, session_id: SESSION_ID, parent_tool_use_id: null,
+      message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] }
+    });
+    const result = (uuid: string, id: string, content: string) => query.push({
+      type: "user", uuid, session_id: SESSION_ID, parent_tool_use_id: null,
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content }] }
+    });
+    call("a1", "tc-1", "TaskCreate", { subject: "Write a.txt" });
+    result("u1", "tc-1", "Task #1 created successfully: Write a.txt");
+    call("a2", "tu-1", "TaskUpdate", { taskId: "1", status: "completed" });
+    result("u2", "tu-1", "Updated task #1 status");
+    await flush();
+    const results = h.of(HOST_NOTIFICATION.sdkMessage).filter((entry) => (entry.message as { type: string }).type === "user");
+    expect(results.map((entry) => entry.toolUses)).toEqual([
+      { "tc-1": { name: "TaskCreate", input: { subject: "Write a.txt" }, taskList: { items: [{ text: "Write a.txt", status: "pending" }] } } },
+      { "tu-1": { name: "TaskUpdate", input: { taskId: "1", status: "completed" }, taskList: { items: [{ text: "Write a.txt", status: "completed" }] } } }
+    ]);
+  });
+
   it("forwards SDK messages with tool-use context and tracks background tasks", async () => {
     const h = harness();
     await h.session.open(openParams());

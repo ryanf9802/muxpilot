@@ -6,7 +6,7 @@ import {
   projectClaudeEvent,
   stableProjectionId
 } from "../src/providers/claude/events.js";
-import { claudeRecordMessages, todoTaskList } from "../src/providers/claude/messages.js";
+import { applyTaskToolResult, claudeRecordMessages, taskStateList, todoTaskList, type ClaudeTaskState } from "../src/providers/claude/messages.js";
 
 const THREAD = "thread-1";
 const AT = "2026-09-27T12:00:00.000Z";
@@ -140,6 +140,34 @@ describe("claudeRecordMessages", () => {
     const [message] = claudeRecordMessages(user("u1", [{ type: "tool_result", tool_use_id: "g", content: "x".repeat(25_000) }]), { g: { name: "Grep", input: {} } });
     expect(message!.text.endsWith("… [truncated]")).toBe(true);
     expect(message!.text.length).toBeLessThan(20_100);
+  });
+});
+
+describe("Claude task tools", () => {
+  it("tracks TaskCreate and TaskUpdate results as one task list", () => {
+    const tasks: ClaudeTaskState = new Map();
+    applyTaskToolResult(tasks, "TaskCreate", { subject: "Write a.txt" }, "Task #1 created successfully: Write a.txt");
+    applyTaskToolResult(tasks, "TaskCreate", { subject: "Write b.txt" }, "Task #2 created successfully: Write b.txt");
+    applyTaskToolResult(tasks, "TaskUpdate", { taskId: "1", status: "completed" }, "Updated task #1 status");
+    applyTaskToolResult(tasks, "TaskUpdate", { taskId: 2, status: "in_progress", subject: "Write b.txt twice" }, "Updated task #2");
+    applyTaskToolResult(tasks, "TaskUpdate", { taskId: "9", status: "completed" }, "unknown task");
+    expect(taskStateList(tasks)).toEqual({ items: [
+      { text: "Write a.txt", status: "completed" },
+      { text: "Write b.txt twice", status: "in_progress" }
+    ] });
+    applyTaskToolResult(tasks, "TaskUpdate", { taskId: "1", status: "deleted" }, "Updated task #1");
+    expect(taskStateList(tasks).items).toHaveLength(1);
+  });
+
+  it("renders a task tool result with the host's task list snapshot", () => {
+    const taskList = { items: [{ text: "Write a.txt", status: "completed" as const }] };
+    const [message] = claudeRecordMessages(
+      user("u-task", [{ type: "tool_result", tool_use_id: "tu-task", content: "Updated task #1 status" }]),
+      { "tu-task": { name: "TaskUpdate", input: { taskId: "1", status: "completed" }, taskList } }
+    );
+    expect(message).toMatchObject({ type: "tool_output", text: "[x] Write a.txt", payload: { toolName: "TaskUpdate", taskList } });
+    const [call] = claudeRecordMessages(assistant("a-task", [{ type: "tool_use", id: "tu-task", name: "TaskUpdate", input: { taskId: "1", status: "in_progress" } }]));
+    expect(call?.text).toBe("Update task #1 → in progress");
   });
 });
 
