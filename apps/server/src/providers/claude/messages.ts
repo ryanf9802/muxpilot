@@ -42,7 +42,12 @@ export function claudeRecordMessages(
   if (string(record.parent_tool_use_id) || record.isSidechain === true || record.isMeta === true) return [];
   const message = objectValue(record.message);
   const content = message?.content;
-  if (record.type === "assistant") return assistantMessages(uuid, Array.isArray(content) ? content : []);
+  if (record.type === "assistant") {
+    // Claude Code writes placeholder replies (for example after an interrupt) with a synthetic model. API errors
+    // are synthetic too but flagged, and stay visible.
+    if (message?.model === "<synthetic>" && record.isApiErrorMessage !== true && !record.error) return [];
+    return assistantMessages(uuid, Array.isArray(content) ? content : []);
+  }
   if (record.type === "user") {
     // Prompts Claude Code injects itself (background task notifications and similar) are not operator input.
     const systemPrompt = record.promptSource === "system";

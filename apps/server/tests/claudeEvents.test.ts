@@ -81,6 +81,10 @@ describe("claudeRecordMessages", () => {
     expect(claudeRecordMessages(user("u3", "[Request interrupted by user]"))).toEqual([]);
     expect(claudeRecordMessages(user("u4", "<task-notification>\n<task-id>t</task-id>\n</task-notification>"))).toEqual([]);
     expect(claudeRecordMessages(user("u5", "Background work finished", { promptSource: "system" }))).toEqual([]);
+    const synthetic = (extra: Record<string, unknown>) => ({ ...assistant("s1", [{ type: "text", text: "No response requested." }]), ...extra });
+    expect(claudeRecordMessages({ ...synthetic({}), message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "No response requested." }] } })).toEqual([]);
+    expect(claudeRecordMessages({ ...synthetic({ isApiErrorMessage: true }), message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: overloaded" }] } }))
+      .toEqual([expect.objectContaining({ text: "API Error: overloaded" })]);
     expect(claudeRecordMessages(user("u4", "<command-name>/clear</command-name>"))).toEqual([]);
     expect(claudeRecordMessages(user("u5", "hi", { isSidechain: true }))).toEqual([]);
     expect(claudeRecordMessages(user("u6", "hi", { isMeta: true }))).toEqual([]);
