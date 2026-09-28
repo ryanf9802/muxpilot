@@ -4,9 +4,10 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, Route, Routes, useOutletContext } from "react-router-dom";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { DashboardSessionSummary, ManagedSession } from "@muxpilot/core";
+import type { DashboardSessionSummary, ManagedSession, ProviderAuthState, ProviderDescriptor } from "@muxpilot/core";
 import * as client from "../api/client.js";
 import { AppShell, type AppShellOutletContext } from "./AppShell.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
@@ -30,7 +31,87 @@ describe("AppShell session loading", () => {
     await renderShell(() => undefined);
 
     expect(container?.querySelector('[aria-label="Manage Codex accounts"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="Manage Claude accounts"]')).toBeNull();
+    const labels = Array.from(container?.querySelectorAll("button, a") ?? [], (element) => `${element.textContent ?? ""} ${element.getAttribute("aria-label") ?? ""}`);
+    expect(labels.some((label) => /sign in|log in|login/i.test(label))).toBe(false);
     expect(container?.querySelector('[aria-label="Clear access"]')).not.toBeNull();
+  });
+
+  it("applies provider authentication events without touching the session list", async () => {
+    const socket = fakeSocket();
+    const summaries = vi.fn(async () => ({ sessions: [testSession("existing", "waiting")] }));
+    mockShellApi(socket, summaries, [providerDescriptor("codex"), providerDescriptor("claude", { authStatus: "signed_out", auth: { revision: 2 } })]);
+    const observed: { current: AppShellOutletContext | null } = { current: null };
+    await renderShell((value) => { observed.current = value; });
+    await act(async () => { await flushPromises(); });
+    const sessionsBefore = observed.current?.sessions;
+    const loadsBefore = summaries.mock.calls.length;
+
+    await act(async () => {
+      socket.onmessage?.(messageEvent({
+        id: "auth-stale",
+        type: "provider.auth.updated",
+        sessionId: "__app__",
+        timestamp: "2026-09-18T12:00:00.000Z",
+        payload: authPayload("claude", "ready", 1)
+      }));
+      await flushPromises();
+    });
+    expect(observed.current?.providers.providers.find((descriptor) => descriptor.kind === "claude")?.auth.status).toBe("signed_out");
+    expect(summaries.mock.calls.length).toBe(loadsBefore);
+
+    await act(async () => {
+      socket.onmessage?.(messageEvent({
+        id: "auth-ready",
+        type: "provider.auth.updated",
+        sessionId: "__app__",
+        timestamp: "2026-09-18T12:00:01.000Z",
+        payload: authPayload("claude", "ready", 3)
+      }));
+      await flushPromises();
+    });
+    expect(observed.current?.providers.providers.find((descriptor) => descriptor.kind === "claude")?.auth).toMatchObject({ status: "ready", revision: 3 });
+    expect(observed.current?.sessions.map((session) => session.id)).toEqual(sessionsBefore?.map((session) => session.id));
+    expect(observed.current?.sessions.some((session) => session.id === "__app__")).toBe(false);
+    expect(summaries.mock.calls.length).toBe(loadsBefore + 1);
+  });
+
+  it("preselects the session provider for Ctrl+N and creates the session with the chosen provider", async () => {
+    installLocalStorage();
+    mockShellApi(fakeSocket(), async () => ({ sessions: [] }));
+    vi.spyOn(client.api, "sessionDirectories").mockResolvedValue({ directories: [] });
+    vi.spyOn(client.api, "gitRepositoryProbe").mockResolvedValue({
+      isGit: false, bare: false, incompatibleReason: null, repoRoot: null, repoName: "repo", currentBranch: null, dirty: false, localBranches: [], remotes: []
+    });
+    const createSession = vi.spyOn(client.api, "createSession").mockResolvedValue({ session: testSession("created", "waiting") as ManagedSession });
+    const observed: { current: AppShellOutletContext | null } = { current: null };
+    await renderShell((value) => { observed.current = value; });
+    await act(async () => { await flushPromises(); });
+
+    act(() => { observed.current!.registerCreateSessionPrefill(() => ({ cwd: "/repo", provider: "claude" })); });
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "n", ctrlKey: true, bubbles: true }));
+      await flushPromises();
+    });
+    expect(document.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Claude");
+
+    await act(async () => { (document.querySelector('[role="radio"][data-provider="codex"]') as HTMLButtonElement).click(); });
+    expect(document.querySelector('[role="radio"][aria-checked="true"]')?.textContent).toContain("Codex");
+    await act(async () => { (document.querySelector('[role="radio"][data-provider="claude"]') as HTMLButtonElement).click(); });
+
+    const nameInput = Array.from(document.querySelectorAll<HTMLLabelElement>(".rename-field"))
+      .find((label) => label.querySelector("span")?.textContent === "Name")!.querySelector("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(nameInput, "claude-work");
+      nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      (Array.from(document.querySelectorAll("button")).find((button) => button.textContent?.trim() === "Create" && button.getAttribute("type") === "submit") as HTMLButtonElement).click();
+      await flushPromises();
+    });
+
+    expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo", name: "claude-work", provider: "claude" }));
+    expect(window.localStorage.getItem("muxpilot.new-session.provider.v1")).toBe("claude");
   });
 
   it("offers remaining-capacity notification thresholds beneath status changes", async () => {
@@ -64,7 +145,8 @@ describe("AppShell session loading", () => {
         timestamp: "2026-09-18T12:00:00.000Z",
         payload: {
           deviceId: "device-test",
-          limit: "fiveHour",
+          provider: "codex",
+          limit: "five_hour",
           limitLabel: "5h limit",
           remainingPercent: 24,
           threshold: 25,
@@ -77,7 +159,7 @@ describe("AppShell session loading", () => {
       await flushPromises();
     });
 
-    expect(container?.textContent).toContain("5h limit has 24% remaining.");
+    expect(container?.textContent).toContain("Codex: 5h limit has 24% remaining.");
   });
 
   it("finishes initial loading without overwriting a live session update", async () => {
@@ -156,7 +238,11 @@ function ContextProbe({ onContext }: { onContext: (context: AppShellOutletContex
   return null;
 }
 
-function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Promise<{ sessions: DashboardSessionSummary[] }>): void {
+function mockShellApi(
+  socket: ReturnType<typeof fakeSocket>,
+  summaries: () => Promise<{ sessions: DashboardSessionSummary[] }>,
+  providers: ProviderDescriptor[] = [providerDescriptor("codex"), providerDescriptor("claude")]
+): void {
   vi.spyOn(client.api, "me").mockResolvedValue({
     accessGranted: true,
     accessKeyRequired: false,
@@ -172,23 +258,20 @@ function mockShellApi(socket: ReturnType<typeof fakeSocket>, summaries: () => Pr
   };
   vi.spyOn(client.api, "notificationSettings").mockResolvedValue(notificationSettings as never);
   vi.spyOn(client.api, "updateNotificationSetting").mockResolvedValue(notificationSettings as never);
-  vi.spyOn(client.api, "codexUsageSummary").mockResolvedValue({
+  vi.spyOn(client.api, "providerUsageSummary").mockImplementation(async (provider) => ({
+    provider,
     available: true,
     error: null,
     refreshedAt: "2026-09-10T12:00:00.000Z",
+    accountStatus: "authenticated",
     account: null,
-    limits: { fiveHour: null, weekly: null },
+    limits: [],
     resetCredits: null
-  });
+  }));
   vi.spyOn(client.api, "sessionRecovery").mockResolvedValue({ incident: null });
-  vi.spyOn(client.api, "appServerCompatibility").mockResolvedValue({
-    provider: "codex",
-    status: "available",
-    available: true,
-    version: "test",
-    detail: "ready",
-    checkedAt: "2026-09-10T12:00:00.000Z",
-    missingCapabilities: []
+  vi.spyOn(client.api, "providers").mockResolvedValue({
+    defaultProvider: "codex",
+    providers
   });
   vi.spyOn(client, "eventSocket").mockReturnValue(socket as unknown as WebSocket);
 }
@@ -197,6 +280,23 @@ function buttonWithText(label: string): HTMLButtonElement {
   const button = Array.from(container?.querySelectorAll("button") ?? []).find((candidate) => candidate.textContent?.trim() === label);
   expect(button, `button ${label}`).toBeDefined();
   return button as HTMLButtonElement;
+}
+
+function installLocalStorage(): void {
+  const stored = new Map<string, string>();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+      removeItem: (key: string) => stored.delete(key),
+      clear: () => stored.clear()
+    }
+  });
+}
+
+function authPayload(provider: ProviderAuthState["provider"], status: ProviderAuthState["status"], revision: number): ProviderAuthState {
+  return { provider, status, account: null, revision, observedAt: "2026-09-18T12:00:00.000Z", error: null, admissionHeld: false, pendingSessionIds: [] };
 }
 
 function fakeSocket() {

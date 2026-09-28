@@ -79,8 +79,11 @@ import type {
   BtwDeltaPayload,
   BtwExchange,
   ChatMessage,
-  CodexSkill,
-  CodexModelCatalogResponse,
+  AgentProviderKind,
+  AgentSkill,
+  ProviderDescriptor,
+  ProviderModelCatalogResponse,
+  ProviderSkillInvocation,
   CollaborationMode,
   MessageContentPart,
   GitWorkspaceSummary,
@@ -124,7 +127,6 @@ import {
   normalizeSessionWaitEvent,
   normalizeSubagentNotificationText,
   normalizeUserContextText,
-  providerDisplayName,
   serializeApprovalDecisionEvent,
   serializeSessionWaitEvent,
   sessionWaitEventFromPayload,
@@ -165,9 +167,12 @@ import {
 } from "../utils/documentMarkdown.js";
 import { codeMirrorComposerFieldAttributes, credentialSuppressedField, freeformComposerField, noAutofillTextField } from "../utils/formFields.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+import { findProvider, providerLabel, sessionProvider, sessionThreadId, shouldShowProviderBadges } from "../utils/providers.js";
+import { ProviderBadge } from "../components/ProviderBadge.js";
 import { childSessionAttentionItems, sessionStatusPresentation, type ChildSessionAttentionItem } from "../utils/sessionStatus.js";
 import { appendBtwDelta, BtwDrawer, parseBtwComposerInput, upsertBtwExchange } from "../components/BtwDrawer.js";
 import { effectiveModelSettings, ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
+import { ReasoningBlock, TaskListBlock, transcriptTaskList } from "../components/TranscriptBlocks.js";
 
 const MESSAGE_PAGE_SIZE = 80;
 const MESSAGE_TOP_LOAD_THRESHOLD_PX = 80;
@@ -529,6 +534,15 @@ export function sessionWithPendingInputMode(session: ManagedSession, pendingMode
   return pendingMode ? { ...session, inputMode: pendingMode } : session;
 }
 
+/** Fast mode is hidden when either the session's driver or its provider reports no support for it. */
+export function sessionFastModeCapable(
+  session: Pick<ManagedSession, "capabilities">,
+  descriptor: Pick<ProviderDescriptor, "capabilities"> | null | undefined
+): boolean {
+  if (session.capabilities?.fastMode === false) return false;
+  return descriptor?.capabilities.fastMode !== false;
+}
+
 export function fastModeAction(enabled: boolean): SessionAction {
   return { type: "setFastMode", enabled };
 }
@@ -651,7 +665,8 @@ export function sessionModeShortcutAction(
   event: Pick<globalThis.KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "shiftKey" | "repeat" | "isComposing" | "defaultPrevented" | "target">,
   session: ManagedSession | null,
   actionBusy: SessionAction["type"] | null,
-  ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document
+  ownerDocument: Pick<Document, "querySelector"> | null = typeof document === "undefined" ? null : document,
+  fastModeCapable = true
 ): { type: "inputMode"; mode: CollaborationMode } | { type: "fastMode"; enabled: boolean } | null {
   if (!session || actionBusy || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey || event.repeat || event.isComposing || event.defaultPrevented) return null;
   if (isSessionBackShortcutEditableTarget(event.target) || ownerDocument?.querySelector("[role='dialog'], [role='menu']")) return null;
@@ -661,6 +676,7 @@ export function sessionModeShortcutAction(
     return session.inputMode === mode ? null : { type: "inputMode", mode };
   }
   if (event.key === "f") {
+    if (!fastModeCapable || session.capabilities?.fastMode === false) return null;
     if (session.agentOwnership?.completedAt || session.initializing || session.runtime?.kind === "systemd_service" && session.runtime.state === "hibernated" || session.fastModeAvailable === false || !canToggleFastMode(session.status)) return null;
     return { type: "fastMode", enabled: session.fastMode !== true };
   }
@@ -1696,12 +1712,13 @@ export function SessionView() {
     sessions: shellSessions,
     openCreateSession,
     openForkSession,
-    registerCreateSessionCwdPrefill,
+    registerCreateSessionPrefill,
     registerPromptHistoryPrefill,
     registerPrimaryInputFocus,
     connectionEpoch,
     accessMode,
-    subscribeSessionEvents
+    subscribeSessionEvents,
+    providers
   } = useOutletContext<AppShellOutletContext>();
   const [session, setSession] = useState<ManagedSession | null>(null);
   const [transcriptItems, setTranscriptItems] = useState<CoreTranscriptItem[]>([]);
@@ -1750,7 +1767,7 @@ export function SessionView() {
   const [inputModeError, setInputModeError] = useState("");
   const [fastModeError, setFastModeError] = useState("");
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
-  const [modelCatalog, setModelCatalog] = useState<CodexModelCatalogResponse | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<ProviderModelCatalogResponse | null>(null);
   const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
   const [modelSettingsError, setModelSettingsError] = useState("");
   const [modelSettingsApplying, setModelSettingsApplying] = useState<CollaborationMode | null>(null);
@@ -1760,7 +1777,7 @@ export function SessionView() {
   const [messageMenu, setMessageMenu] = useState<MessageActionMenuState | null>(null);
   const [imagePreview, setImagePreview] = useState<SessionImageTarget | null>(null);
   const [messageActionError, setMessageActionError] = useState("");
-  const [codexSkills, setCodexSkills] = useState<CodexSkill[]>([]);
+  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   const [sessionVariables, setSessionVariables] = useState<SessionEnvironmentVariable[]>([]);
   const [composerFocused, setComposerFocused] = useState(false);
   const [composerFocusRequest, setComposerFocusRequest] = useState<{ nonce: number; command: PrimaryInputFocusCommand } | null>(null);
@@ -1837,6 +1854,7 @@ export function SessionView() {
     setGitPanelOpen(false);
   }, []);
 
+  const providerDescriptor = session ? findProvider(providers?.providers, sessionProvider(session)) : null;
   const loadedMessages = useMemo(() => transcriptMessages(transcriptItems), [transcriptItems]);
   const inputDeliveryFailure = useMemo(() => inputDeliveryFailureDetail(loadedMessages), [loadedMessages]);
   const inputDeliveryCode = useMemo(() => inputDeliveryFailureCode(loadedMessages), [loadedMessages]);
@@ -1895,20 +1913,20 @@ export function SessionView() {
     hasMoreAfter ? "newer" : ""
   ].join("\0");
 
-  const refreshCodexSkills = useCallback(
+  const refreshAgentSkills = useCallback(
     async (options: { force?: boolean } = {}) => {
       if (!id || skillsRefreshRunningRef.current) return;
       const now = Date.now();
       if (!options.force && now - skillsLastRefreshRef.current < SKILL_REFRESH_STALE_MS) return;
       skillsRefreshRunningRef.current = true;
       try {
-        const response = await api.codexSkills(id);
+        const response = await api.sessionSkills(id);
         if (activeIdRef.current === id) {
-          setCodexSkills(response.skills);
+          setAgentSkills(response.skills);
           skillsLastRefreshRef.current = Date.now();
         }
       } catch {
-        if (activeIdRef.current === id && options.force) setCodexSkills([]);
+        if (activeIdRef.current === id && options.force) setAgentSkills([]);
       } finally {
         skillsRefreshRunningRef.current = false;
       }
@@ -1917,12 +1935,12 @@ export function SessionView() {
   );
 
   useEffect(() => {
-    setCodexSkills([]);
+    setAgentSkills([]);
     skillsLastRefreshRef.current = 0;
-    void refreshCodexSkills({ force: true });
-    const interval = window.setInterval(() => void refreshCodexSkills(), SKILL_REFRESH_INTERVAL_MS);
+    void refreshAgentSkills({ force: true });
+    const interval = window.setInterval(() => void refreshAgentSkills(), SKILL_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [refreshCodexSkills]);
+  }, [refreshAgentSkills]);
 
   const refreshSessionVariables = useCallback(async () => {
     if (!id) return;
@@ -1949,8 +1967,10 @@ export function SessionView() {
   }, [session]);
 
   useEffect(
-    () => registerCreateSessionCwdPrefill(() => (sessionRef.current ? sessionCreateSessionCwd(sessionRef.current) : "")),
-    [registerCreateSessionCwdPrefill]
+    () => registerCreateSessionPrefill(() => (sessionRef.current
+      ? { cwd: sessionCreateSessionCwd(sessionRef.current), provider: sessionProvider(sessionRef.current) }
+      : { cwd: "" })),
+    [registerCreateSessionPrefill]
   );
 
   useEffect(
@@ -2588,7 +2608,7 @@ export function SessionView() {
     setModelCatalogLoading(true);
     setModelSettingsError("");
     try {
-      const catalog = await api.codexModels();
+      const catalog = await api.providerModels(sessionProvider(sessionRef.current));
       setModelCatalog(catalog);
     } catch (error) {
       setModelSettingsError(error instanceof Error ? error.message : String(error));
@@ -3264,7 +3284,9 @@ export function SessionView() {
 
   useEffect(() => {
     const handleModeShortcut = (event: globalThis.KeyboardEvent) => {
-      const action = sessionLoading ? null : sessionModeShortcutAction(event, session, actionBusy, document);
+      const action = sessionLoading || !session
+        ? null
+        : sessionModeShortcutAction(event, session, actionBusy, document, sessionFastModeCapable(session, providerDescriptor));
       if (!action) return;
       event.preventDefault();
       if (action.type === "inputMode") void setInputMode(action.mode);
@@ -3272,7 +3294,7 @@ export function SessionView() {
     };
     document.addEventListener("keydown", handleModeShortcut);
     return () => document.removeEventListener("keydown", handleModeShortcut);
-  }, [session, sessionLoading, actionBusy]);
+  }, [session, sessionLoading, actionBusy, providerDescriptor]);
 
   async function copyAttachCommand() {
     if (!session) return;
@@ -3410,6 +3432,12 @@ export function SessionView() {
   }
   const readyWorkspace = normalizeGitWorkspaceSummary(readySession.gitWorkspace);
   const completed = Boolean(readySession.agentOwnership?.completedAt);
+  const providerKind = sessionProvider(readySession);
+  const providerName = providerLabel(providerKind);
+  const showProviderBadge = shouldShowProviderBadges(providers?.providers, [readySession, ...shellSessions]);
+  const fastModeCapable = sessionFastModeCapable(readySession, providerDescriptor);
+  const forkCapable = providerDescriptor?.capabilities.fork !== false && readySession.capabilities?.fork !== false;
+  const btwCapable = providerDescriptor?.capabilities.btw !== false;
   const approvalModeParent = readySession.agentOwnership
     ? shellSessions.find((candidate) => candidate.id === readySession.agentOwnership?.parentSessionId)
     : null;
@@ -3430,7 +3458,8 @@ export function SessionView() {
           <SessionTitleHeading
             name={sessionDisplayName(readySession)}
             onFork={() => openForkSession(readySession)}
-            forkDisabled={Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !readySession.provider.threadId}
+            forkDisabled={!forkCapable || Boolean(actionBusy) || readySession.initializing === true || Boolean(readySession.startupError) || !sessionThreadId(readySession)}
+            provider={showProviderBadge ? providerKind : null}
           />
           <div className="session-title-meta">
             <SessionHeaderMeta session={readySession} />
@@ -3448,7 +3477,7 @@ export function SessionView() {
             session={readySession}
             copied={copiedAttachCommand}
             accessMode={accessMode}
-            enabled={!completed && readySession.capabilities?.terminalAttach !== false}
+            enabled={!completed && readySession.capabilities?.terminalAttach !== false && providerDescriptor?.capabilities.terminalAttach !== false}
             onCopy={() => void copyAttachCommand()}
           />
           <span ref={adaptiveHeaderStatus.statusProbeRef} className="session-header-status-probe" aria-hidden="true">
@@ -3475,7 +3504,7 @@ export function SessionView() {
 
       {readySession.authenticationError || readySession.authenticationResumeRequired ? (
         <div className="session-startup-error-banner" role="alert">
-          <span>{readySession.authenticationError ?? "Codex authentication recovered. Resume explicitly before continuing."}</span>
+          <span>{readySession.authenticationError ?? `${providerName} authentication recovered. Resume explicitly before continuing.`}</span>
           {readySession.authenticationResumeRequired ? (
             <button
               className="secondary-button"
@@ -3494,15 +3523,16 @@ export function SessionView() {
             busyAction={actionBusy}
             detail={inputDeliveryFailure}
             interrupted={inputDeliveryCode === "turn_interrupted"}
+            provider={providerKind}
             error={inputDeliveryError}
             onRetry={() => void resolveInputDelivery({ type: "retryInputDelivery", ...inputDeliveryIdentity })}
             onDismiss={() => void resolveInputDelivery({ type: "dismissInputDeliveryFailure", ...inputDeliveryIdentity })}
           />
         ) : (
           <div className="session-startup-error-banner" role="alert">
-            <span>An automatic Codex turn failed. Restart its runtime to recover the session.</span>
+            <span>An automatic {providerName} turn failed. Restart its runtime to recover the session.</span>
             <button className="secondary-button" disabled={Boolean(actionBusy)} onClick={() => void runAction({ type: "restartRuntime" })}>
-              {actionBusy === "restartRuntime" ? "Restarting…" : "Restart Codex"}
+              {actionBusy === "restartRuntime" ? "Restarting…" : `Restart ${providerName}`}
             </button>
           </div>
         )
@@ -3551,6 +3581,8 @@ export function SessionView() {
         open={modelSettingsOpen}
         title="Session model settings"
         description="Choose a model and reasoning effort, then apply it explicitly to this session's Normal or Plan mode."
+        provider={providerKind}
+        providerFastMode={fastModeCapable}
         selections={readySession.models}
         activeMode={readySession.inputMode}
         fastMode={readySession.fastMode}
@@ -3576,7 +3608,7 @@ export function SessionView() {
           <button
             className="session-new-session-button"
             type="button"
-            onClick={() => openCreateSession(sessionCreateSessionCwd(readySession))}
+            onClick={() => openCreateSession(sessionCreateSessionCwd(readySession), { provider: sessionProvider(readySession) })}
             aria-label="New session"
             title="New session"
           >
@@ -3593,7 +3625,7 @@ export function SessionView() {
             type="button"
             className="btw-button"
             onClick={openBtwDrawer}
-            disabled={readySession.initializing === true || !readySession.provider.threadId || Boolean(readySession.startupError) || Boolean(readySession.runtimeUnavailableReason)}
+            disabled={!btwCapable || readySession.initializing === true || !sessionThreadId(readySession) || Boolean(readySession.startupError) || Boolean(readySession.runtimeUnavailableReason)}
             aria-haspopup="dialog"
             aria-expanded={btwOpen}
             aria-label="Open BTW side questions"
@@ -3776,9 +3808,9 @@ export function SessionView() {
               onOpenImageMenu={openImageMenu}
             />
           ) : null}
-          {showTranscriptSyncIndicator ? <TranscriptSyncIndicator /> : null}
-          {showWorkingIndicator ? <WorkingIndicator status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
-          {showQueuedIndicator ? <QueuedIndicator /> : null}
+          {showTranscriptSyncIndicator ? <TranscriptSyncIndicator provider={providerKind} /> : null}
+          {showWorkingIndicator ? <WorkingIndicator provider={providerKind} status={readySession.status} lastUserPromptAt={lastUserPromptAt} /> : null}
+          {showQueuedIndicator ? <QueuedIndicator provider={providerKind} /> : null}
           {question && !questionRenderedInline ? (
             <QuestionBanner
               key={question.id}
@@ -3860,10 +3892,12 @@ export function SessionView() {
             <QueuedInputList
               sessionId={id}
               inputs={queuedInputs}
-              skills={codexSkills}
+              skills={agentSkills}
+              skillInvocation={providerDescriptor?.skillInvocation}
+              skillsLabel={`${providerName} skills`}
               variables={sessionVariables}
               vimEnabled={effectiveVimEnabled}
-              onSkillSearch={() => { void refreshCodexSkills(); void refreshSessionVariables(); }}
+              onSkillSearch={() => { void refreshAgentSkills(); void refreshSessionVariables(); }}
               onUpdate={updateQueuedInput}
               onDelete={deleteQueuedInput}
               onOpenImage={setImagePreview}
@@ -3884,13 +3918,16 @@ export function SessionView() {
                 busy={completed || readySession.initializing === true || actionBusy === "setInputMode" || Boolean(readySession.startupError) || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
                 onChange={setInputMode}
               />
-              <FastModeToggle
-                enabled={readySession.fastMode === true}
-                available={readySession.fastModeAvailable ?? null}
-                busy={completed || readySession.initializing === true || actionBusy === "setFastMode" || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
-                status={readySession.status}
-                onChange={setFastMode}
-              />
+              {fastModeCapable ? (
+                <FastModeToggle
+                  provider={providerKind}
+                  enabled={readySession.fastMode === true}
+                  available={readySession.fastModeAvailable ?? null}
+                  busy={completed || readySession.initializing === true || actionBusy === "setFastMode" || readySession.runtime?.kind === "systemd_service" && readySession.runtime.state === "hibernated"}
+                  status={readySession.status}
+                  onChange={setFastMode}
+                />
+              ) : null}
               {vimAvailable ? <VimModeToggle enabled={vimEnabled} onChange={updateVimMode} /> : null}
             </div>
             <SkillTextArea
@@ -3903,9 +3940,11 @@ export function SessionView() {
               }}
               onFocus={() => setComposerFocused(true)}
               onBlur={() => setComposerFocused(false)}
-              skills={codexSkills}
+              skills={agentSkills}
+              skillInvocation={providerDescriptor?.skillInvocation}
+              skillsLabel={`${providerName} skills`}
               variables={sessionVariables}
-              onSkillSearch={() => { void refreshCodexSkills(); void refreshSessionVariables(); }}
+              onSkillSearch={() => { void refreshAgentSkills(); void refreshSessionVariables(); }}
               placeholder={
                 composerLock ??
                 (shouldQueueComposerInput(readySession, queuedInputs)
@@ -3913,8 +3952,8 @@ export function SessionView() {
                     ? "Queue plan message"
                     : "Queue message"
                   : readySession.inputMode === "plan"
-                    ? "Plan with Codex"
-                    : "Message Codex")
+                    ? `Plan with ${providerName}`
+                    : `Message ${providerName}`)
               }
               focusRequestKey={composerFocusRequest ? String(composerFocusRequest.nonce) : null}
               focusCommand={composerFocusRequest?.command ?? "focus"}
@@ -3978,11 +4017,13 @@ export function InputDeliveryFailureBanner({
   interrupted = false,
   error,
   onRetry,
-  onDismiss
+  onDismiss,
+  provider = "codex"
 }: {
   busyAction: SessionAction["type"] | null;
   detail: string;
   interrupted?: boolean;
+  provider?: AgentProviderKind;
   error: string;
   onRetry: () => void;
   onDismiss: () => void;
@@ -3991,7 +4032,7 @@ export function InputDeliveryFailureBanner({
     <section className="session-input-failed-banner" role="alert">
       <div>
         <strong>{interrupted ? "The last turn was interrupted." : "The last input needs attention."}</strong>
-        <p>{detail || "Codex did not complete the last input."} The message remains preserved for {interrupted ? "resumption" : "retry"} or dismissal.</p>
+        <p>{detail || `${providerLabel(provider)} did not complete the last input.`} The message remains preserved for {interrupted ? "resumption" : "retry"} or dismissal.</p>
         {error ? <p className="session-input-failed-error">{error}</p> : null}
       </div>
       <div className="session-input-failed-actions">
@@ -4308,16 +4349,25 @@ export interface ActiveSkillToken {
 
 type SkillSuggestionCommand = "next" | "previous" | "accept" | "dismiss";
 
-export function activeSkillToken(text: string, caret: number): ActiveSkillToken | null {
+export const CODEX_SKILL_INVOCATION: ProviderSkillInvocation = { prefix: "$", position: "anywhere" };
+
+/**
+ * The skill reference being typed at the caret. Codex accepts `$skill` anywhere; Claude only treats `/skill`
+ * as a command at the start of the message, and a second slash (e.g. `/home/dev`) marks a path instead.
+ */
+export function activeSkillToken(text: string, caret: number, invocation: ProviderSkillInvocation = CODEX_SKILL_INVOCATION): ActiveSkillToken | null {
   const boundedCaret = Math.max(0, Math.min(caret, text.length));
   let start = boundedCaret;
   while (start > 0 && !/\s/.test(text[start - 1] ?? "")) start -= 1;
   const token = text.slice(start, boundedCaret);
-  if (!token.startsWith("$")) return null;
+  if (!token.startsWith(invocation.prefix)) return null;
+  if (invocation.position === "start" && text.slice(0, start).trim()) return null;
 
   let end = boundedCaret;
   while (end < text.length && !/\s/.test(text[end] ?? "")) end += 1;
-  return { start, end, query: token.slice(1) };
+  const query = token.slice(invocation.prefix.length);
+  if (invocation.prefix === "/" && text.slice(start + 1, end).includes("/")) return null;
+  return { start, end, query };
 }
 
 export function activeVariableToken(text: string, caret: number): ActiveSkillToken | null {
@@ -4332,11 +4382,11 @@ export function activeVariableToken(text: string, caret: number): ActiveSkillTok
   return { start, end, query: token.slice(1) };
 }
 
-export function skillSuggestions(skills: CodexSkill[], query: string, limit = 8): CodexSkill[] {
+export function skillSuggestions(skills: AgentSkill[], query: string, limit = 8): AgentSkill[] {
   const normalizedQuery = query.toLowerCase();
   return skills
     .map((skill) => ({ skill, score: skillSuggestionScore(skill.name, normalizedQuery) }))
-    .filter((match): match is { skill: CodexSkill; score: number } => match.score !== null)
+    .filter((match): match is { skill: AgentSkill; score: number } => match.score !== null)
     .sort((a, b) => a.score - b.score || a.skill.name.localeCompare(b.skill.name))
     .map((match) => match.skill)
     .slice(0, limit);
@@ -4369,8 +4419,13 @@ function isSkillWordBoundary(value: string, index: number): boolean {
   return /[-_:]/.test(value[index - 1] ?? "");
 }
 
-export function replaceSkillToken(text: string, token: ActiveSkillToken, skillName: string): { text: string; caret: number } {
-  const replacement = `$${skillName} `;
+export function replaceSkillToken(
+  text: string,
+  token: ActiveSkillToken,
+  skillName: string,
+  invocation: ProviderSkillInvocation = CODEX_SKILL_INVOCATION
+): { text: string; caret: number } {
+  const replacement = `${invocation.prefix}${skillName} `;
   const nextText = `${text.slice(0, token.start)}${replacement}${text.slice(token.end).replace(/^\s/, "")}`;
   return { text: nextText, caret: token.start + replacement.length };
 }
@@ -4454,13 +4509,20 @@ export function vimRelativeLineNumbers(): Extension {
   });
 }
 
-function codeMirrorReferenceHighlightExtension(skillNames: Set<string>, variableNames: Set<string>): Extension {
+function codeMirrorReferenceHighlightExtension(
+  skillNames: Set<string>,
+  variableNames: Set<string>,
+  invocation: ProviderSkillInvocation = CODEX_SKILL_INVOCATION
+): Extension {
+  // A slash command ends at whitespace; a following slash means the token is a path such as /home/dev.
+  const skillReference = invocation.prefix === "/" ? "\\/([A-Za-z0-9][A-Za-z0-9_:-]*)(?![\\/\\w:-])" : "\\$([A-Za-z0-9][A-Za-z0-9_:-]*)";
   const matcher = new MatchDecorator({
-    regexp: /(?<!\S)(?:\$([A-Za-z0-9][A-Za-z0-9_:-]*)|#([A-Za-z_][A-Za-z0-9_]*))/g,
-    decoration: (match) => {
+    regexp: new RegExp(`(?<!\\S)(?:${skillReference}|#([A-Za-z_][A-Za-z0-9_]*))`, "g"),
+    decoration: (match, view, pos) => {
       const skillName = match[1];
       const variableName = match[2];
-      if (skillName && skillNames.has(skillName)) return Decoration.mark({ class: "composer-skill-reference" });
+      const skillAllowedHere = invocation.position === "anywhere" || !view.state.doc.sliceString(0, pos).trim();
+      if (skillName && skillAllowedHere && skillNames.has(skillName)) return Decoration.mark({ class: "composer-skill-reference" });
       return variableName && variableNames.has(variableName) ? Decoration.mark({ class: "composer-variable-reference" }) : null;
     }
   });
@@ -4585,6 +4647,7 @@ function VimPromptEditor({
   onFocus,
   onBlur,
   skills,
+  skillInvocation = CODEX_SKILL_INVOCATION,
   variables,
   placeholder,
   disabled,
@@ -4602,7 +4665,8 @@ function VimPromptEditor({
   onSuggestionCommand?: (command: SkillSuggestionCommand) => boolean;
   onFocus?: () => void;
   onBlur?: () => void;
-  skills: CodexSkill[];
+  skills: AgentSkill[];
+  skillInvocation?: ProviderSkillInvocation;
   variables: SessionEnvironmentVariable[];
   placeholder?: string;
   disabled?: boolean;
@@ -4747,7 +4811,7 @@ function VimPromptEditor({
       minimalSetup,
       EditorView.lineWrapping,
       EditorView.contentAttributes.of(codeMirrorComposerFieldAttributes),
-      skillHighlightCompartment.of(codeMirrorReferenceHighlightExtension(skillNames, variableNames)),
+      skillHighlightCompartment.of(codeMirrorReferenceHighlightExtension(skillNames, variableNames, skillInvocation)),
       placeholderCompartment.of(placeholder ? codeMirrorPlaceholder(placeholder) : []),
       EditorState.readOnly.of(Boolean(disabled)),
       EditorView.editable.of(!disabled),
@@ -4856,9 +4920,9 @@ function VimPromptEditor({
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({
-      effects: skillHighlightCompartment.reconfigure(codeMirrorReferenceHighlightExtension(skillNames, variableNames))
+      effects: skillHighlightCompartment.reconfigure(codeMirrorReferenceHighlightExtension(skillNames, variableNames, skillInvocation))
     });
-  }, [skillHighlightCompartment, skillNamesKey, variableNamesKey]);
+  }, [skillHighlightCompartment, skillInvocation.position, skillInvocation.prefix, skillNamesKey, variableNamesKey]);
 
   return (
     <div
@@ -4877,6 +4941,8 @@ export function SkillTextArea({
   onFocus,
   onBlur,
   skills,
+  skillInvocation = CODEX_SKILL_INVOCATION,
+  skillsLabel = "Codex skills",
   variables = [],
   onSkillSearch,
   placeholder,
@@ -4892,7 +4958,9 @@ export function SkillTextArea({
   onSubmitShortcut?: () => void;
   onFocus?: () => void;
   onBlur?: () => void;
-  skills: CodexSkill[];
+  skills: AgentSkill[];
+  skillInvocation?: ProviderSkillInvocation;
+  skillsLabel?: string;
   variables?: SessionEnvironmentVariable[];
   onSkillSearch?: () => void;
   placeholder?: string;
@@ -4909,7 +4977,7 @@ export function SkillTextArea({
   const [vimSelectionRequest, setVimSelectionRequest] = useState<{ caret: number; nonce: number } | null>(null);
   const vimSelectionNonceRef = useRef(0);
   const variableToken = activeVariableToken(value, caret);
-  const skillToken = variableToken ? null : activeSkillToken(value, caret);
+  const skillToken = variableToken ? null : activeSkillToken(value, caret, skillInvocation);
   const token = variableToken ?? skillToken;
   const suggestions = useMemo(() => {
     if (!token || disabled) return [];
@@ -4932,7 +5000,7 @@ export function SkillTextArea({
   function acceptSuggestion(suggestion: typeof suggestions[number]) {
     if (!token) return;
     const next = suggestion.kind === "skill"
-      ? replaceSkillToken(value, token, suggestion.skill.name)
+      ? replaceSkillToken(value, token, suggestion.skill.name, skillInvocation)
       : replaceVariableToken(value, token, suggestion.variable.name);
     onChange(next.text);
     vimSelectionNonceRef.current += 1;
@@ -4975,6 +5043,7 @@ export function SkillTextArea({
             onBlur?.();
           }}
           skills={skills}
+          skillInvocation={skillInvocation}
           variables={variables}
           placeholder={placeholder}
           disabled={disabled}
@@ -4987,7 +5056,7 @@ export function SkillTextArea({
           onUploadingChange={onUploadingChange}
         />
       {open ? (
-        <div className="skill-suggestions" role="listbox" aria-label={variableToken ? "Session variables" : "Codex skills"}>
+        <div className="skill-suggestions" role="listbox" aria-label={variableToken ? "Session variables" : skillsLabel}>
           {suggestions.map((suggestion, index) => (
             <button
               key={suggestion.kind === "skill" ? suggestion.skill.name : suggestion.variable.name}
@@ -5001,7 +5070,7 @@ export function SkillTextArea({
               }}
             >
               {suggestion.kind === "skill" ? <>
-                <span className="skill-suggestion-name">${suggestion.skill.name}</span>
+                <span className="skill-suggestion-name">{skillInvocation.prefix}{suggestion.skill.name}</span>
                 {suggestion.skill.description ? <span className="skill-suggestion-description">{suggestion.skill.description}</span> : null}
               </> : <>
                 <span className="skill-suggestion-name">#{suggestion.variable.name}</span>
@@ -5042,15 +5111,19 @@ function renderComposerHighlights(text: string, skillNames: Set<string>): ReactN
 export function SessionTitleHeading({
   name,
   onFork,
-  forkDisabled = false
+  forkDisabled = false,
+  provider = null
 }: {
   name: string;
   onFork: () => void;
   forkDisabled?: boolean;
+  /** Shown as a badge only when the host runs more than one provider. */
+  provider?: AgentProviderKind | null;
 }) {
   return (
     <div className="session-title-heading">
       <h1>{name}</h1>
+      {provider ? <ProviderBadge provider={provider} /> : null}
       <button
         className="session-title-fork-button"
         type="button"
@@ -5067,7 +5140,7 @@ export function SessionTitleHeading({
 
 export function SessionHeaderMeta({ session }: {
   session: Pick<ManagedSession, "repo" | "gitWorkspace" | "forkedFrom" | "agentOwnership"> &
-    Partial<Pick<ManagedSession, "contextUsage" | "runtime" | "resourceUsage">>;
+    Partial<Pick<ManagedSession, "contextUsage" | "runtime" | "resourceUsage" | "provider">>;
 }) {
   const workspace = normalizeGitWorkspaceSummary(session.gitWorkspace);
   const dirty = workspace?.state === "worktree" || session.repo.dirty;
@@ -5214,12 +5287,14 @@ export function ModeToggle({
 }
 
 export function FastModeToggle({
+  provider = "codex",
   enabled,
   available,
   busy,
   status,
   onChange
 }: {
+  provider?: AgentProviderKind;
   enabled: boolean;
   available: boolean | null;
   busy: boolean;
@@ -5234,8 +5309,8 @@ export function FastModeToggle({
     : !allowed
       ? "Fast mode cannot be changed in the session's current state"
       : enabled
-        ? "Disable Fast mode (F; also updates the default for future Codex sessions)"
-        : "Enable Fast mode (F; uses more credits and updates the default for future Codex sessions)";
+        ? `Disable Fast mode (F; also updates the default for future ${providerLabel(provider)} sessions)`
+        : `Enable Fast mode (F; uses more credits and updates the default for future ${providerLabel(provider)} sessions)`;
   return (
     <button
       type="button"
@@ -5285,7 +5360,7 @@ export function ModelSettingsButton({
   onOpen
 }: {
   session: ManagedSession;
-  catalog: CodexModelCatalogResponse | null;
+  catalog: ProviderModelCatalogResponse | null;
   compact?: boolean;
   onOpen?: () => void;
 }) {
@@ -5329,13 +5404,15 @@ export function RuntimeAttachButton({
   enabled,
   onCopy
 }: {
-  session: Pick<ManagedSession, "runtime">;
+  session: Partial<Pick<ManagedSession, "runtime" | "provider">>;
   copied: boolean;
   accessMode: AccessMode | null;
   enabled: boolean;
   onCopy: () => void;
 }) {
   if (accessMode !== "local") return null;
+  // Providers without an attach command (live Claude runtimes) show no attach control at all.
+  if (session.runtime?.kind === "systemd_service" && !runtimeAttachCommandOrNull(session)) return null;
 
   return (
     <button
@@ -5353,7 +5430,7 @@ export function RuntimeAttachButton({
 
 export function sessionModelDisplay(
   session: Pick<ManagedSession, "inputMode" | "models">,
-  catalog: CodexModelCatalogResponse | null = null
+  catalog: ProviderModelCatalogResponse | null = null
 ): { model: string; reasoningEffort: string } {
   const settings = catalog
     ? effectiveModelSettings(session, catalog.defaults, session.inputMode)
@@ -5372,9 +5449,21 @@ function fallbackModelSettings(...settings: SessionModelSettings[]): SessionMode
   };
 }
 
-export function runtimeAttachCommand(session: Pick<ManagedSession, "runtime">): string {
-  if (session.runtime?.kind !== "systemd_service") throw new Error("Session has no attachable app-server runtime");
+/**
+ * The server-provided attach command wins; older servers omit it, in which case only Codex runtimes are attachable
+ * through the app-server socket. Live Claude runtimes cannot be attached.
+ */
+export function runtimeAttachCommandOrNull(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string | null {
+  if (session.runtime?.kind !== "systemd_service") return null;
+  if (session.runtime.attachCommand !== undefined) return session.runtime.attachCommand || null;
+  if (sessionProvider(session) !== "codex") return null;
   return `codex --remote ${shellQuote(`unix://${session.runtime.socketPath}`)}`;
+}
+
+export function runtimeAttachCommand(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string {
+  const command = runtimeAttachCommandOrNull(session);
+  if (!command) throw new Error("Session has no attachable runtime");
+  return command;
 }
 
 export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime">>): string {
@@ -5384,7 +5473,7 @@ export function runtimeLabel(session: Partial<Pick<ManagedSession, "runtime">>):
 
 function runtimeDetail(session: Partial<Pick<ManagedSession, "runtime" | "provider">>): string {
   if (session.runtime?.kind !== "systemd_service") return runtimeLabel(session);
-  const version = session.runtime.agentVersion ? ` · ${providerDisplayName(session.provider?.kind ?? "codex")} ${session.runtime.agentVersion}` : "";
+  const version = session.runtime.agentVersion ? ` · ${providerLabel(sessionProvider(session))} ${session.runtime.agentVersion}` : "";
   return `${runtimeLabel(session)} · ${session.runtime.unit}${version}`;
 }
 
@@ -5502,6 +5591,8 @@ function QueuedInputList({
   sessionId,
   inputs,
   skills,
+  skillInvocation,
+  skillsLabel,
   variables,
   vimEnabled,
   onSkillSearch,
@@ -5512,7 +5603,9 @@ function QueuedInputList({
 }: {
   sessionId: string;
   inputs: QueuedInput[];
-  skills: CodexSkill[];
+  skills: AgentSkill[];
+  skillInvocation?: ProviderSkillInvocation;
+  skillsLabel?: string;
   variables: SessionEnvironmentVariable[];
   vimEnabled: boolean;
   onSkillSearch: () => void;
@@ -5583,6 +5676,8 @@ function QueuedInputList({
                     onChange={setDraft}
                     vimEnabled={vimEnabled}
                     skills={skills}
+                    skillInvocation={skillInvocation}
+                    skillsLabel={skillsLabel}
                     variables={variables}
                     onSkillSearch={onSkillSearch}
                     disabled={busy}
@@ -5963,19 +6058,22 @@ export function formatElapsedSeconds(totalSeconds: number): string {
 }
 
 export function WorkingIndicator({
+  provider = "codex",
   status = "working",
   lastUserPromptAt,
   nowMs
 }: {
+  provider?: AgentProviderKind;
   status?: ManagedSession["status"];
   lastUserPromptAt?: string | null;
   nowMs?: number;
 }) {
+  const providerName = providerLabel(provider);
   const label = status === "planning"
-    ? "Codex is planning..."
+    ? `${providerName} is planning...`
     : status === "running"
       ? "Heavyweight command is running"
-      : "Codex is working";
+      : `${providerName} is working`;
   const [currentNowMs, setCurrentNowMs] = useState(() => nowMs ?? Date.now());
   const elapsedSeconds = elapsedSince(lastUserPromptAt ?? null, nowMs ?? currentNowMs);
 
@@ -5990,7 +6088,7 @@ export function WorkingIndicator({
     <article className="message message-assistant message-working-indicator" aria-live="polite" role="status">
       <div className="message-meta">
         <span className="message-meta-main">
-          <span>Codex</span>
+          <span>{providerName}</span>
         </span>
       </div>
       <div className="working-indicator-content">
@@ -6008,12 +6106,12 @@ export function WorkingIndicator({
   );
 }
 
-export function TranscriptSyncIndicator() {
+export function TranscriptSyncIndicator({ provider = "codex" }: { provider?: AgentProviderKind }) {
   return (
     <article className="message message-assistant message-working-indicator" aria-live="polite" role="status">
       <div className="message-meta">
         <span className="message-meta-main">
-          <span>Codex</span>
+          <span>{providerLabel(provider)}</span>
         </span>
       </div>
       <div className="working-indicator-content">
@@ -6026,19 +6124,20 @@ export function TranscriptSyncIndicator() {
   );
 }
 
-export function QueuedIndicator() {
+export function QueuedIndicator({ provider = "codex" }: { provider?: AgentProviderKind }) {
+  const providerName = providerLabel(provider);
   return (
     <article className="message message-assistant message-working-indicator message-queued-indicator" aria-live="polite" role="status">
       <div className="message-meta">
         <span className="message-meta-main">
-          <span>Codex</span>
+          <span>{providerName}</span>
         </span>
       </div>
       <div className="working-indicator-content">
         <span className="working-indicator-label">
           <Clock3 size={18} aria-hidden="true" />
           <span className="queued-indicator-copy">
-            <span>Codex is queued</span>
+            <span>{providerName} is queued</span>
             <small>Waiting for a heavyweight command slot</small>
           </span>
         </span>
@@ -6344,8 +6443,12 @@ function label(message: ChatMessage): string {
   if (heavyCommandQueueEventFromPayload(message.payload)) return "Muxpilot queue";
   if (gitWorkflowEventFromPayload(message.payload)) return "Git workflow";
   if (isSubagentMessage(message)) return "Subagent";
+  if (message.type === "reasoning") return "Thinking";
   if (isAssistantUpdate(message)) return "Progress";
-  if (message.type === "tool_call") return "Tool";
+  if (message.type === "tool_call") {
+    const toolName = stringRecord(message.payload)?.toolName;
+    return typeof toolName === "string" && toolName.trim() ? `Tool · ${toolName.trim()}` : "Tool";
+  }
   if (message.type === "command_output") return "Command";
   if (message.type === "parser_notice") return "Parser";
   const delegated = delegatedSessionId(message);
@@ -6378,6 +6481,21 @@ function MessageContent({
   onOpenImageMenu?: (image: SessionImageTarget, copyTarget: MessageCopyTarget | undefined, x: number, y: number) => void;
 }) {
   const components = fileAwareMarkdownComponentsValue;
+
+  if (message.type === "reasoning") {
+    return (
+      <ReasoningBlock text={message.text}>
+        <MarkdownLinkBehaviorProvider onOpenDocument={onOpenDocument}>
+          <div className="rendered">
+            <MarkdownBlock text={message.text.trim()} components={components} />
+          </div>
+        </MarkdownLinkBehaviorProvider>
+      </ReasoningBlock>
+    );
+  }
+
+  const taskList = message.type === "tool_call" ? transcriptTaskList(message.payload) : null;
+  if (taskList) return <TaskListBlock taskList={taskList} />;
 
   if (isToolOutput(message)) {
     return (
@@ -7180,7 +7298,7 @@ function groupAssistantActivity(messages: ChatMessage[], fallbackKind: "activity
   let hasAssistantMessage = false;
 
   for (const message of messages) {
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || message.type === "reasoning") {
       pendingEvents.push(message);
       continue;
     }
@@ -7330,6 +7448,7 @@ function flushStack(items: TranscriptItem[], stack: ChatMessage[]): void {
 
 function isStackableMessage(message: ChatMessage): boolean {
   if (isStandaloneActionMessage(message)) return false;
+  if (message.type === "reasoning") return true;
   if (message.role === "assistant") return false;
   if (message.role === "tool" || message.role === "system") return true;
   return (
@@ -7356,7 +7475,7 @@ function stackLabel(messages: ChatMessage[]): string {
     (current, message) => {
       if (message.type === "command_output") current.command += 1;
       else if (message.type === "tool_call" || message.type === "tool_output") current.tool += 1;
-      else if (isAssistantUpdate(message)) current.progress += 1;
+      else if (isAssistantUpdate(message) || message.type === "reasoning") current.progress += 1;
       else if (isTurnAbortedStatus(message)) current.aborted += 1;
       else if (isSubagentMessage(message)) current.subagent += 1;
       else current.system += 1;

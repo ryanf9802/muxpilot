@@ -5,11 +5,11 @@ import { getCM } from "@replit/codemirror-vim";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { CodexSkill } from "@muxpilot/core";
+import type { AgentSkill } from "@muxpilot/core";
 import { ComposerSubmissionAlert, composerContent, composerSubmissionError, SkillTextArea } from "./SessionView.js";
 import { api } from "../api/client.js";
 
-const skills: CodexSkill[] = [
+const skills: AgentSkill[] = [
   { name: "first-skill", description: "First skill", source: "user" }
 ];
 
@@ -167,7 +167,7 @@ function renderComposer({
   sessionId = ""
 }: {
   placeholder: string;
-  skills: CodexSkill[];
+  skills: AgentSkill[];
   value?: string;
   onChange?: (value: string) => void;
   onSubmitShortcut?: () => void;
