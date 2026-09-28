@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ChatMessage, SessionStatus } from "@muxpilot/core";
 import type { AppServerReconciliationState } from "../src/db/database.js";
-import {
-  CodexAppServerReconciler,
-  type AppServerProjectionStore
-} from "../src/services/sessionDrivers/codexAppServerReconciler.js";
+import type { AppServerProjectionStore } from "../src/providers/shared/projectionReconciler.js";
+import { CodexAppServerReconciler } from "../src/providers/codex/reconciler.js";
 
 describe("CodexAppServerReconciler", () => {
   it("persists completed items before publishing transcript and status", async () => {
@@ -566,7 +564,7 @@ describe("CodexAppServerReconciler", () => {
       id: "session-1",
       status: "blocked",
       inputMode: "default",
-      provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
+      provider: { kind: "codex", threadId: "thread-1", transcriptPath: null },
       agentOwnership: {
         parentSessionId: "parent",
         rootSessionId: "parent",
@@ -747,7 +745,7 @@ function projectionStore(order: string[], inputMode: "default" | "plan" = "defau
     id: "session-1",
     status,
     inputMode,
-    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null }
+    provider: { kind: "codex", threadId: "thread-1", transcriptPath: null }
   };
   let state: AppServerReconciliationState | null = null;
   const intentionalInterruptions = new Map<string, "operator" | "budget_guard">();

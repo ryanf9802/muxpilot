@@ -1,14 +1,16 @@
 # Agent Orchestration Reference
 
-muxpilot can expose managed Codex sessions to one another through a constrained `muxpilot_sessions` tool server. This supports durable delegated work in independently visible sessions without turning muxpilot into a general remote shell.
+muxpilot can expose managed Codex and Claude sessions to one another through a constrained `muxpilot_sessions` tool server. This supports durable delegated work in independently visible sessions without turning muxpilot into a general remote shell.
 
 Agent-managed sessions continuously inherit their direct parent's approval mode. Changes at a root flow through every descendant. A child cannot override the inherited mode; detaching it resets its independent mode to Ask while its descendants continue to inherit from it.
 
 ## Choosing a Delegation Mechanism
 
-Use Codex's built-in subagents for routine bounded delegation, especially standard code-review passes. They run inside the current Codex session and do not create more muxpilot sessions.
+Use the provider's built-in subagents (Codex subagents or Claude's Agent tool) for routine bounded delegation, especially standard code-review passes. They run inside the current session and do not create more muxpilot sessions.
 
 Create a nested muxpilot session only when the operator explicitly requests one or when durable delegated work benefits from independent monitoring, transcript history, documents, and resource isolation.
+
+Claude sessions stay native for delegation. Claude Code runs long-running and parallel work as background subagents, and muxpilot shows them in the session's Agents view, where the operator can follow each subagent's transcript and stop it. Claude sessions are instructed to create a muxpilot child only when the operator explicitly asks for one or the child must run on a different provider. Claude's cross-session messaging (`SendMessage`, `ListAgents`) is also available to Claude sessions without approval.
 
 ## Session Trees in the UI
 
@@ -32,12 +34,12 @@ Agent children require a dedicated `muxpilot-session-<capability>.scope`. Creati
 
 ## Child Creation and Inheritance
 
-A created child starts with fresh Codex context and inherits the parent's:
+A created child starts with fresh context on the parent's provider unless `create_session` names another `provider` (`codex` or `claude`). It inherits the parent's:
 
 - Repository entry path or direct working directory.
 - Current managed Git target when present.
-- Default and Plan model/reasoning selections.
-- Fast-mode setting.
+- Default and Plan model/reasoning selections, when the child uses the same provider.
+- Fast-mode setting, when the child uses the same provider.
 
 It receives its own runtime service, capability-bound tool server, resource unit, managed Git workspace identity when applicable, and private documents directory. The initial delegated task is delivered only after the child reaches a reconciled ready state.
 
@@ -49,9 +51,9 @@ The tool server exposes bounded operations rather than arbitrary shell access:
 
 | Tool | Contract |
 | --- | --- |
-| `list_sessions` | List all sessions or the caller's tree with hierarchy, state, context, budget, and Codex goal telemetry. |
+| `list_sessions` | List all sessions or the caller's tree with hierarchy, provider, state, context, budget, and Codex goal telemetry. |
 | `read_session` | Read persisted metadata, Codex goal telemetry, queued input, and up to 30 recent parsed messages. |
-| `create_session` | Create a fresh-context child with a bounded task and optional Plan mode. |
+| `create_session` | Create a fresh-context child with a bounded task, optional Plan mode, and optional provider. |
 | `claim_session` | Attach an unowned live scoped session as a child. |
 | `release_session` | Detach a controlled child without stopping it. |
 | `send_message` | Send work to a live session with context and budget enforcement. |
@@ -69,13 +71,13 @@ All operations use exact session IDs, and the broker rejects requests larger tha
 
 Each created or claimed child starts with a 1,000,000 work-token budget measured from the ownership baseline. Uncached input, output, and reasoning tokens count as work. Reaching the budget interrupts the child, marks it blocked, and prevents more delegated work until an ancestor extends the budget with a reason. A single extension can add at most 2,000,000 tokens.
 
-Context-window use remains visible as informational telemetry. Muxpilot lets Codex manage its context and automatic compaction without interrupting or blocking the child at a context threshold.
+Context-window use remains visible as informational telemetry. Muxpilot lets the provider manage its context and automatic compaction without interrupting or blocking the child at a context threshold.
 
-The work-token budget limits delegated work; it does not alter the Codex account's own rate limits or context implementation.
+The work-token budget limits delegated work; it does not alter the provider account's own rate limits or context implementation.
 
 ## Codex Goal Telemetry
 
-Session inspection reads Codex thread goals directly from the configured Codex home. When a session has a goal, its MCP summary includes the objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Active elapsed time advances from Codex's latest accounting checkpoint; paused and terminal durations remain fixed.
+Session inspection reads Codex thread goals directly from the configured Codex home. Goals are Codex-only; Claude sessions report no goal. When a Codex session has a goal, its MCP summary includes the objective, status, elapsed seconds, consumed tokens, optional token budget, and source timestamps. Active elapsed time advances from Codex's latest accounting checkpoint; paused and terminal durations remain fixed.
 
 Both inspection responses include `goalTelemetry.available`. When it is true, `goal: null` means the session's Codex thread has no recorded goal. When it is false, muxpilot could not read a compatible Codex goal store and leaves the rest of session inspection available.
 
@@ -91,27 +93,29 @@ Normalized muxpilot state can be compared with independent read-only evidence:
 
 | Tool | Evidence |
 | --- | --- |
-| `read_session_runtime` | Neutral runtime, exact systemd state, socket, resource unit, Codex version, and CLI attachment command. |
-| `read_session_process_tree` | `/proc` and cgroup evidence rooted at the app-server service PID. |
-| `read_session_protocol_journal` | Bounded raw app-server request, response, notification, and connection evidence. |
-| `list_codex_session_files` | Filesystem metadata for recent Codex JSONL files. |
-| `read_codex_session_file` | A bounded byte slice from an exact listed JSONL path. |
+| `read_session_runtime` | Neutral runtime, exact systemd state, socket, resource unit, agent version, and, for Codex, the CLI attachment command. |
+| `read_session_process_tree` | `/proc` and cgroup evidence rooted at the session service PID. |
+| `read_session_protocol_journal` | Bounded raw app-server or Claude host request, response, notification, and connection evidence. |
+| `list_transcript_files` | Filesystem metadata for recent Codex or Claude JSONL files. |
+| `read_transcript_file` | A bounded byte slice from an exact listed JSONL path. |
+
+Both transcript tools take an optional `provider` and default to the calling session's provider. The earlier names `list_codex_session_files` and `read_codex_session_file` remain as Codex-only aliases.
 
 These tools diagnose discrepancies; they do not decide which source is correct or authorize remediation.
 
-Codex file listings return at most 500 entries per page, and an exact file read is limited to a 256 KiB byte slice. Paths must come from the configured Codex session root and pass the broker's relative-path checks.
+Transcript file listings return at most 500 entries per page, and an exact file read is limited to a 256 KiB byte slice. Paths must come from the provider's configured transcript root, `sessions/` under the Codex home or `projects/` under the Claude config directory, and pass the broker's relative-path checks.
 
 ## Documents and Handoffs
 
 Every muxpilot session owns a private `$MUXPILOT_DOCUMENTS_DIR`. Parent documents are canonical program state. A nested child may read explicitly supplied parent document paths, but it cannot edit the parent's scope. It returns independently verified evidence and proposed plan, acceptance, workflow, or reminder updates for the parent to verify and apply.
 
-Built-in Codex subagents share the current session's environment and document directory. They should return proposed document changes without writing canonical session documents themselves.
+Built-in provider subagents share the current session's environment and document directory. They should return proposed document changes without writing canonical session documents themselves.
 
 Documents are copied into an independent scope when a conversation is forked and included in session transfers. See [Usage](usage.md#session-documents) for limits and the operator viewer.
 
 ## BTW Side Questions
 
-BTW runs a separate, non-interrupting Codex turn from a fresh snapshot of the main conversation. Each question is independent and has its own saved answer, progress state, cancellation control, and copy actions. It cannot request interactive input or approvals, and a run is bounded to two minutes.
+BTW runs a separate, non-interrupting turn from a fresh snapshot of the main conversation. For Claude, that turn is an unpersisted fork limited to read-only file tools plus staged document writes. Each question is independent and has its own saved answer, progress state, cancellation control, and copy actions. It cannot request interactive input or approvals.
 
 A BTW request may also create or edit session documents. It works in isolated staging and cannot delete or rename documents or write elsewhere. muxpilot validates the staged diff, waits for a safe boundary, and applies it atomically. If canonical documents changed meanwhile, BTW regenerates once from the latest state and otherwise reports a conflict without overwriting them. The main agent receives an internal notice and remains responsible for reconciling and maintaining canonical documents.
 

@@ -1,3 +1,5 @@
+import type { AgentProviderKind } from "./provider.js";
+
 export type SessionStatus =
   | "idle"
   | "generating"
@@ -38,7 +40,8 @@ export interface ApprovalReviewerSettings {
 }
 
 export interface ApprovalReviewerSettingsResponse {
-  settings: ApprovalReviewerSettings;
+  /** Null when the provider has no automated reviewer. */
+  settings: ApprovalReviewerSettings | null;
 }
 
 export interface SessionModelSettings {
@@ -51,50 +54,9 @@ export interface SessionModelSelections {
   plan: SessionModelSettings;
 }
 
-export type CodexSkillSource = "user" | "system" | "plugin" | "workspace";
-
-export interface CodexSkill {
-  name: string;
-  description: string;
-  source: CodexSkillSource;
-  pluginName?: string;
-}
-
-export interface CodexSkillsResponse {
-  skills: CodexSkill[];
-}
-
 export interface MuxpilotGitSkillStatus {
   status: "missing" | "outdated" | "current";
   path: string;
-}
-
-export interface CodexModel {
-  id: string;
-  model: string;
-  displayName: string;
-  description: string;
-  hidden: boolean;
-  isDefault: boolean;
-  supportedReasoningEfforts: CodexReasoningEffortOption[];
-  defaultReasoningEffort: string | null;
-  serviceTiers: CodexServiceTier[];
-}
-
-export interface CodexServiceTier {
-  id: string;
-  name: string;
-  description: string;
-}
-
-export interface CodexReasoningEffortOption {
-  reasoningEffort: string;
-  description: string;
-}
-
-export interface CodexModelCatalogResponse {
-  models: CodexModel[];
-  defaults: SessionModelSelections;
 }
 
 export interface GlobalModelSettingsResponse {
@@ -118,14 +80,26 @@ export type MessageType =
   | "status"
   | "approval_request"
   | "question_request"
-  | "parser_notice";
+  | "parser_notice"
+  /** Model reasoning (Claude thinking blocks, Codex reasoning summaries); collapsed by default. */
+  | "reasoning";
 
-export type AgentProviderKind = "codex";
+export type TranscriptTaskStatus = "pending" | "in_progress" | "completed";
+
+/**
+ * Normalized agent task list carried on a `tool_call` message as `payload.taskList`
+ * (Claude TodoWrite, Codex plan updates).
+ */
+export interface TranscriptTaskList {
+  items: Array<{ text: string; status: TranscriptTaskStatus }>;
+}
 
 export interface AgentProviderRef {
   kind: AgentProviderKind;
+  /** Provider-native conversation id (Codex thread id, Claude session id). */
   threadId: string | null;
-  rolloutPath: string | null;
+  /** Provider-native transcript file (Codex rollout JSONL, Claude project JSONL). */
+  transcriptPath: string | null;
 }
 
 export interface SessionRuntimeRef {
@@ -133,7 +107,9 @@ export interface SessionRuntimeRef {
   unit: string;
   socketPath: string;
   state: "starting" | "connected" | "hibernated" | "stopped" | "failed";
-  codexVersion: string | null;
+  agentVersion: string | null;
+  /** Shell command that attaches a terminal to this runtime, when supported. */
+  attachCommand?: string | null;
 }
 
 export interface SessionCapabilities {
@@ -151,21 +127,6 @@ export interface SessionCapabilities {
   fastMode: boolean;
   terminalAttach: boolean;
   hibernate: boolean;
-}
-
-export type AppServerCompatibilityStatus =
-  | "available"
-  | "user_systemd_unavailable"
-  | "incompatible_codex_protocol"
-  | "failed_health_probe";
-
-export interface AppServerCompatibility {
-  status: AppServerCompatibilityStatus;
-  available: boolean;
-  codexVersion: string | null;
-  detail: string;
-  checkedAt: string;
-  missingCapabilities: string[];
 }
 
 export interface RepoMetadata {
@@ -335,7 +296,8 @@ export interface HeavyCommandOutputResponse {
 }
 
 export interface SessionForkOrigin {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionId: string | null;
   sessionName: string;
 }
@@ -350,8 +312,6 @@ export interface ManagedSession {
   runtime?: SessionRuntimeRef;
   capabilities?: SessionCapabilities;
   repo: RepoMetadata;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
   discoveryConfidence: "high" | "medium" | "low";
   status: SessionStatus;
   initializing?: boolean;
@@ -480,6 +440,8 @@ export interface ApprovalRequest {
   reviewStatus?: "reviewing" | "escalated";
   reviewerModel?: string;
   reviewerExplanation?: string;
+  /** The native subagent that asked, when the request did not come from the main conversation. */
+  requestedBy?: { agentId: string; label: string | null };
 }
 
 export interface ResolveApprovalRequest {
@@ -549,8 +511,8 @@ export interface QueuedInput {
   mode: CollaborationMode;
   status: QueuedInputStatus;
   error: string | null;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  threadId: string | null;
+  transcriptPath: string | null;
   actorSessionId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -616,6 +578,37 @@ export interface BtwDeltaPayload {
   firstTokenAt: string | null;
 }
 
+/** A subagent, background shell, monitor or workflow the session's agent runs natively (Claude Code tasks). */
+export interface SessionAgent {
+  id: string;
+  /** The tool call in the main transcript that started it. */
+  toolUseId: string | null;
+  kind: "subagent" | "shell" | "monitor" | "workflow" | "other";
+  /** Subagent type (Explore, general-purpose, a custom agent) when it is a subagent. */
+  agentType: string | null;
+  description: string;
+  status: "running" | "paused" | "completed" | "failed" | "stopped";
+  background: boolean;
+  depth: number | null;
+  lastToolName: string | null;
+  summary: string | null;
+  error: string | null;
+  usage: { totalTokens: number; toolUses: number; durationMs: number } | null;
+  /** Housekeeping work the agent CLI hides from activity indicators. */
+  ambient: boolean;
+  startedAt: string;
+  updatedAt: string;
+}
+
+export interface SessionAgentsResponse {
+  agents: SessionAgent[];
+}
+
+export interface SessionAgentMessagesResponse {
+  agent: SessionAgent | null;
+  messages: ChatMessage[];
+}
+
 export interface SessionEvent {
   id: string;
   type:
@@ -631,7 +624,8 @@ export interface SessionEvent {
     | "btw.updated"
     | "btw.finished"
     | "documents.updated"
-    | "codex.auth.updated";
+    | "provider.auth.updated"
+    | "session.agents.updated";
   sessionId: string;
   payload: unknown;
   timestamp: string;
@@ -696,7 +690,9 @@ export interface NotificationTriggeredPayload {
 
 export interface UsageLimitNotificationTriggeredPayload {
   deviceId: string;
-  limit: "fiveHour" | "weekly";
+  provider: AgentProviderKind;
+  /** Provider usage limit id, e.g. `five_hour` or `weekly`. */
+  limit: string;
   limitLabel: string;
   remainingPercent: number;
   threshold: UsageLimitThreshold;
@@ -788,12 +784,14 @@ export type CreateSessionRequest =
   | {
       cwd: string;
       name: string;
+      /** Agent provider for the new session; defaults to the host's default provider. */
+      provider?: AgentProviderKind;
       workspace: {
         mode: "git";
         targetBranch: string;
       };
     }
-  | { cwd: string; name: string; workspace?: { mode: "directory" } };
+  | { cwd: string; name: string; provider?: AgentProviderKind; workspace?: { mode: "directory" } };
 
 export interface ForkSessionRequest {
   name: string;
@@ -823,8 +821,9 @@ export interface SessionHistoryPromptMatch {
 
 export interface SessionHistoryResult {
   sessionId: string;
-  codexSessionId: string;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string;
+  transcriptPath: string | null;
   status: SessionStatus;
   archived: boolean;
   sessionName: string;
@@ -837,8 +836,8 @@ export interface SessionHistoryResult {
   gitWorkspace: Pick<GitWorkspaceSummary, "id" | "worktreePath" | "sessionBranch" | "targetBranch"> | null;
 }
 
-export function sessionHistoryIdentity(result: Pick<SessionHistoryResult, "sessionId" | "codexSessionId" | "gitWorkspace">): string {
-  return result.gitWorkspace ? `workspace:${result.gitWorkspace.id}` : `codex:${result.codexSessionId || result.sessionId}`;
+export function sessionHistoryIdentity(result: Pick<SessionHistoryResult, "sessionId" | "provider" | "threadId" | "gitWorkspace">): string {
+  return result.gitWorkspace ? `workspace:${result.gitWorkspace.id}` : `${result.provider}:${result.threadId || result.sessionId}`;
 }
 
 export interface SessionHistoryResponse {
@@ -889,7 +888,8 @@ export interface SessionTransferExportRequest {
 }
 
 export interface SessionTransferPreviewSession {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionName: string;
   sourceCwd: string;
   repoName: string;
@@ -922,7 +922,7 @@ export interface SessionTransferInspectResponse {
   token: string;
   encrypted: boolean;
   expiresAt: string;
-  formatVersion: 2 | 3 | 4 | 5 | 6 | 7;
+  formatVersion: 2 | 3 | 4 | 5 | 6 | 7 | 8;
   sessions: SessionTransferPreviewSession[];
   mappings: SessionTransferMappingRequirement[];
 }
@@ -939,7 +939,8 @@ export interface SessionTransferImportRequest {
 }
 
 export interface SessionTransferImportResult {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionName: string;
   status: "resumed" | "reused_live" | "kept_existing" | "resume_failed";
   sessionId: string | null;
@@ -1090,8 +1091,9 @@ export type TranscriptItem = TranscriptMessageItem | TranscriptUserActionItem | 
 
 export interface TranscriptPageResponse {
   sessionId: string;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string | null;
+  transcriptPath: string | null;
   items: TranscriptItem[];
   hasMoreBefore: boolean;
   hasMoreAfter: boolean;
@@ -1111,109 +1113,10 @@ export interface TranscriptSearchMatch {
 
 export interface TranscriptSearchResponse {
   sessionId: string;
-  codexSessionId: string | null;
-  codexJsonlPath: string | null;
+  provider: AgentProviderKind;
+  threadId: string | null;
+  transcriptPath: string | null;
   query: string;
   matches: TranscriptSearchMatch[];
   total: number;
-}
-
-export type CodexAccountKind = "chatgpt" | "apiKey" | "amazonBedrock" | "unknown";
-
-export interface CodexUsageAccount {
-  kind: CodexAccountKind;
-  email: string | null;
-  planType: string | null;
-}
-
-export interface CodexUsageLimit {
-  label: string;
-  limitName: string | null;
-  usedPercent: number | null;
-  remainingPercent: number | null;
-  windowDurationMins: number | null;
-  resetsAt: number | null;
-}
-
-export interface CodexRateLimitResetCredit {
-  id: string;
-  resetType: string;
-  status: string;
-  grantedAt: number;
-  expiresAt: number | null;
-  title: string | null;
-  description: string | null;
-}
-
-export interface CodexRateLimitResetCredits {
-  availableCount: number;
-  credits: CodexRateLimitResetCredit[] | null;
-}
-
-export interface CodexUsageSummaryResponse {
-  available: boolean;
-  error: string | null;
-  refreshedAt: string;
-  accountStatus?: "authenticated" | "signed_out" | "unknown";
-  account: CodexUsageAccount | null;
-  limits: {
-    fiveHour: CodexUsageLimit | null;
-    weekly: CodexUsageLimit | null;
-  };
-  resetCredits: CodexRateLimitResetCredits | null;
-}
-
-export type CodexAuthLifecycleStatus =
-  | "checking"
-  | "ready"
-  | "signed_out"
-  | "authentication_required"
-  | "temporarily_unavailable";
-
-export interface CodexAuthAccount {
-  type: string;
-  email: string | null;
-  planType: string | null;
-}
-
-export interface CodexAuthState {
-  status: CodexAuthLifecycleStatus;
-  account: CodexAuthAccount | null;
-  revision: number;
-  observedAt: string;
-  error: string | null;
-  admissionHeld: boolean;
-  pendingSessionIds: string[];
-}
-
-export interface CodexTokenUsageDailyPoint {
-  date: string;
-  tokens: number;
-}
-
-export interface CodexTokenUsageResponse {
-  available: boolean;
-  error: string | null;
-  refreshedAt: string;
-  days: 7 | 30;
-  summary: {
-    lifetimeTokens: number | null;
-    peakDailyTokens: number | null;
-    longestRunningTurnSec: number | null;
-    currentStreakDays: number | null;
-    longestStreakDays: number | null;
-  } | null;
-  points: CodexTokenUsageDailyPoint[] | null;
-}
-
-export interface ConsumeCodexResetCreditRequest {
-  idempotencyKey: string;
-  creditId?: string | null;
-}
-
-export type ConsumeCodexResetCreditOutcome = "reset" | "alreadyRedeemed" | "nothingToReset" | "noCredit";
-
-export interface ConsumeCodexResetCreditResponse {
-  outcome: ConsumeCodexResetCreditOutcome;
-  summary: CodexUsageSummaryResponse;
 }

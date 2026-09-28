@@ -1,0 +1,165 @@
+import type { Logger } from "pino";
+import type { ApprovalRequest, ApprovalReviewerSettings, ManagedSession } from "@muxpilot/core";
+import { CodexAppServerClient, type CodexAppServerMessage } from "./usage.js";
+import {
+  approvalReviewInstructions,
+  approvalReviewPrompt,
+  parseApprovalReview,
+  type ApprovalReviewResult
+} from "../shared/approvalReview.js";
+
+export { parseApprovalReview, type ApprovalReviewResult };
+
+const REVIEW_TIMEOUT_MS = 60_000;
+/**
+ * The reviewer runs in a fork of the session, so without a schema the model tends to continue the session's own
+ * task and answer in prose. Codex constrains the final assistant message to this shape.
+ */
+const REVIEW_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decision", "explanation"],
+  properties: {
+    decision: { type: "string", enum: ["approve", "deny", "escalate"] },
+    explanation: { type: "string" }
+  }
+} as const;
+interface ActiveReview {
+  threadId: string | null;
+  turnId: string | null;
+  text: string;
+  /** The completed final-answer message, which carries the schema-constrained decision. */
+  finalText: string | null;
+  resolve: (result: ApprovalReviewResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+type ReviewerClient = Pick<CodexAppServerClient, "initialize" | "request" | "respondError" | "subscribe" | "subscribeClose" | "stop">;
+
+export class ApprovalReviewer {
+  private readonly client: ReviewerClient;
+  private readonly reviews = new Map<string, ActiveReview>();
+  private readonly unsubscribe: () => void;
+  private readonly unsubscribeClose: () => void;
+
+  constructor(codexHome: string, private readonly logger?: Pick<Logger, "warn" | "debug">, client?: ReviewerClient) {
+    this.client = client ?? new CodexAppServerClient({ codexHome, timeoutMs: 10_000, logger });
+    this.unsubscribe = this.client.subscribe((message) => this.handleMessage(message));
+    this.unsubscribeClose = this.client.subscribeClose((error) => this.failAll(error));
+  }
+
+  start(): void {
+    void this.client.initialize().catch((error) => this.logger?.warn({ err: error }, "approval reviewer warmup failed"));
+  }
+
+  stop(): void {
+    this.failAll(new Error("Approval reviewer stopped."));
+    this.unsubscribe();
+    this.unsubscribeClose();
+    this.client.stop();
+  }
+
+  invalidateAuthentication(): void {
+    this.failAll(new Error("Codex account changed while approval review was active."));
+    this.client.stop();
+  }
+
+  async review(session: ManagedSession, approval: ApprovalRequest, settings: ApprovalReviewerSettings): Promise<ApprovalReviewResult> {
+    const sourceThreadId = session.provider.kind === "codex" ? session.provider.threadId : null;
+    if (!sourceThreadId) throw new Error("Session has no Codex thread to review");
+    const fork = await this.client.request<{ thread?: { id?: unknown } }>("thread/fork", {
+      threadId: sourceThreadId,
+      ephemeral: true,
+      excludeTurns: true,
+      model: settings.model,
+      approvalPolicy: "never",
+      sandbox: "read-only",
+      developerInstructions: approvalReviewInstructions("Codex")
+    });
+    const threadId = typeof fork.thread?.id === "string" ? fork.thread.id : null;
+    if (!threadId) throw new Error("Approval reviewer did not receive a thread id");
+    const result = new Promise<ApprovalReviewResult>((resolve, reject) => {
+      const timer = setTimeout(() => this.fail(threadId, new Error("Approval review timed out")), REVIEW_TIMEOUT_MS);
+      this.reviews.set(threadId, { threadId, turnId: null, text: "", finalText: null, resolve, reject, timer });
+    });
+    try {
+      const turn = await this.client.request<{ turn?: { id?: unknown } }>("turn/start", {
+        threadId,
+        input: [{ type: "text", text: approvalReviewPrompt(session, approval) }],
+        model: settings.model,
+        effort: settings.reasoningEffort,
+        summary: "none",
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+        outputSchema: REVIEW_OUTPUT_SCHEMA
+      });
+      const active = this.reviews.get(threadId);
+      if (active) active.turnId = typeof turn.turn?.id === "string" ? turn.turn.id : null;
+      return await result;
+    } catch (error) {
+      this.fail(threadId, error instanceof Error ? error : new Error(String(error)));
+      return await result;
+    }
+  }
+
+  private handleMessage(message: CodexAppServerMessage): void {
+    if (message.id !== undefined && message.method) {
+      this.client.respondError(message.id, "Approval reviewers cannot perform interactive actions");
+      return;
+    }
+    if (!message.method || !message.params || typeof message.params !== "object" || Array.isArray(message.params)) return;
+    const params = message.params as Record<string, unknown>;
+    const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    if (!threadId) return;
+    const review = this.reviews.get(threadId);
+    if (!review) return;
+    if (message.method === "item/agentMessage/delta" && typeof params.delta === "string") {
+      review.text += params.delta;
+      return;
+    }
+    if (message.method === "item/completed") {
+      const item = params.item && typeof params.item === "object" && !Array.isArray(params.item)
+        ? params.item as Record<string, unknown>
+        : null;
+      // Commentary messages precede the answer; only the final answer holds the decision.
+      if (item?.type === "agentMessage" && typeof item.text === "string" && item.phase !== "commentary") review.finalText = item.text;
+      return;
+    }
+    if (message.method !== "turn/completed") return;
+    const turn = params.turn && typeof params.turn === "object" && !Array.isArray(params.turn)
+      ? params.turn as Record<string, unknown>
+      : null;
+    if (turn?.status !== "completed") {
+      this.fail(threadId, new Error("Approval reviewer did not complete successfully"));
+      return;
+    }
+    try {
+      this.complete(threadId, parseApprovalReview(review.finalText ?? review.text));
+    } catch (error) {
+      this.fail(threadId, error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  private complete(threadId: string, result: ApprovalReviewResult): void {
+    const review = this.reviews.get(threadId);
+    if (!review) return;
+    clearTimeout(review.timer);
+    this.reviews.delete(threadId);
+    void this.client.request("thread/unsubscribe", { threadId }).catch(() => undefined);
+    review.resolve(result);
+  }
+
+  private fail(threadId: string, error: Error): void {
+    const review = this.reviews.get(threadId);
+    if (!review) return;
+    clearTimeout(review.timer);
+    this.reviews.delete(threadId);
+    void this.client.request("thread/unsubscribe", { threadId }).catch(() => undefined);
+    review.reject(error);
+  }
+
+  private failAll(error: Error): void {
+    for (const threadId of [...this.reviews.keys()]) this.fail(threadId, error);
+  }
+}

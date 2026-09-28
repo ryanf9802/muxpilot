@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectAppServerEvent } from "../src/services/sessionDrivers/codexAppServerEvents.js";
+import { projectAppServerEvent } from "../src/providers/codex/events.js";
 import { serializeApprovalDecisionEvent, serializeHeavyCommandQueueEvent, serializeSessionWaitEvent } from "@muxpilot/core";
 
 const receivedAt = "2026-09-01T12:00:00.000Z";

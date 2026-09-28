@@ -7,7 +7,7 @@ import {
   selectCodexRateLimitSnapshot,
   type AccountReadResponse,
   type RateLimitsReadResponse
-} from "../src/services/codexUsage.js";
+} from "../src/providers/codex/usage.js";
 
 describe("CodexUsageService", () => {
   it("single-flights concurrent reads and caches successful summaries", async () => {
@@ -147,7 +147,7 @@ describe("CodexUsageService", () => {
     const result = await service.consumeResetCredit("05f9c8bb-08b1-43ad-b396-31f2b685ba9c", "reset-1");
 
     expect(result.outcome).toBe("reset");
-    expect(result.summary.limits.fiveHour?.usedPercent).toBe(0);
+    expect(result.summary.limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(0);
     expect(result.summary.resetCredits).toEqual({ availableCount: 0, credits: [] });
     expect(requests[0]).toEqual({
       method: "account/rateLimitResetCredit/consume",
@@ -182,8 +182,8 @@ describe("CodexUsageService", () => {
     resolveOld(rateLimits({ rateLimits: snapshot("codex", "codex usage", 90, 95), rateLimitsByLimitId: null }));
     await older;
 
-    expect(refreshed.limits.fiveHour?.usedPercent).toBe(5);
-    expect((await service.summary()).limits.fiveHour?.usedPercent).toBe(5);
+    expect(refreshed.limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(5);
+    expect((await service.summary()).limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(5);
   });
 
   it("does not cache a read completed after authentication invalidation", async () => {
@@ -205,8 +205,8 @@ describe("CodexUsageService", () => {
     const fresh = await service.summary();
     resolveOld(rateLimits({ rateLimits: snapshot("codex", "codex usage", 90, 95), rateLimitsByLimitId: null }));
     await older;
-    expect(fresh.limits.fiveHour?.usedPercent).toBe(5);
-    expect((await service.summary()).limits.fiveHour?.usedPercent).toBe(5);
+    expect(fresh.limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(5);
+    expect((await service.summary()).limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(5);
   });
 });
 
@@ -225,7 +225,7 @@ describe("normalizeCodexUsage", () => {
 
     expect(summary.available).toBe(true);
     expect(summary.account).toEqual({ kind: "chatgpt", email: "engineer@example.com", planType: "plus" });
-    expect(summary.limits.fiveHour).toMatchObject({
+    expect(summary.limits.find((limit) => limit.id === "five_hour")).toMatchObject({
       label: "5h limit",
       limitName: "codex usage",
       usedPercent: 45.4,
@@ -233,13 +233,13 @@ describe("normalizeCodexUsage", () => {
       windowDurationMins: 300,
       resetsAt: 1_784_000_000
     });
-    expect(summary.limits.weekly).toMatchObject({
+    expect(summary.limits.find((limit) => limit.id === "weekly")).toMatchObject({
       label: "Weekly limit",
       usedPercent: 72.2,
       windowDurationMins: 10_080,
       resetsAt: 1_784_300_000
     });
-    expect(summary.limits.weekly?.remainingPercent).toBeCloseTo(27.8);
+    expect(summary.limits.find((limit) => limit.id === "weekly")?.remainingPercent).toBeCloseTo(27.8);
     expect(summary.resetCredits).toBeNull();
   });
 
@@ -284,9 +284,9 @@ describe("normalizeCodexUsage", () => {
     );
 
     expect(summary.account).toEqual({ kind: "apiKey", email: null, planType: null });
-    expect(summary.limits.fiveHour?.usedPercent).toBe(100);
-    expect(summary.limits.fiveHour?.remainingPercent).toBe(0);
-    expect(summary.limits.weekly).toBeNull();
+    expect(summary.limits.find((limit) => limit.id === "five_hour")?.usedPercent).toBe(100);
+    expect(summary.limits.find((limit) => limit.id === "five_hour")?.remainingPercent).toBe(0);
+    expect(summary.limits.find((limit) => limit.id === "weekly")).toBeUndefined();
   });
 });
 
@@ -331,7 +331,7 @@ describe("normalizeCodexModels", () => {
           { reasoningEffort: "high", description: "Deeper" }
         ],
         defaultReasoningEffort: "medium",
-        serviceTiers: [{ id: "fast", name: "Fast", description: "Priority processing" }]
+        supportsFastMode: true
       }
     ]);
   });

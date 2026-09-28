@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import webPush from "web-push";
-import type { CodexUsageSummaryResponse, ManagedSession, NotificationRuleType, NotificationSettings, SessionEvent, UsageLimitNotificationTriggeredPayload } from "@muxpilot/core";
+import type { ProviderUsageSummary, ManagedSession, NotificationRuleType, NotificationSettings, SessionEvent, UsageLimitNotificationTriggeredPayload } from "@muxpilot/core";
 import { matchingNotificationRules, mostUrgentCrossedThreshold, NotificationService } from "../src/services/notifications.js";
 import { EventBus } from "../src/services/eventBus.js";
 
@@ -695,7 +695,7 @@ describe("usage limit notifications", () => {
       { info: () => undefined, warn: () => undefined, error: () => undefined } as never
     );
     const reconcile = service as unknown as {
-      handleUsageSummary: (summary: CodexUsageSummaryResponse, settings: Record<string, NotificationSettings>) => Promise<void>;
+      handleUsageSummary: (summary: ProviderUsageSummary, settings: Record<string, NotificationSettings>) => Promise<void>;
     };
     const settings: Record<string, NotificationSettings> = {
       "device-one": { ...testNotificationSettings(), usageLimitThresholds: [75, 50, 25] },
@@ -705,7 +705,15 @@ describe("usage limit notifications", () => {
     await reconcile.handleUsageSummary(testUsageSummary(80), settings);
     expect(triggered).toEqual([]);
     await reconcile.handleUsageSummary(testUsageSummary(20), settings);
-    expect(triggered).toEqual([expect.objectContaining({ deviceId: "device-one", threshold: 25, remainingPercent: 20, severity: "yellow" })]);
+    expect(triggered).toEqual([expect.objectContaining({
+      deviceId: "device-one",
+      provider: "codex",
+      limit: "five_hour",
+      threshold: 25,
+      remainingPercent: 20,
+      severity: "yellow",
+      title: "Codex usage limit warning"
+    })]);
     await reconcile.handleUsageSummary(testUsageSummary(0), settings);
     expect(triggered).toEqual([
       expect.objectContaining({ deviceId: "device-one", threshold: 25 }),
@@ -725,7 +733,7 @@ describe("usage limit notifications", () => {
       { info: () => undefined, warn: () => undefined, error: () => undefined } as never
     );
     const reconcile = service as unknown as {
-      handleUsageSummary: (summary: CodexUsageSummaryResponse, settings: Record<string, NotificationSettings>) => Promise<void>;
+      handleUsageSummary: (summary: ProviderUsageSummary, settings: Record<string, NotificationSettings>) => Promise<void>;
     };
     const settings: Record<string, NotificationSettings> = { device: { ...testNotificationSettings(), usageLimitThresholds: [50] } };
 
@@ -746,23 +754,23 @@ function testNotificationSettings(
   return { globalRules, sessionRules, usageLimitThresholds: [75, 50, 25, 10, 0], delivery };
 }
 
-function testUsageSummary(remainingPercent: number): CodexUsageSummaryResponse {
+function testUsageSummary(remainingPercent: number): ProviderUsageSummary {
   return {
+    provider: "codex",
     available: true,
     error: null,
     refreshedAt: "2026-09-18T12:00:00.000Z",
+    accountStatus: "authenticated",
     account: { kind: "chatgpt", email: "engineer@example.com", planType: "plus" },
-    limits: {
-      fiveHour: {
-        label: "5h limit",
-        limitName: "codex",
-        usedPercent: 100 - remainingPercent,
-        remainingPercent,
-        windowDurationMins: 300,
-        resetsAt: 1_800_000_000
-      },
-      weekly: null
-    },
+    limits: [{
+      id: "five_hour",
+      label: "5h limit",
+      limitName: "codex",
+      usedPercent: 100 - remainingPercent,
+      remainingPercent,
+      windowDurationMins: 300,
+      resetsAt: 1_800_000_000
+    }],
     resetCredits: null
   };
 }
@@ -776,10 +784,8 @@ function testSession(input: Partial<ManagedSession> = {}): ManagedSession {
     id: "a",
     name: "muxpilot",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "codex", rolloutPath: "/tmp/codex.jsonl" },
+    provider: { kind: "codex", threadId: "codex", transcriptPath: "/tmp/codex.jsonl" },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "codex",
-    codexJsonlPath: "/tmp/codex.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,

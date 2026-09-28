@@ -154,7 +154,7 @@ function groupAssistantActivity(messages: ChatMessage[], fallbackKind: "activity
   let hasAssistantMessage = false;
 
   for (const message of messages) {
-    if (message.role !== "assistant") {
+    if (message.role !== "assistant" || message.type === "reasoning") {
       pendingEvents.push(message);
       continue;
     }
@@ -312,6 +312,7 @@ function displayMessage(message: ChatMessage): ChatMessage | null {
 
 function isStackableMessage(message: ChatMessage): boolean {
   if (isStandaloneActionMessage(message)) return false;
+  if (message.type === "reasoning") return true;
   if (message.role === "assistant") return false;
   if (message.role === "tool" || message.role === "system") return true;
   return (
@@ -331,7 +332,8 @@ function isStandaloneActionMessage(message: ChatMessage): boolean {
 function stackLabel(messages: ChatMessage[]): string {
   const counts = messages.reduce(
     (current, message) => {
-      if (message.type === "command_output") current.command += 1;
+      if (message.type === "reasoning") current.reasoning += 1;
+      else if (message.type === "command_output") current.command += 1;
       else if (message.type === "tool_call" || message.type === "tool_output") current.tool += 1;
       else if (isAssistantUpdate(message)) current.progress += 1;
       else if (isTurnAbortedStatus(message)) current.aborted += 1;
@@ -339,11 +341,12 @@ function stackLabel(messages: ChatMessage[]): string {
       else current.system += 1;
       return current;
     },
-    { aborted: 0, command: 0, progress: 0, subagent: 0, system: 0, tool: 0 }
+    { aborted: 0, command: 0, progress: 0, reasoning: 0, subagent: 0, system: 0, tool: 0 }
   );
   const parts = [
     counts.aborted ? `${counts.aborted} aborted` : "",
     counts.progress ? `${counts.progress} progress` : "",
+    counts.reasoning ? `${counts.reasoning} reasoning` : "",
     counts.command ? `${counts.command} command` : "",
     counts.tool ? `${counts.tool} tool` : "",
     counts.subagent ? `${counts.subagent} subagent` : "",
@@ -361,7 +364,7 @@ function pluralize(count: number, singular: string): string {
 }
 
 function isRegularAssistantMessage(message: ChatMessage): boolean {
-  return message.role === "assistant" && !isAssistantUpdate(message);
+  return message.role === "assistant" && message.type !== "reasoning" && !isAssistantUpdate(message);
 }
 
 function isUserActionMessage(message: ChatMessage): boolean {

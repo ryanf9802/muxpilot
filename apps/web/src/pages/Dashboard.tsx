@@ -12,7 +12,9 @@ import {
 } from "react";
 import { useLocation, useNavigate, useOutletContext, useSearchParams } from "react-router-dom";
 import type {
-  CodexModelCatalogResponse,
+  AgentProviderKind,
+  ProviderDescriptor,
+  ProviderModelCatalogResponse,
   ApprovalReviewerSettings,
   CollaborationMode,
   ManagedSession,
@@ -32,8 +34,10 @@ import { DashboardSessionsSkeleton, UsagePanelSkeleton } from "../components/Loa
 import { Modal } from "../components/Modal.js";
 import { ModelSettingsDrawer } from "../components/ModelSettingsDrawer.js";
 import { Button, DialogActions } from "../components/Button.js";
-import { CodexUsagePanel } from "../components/CodexUsagePanel.js";
+import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import { noAutofillTextField, searchField } from "../utils/formFields.js";
+import { findProvider, providerLabel, providerUsageEnabled, sessionProvider, shouldShowProviderBadges } from "../utils/providers.js";
+import { ProviderBadge } from "../components/ProviderBadge.js";
 import { sessionBaseName, sessionDisplayName } from "../utils/sessionLabels.js";
 import { notificationRulesLabel, sessionNotificationRules } from "../utils/notifications.js";
 import {
@@ -42,8 +46,7 @@ import {
   type SessionStatusSeverity
 } from "../utils/sessionStatus.js";
 
-export { CodexUsagePanel };
-export { CODEX_USAGE_POLL_INTERVAL_MS as DASHBOARD_USAGE_RECONCILE_INTERVAL_MS } from "../hooks/useCodexUsageMonitor.js";
+export { PROVIDER_USAGE_POLL_INTERVAL_MS as DASHBOARD_USAGE_RECONCILE_INTERVAL_MS } from "../hooks/useProviderUsageMonitor.js";
 
 const ACTION_MENU_WIDTH = 220;
 const ACTION_MENU_HEIGHT = 312;
@@ -63,7 +66,7 @@ export type DashboardStatusFilter =
 export function Dashboard() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode, codexUsageMonitor } =
+  const { sessions: shellSessions, sessionsLoaded, sessionsLoadError, retrySessions, subscribeSessionEvents, refreshSessionStoplight, syncSessionStoplight, openCreateSession, openSessionTransfer, openForkSession, notificationSettings, setNotificationSettings, registerPrimaryInputFocus, sessionStoplightSeverity, accessMode, providers, usageMonitors } =
     useOutletContext<AppShellOutletContext>();
   const [searchParams] = useSearchParams();
   const [q, setQ] = useState("");
@@ -78,10 +81,9 @@ export function Dashboard() {
   const [agentParentId, setAgentParentId] = useState("");
   const [busyAction, setBusyAction] = useState<{ sessionId?: string; type: "rename" | "pin" | "kill" | "agentParent" } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [reviewerSettings, setReviewerSettings] = useState<ApprovalReviewerSettings | null>(null);
   const [modelDefaultsOpen, setModelDefaultsOpen] = useState(false);
-  const [modelDefaultsCatalog, setModelDefaultsCatalog] = useState<CodexModelCatalogResponse | null>(null);
-  const [modelDefaults, setModelDefaults] = useState<SessionModelSelections | null>(null);
+  const [modelDefaultsProvider, setModelDefaultsProvider] = useState<AgentProviderKind>("codex");
+  const [modelDefaultsByProvider, setModelDefaultsByProvider] = useState<Partial<Record<AgentProviderKind, ProviderModelDefaults>>>({});
   const [modelDefaultsLoading, setModelDefaultsLoading] = useState(false);
   const [modelDefaultsApplying, setModelDefaultsApplying] = useState<CollaborationMode | "reviewer" | null>(null);
   const [modelDefaultsError, setModelDefaultsError] = useState("");
@@ -173,6 +175,7 @@ export function Dashboard() {
   );
 
   const sessionGroups = useMemo(() => groupSessionsByRepo(sessions), [sessions]);
+  const showProviderBadges = shouldShowProviderBadges(providers.providers, shellSessions);
   const renameNameWarning = renameSession ? sessionNameValidationMessage(renameName) : null;
   const renameNameInvalid = Boolean(renameSession) && !isValidSessionName(normalizeSessionName(renameName));
 
@@ -299,18 +302,27 @@ export function Dashboard() {
     }
   }
 
-  async function loadModelDefaults() {
+  const modelDefaultsProviders = providers.providers.filter((descriptor) => descriptor.enabled);
+  const currentModelDefaults = modelDefaultsByProvider[modelDefaultsProvider] ?? null;
+
+  function updateProviderModelDefaults(kind: AgentProviderKind, update: Partial<ProviderModelDefaults>) {
+    setModelDefaultsByProvider((current) => ({
+      ...current,
+      [kind]: { catalog: null, defaults: null, reviewer: null, ...current[kind], ...update }
+    }));
+  }
+
+  // Opening the drawer refreshes the default provider; other provider tabs load lazily the first time they are shown.
+  async function loadModelDefaults(kind: AgentProviderKind) {
     setModelDefaultsLoading(true);
     setModelDefaultsError("");
     try {
       const [catalog, response, reviewer] = await Promise.all([
-        api.codexModels(),
-        api.globalModelSettings(),
-        api.approvalReviewerSettings()
+        api.providerModels(kind),
+        api.globalModelSettings(kind),
+        api.approvalReviewerSettings(kind)
       ]);
-      setModelDefaultsCatalog(catalog);
-      setModelDefaults(response.settings);
-      setReviewerSettings(reviewer.settings);
+      updateProviderModelDefaults(kind, { catalog, defaults: response.settings, reviewer: reviewer.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not load model defaults.");
     } finally {
@@ -318,17 +330,27 @@ export function Dashboard() {
     }
   }
 
+  function showModelDefaults(kind: AgentProviderKind) {
+    setModelDefaultsProvider(kind);
+    setModelDefaultsError("");
+    if (!modelDefaultsByProvider[kind]?.catalog) void loadModelDefaults(kind);
+  }
+
   function openModelDefaults() {
     setModelDefaultsOpen(true);
-    void loadModelDefaults();
+    const preferred = modelDefaultsProviders.find((descriptor) => descriptor.kind === providers.defaultProvider) ?? modelDefaultsProviders[0];
+    const kind = preferred?.kind ?? providers.defaultProvider;
+    setModelDefaultsProvider(kind);
+    void loadModelDefaults(kind);
   }
 
   async function applyReviewerSettings(model: string, reasoningEffort: string | null): Promise<void> {
+    const kind = modelDefaultsProvider;
     setModelDefaultsApplying("reviewer");
     setModelDefaultsError("");
     try {
-      const response = await api.updateApprovalReviewerSettings({ model, reasoningEffort });
-      setReviewerSettings(response.settings);
+      const response = await api.updateApprovalReviewerSettings(kind, { model, reasoningEffort });
+      updateProviderModelDefaults(kind, { reviewer: response.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update approval reviewer settings.");
     } finally {
@@ -337,11 +359,12 @@ export function Dashboard() {
   }
 
   async function applyModelDefault(mode: CollaborationMode, model: string, reasoningEffort: string | null): Promise<void> {
+    const kind = modelDefaultsProvider;
     setModelDefaultsApplying(mode);
     setModelDefaultsError("");
     try {
-      const response = await api.updateGlobalModelSettings({ mode, model, reasoningEffort });
-      setModelDefaults(response.settings);
+      const response = await api.updateGlobalModelSettings(kind, { mode, model, reasoningEffort });
+      updateProviderModelDefaults(kind, { defaults: response.settings });
     } catch (error) {
       setModelDefaultsError(error instanceof Error ? error.message : "Could not update model defaults.");
     } finally {
@@ -396,17 +419,27 @@ export function Dashboard() {
 
       <ModelSettingsDrawer
         open={modelDefaultsOpen}
+        provider={modelDefaultsProvider}
+        providerFastMode={findProvider(providers.providers, modelDefaultsProvider)?.capabilities.fastMode ?? true}
+        toolbar={modelDefaultsProviders.length > 1 ? (
+          <ModelDefaultsProviderTabs
+            providers={modelDefaultsProviders}
+            value={modelDefaultsProvider}
+            disabled={Boolean(modelDefaultsApplying)}
+            onChange={showModelDefaults}
+          />
+        ) : null}
         title="Default model settings"
-        description="Choose the model and reasoning effort inherited by new sessions, then apply it to the Normal or Plan default."
-        selections={modelDefaults ?? modelDefaultsCatalog?.defaults ?? emptyModelSelections}
+        description={`Choose the ${providerLabel(modelDefaultsProvider)} model and reasoning effort inherited by new sessions, then apply it to the Normal or Plan default.`}
+        selections={currentModelDefaults?.defaults ?? currentModelDefaults?.catalog?.defaults ?? emptyModelSelections}
         activeMode={null}
-        catalog={modelDefaultsCatalog}
+        catalog={currentModelDefaults?.catalog ?? null}
         loading={modelDefaultsLoading}
         error={modelDefaultsError}
         applying={modelDefaultsApplying}
-        reviewerSettings={reviewerSettings}
+        reviewerSettings={currentModelDefaults?.reviewer ?? null}
         onClose={() => setModelDefaultsOpen(false)}
-        onRetry={() => void loadModelDefaults()}
+        onRetry={() => void loadModelDefaults(modelDefaultsProvider)}
         onApply={applyModelDefault}
         onApplyReviewer={applyReviewerSettings}
       />
@@ -451,6 +484,7 @@ export function Dashboard() {
                         notificationRules={sessionNotificationRules(notificationSettings, session.id)}
                         notificationRing={notificationRings[session.id] ?? null}
                         children={agentSessionDescendants(session.id, sessions)}
+                        showProvider={showProviderBadges}
                         onOpen={() => navigate(`/sessions/${session.id}`)}
                         onOpenChild={(childId) => navigate(`/sessions/${childId}`)}
                         onOpenMenu={openMenu}
@@ -490,7 +524,7 @@ export function Dashboard() {
               setMenu(null);
               openForkSession(menu.session);
             }}
-            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.codexSessionId}
+            disabled={Boolean(busyAction) || menu.session.initializing === true || !menu.session.provider?.threadId || findProvider(providers.providers, sessionProvider(menu.session))?.capabilities.fork === false}
           >
             Fork session
           </ContextMenuItem>
@@ -631,16 +665,7 @@ export function Dashboard() {
       ) : null}
 
       <div className="dashboard-usage-separator" aria-hidden="true" />
-      {codexUsageMonitor.initialLoading && !codexUsageMonitor.summary ? (
-        <UsagePanelSkeleton />
-      ) : codexUsageMonitor.summary ? (
-        <CodexUsagePanel
-          summary={codexUsageMonitor.summary}
-          usageMonitor={codexUsageMonitor}
-        />
-      ) : (
-        <UsageUnavailablePanel title="Codex usage" />
-      )}
+      <DashboardUsageGrid providers={providers} usageMonitors={usageMonitors} />
     </section>
   );
 }
@@ -676,18 +701,98 @@ export function DashboardPrimaryActions({
   );
 }
 
+interface ProviderModelDefaults {
+  catalog: ProviderModelCatalogResponse | null;
+  defaults: SessionModelSelections | null;
+  reviewer: ApprovalReviewerSettings | null;
+}
+
+export function ModelDefaultsProviderTabs({
+  providers,
+  value,
+  disabled = false,
+  onChange
+}: {
+  providers: ProviderDescriptor[];
+  value: AgentProviderKind;
+  disabled?: boolean;
+  onChange: (provider: AgentProviderKind) => void;
+}) {
+  return (
+    <div className="dialog-tabs model-settings-provider-tabs" role="tablist" aria-label="Provider defaults">
+      {providers.map((descriptor) => (
+        <button
+          key={descriptor.kind}
+          type="button"
+          role="tab"
+          data-provider={descriptor.kind}
+          aria-selected={descriptor.kind === value}
+          data-active={descriptor.kind === value || undefined}
+          disabled={disabled}
+          onClick={() => onChange(descriptor.kind)}
+        >
+          <span className="provider-badge-dot" aria-hidden="true" />
+          {descriptor.displayName}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 const emptyModelSelections: SessionModelSelections = {
   default: { model: null, reasoningEffort: null },
   plan: { model: null, reasoningEffort: null }
 };
 
-function UsageUnavailablePanel({ title }: { title: string }) {
+/** One usage panel per installed provider that reports limits; stacked, or two columns on wide screens. */
+export function DashboardUsageGrid({
+  providers,
+  usageMonitors
+}: Pick<AppShellOutletContext, "providers" | "usageMonitors">) {
+  if (!providers.loaded) {
+    return (
+      <div className="dashboard-usage-grid" data-count={1}>
+        {providers.error ? <UsageUnavailablePanel title="Provider usage" /> : <UsagePanelSkeleton />}
+      </div>
+    );
+  }
+  const usageProviders = providers.providers.filter(providerUsageEnabled);
+  if (usageProviders.length === 0) {
+    return (
+      <div className="dashboard-usage-grid" data-count={1}>
+        <UsageUnavailablePanel title="Provider usage" message="No installed provider reports account usage." />
+      </div>
+    );
+  }
+  return (
+    <div className="dashboard-usage-grid" data-count={usageProviders.length}>
+      {usageProviders.map((descriptor) => {
+        const monitor = usageMonitors[descriptor.kind];
+        if (monitor.initialLoading && !monitor.summary) return <UsagePanelSkeleton key={descriptor.kind} />;
+        if (!monitor.summary) return <UsageUnavailablePanel key={descriptor.kind} title={`${descriptor.displayName} usage`} />;
+        return (
+          <ProviderUsagePanel
+            key={descriptor.kind}
+            provider={descriptor.kind}
+            descriptor={descriptor}
+            summary={monitor.summary}
+            refreshError={monitor.refreshError}
+            resetCredits={descriptor.capabilities.resetCredits ? monitor.resetCredits : null}
+            onCheckAuth={() => providers.refreshAuth(descriptor.kind)}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function UsageUnavailablePanel({ title, message = "Usage data is unavailable. Muxpilot will retry automatically." }: { title: string; message?: string }) {
   return (
     <section className="usage-panel">
       <div className="usage-panel-head">
         <div>
           <h2>{title}</h2>
-          <p>Usage data is unavailable. Muxpilot will retry automatically.</p>
+          <p>{message}</p>
         </div>
       </div>
     </section>
@@ -718,6 +823,7 @@ export function filterSessionsByDashboardQuery(sessions: ManagedSession[], query
   if (!needle) return sessions;
   return sessions.filter((session) => [
     sessionBaseName(session),
+    providerLabel(sessionProvider(session)),
     session.repo.name,
     session.repo.branch,
     session.preview,
@@ -767,6 +873,7 @@ export function SessionCard({
   notificationRules,
   notificationRing,
   children = [],
+  showProvider = false,
   onOpen,
   onOpenChild = () => undefined,
   onOpenMenu,
@@ -778,6 +885,7 @@ export function SessionCard({
   notificationRules: NotificationRuleType[];
   notificationRing: NotificationTriggeredPayload["severity"] | null;
   children?: ManagedSession[];
+  showProvider?: boolean;
   onOpen: () => void;
   onOpenChild?: (sessionId: string) => void;
   onOpenMenu: (session: ManagedSession, x: number, y: number) => void;
@@ -819,6 +927,7 @@ export function SessionCard({
             ) : null}
           </div>
           <span className="session-card-head-actions">
+            {showProvider ? <ProviderBadge provider={sessionProvider(session)} /> : null}
             {session.fastMode === true ? (
               <span className="session-fast-mode-indicator" title="Fast mode enabled" aria-label="Fast mode enabled">
                 <Zap size={14} />
@@ -879,7 +988,7 @@ export function SessionCard({
             {allChildrenCompleted ? null : <span>{agentTreeStatusLabel(children)}</span>}
           </summary>
           <div className="agent-session-children">
-            <AgentSessionRows parentSessionId={session.id} allSessions={children} depth={0} onOpen={onOpenChild} revealCompleted={allChildrenCompleted} />
+            <AgentSessionRows parentSessionId={session.id} rootProvider={sessionProvider(session)} allSessions={children} depth={0} onOpen={onOpenChild} revealCompleted={allChildrenCompleted} />
           </div>
         </details>
       ) : null}
@@ -1109,12 +1218,14 @@ function includeAgentAncestors(filtered: ManagedSession[], all: ManagedSession[]
 
 function AgentSessionRows({
   parentSessionId,
+  rootProvider,
   allSessions,
   depth,
   onOpen,
   revealCompleted = false
 }: {
   parentSessionId: string;
+  rootProvider: AgentProviderKind;
   allSessions: ManagedSession[];
   depth: number;
   onOpen: (sessionId: string) => void;
@@ -1131,14 +1242,14 @@ function AgentSessionRows({
   return (
     <>
       {visibleChildren.map((child) => (
-        <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted={revealCompleted} />
+        <AgentSessionRow key={child.id} session={child} rootProvider={rootProvider} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted={revealCompleted} />
       ))}
       {completedRoots.length > 0 ? (
         <details className="agent-session-completed">
           <summary>{formatSessionCount(completedCount, "completed agent")}</summary>
           <div className="agent-session-completed-children">
             {completedRoots.map((child) => (
-              <AgentSessionRow key={child.id} session={child} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted />
+              <AgentSessionRow key={child.id} session={child} rootProvider={rootProvider} allSessions={allSessions} depth={depth} onOpen={onOpen} revealCompleted />
             ))}
           </div>
         </details>
@@ -1147,7 +1258,8 @@ function AgentSessionRows({
   );
 }
 
-function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
+function AgentSessionRow({ session, rootProvider, allSessions, depth, onOpen, revealCompleted }: { session: ManagedSession; rootProvider: AgentProviderKind; allSessions: ManagedSession[]; depth: number; onOpen: (sessionId: string) => void; revealCompleted: boolean }) {
+  const provider = sessionProvider(session);
   const statusPresentation = sessionStatusPresentation(session, allSessions);
   const context = session.contextUsage ? `${Math.round(session.contextUsage.contextPercent)}% context` : "context pending";
   const ownership = session.agentOwnership;
@@ -1156,11 +1268,14 @@ function AgentSessionRow({ session, allSessions, depth, onOpen, revealCompleted 
   return (
     <div className="agent-session-branch" style={{ "--agent-depth": depth } as CSSProperties}>
       <button className="agent-session-row" type="button" data-completed={statusPresentation.status === "completed" || undefined} onClick={() => onOpen(session.id)}>
-        <span className="agent-session-row-name">{sessionDisplayName(session)}</span>
+        <span className="agent-session-row-name">
+          {sessionDisplayName(session)}
+          {provider !== rootProvider ? <ProviderBadge provider={provider} /> : null}
+        </span>
         <span className="agent-session-row-meta">{context}{budget ? ` · ${budget}` : ""}</span>
         {session.initializing ? <LoadingStatusPill /> : <StatusPill status={statusPresentation.status} />}
       </button>
-      <AgentSessionRows parentSessionId={session.id} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />
+      <AgentSessionRows parentSessionId={session.id} rootProvider={rootProvider} allSessions={allSessions} depth={depth + 1} onOpen={onOpen} revealCompleted={revealCompleted} />
     </div>
   );
 }

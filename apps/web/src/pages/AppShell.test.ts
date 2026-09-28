@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { AppServerCompatibility, ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident } from "@muxpilot/core";
+import type { ManagedSession, RemoteAccessResponse, SessionDirectorySuggestion, SessionRecoveryIncident, SessionTransferPreviewSession } from "@muxpilot/core";
 import {
   AppBrand,
   AppRecoveryPage,
-  appServerCompatibilityLabel,
   applySessionEventToSessions,
   ConnectDeviceContent,
   defaultForkSessionName,
@@ -18,7 +17,12 @@ import {
   SessionRecoveryContent,
   filterSessionDirectorySuggestions,
   foregroundConnectionDisplayState,
+  forkSessionBlockedReason,
   forkSessionWarnings,
+  isTransferableSession,
+  restorableRecoverySessionIds,
+  transferImportBlockers,
+  usageLimitToastMessage,
   hasShortcutBlockingOverlay,
   isMuxpilotManagedSessionBranch,
   isEditableShortcutTarget,
@@ -37,7 +41,6 @@ import {
   primaryInputFocusCommandForShortcut,
   promptHistoryResultMeta,
   remoteAccessQrValue,
-  runtimeUnavailableLabel,
   sessionHistoryResultActionLabel,
   sessionHistoryResultKey,
   sessionHistoryResultMeta,
@@ -53,48 +56,19 @@ import {
   syncSessionIntoStoplightSessions
 } from "./AppShell.js";
 import { directorySuggestionLabel } from "../utils/sessionDirectories.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
 import { ApiError } from "../api/client.js";
 
 describe("shell connection state", () => {
-  it("describes app-server availability and concrete incompatibility", () => {
-    const available: AppServerCompatibility = {
-      status: "available",
-      available: true,
-      codexVersion: "0.152.0",
-      detail: "ready",
-      checkedAt: "2026-09-01T12:00:00.000Z",
-      missingCapabilities: []
-    };
-    expect(appServerCompatibilityLabel(available)).toBe("Codex app-server available · Codex 0.152.0.");
-    expect(appServerCompatibilityLabel({
-      ...available,
-      status: "user_systemd_unavailable",
-      available: false,
-      codexVersion: null,
-      detail: "A persistent user-systemd manager is required."
-    })).toBe("A persistent user-systemd manager is required.");
-  });
-
-  it("explains unavailable app-server runtime", () => {
-    const appServer: AppServerCompatibility = {
-      status: "available",
-      available: true,
-      codexVersion: "0.152.0",
-      detail: "ready",
-      checkedAt: "2026-09-01T12:00:00.000Z",
-      missingCapabilities: []
-    };
-    expect(runtimeUnavailableLabel(appServer)).toBe("ready");
-  });
-
   it("renders every interrupted session selected with crash limitations and failures", () => {
     const incident: SessionRecoveryIncident = {
       id: "incident-1",
       detectedAt: "2026-08-17T20:00:00.000Z",
       sessions: [{
         sessionId: "session-1",
-        codexSessionId: "codex-1",
-        codexJsonlPath: "/codex/session.jsonl",
+        provider: "codex",
+        threadId: "codex-1",
+        transcriptPath: "/codex/session.jsonl",
         status: "missing",
         previousStatus: "working",
         archived: false,
@@ -113,14 +87,7 @@ describe("shell connection state", () => {
       selectedIds: new Set(["session-1"]),
       busy: false,
       errors: { "session-1": "Directory is unavailable" },
-      compatibility: {
-        status: "available",
-        available: true,
-        codexVersion: "0.152.0",
-        detail: "Codex app-server is available.",
-        checkedAt: "2026-09-01T20:00:00.000Z",
-        missingCapabilities: []
-      },
+      providers: [providerDescriptor("codex")],
       onToggle: () => undefined,
       onDismiss: () => undefined,
       onRestore: () => undefined
@@ -133,6 +100,60 @@ describe("shell connection state", () => {
     expect(html).toContain("Restore selected (1)");
     expect(html).toContain("Directory is unavailable");
     expect(html).not.toContain("Runtime");
+  });
+
+  it("keeps recovery rows for unavailable providers visible but out of the restore selection", () => {
+    const incident: SessionRecoveryIncident = {
+      id: "incident-2",
+      detectedAt: "2026-08-17T20:00:00.000Z",
+      sessions: [recoveryCandidate("codex-work", "codex"), recoveryCandidate("claude-work", "claude")]
+    };
+    const providers = [providerDescriptor("codex"), providerDescriptor("claude", { compatibility: { status: "missing_binary", available: false } })];
+    const selected = new Set(["codex-work", "claude-work"]);
+    const html = renderToStaticMarkup(createElement(SessionRecoveryContent, {
+      incident,
+      selectedIds: selected,
+      busy: false,
+      errors: {},
+      providers,
+      onToggle: () => undefined,
+      onDismiss: () => undefined,
+      onRestore: () => undefined
+    }));
+
+    expect(restorableRecoverySessionIds(incident, selected, providers)).toEqual(["codex-work"]);
+    expect(html).toContain("Restore selected (1)");
+    expect(html).toContain("Claude is not installed on this host.");
+    expect(html).toContain('aria-label="Claude provider"');
+    expect(html.match(/checked=""/g)).toHaveLength(1);
+  });
+
+  it("keeps forks in the source provider and blocks them when that provider cannot fork", () => {
+    const claudeSession = testSession({ id: "claude-source" });
+    claudeSession.provider = { kind: "claude", threadId: "claude-1", transcriptPath: null };
+    expect(forkSessionBlockedReason(claudeSession, [providerDescriptor("codex"), providerDescriptor("claude")])).toBeNull();
+    expect(forkSessionBlockedReason(claudeSession, [providerDescriptor("claude", { capabilities: { ...providerDescriptor("claude").capabilities, fork: false } })]))
+      .toBe("Claude sessions cannot be forked.");
+    expect(forkSessionBlockedReason(claudeSession, [providerDescriptor("claude", { authStatus: "signed_out" })])).toContain("claude auth login");
+  });
+
+  it("gates session transfer by provider support and availability", () => {
+    const portable = testSession({ id: "portable" });
+    portable.provider = { kind: "claude", threadId: "claude-1", transcriptPath: "/home/dev/.claude/projects/x/claude-1.jsonl" };
+    const providers = [providerDescriptor("codex"), providerDescriptor("claude")];
+    expect(isTransferableSession(portable, providers)).toBe(true);
+    expect(isTransferableSession(portable, [providerDescriptor("claude", { capabilities: { ...providerDescriptor("claude").capabilities, transcriptTransfer: false } })])).toBe(false);
+    expect(isTransferableSession({ ...portable, provider: { ...portable.provider, transcriptPath: null } }, providers)).toBe(false);
+
+    const preview = { sessions: [transferSession("claude"), transferSession("codex"), transferSession("claude")] };
+    expect(transferImportBlockers(preview, providers)).toEqual([]);
+    expect(transferImportBlockers(preview, [providerDescriptor("codex")])).toEqual(["Claude status could not be loaded."]);
+    expect(transferImportBlockers(preview, [providerDescriptor("codex"), providerDescriptor("claude", { compatibility: { status: "missing_binary", available: false } })]))
+      .toEqual(["Claude is not installed on this host."]);
+  });
+
+  it("names the provider in usage-limit toasts", () => {
+    expect(usageLimitToastMessage({ provider: "claude", body: "Opus weekly limit has 10% remaining." })).toBe("Claude: Opus weekly limit has 10% remaining.");
   });
 
   it("builds a valid editable name for a fork", () => {
@@ -320,6 +341,8 @@ describe("GitWorkflowSkillStatusCallout", () => {
     expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "checking", onRetry: () => undefined }))).toContain("Checking Codex skill");
     expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "error", onRetry: () => undefined }))).toContain("Retry");
     expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { status: "current", onRetry: () => undefined }))).toBe("");
+    expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { provider: "claude", status: "checking", onRetry: () => undefined }))).toContain("Checking Claude skill");
+    expect(renderToStaticMarkup(createElement(GitWorkflowSkillStatusCallout, { provider: "claude", status: "missing", onRetry: () => undefined }))).toContain("muxpilot Git workflow skill for Claude");
   });
 });
 
@@ -372,7 +395,8 @@ describe("prompt history helpers", () => {
 describe("session history helpers", () => {
   const managed = {
     sessionId: "pane-1",
-    codexSessionId: "codex-1",
+    provider: "codex" as const,
+    threadId: "codex-1",
     repoName: "muxpilot",
     repoBranch: "main",
     cwd: "/repo",
@@ -966,7 +990,7 @@ function testSession(
     id: input.id,
     name: input.repoName ?? "repo",
     cwd: input.cwd ?? "/repo",
-    provider: { kind: "codex", threadId: null, rolloutPath: null },
+    provider: { kind: "codex", threadId: null, transcriptPath: null },
     repo: {
       root: input.repoRoot === undefined ? "/repo" : input.repoRoot,
       name: input.repoName ?? "repo",
@@ -974,8 +998,6 @@ function testSession(
       dirty: false,
       worktree: null
     },
-    codexSessionId: null,
-    codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
     initializing: input.initializing,
@@ -990,5 +1012,40 @@ function testSession(
     pinned: false,
     archived: input.archived ?? false,
     agentOwnership: input.agentOwnership ?? null
+  };
+}
+
+function recoveryCandidate(sessionId: string, provider: "codex" | "claude"): SessionRecoveryIncident["sessions"][number] {
+  return {
+    sessionId,
+    provider,
+    threadId: `${provider}-thread`,
+    transcriptPath: null,
+    status: "missing",
+    previousStatus: "working",
+    archived: false,
+    sessionName: sessionId,
+    repoName: "muxpilot",
+    repoBranch: "main",
+    cwd: "/repo",
+    lastActivityAt: "2026-08-17T19:59:00.000Z",
+    transcriptSize: 8,
+    matchedPrompts: [],
+    gitWorkspace: null
+  };
+}
+
+function transferSession(provider: "codex" | "claude"): SessionTransferPreviewSession {
+  return {
+    provider,
+    threadId: `${provider}-thread`,
+    sessionName: `${provider}-work`,
+    sourceCwd: "/repo",
+    repoName: "repo",
+    workspaceMode: "directory",
+    targetBranch: null,
+    transcriptBytes: 10,
+    lastActivityAt: null,
+    documentCount: 0
   };
 }

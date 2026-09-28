@@ -21,7 +21,7 @@ describe("buildTranscriptItems", () => {
 
   it("classifies generic failures but leaves malformed and text-only records in activity", () => {
     const failure = { ...message(2, "Failed", "system", "status"), payload: { turnFailure: { failureCode: "turn_failed", failureReason: "Network error" } } };
-    expect(turnFailureEventLabel(turnFailureEventFromPayload(failure.payload)!)).toBe("Codex turn failed");
+    expect(turnFailureEventLabel(turnFailureEventFromPayload(failure.payload)!)).toBe("Agent turn failed");
     expect(buildTranscriptItems([message(1, "prompt"), failure])[1]).toMatchObject({ type: "user_action" });
     expect(turnFailureEventFromPayload({ turnFailure: { failureCode: "turn_failed", failureReason: "" } })).toBeNull();
     expect(turnFailureEventFromPayload({ turnFailure: { failureCode: "turn_interrupted", failureReason: "Stopped" } })).toBeNull();
@@ -114,6 +114,23 @@ describe("buildTranscriptItems", () => {
         message: expect.objectContaining({ type: "assistant" })
       })
     ]);
+  });
+
+  it("collapses reasoning into turn activity instead of showing it as an assistant reply", () => {
+    const items = buildTranscriptItems([
+      message(1, "prompt"),
+      message(2, "Considering the options", "assistant", "reasoning"),
+      message(3, "tool_result", "tool", "tool_output"),
+      message(4, "Done", "assistant", "assistant")
+    ]);
+
+    expect(items.map((item) => item.type)).toEqual(["message", "range", "message"]);
+    expect(items.at(-1)).toMatchObject({ message: { text: "Done" } });
+    const loose = buildTranscriptItems([
+      message(1, "Considering", "assistant", "reasoning"),
+      message(2, "tool_result", "tool", "tool_output")
+    ]);
+    expect(loose).toEqual([expect.objectContaining({ label: expect.stringContaining("1 reasoning") })]);
   });
 
   it("never puts assistant updates inside expanded event stacks", () => {

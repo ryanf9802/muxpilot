@@ -1,29 +1,22 @@
 import type { Logger } from "pino";
 import type {
+  AgentProviderKind,
   BtwDocumentOperation,
   BtwExchange,
-  BtwExchangeStatus
+  BtwExchangeStatus,
+  ManagedSession
 } from "@muxpilot/core";
+import { providerDisplayName, sessionThreadId } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
+import { btwErrorMessage, type BtwEngine, type BtwGeneration, type BtwGenerationListener } from "../providers/shared/btw.js";
 import { eventId } from "../utils/ids.js";
 import { nowIso } from "../utils/time.js";
 import type { EventBus } from "./eventBus.js";
 import type { BtwDocumentApplyResult, BtwDocumentChanges } from "./sessionDocuments.js";
 import { isSessionDocumentCapacityError } from "./sessionDocuments.js";
-import {
-  CodexAppServerClient,
-  type CodexAppServerClientOptions,
-  type CodexAppServerMessage
-} from "./codexUsage.js";
 
 const BTW_RESTART_ERROR = "muxpilot restarted before this BTW answer completed.";
-const BTW_INTERACTIVE_ERROR = "BTW questions cannot request interactive input or approval.";
 const BTW_HANDOFF_RETRY_MS = 1_000;
-const BTW_READ_ONLY_INSTRUCTIONS = `You are answering one quick side question from a snapshot of another Codex conversation.
-Answer directly and concisely. Do not continue, steer, or modify the source task.
-This thread is strictly read-only: do not edit files, change repository state, send messages, create goals, delegate work, request user input, use network access, or perform external side effects.
-You may inspect local files with read-only tools only when needed to answer accurately.
-If the snapshot is incomplete or the answer cannot be established safely, say so briefly.`;
 
 interface BtwDocumentCoordinator {
   prepareBtwDocumentStaging(sessionId: string, exchangeId: string): Promise<{ documentsRoot: string; sourceCwd: string }>;
@@ -36,31 +29,29 @@ interface BtwDocumentCoordinator {
   deliverBtwDocumentNotice(sessionId: string, exchangeId: string, changes: BtwDocumentChanges): Promise<boolean>;
 }
 
-interface BtwAppServerClient {
-  initialize(): Promise<void>;
-  request<T = unknown>(method: string, params?: unknown): Promise<T>;
-  respond(id: string | number, result: unknown): void;
-  respondError(id: string | number, message: string, code?: number): void;
-  subscribe(listener: (message: CodexAppServerMessage) => void): () => void;
-  subscribeClose(listener: (error: Error) => void): () => void;
-  stop(): void;
-}
-
 interface BtwServiceOptions {
   db: AppDatabase;
   events: EventBus;
-  client: BtwAppServerClient;
+  /** BTW backends by provider; sessions of a provider without an engine cannot ask BTW questions. */
+  engines: Partial<Record<AgentProviderKind, BtwEngine>>;
   documents?: BtwDocumentCoordinator;
   logger?: Pick<Logger, "warn" | "debug">;
   now?: () => string;
   handoffRetryMs?: number;
 }
 
+/** One generation attempt; a document conflict retry starts a new attempt for the same exchange. */
+interface BtwAttempt {
+  abort: AbortController;
+  generation: BtwGeneration | null;
+  settled: boolean;
+}
+
 interface ActiveBtwRun {
   exchange: BtwExchange;
-  sourceCodexSessionId: string;
-  threadId: string | null;
-  turnId: string | null;
+  session: ManagedSession;
+  sourceThreadId: string;
+  attempt: BtwAttempt | null;
   documentsRoot: string | null;
   sourceCwd: string | null;
   cancelled: boolean;
@@ -71,14 +62,6 @@ interface ActiveBtwRun {
   handoffPromise: Promise<void> | null;
 }
 
-interface ThreadForkResponse {
-  thread?: { id?: unknown };
-}
-
-interface TurnStartResponse {
-  turn?: { id?: unknown };
-}
-
 export class BtwError extends Error {
   constructor(message: string, readonly statusCode = 400) {
     super(message);
@@ -86,42 +69,30 @@ export class BtwError extends Error {
   }
 }
 
+/**
+ * Coordinates BTW side questions: exchange persistence, cancellation, and document handoff. Generation is
+ * delegated to the session provider's BTW engine.
+ */
 export class BtwService {
   private readonly db: AppDatabase;
   private readonly events: EventBus;
-  private readonly client: BtwAppServerClient;
+  private readonly engines: Partial<Record<AgentProviderKind, BtwEngine>>;
   private readonly documents?: BtwDocumentCoordinator;
   private readonly logger?: Pick<Logger, "warn" | "debug">;
   private readonly now: () => string;
   private readonly handoffRetryMs: number;
   private readonly activeBySession = new Map<string, ActiveBtwRun>();
-  private readonly activeByThread = new Map<string, ActiveBtwRun>();
   private readonly startingSessions = new Set<string>();
-  private readonly unsubscribeMessage: () => void;
-  private readonly unsubscribeClose: () => void;
-  private authenticationGuard: (() => void) | null = null;
+  private authenticationGuard: ((provider: AgentProviderKind) => void) | null = null;
 
   constructor(options: BtwServiceOptions) {
     this.db = options.db;
     this.events = options.events;
-    this.client = options.client;
+    this.engines = options.engines;
     this.documents = options.documents;
     this.logger = options.logger;
     this.now = options.now ?? nowIso;
     this.handoffRetryMs = options.handoffRetryMs ?? BTW_HANDOFF_RETRY_MS;
-    this.unsubscribeMessage = this.client.subscribe((message) => this.handleMessage(message));
-    this.unsubscribeClose = this.client.subscribeClose((error) => this.handleClientClose(error));
-  }
-
-  static create(options: Omit<BtwServiceOptions, "client"> & CodexAppServerClientOptions): BtwService {
-    return new BtwService({
-      ...options,
-      client: new CodexAppServerClient({
-        codexHome: options.codexHome,
-        timeoutMs: options.timeoutMs ?? 10_000,
-        logger: options.logger
-      })
-    });
   }
 
   async start(): Promise<void> {
@@ -137,21 +108,23 @@ export class BtwService {
       await this.db.failBtwExchange(exchange.sessionId, exchange.id, BTW_RESTART_ERROR, this.now());
       await this.documents?.cleanupBtwDocumentStaging(exchange.sessionId, exchange.id).catch(() => undefined);
     }
-    void this.client.initialize().catch((error) => {
-      this.logger?.warn({ err: error }, "BTW Codex app-server warmup failed; the next question will retry");
-    });
+    for (const engine of Object.values(this.engines)) engine.start();
   }
 
-  authenticationBlockers(): string[] {
-    return [...new Set([...this.startingSessions, ...this.activeBySession.keys()])];
+  /** Sessions whose BTW work must finish before the provider's account can change. */
+  authenticationBlockers(provider: AgentProviderKind): string[] {
+    const active = [...this.activeBySession.values()]
+      .filter((run) => run.session.provider.kind === provider)
+      .map((run) => run.exchange.sessionId);
+    return [...new Set([...this.startingSessions, ...active])];
   }
 
-  setAuthenticationGuard(guard: (() => void) | null): void {
+  setAuthenticationGuard(guard: ((provider: AgentProviderKind) => void) | null): void {
     this.authenticationGuard = guard;
   }
 
-  invalidateAuthentication(): void {
-    if (this.startingSessions.size === 0 && this.activeBySession.size === 0) this.client.stop();
+  invalidateAuthentication(provider: AgentProviderKind): void {
+    if (this.authenticationBlockers(provider).length === 0) this.engines[provider]?.invalidateAuthentication();
   }
 
   async stop(): Promise<void> {
@@ -166,22 +139,13 @@ export class BtwService {
         this.activeBySession.delete(run.exchange.sessionId);
         return;
       }
-      if (run.threadId && run.turnId) {
-        try {
-          await this.client.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId });
-        } catch {
-          // The app-server may already be stopping.
-        }
-      }
+      await run.attempt?.generation?.interrupt();
       await this.finish(run, "failed", "muxpilot stopped before this BTW answer completed.", false);
     }));
-    this.unsubscribeMessage();
-    this.unsubscribeClose();
-    this.client.stop();
+    for (const engine of Object.values(this.engines)) engine.stop();
   }
 
   async ask(sessionId: string, question: string): Promise<BtwExchange> {
-    this.authenticationGuard?.();
     const text = question.trim();
     if (!text) throw new BtwError("BTW question is empty");
     if (this.startingSessions.has(sessionId) || this.activeBySession.has(sessionId)) {
@@ -192,7 +156,12 @@ export class BtwService {
     try {
       const session = await this.db.getSession(sessionId);
       if (!session) throw new BtwError("Session not found", 404);
-      if (!session.codexSessionId) throw new BtwError("This session does not have a Codex conversation to snapshot", 409);
+      if (!this.engines[session.provider.kind]) {
+        throw new BtwError(`BTW questions are unavailable for ${providerDisplayName(session.provider.kind)} sessions`, 409);
+      }
+      this.authenticationGuard?.(session.provider.kind);
+      const threadId = sessionThreadId(session);
+      if (!threadId) throw new BtwError("This session does not have a conversation to snapshot", 409);
       if (await this.db.activeBtwExchange(sessionId)) {
         throw new BtwError("Wait for the active BTW question to finish or cancel it first", 409);
       }
@@ -210,7 +179,7 @@ export class BtwService {
         completedAt: null,
         documentOperation: null
       };
-      const run = this.newRun(exchange, session.codexSessionId);
+      const run = this.newRun(exchange, session, threadId);
       await this.db.putBtwExchange(exchange);
       this.activeBySession.set(sessionId, run);
       this.publish("btw.started", exchange);
@@ -237,23 +206,18 @@ export class BtwService {
     }
     if (run.handoffBusy) throw new BtwError("Document changes are being handed off; wait for this BTW request to finish", 409);
     run.cancelled = true;
-    if (run.threadId && run.turnId) {
-      try {
-        await this.client.request("turn/interrupt", { threadId: run.threadId, turnId: run.turnId });
-      } catch (error) {
-        this.logger?.debug({ err: error, exchangeId }, "BTW turn interrupt failed");
-      }
-    }
+    run.attempt?.abort.abort();
+    await run.attempt?.generation?.interrupt();
     await this.finish(run, "cancelled", null);
     return run.exchange;
   }
 
-  private newRun(exchange: BtwExchange, sourceCodexSessionId: string): ActiveBtwRun {
+  private newRun(exchange: BtwExchange, session: ManagedSession, sourceThreadId: string): ActiveBtwRun {
     return {
       exchange,
-      sourceCodexSessionId,
-      threadId: null,
-      turnId: null,
+      session,
+      sourceThreadId,
+      attempt: null,
       documentsRoot: null,
       sourceCwd: null,
       cancelled: false,
@@ -267,11 +231,14 @@ export class BtwService {
 
   private async restoreDocumentHandoff(exchange: BtwExchange): Promise<ActiveBtwRun | null> {
     const session = await this.db.getSession(exchange.sessionId);
-    if (!session?.codexSessionId) return null;
-    return this.newRun(exchange, session.codexSessionId);
+    const threadId = session ? sessionThreadId(session) : null;
+    if (!session || !threadId) return null;
+    return this.newRun(exchange, session, threadId);
   }
 
   private async runAttempt(run: ActiveBtwRun): Promise<void> {
+    const attempt: BtwAttempt = { abort: new AbortController(), generation: null, settled: false };
+    run.attempt = attempt;
     try {
       if (this.documents) {
         try {
@@ -290,124 +257,67 @@ export class BtwService {
           await this.persistAndPublish(run);
         }
       }
-      const fork = await this.client.request<ThreadForkResponse>("thread/fork", this.forkParams(run));
-      const threadId = stringValue(fork.thread?.id);
-      if (!threadId) throw new Error("Codex app-server did not return a BTW thread id");
-      run.threadId = threadId;
-      this.activeByThread.set(threadId, run);
-      if (run.finished || run.cancelled) {
-        await this.cleanupThread(threadId);
+      const engine = this.engines[run.session.provider.kind];
+      if (!engine) throw new Error(`BTW questions are unavailable for ${providerDisplayName(run.session.provider.kind)} sessions`);
+      const generation = await engine.generate({
+        session: run.session,
+        sourceThreadId: run.sourceThreadId,
+        question: run.exchange.question,
+        documentsRoot: run.documentsRoot,
+        sourceCwd: run.sourceCwd,
+        documentsUnavailable: Boolean(run.exchange.documentWarning),
+        signal: attempt.abort.signal
+      }, this.listener(run, attempt));
+      attempt.generation = generation;
+      if (run.attempt !== attempt || attempt.settled || run.finished) {
+        if (run.cancelled) await generation.interrupt();
+        if (run.attempt === attempt) run.attempt = null;
+        await generation.dispose();
         return;
       }
-
-      let turn: TurnStartResponse;
-      try {
-        turn = await this.startTurn(run, true);
-      } catch (error) {
-        if (!isUnsupportedEffortError(error)) throw error;
-        turn = await this.startTurn(run, false);
-      }
-      const turnId = stringValue(turn.turn?.id);
-      if (!turnId) throw new Error("Codex app-server did not return a BTW turn id");
-      run.turnId = turnId;
-      if (run.finished) {
-        if (run.cancelled) {
-          try {
-            await this.client.request("turn/interrupt", { threadId, turnId });
-          } catch {
-            // Cancellation already completed from the operator's perspective.
-          }
-        }
-        await this.cleanupThread(threadId);
-        return;
-      }
-      if (run.cancelled && !run.finished) await this.cancel(run.exchange.sessionId, run.exchange.id);
+      if (run.cancelled) await this.cancel(run.exchange.sessionId, run.exchange.id);
     } catch (error) {
-      if (!run.finished) {
-        await this.finish(run, run.cancelled ? "cancelled" : "failed", run.cancelled ? null : errorMessage(error));
+      if (!run.finished && run.attempt === attempt) {
+        await this.finish(run, run.cancelled ? "cancelled" : "failed", run.cancelled ? null : this.errorMessage(run, error));
       }
     }
   }
 
-  private forkParams(run: ActiveBtwRun): Record<string, unknown> {
-    if (!run.documentsRoot) {
-      return {
-        threadId: run.sourceCodexSessionId,
-        ephemeral: true,
-        excludeTurns: true,
-        approvalPolicy: "never",
-        sandbox: "read-only",
-        developerInstructions: run.exchange.documentWarning
-          ? `${BTW_READ_ONLY_INSTRUCTIONS}\nDocument editing is unavailable for this request because the session document limits were exceeded. Answer without creating or changing documents.`
-          : BTW_READ_ONLY_INSTRUCTIONS
-      };
-    }
-    return {
-      threadId: run.sourceCodexSessionId,
-      ephemeral: true,
-      excludeTurns: true,
-      approvalPolicy: "never",
-      sandbox: "workspace-write",
-      cwd: run.documentsRoot,
-      runtimeWorkspaceRoots: [run.documentsRoot],
-      developerInstructions: documentInstructions(run.documentsRoot, run.sourceCwd)
+  private listener(run: ActiveBtwRun, attempt: BtwAttempt): BtwGenerationListener {
+    const current = () => !run.finished && run.attempt === attempt && !attempt.settled;
+    const settle = () => {
+      attempt.settled = true;
     };
-  }
-
-  private startTurn(run: ActiveBtwRun, lowEffort: boolean): Promise<TurnStartResponse> {
-    const workspaceWrite = Boolean(run.documentsRoot);
-    return this.client.request<TurnStartResponse>("turn/start", {
-      threadId: run.threadId,
-      input: [{ type: "text", text: run.exchange.question }],
-      ...(lowEffort ? { effort: "low" } : {}),
-      summary: "none",
-      approvalPolicy: "never",
-      sandboxPolicy: workspaceWrite
-        ? {
-            type: "workspaceWrite",
-            writableRoots: [run.documentsRoot],
-            networkAccess: false,
-            excludeTmpdirEnvVar: true,
-            excludeSlashTmp: true
-          }
-        : { type: "readOnly", networkAccess: false }
-    });
-  }
-
-  private handleMessage(message: CodexAppServerMessage): void {
-    if (message.id !== undefined && message.method) {
-      this.denyServerRequest(message.id, message.method);
-      return;
-    }
-    if (!message.method) return;
-    const params = recordValue(message.params);
-    const threadId = stringValue(params?.threadId);
-    if (!threadId) return;
-    const run = this.activeByThread.get(threadId);
-    if (!run || run.finished) return;
-
-    if (message.method === "item/agentMessage/delta") {
-      if (run.retrying) return;
-      const delta = stringValue(params?.delta);
-      if (!delta) return;
-      const firstTokenAt = run.exchange.firstTokenAt ?? this.now();
-      run.exchange = { ...run.exchange, answer: run.exchange.answer + delta, firstTokenAt };
-      this.publish("btw.delta", { exchangeId: run.exchange.id, delta, firstTokenAt });
-      return;
-    }
-
-    if (message.method === "turn/completed") {
-      const turn = recordValue(params?.turn);
-      const status = stringValue(turn?.status);
-      if (run.cancelled || status === "interrupted") {
+    return {
+      delta: (delta) => {
+        if (!current() || run.retrying) return;
+        const firstTokenAt = run.exchange.firstTokenAt ?? this.now();
+        run.exchange = { ...run.exchange, answer: run.exchange.answer + delta, firstTokenAt };
+        this.publish("btw.delta", { exchangeId: run.exchange.id, delta, firstTokenAt });
+      },
+      completed: () => {
+        if (!current()) return;
+        settle();
+        if (run.cancelled) void this.finish(run, "cancelled", null);
+        else void this.completeGeneration(run);
+      },
+      interrupted: () => {
+        if (!current()) return;
+        settle();
         void this.finish(run, "cancelled", null);
-      } else if (status === "completed") {
-        void this.completeGeneration(run);
-      } else if (status === "failed") {
-        const error = recordValue(turn?.error);
-        void this.finish(run, "failed", stringValue(error?.message) ?? "Codex could not answer this BTW question.");
+      },
+      failed: (message) => {
+        if (!current()) return;
+        settle();
+        void this.finish(run, run.cancelled ? "cancelled" : "failed", run.cancelled ? null : message);
+      },
+      closed: (message) => {
+        if (!current()) return;
+        settle();
+        run.attempt = null;
+        void this.finish(run, "failed", message, false);
       }
-    }
+    };
   }
 
   private async completeGeneration(run: ActiveBtwRun): Promise<void> {
@@ -436,7 +346,7 @@ export class BtwService {
       await this.persistAndPublish(run);
       this.scheduleDocumentHandoff(run);
     } catch (error) {
-      await this.finish(run, "failed", errorMessage(error));
+      await this.finish(run, "failed", this.errorMessage(run, error));
     }
   }
 
@@ -498,7 +408,7 @@ export class BtwService {
       };
       await this.finish(run, "completed", null);
     } catch (error) {
-      await this.finish(run, "failed", errorMessage(error));
+      await this.finish(run, "failed", this.errorMessage(run, error));
     } finally {
       run.handoffBusy = false;
     }
@@ -529,43 +439,17 @@ export class BtwService {
     void this.runAttempt(run);
   }
 
-  private denyServerRequest(id: string | number, method: string): void {
-    if (method === "item/commandExecution/requestApproval" || method === "item/fileChange/requestApproval") {
-      this.client.respond(id, { decision: "decline" });
-      return;
-    }
-    if (method === "item/tool/requestUserInput") {
-      this.client.respond(id, { answers: {} });
-      return;
-    }
-    if (method === "mcpServer/elicitation/request") {
-      this.client.respond(id, { action: "decline" });
-      return;
-    }
-    if (method === "applyPatchApproval" || method === "execCommandApproval") {
-      this.client.respond(id, { decision: { denied: { rejection: BTW_INTERACTIVE_ERROR } } });
-      return;
-    }
-    this.client.respondError(id, BTW_INTERACTIVE_ERROR);
-  }
-
-  private handleClientClose(error: Error): void {
-    for (const run of [...this.activeBySession.values()]) {
-      if (isPendingDocumentHandoff(run.exchange.documentOperation)) continue;
-      void this.finish(run, "failed", `Codex app-server stopped: ${errorMessage(error)}`, false);
-    }
-  }
-
   private async finish(run: ActiveBtwRun, status: BtwExchangeStatus, error: string | null, cleanup = true): Promise<void> {
     if (run.finished) return;
     run.finished = true;
+    const attempt = run.attempt;
     this.clearRunTimers(run);
+    attempt?.abort.abort();
     run.exchange = { ...run.exchange, status, error, completedAt: this.now() };
     this.activeBySession.delete(run.exchange.sessionId);
-    if (run.threadId) this.activeByThread.delete(run.threadId);
     await this.db.putBtwExchange(run.exchange);
     this.publish("btw.finished", run.exchange);
-    if (cleanup && run.threadId) await this.cleanupThread(run.threadId);
+    if (cleanup) await attempt?.generation?.dispose();
     await this.documents?.cleanupBtwDocumentStaging(run.exchange.sessionId, run.exchange.id).catch((cleanupError) => {
       this.logger?.debug({ err: cleanupError, exchangeId: run.exchange.id }, "BTW document staging cleanup failed");
     });
@@ -576,30 +460,20 @@ export class BtwService {
     this.publish("btw.updated", run.exchange);
   }
 
-  private clearGeneration(run: ActiveBtwRun): void {
-    if (run.threadId) this.activeByThread.delete(run.threadId);
-    run.turnId = null;
-  }
-
   private clearRunTimers(run: ActiveBtwRun): void {
-    this.clearGeneration(run);
+    run.attempt = null;
     if (run.handoffTimer) clearTimeout(run.handoffTimer);
     run.handoffTimer = null;
   }
 
   private async cleanupGenerationThread(run: ActiveBtwRun): Promise<void> {
-    this.clearGeneration(run);
-    const threadId = run.threadId;
-    run.threadId = null;
-    if (threadId) await this.cleanupThread(threadId);
+    const generation = run.attempt?.generation;
+    run.attempt = null;
+    await generation?.dispose();
   }
 
-  private async cleanupThread(threadId: string): Promise<void> {
-    try {
-      await this.client.request("thread/unsubscribe", { threadId });
-    } catch (error) {
-      this.logger?.debug({ err: error, threadId }, "BTW thread unsubscribe failed");
-    }
+  private errorMessage(run: ActiveBtwRun, error: unknown): string {
+    return btwErrorMessage(error, `${providerDisplayName(run.session.provider.kind)} could not answer this BTW question.`);
   }
 
   private publish(type: "btw.started" | "btw.delta" | "btw.updated" | "btw.finished", payload: unknown): void {
@@ -632,32 +506,4 @@ function changesFromOperation(documentOperation: BtwDocumentOperation): BtwDocum
 
 function isPendingDocumentHandoff(documentOperation: BtwDocumentOperation | null | undefined): boolean {
   return documentOperation?.phase === "waiting" || documentOperation?.phase === "notifying";
-}
-
-function documentInstructions(documentsRoot: string, sourceCwd: string | null): string {
-  return `You are answering one quick side request from a snapshot of another Codex conversation.
-Answer directly and concisely. Do not continue, steer, interrupt, or message the source task.
-You may create or update Markdown session documents only when the operator explicitly asks you to do so. The only writable directory is ${JSON.stringify(documentsRoot)}.
-Keep INDEX.md current when creating documents. Do not delete or rename documents. Do not edit repository files, change repository state, create goals, delegate work, request user input, use network access, or perform any other side effect.
-The source workspace path is ${sourceCwd ? JSON.stringify(sourceCwd) : "unavailable"}; inspect it read-only only when needed for accurate document content.
-If the snapshot is incomplete or the request cannot be completed safely, say so briefly.`;
-}
-
-function isUnsupportedEffortError(error: unknown): boolean {
-  return error instanceof Error && /effort|reasoning/i.test(error.message);
-}
-
-function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").trim().slice(0, 1_000) || "Codex could not answer this BTW question.";
-}
-
-function recordValue(value: unknown): Record<string, unknown> | null {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" && value ? value : null;
 }

@@ -4,12 +4,11 @@ import websocket from "@fastify/websocket";
 import Fastify, { LogController } from "fastify";
 import { loadConfig } from "./config/config.js";
 import { AppDatabase } from "./db/database.js";
-import { CodexSessionStore } from "./codex/codexSessionStore.js";
+import { CodexSessionStore } from "./providers/codex/sessionStore.js";
 import { EventBus } from "./services/eventBus.js";
 import { SessionManager } from "./services/sessionManager.js";
 import { createAccessControl } from "./auth/auth.js";
 import { registerRoutes } from "./api/routes.js";
-import { CodexModelsService, CodexUsageService } from "./services/codexUsage.js";
 import { PwaTrustServer } from "./services/pwaTrustServer.js";
 import { NotificationService } from "./services/notifications.js";
 import { eventId } from "./utils/ids.js";
@@ -27,14 +26,15 @@ import { SessionOrchestrationBroker } from "./services/sessionOrchestrationBroke
 import { detectSessionScopeCapability } from "./services/sessionScopes.js";
 import { RawSessionEvidenceReader } from "./services/rawSessionEvidence.js";
 import { BtwService } from "./services/btwService.js";
-import { probeAppServerCompatibility } from "./services/appServerCompatibility.js";
+import { probeAppServerCompatibility } from "./providers/codex/compatibility.js";
 import { randomBytes } from "node:crypto";
-import { createSessionDriverRegistry } from "./services/sessionDrivers/appServerRuntime.js";
-import { CodexGoalStore } from "./codex/codexGoalStore.js";
+import { createCodexProvider } from "./providers/codex/provider.js";
+import { probeClaudeCompatibility } from "./providers/claude/compatibility.js";
+import { createClaudeProvider } from "./providers/claude/provider.js";
+import { ProviderRegistry } from "./providers/registry.js";
+import { CodexGoalStore } from "./providers/codex/goalStore.js";
 import { requestLogLevel, slowRequestThresholdMs } from "./services/requestLogging.js";
-import { ApprovalReviewer } from "./services/approvalReviewer.js";
 import { SessionImageService } from "./services/sessionImages.js";
-import { CodexAuthLifecycle } from "./services/codexAuthLifecycle.js";
 
 const config = loadConfig();
 const app = Fastify({
@@ -59,9 +59,6 @@ const db = new AppDatabase(config.dbPath);
 const sessionImages = new SessionImageService(config.dataDir, db);
 const codex = new CodexSessionStore(config.codexHome);
 const events = new EventBus();
-const codexAuth = new CodexAuthLifecycle(db, events, config.codexHome, config.dataDir, app.log);
-const codexUsage = new CodexUsageService({ codexHome: config.codexHome, logger: app.log });
-const codexModels = new CodexModelsService({ codexHome: config.codexHome, logger: app.log });
 const pwaTrustServer = new PwaTrustServer(config, app.log);
 const gitWorkflowBrokerSocketPath = join(config.dataDir, "runtime", "git-workflow-broker", "broker.sock");
 const gitWorkflowBroker = new GitWorkflowBroker(db, gitWorkflowBrokerSocketPath, app.log);
@@ -71,17 +68,16 @@ const gitWorkspaces = new GitWorkspaceManager(db, {
   sessionRoot: config.gitSessionRoot,
   publishCapability: (workspace) => gitWorkflowBroker.publishCapability(workspace)
 });
-const approvalReviewer = new ApprovalReviewer(config.codexHome, app.log);
 let dockerProxy: DockerResourceProxy | null = null;
 const userSystemd = await detectSessionScopeCapability(true);
 const sessionScopes = config.resourceGovernor === "off"
   ? { ...userSystemd, configured: false, available: false, unavailableReason: "disabled" as const }
   : userSystemd;
-const appServerCompatibility = await probeAppServerCompatibility(userSystemd.available);
-if (!appServerCompatibility.available) {
+const codexCompatibility = await probeAppServerCompatibility(userSystemd.available);
+if (!codexCompatibility.available) {
   app.log.warn(
-    { status: appServerCompatibility.status, detail: appServerCompatibility.detail },
-    "Codex app-server is unavailable; muxpilot is running in read-only history mode"
+    { status: codexCompatibility.status, detail: codexCompatibility.detail },
+    "Codex app-server is unavailable; Codex sessions are read-only history"
   );
 }
 const heavyLaunchToken = randomBytes(32).toString("hex");
@@ -130,55 +126,98 @@ if (config.resourceGovernor !== "off") {
 const sessionDocuments = new SessionDocumentService(config.gitSessionRoot);
 const sessionEnvironment = new SessionEnvironmentService(db, config.dataDir);
 await sessionEnvironment.initialize();
-const sessionDrivers = createSessionDriverRegistry({
-  compatibility: appServerCompatibility,
+const enabledProviders = new Set(config.providers);
+const claudeCompatibility = enabledProviders.has("claude")
+  ? await probeClaudeCompatibility(userSystemd.available, config.claudeExecutable ?? null)
+  : null;
+if (claudeCompatibility && !claudeCompatibility.available) {
+  app.log.warn({ status: claudeCompatibility.status, detail: claudeCompatibility.detail }, "Claude sessions are unavailable");
+}
+const codexProvider = createCodexProvider({
+  compatibility: codexCompatibility,
+  skillHome: config.skillHome,
+  logger: app.log,
   dataDir: config.dataDir,
   runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
   codexHome: config.codexHome,
   environment: managedEnvironment,
   sessionEnvironment,
   db,
-  events,
-  onAuthenticationFailure: (_sessionId, error) => codexAuth.reportAuthenticationFailure(error),
-  onAccountUpdated: () => codexAuth.reportAccountUpdated()
+  events
 });
-const manager = new SessionManager(
+const claudeProvider = claudeCompatibility ? createClaudeProvider({
+  compatibility: claudeCompatibility,
+  dataDir: config.dataDir,
+  runtimeDir: userSystemd.environment.XDG_RUNTIME_DIR,
+  configDir: config.claudeConfigDir,
+  skillHome: config.skillHome,
+  environment: managedEnvironment,
+  sessionEnvironment,
   db,
-  codex,
   events,
-  config.discoveryIntervalMs,
-  config.parserIntervalMs,
-  sessionDocuments,
-  approvalReviewer,
-  gitWorkspaces,
-  config.codexHome,
-  config.gitWorktreeRoot,
-  managedEnvironment,
-  codexModels,
-  sessionDrivers,
-  config.appServerHibernateMs,
-  (sessionId, imageId) => sessionImages.path(sessionId, imageId),
-  sessionEnvironment
+  logger: app.log
+}) : null;
+if (claudeProvider) {
+  await claudeProvider.syncBundledSkills().catch((error) => app.log.warn({ err: error }, "Could not install bundled skills for Claude"));
+}
+const providers = new ProviderRegistry(
+  [...(enabledProviders.has("codex") ? [codexProvider] : []), ...(claudeProvider ? [claudeProvider] : [])],
+  await db.getDefaultAgentProvider() ?? config.defaultProvider
 );
-const btw = BtwService.create({ db, events, codexHome: config.codexHome, logger: app.log, documents: manager });
-manager.setAuthenticationGuard(() => codexAuth.assertReady());
-manager.setAuthenticationAvailabilityGuard(() => codexAuth.assertAvailable());
-btw.setAuthenticationGuard(() => codexAuth.assertReady());
-codexAuth.setRuntimeHooks({
-  blockers: async () => [...new Set([...await manager.codexAuthenticationBlockers(), ...btw.authenticationBlockers()])],
-  reconcile: (sessionIds) => manager.reconcileCodexAuthentication(sessionIds),
-  suspend: () => manager.suspendForCodexSignOut(),
-  invalidateConsumers: () => {
-    codexUsage.invalidateAuthentication();
-    codexModels.invalidateAuthentication();
-    approvalReviewer.invalidateAuthentication();
-    btw.invalidateAuthentication();
-  },
-  admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication()
+const manager = new SessionManager({
+  db,
+  providers,
+  codexStore: codex,
+  events,
+  discoveryIntervalMs: config.discoveryIntervalMs,
+  parserIntervalMs: config.parserIntervalMs,
+  documents: sessionDocuments,
+  gitWorkspaces,
+  codexHome: config.codexHome,
+  gitWorktreeRoot: config.gitWorktreeRoot,
+  managedEnvironment,
+  appServerHibernateMs: config.appServerHibernateMs,
+  imagePath: (sessionId, imageId) => sessionImages.path(sessionId, imageId),
+  sessionEnvironment
 });
-await codexAuth.start();
+const btw = new BtwService({
+  db,
+  events,
+  engines: Object.fromEntries(providers.list().flatMap((provider) => provider.btw ? [[provider.kind, provider.btw]] : [])),
+  logger: app.log,
+  documents: manager
+});
+btw.setAuthenticationGuard((kind) => providers.get(kind).auth.assertReady());
+codexProvider.authLifecycle.setRuntimeHooks({
+  blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("codex"), ...btw.authenticationBlockers("codex")])],
+  reconcile: (sessionIds) => manager.reconcileProviderAuthentication("codex", sessionIds),
+  suspend: () => manager.suspendForProviderSignOut("codex"),
+  invalidateConsumers: () => {
+    codexProvider.usage.invalidateAuthentication();
+    codexProvider.models.invalidateAuthentication();
+    codexProvider.approvalReview.invalidateAuthentication();
+    btw.invalidateAuthentication("codex");
+  },
+  admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("codex")
+});
+await codexProvider.authLifecycle.start();
+if (claudeProvider) {
+  claudeProvider.authLifecycle.setRuntimeHooks({
+    blockers: async () => [...new Set([...await manager.providerAuthenticationBlockers("claude"), ...btw.authenticationBlockers("claude")])],
+    reconcile: (sessionIds) => manager.reconcileProviderAuthentication("claude", sessionIds),
+    suspend: () => manager.suspendForProviderSignOut("claude"),
+    invalidateConsumers: () => {
+      claudeProvider.usage.invalidateAuthentication();
+      claudeProvider.models.invalidateAuthentication();
+      claudeProvider.approvalReview.invalidateAuthentication();
+      btw.invalidateAuthentication("claude");
+    },
+    admissionReleased: () => manager.resumeQueuedInputsAfterAuthentication("claude")
+  });
+  await claudeProvider.authLifecycle.start();
+}
 const rawSessionEvidence = new RawSessionEvidenceReader(
-  config.codexHome,
+  { transcripts: { codex: join(config.codexHome, "sessions"), claude: join(config.claudeConfigDir, "projects") } },
   undefined,
   undefined,
   config.dataDir
@@ -212,7 +251,9 @@ await heavyCommands.start(manager);
 const notifications = new NotificationService(db, events, app.log, {
   pendingAutomaticWork: (sessionId) => manager.notificationPendingWorkReasons(sessionId),
   completionEvidence: (sessionId) => manager.notificationCompletionEvidence(sessionId),
-  usageSummary: () => codexUsage.summary()
+  usageSummaries: () => Promise.all(providers.list()
+    .filter((provider) => provider.capabilities.usageLimits)
+    .map((provider) => provider.usage.summary()))
 });
 const resourceGovernor = new ResourceGovernor({
   configured: sessionScopes.configured,
@@ -271,12 +312,25 @@ app.addContentTypeParser(
 );
 
 access.register(app);
-registerRoutes(app, manager, events, db, config, access, codexUsage, notifications, sessionTransfers, heavyCommands, btw, appServerCompatibility, sessionImages, codexAuth, sessionEnvironment);
+registerRoutes(app, {
+  manager,
+  events,
+  db,
+  config,
+  access,
+  providers,
+  notificationService: notifications,
+  sessionTransfers,
+  heavyCommands,
+  btw,
+  sessionImages,
+  sessionEnvironment
+});
 
 app.get("/healthz", async () => ({
   ok: true,
   shadowMode: process.env.MUXPILOT_SHADOW === "1",
-  appServerCompatibility,
+  providers: providers.list().map((provider) => provider.compatibility()),
   resourceGovernor: resourceGovernor.snapshot(),
   dockerGuardActive: Boolean(dockerProxy)
 }));
@@ -284,8 +338,14 @@ app.get("/healthz", async () => ({
 let closing = false;
 
 await manager.prepareStartupRecovery();
+// Provider CLIs sweep old transcripts (Claude's cleanupPeriodDays); keep muxpilot's copies current.
+const TRANSCRIPT_PRESERVE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const preserveTranscripts = () => manager.preserveTranscripts().catch((error) => app.log.warn({ err: error }, "Transcript preservation sweep failed"));
+void preserveTranscripts();
+const transcriptPreserveTimer = setInterval(() => void preserveTranscripts(), TRANSCRIPT_PRESERVE_INTERVAL_MS);
+transcriptPreserveTimer.unref();
 await btw.start();
-approvalReviewer.start();
+for (const provider of providers.list()) provider.approvalReview?.start();
 events.subscribe((event) => {
   if (event.type !== "message.appended") return;
   const message = event.payload && typeof event.payload === "object" ? event.payload as { id?: unknown; type?: unknown } : null;
@@ -296,7 +356,8 @@ events.subscribe((event) => {
 await manager.discoverNow();
 await manager.finishStartupRecovery();
 await manager.recoverAppServerSessions();
-await codexAuth.reconcileAfterStartup();
+await codexProvider.authLifecycle.reconcileAfterStartup();
+await claudeProvider?.authLifecycle.reconcileAfterStartup();
 await manager.recoverAutomatedApprovals();
 manager.start({ runInitialTick: false, recoverAppServerSessions: false });
 resourceGovernor.start();
@@ -319,14 +380,19 @@ async function startNotificationsAfterStartupCatchup(): Promise<void> {
 
 const close = async () => {
   closing = true;
+  clearInterval(transcriptPreserveTimer);
   manager.stop();
   await heavyCommands.stop();
   await resourceGovernor.stop();
   notifications.stop();
   await btw.stop();
-  await codexAuth.stop();
-  codexUsage.stop();
-  codexModels.stop();
+  await codexProvider.authLifecycle.stop();
+  await claudeProvider?.authLifecycle.stop();
+  for (const provider of providers.list()) {
+    provider.usage.stop();
+    provider.models.stop();
+    provider.approvalReview?.stop();
+  }
   await pwaTrustServer.close();
   await dockerProxy?.close();
   await gitWorkflowBroker.close();

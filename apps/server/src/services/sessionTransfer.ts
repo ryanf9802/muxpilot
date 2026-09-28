@@ -7,7 +7,7 @@ import { gunzip, gzip } from "node:zlib";
 import { extract, pack } from "tar-stream";
 import { nanoid } from "nanoid";
 import type {
-  AgentProviderRef,
+  AgentProviderKind,
   CollaborationMode,
   ManagedSession,
   SessionModelSelections,
@@ -18,6 +18,7 @@ import type {
   SessionTransferInspectResponse,
   SessionTransferMappingRequirement
 } from "@muxpilot/core";
+import { isAgentProviderKind, providerThreadIdentity, sessionThreadId, sessionTranscriptPath } from "@muxpilot/core";
 import type { AppDatabase } from "../db/database.js";
 import {
   exportPortableGitBranch,
@@ -47,7 +48,8 @@ const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_SESSIONS = 500;
 
 export interface PortableSession {
-  codexSessionId: string;
+  provider: AgentProviderKind;
+  threadId: string;
   sessionName: string;
   sourceCwd: string;
   repoName: string;
@@ -64,14 +66,21 @@ export interface PortableSession {
   transcriptSha256: string;
   gitBranchId?: string | null;
   documents?: PortableDocument[];
-  provider?: AgentProviderRef;
   name?: string;
   cwd?: string;
   environment?: Record<string, string>;
-  environmentParentCodexSessionId?: string | null;
+  environmentParentThreadId?: string | null;
 }
 
-const PORTABLE_SESSION_KEYS = new Set<keyof PortableSession>([
+const PORTABLE_SESSION_KEYS = new Set<string>([
+  "provider", "threadId", "sessionName", "sourceCwd", "repoName", "workspaceMode", "targetBranch",
+  "inputMode", "models", "fastMode", "pinned", "forkedFrom", "lastActivityAt", "transcriptEntry",
+  "transcriptBytes", "transcriptSha256", "gitBranchId", "documents", "name", "cwd",
+  "environment", "environmentParentThreadId"
+]);
+
+/** Format 6/7 manifests describe Codex sessions with Codex-named identity fields. */
+const LEGACY_PORTABLE_SESSION_KEYS = new Set<string>([
   "codexSessionId", "sessionName", "sourceCwd", "repoName", "workspaceMode", "targetBranch",
   "inputMode", "models", "fastMode", "pinned", "forkedFrom", "lastActivityAt", "transcriptEntry",
   "transcriptBytes", "transcriptSha256", "gitBranchId", "documents", "provider", "name", "cwd",
@@ -86,7 +95,7 @@ export interface PortableDocument {
 }
 
 interface Manifest {
-  formatVersion: 6 | 7;
+  formatVersion: 6 | 7 | 8;
   createdAt: string;
   sessions: PortableSession[];
   gitBranches: PortableGitBranch[];
@@ -141,16 +150,20 @@ export class SessionTransferService {
     if (uniqueIds.length > MAX_SESSIONS) throw new SessionTransferError(`At most ${MAX_SESSIONS} sessions can be exported`);
 
     const createdAt = new Date().toISOString();
-    const manifest: Manifest = { formatVersion: this.sessionEnvironment ? 7 : 6, createdAt, sessions: [], gitBranches: [] };
+    const manifest: Manifest = { formatVersion: 8, createdAt, sessions: [], gitBranches: [] };
     const contents = new Map<string, Buffer>();
     const branchIds = new Map<string, string>();
-    const codexSessionIds = new Set<string>();
+    const threadIdentities = new Set<string>();
     for (const [index, id] of uniqueIds.entries()) {
       const session = await this.db.getSession(id);
-      if (!session?.codexSessionId || !session.codexJsonlPath) throw new SessionTransferError(`Session '${id}' does not have a portable Codex transcript`, 409);
-      if (codexSessionIds.has(session.codexSessionId)) throw new SessionTransferError("The selection contains more than one record for the same Codex session", 409);
-      codexSessionIds.add(session.codexSessionId);
-      const file = await readFile(session.codexJsonlPath).catch(() => null);
+      const threadId = session ? sessionThreadId(session) : null;
+      const transcriptPath = session ? sessionTranscriptPath(session) : null;
+      if (!session || !threadId || !transcriptPath) throw new SessionTransferError(`Session '${id}' does not have a portable transcript`, 409);
+      const identity = providerThreadIdentity(session.provider.kind, threadId);
+      if (threadIdentities.has(identity)) throw new SessionTransferError("The selection contains more than one record for the same conversation", 409);
+      threadIdentities.add(identity);
+      await this.manager.ensureTranscriptAvailable(session);
+      const file = await readFile(transcriptPath).catch(() => null);
       if (!file) throw new SessionTransferError(`Transcript for session '${id}' is unavailable`, 409);
       const transcript = completeJsonlPrefix(file);
       const entry = `sessions/${String(index + 1).padStart(4, "0")}.jsonl`;
@@ -191,13 +204,12 @@ export class SessionTransferService {
           sha256: sha256(document.contents)
         };
       });
-      const portable = portableSession(session, entry, transcript, gitBranchId);
+      const portable = portableSession(session, threadId, entry, transcript, gitBranchId);
       if (this.sessionEnvironment) {
         portable.environment = await this.sessionEnvironment.exportOwned(id);
         const parentId = session.agentOwnership?.parentSessionId ?? null;
-        portable.environmentParentCodexSessionId = parentId
-          ? (await this.db.getSession(parentId))?.codexSessionId ?? null
-          : null;
+        const parent = parentId ? await this.db.getSession(parentId) : null;
+        portable.environmentParentThreadId = parent ? sessionThreadId(parent) : null;
       }
       manifest.sessions.push({ ...portable, documents: portableDocuments });
     }
@@ -234,7 +246,8 @@ export class SessionTransferService {
       expiresAt: new Date(expiresAtMs).toISOString(),
       formatVersion: manifest.formatVersion,
       sessions: manifest.sessions.map((session) => ({
-        codexSessionId: session.codexSessionId,
+        provider: session.provider,
+        threadId: session.threadId,
         sessionName: session.sessionName,
         sourceCwd: session.sourceCwd,
         repoName: session.repoName,
@@ -253,7 +266,7 @@ export class SessionTransferService {
     const mappingBySource = new Map(mappings.map((mapping) => [mapping.sourceCwd, mapping]));
     for (const session of staged.manifest.sessions) {
       if (!mappingBySource.has(session.sourceCwd)) throw new SessionTransferError(`Missing destination mapping for '${session.sourceCwd}'`);
-      this.manager.assertPortableRuntimeAvailable(mappingBySource.get(session.sourceCwd)!);
+      this.manager.assertPortableRuntimeAvailable(session);
       if (session.workspaceMode === "git") continue;
       try {
         await this.manager.validatePortableMapping(session, mappingBySource.get(session.sourceCwd)!);
@@ -291,7 +304,8 @@ export class SessionTransferService {
         results.push(await this.manager.importPortableSession(session, transcript, mapping, documents));
       } catch (error) {
         results.push({
-          codexSessionId: session.codexSessionId,
+          provider: session.provider,
+          threadId: session.threadId,
           sessionName: session.sessionName,
           status: "resume_failed" as const,
           sessionId: null,
@@ -300,12 +314,12 @@ export class SessionTransferService {
       }
     }
     if (this.sessionEnvironment && manifest.formatVersion >= 7) {
-      const importedByCodexId = new Map(results.flatMap((result) => result.sessionId ? [[result.codexSessionId, result.sessionId] as const] : []));
+      const importedByThread = new Map(results.flatMap((result) => result.sessionId ? [[result.threadId, result.sessionId] as const] : []));
       for (const portable of manifest.sessions) {
-        const importedId = importedByCodexId.get(portable.codexSessionId);
+        const importedId = importedByThread.get(portable.threadId);
         if (!importedId) continue;
-        const parentId = portable.environmentParentCodexSessionId
-          ? importedByCodexId.get(portable.environmentParentCodexSessionId) ?? null
+        const parentId = portable.environmentParentThreadId
+          ? importedByThread.get(portable.environmentParentThreadId) ?? null
           : null;
         await this.sessionEnvironment.importOwned(importedId, portable.environment ?? {}, parentId);
       }
@@ -339,6 +353,7 @@ export class SessionTransferService {
 
 function portableSession(
   session: ManagedSession,
+  threadId: string,
   transcriptEntry: string,
   transcript: Buffer,
   gitBranchId: string | null
@@ -346,7 +361,8 @@ function portableSession(
   const name = session.name || session.repo.name || "imported";
   const cwd = session.gitWorkspace?.entryPath ?? session.cwd ?? session.repo.root;
   return {
-    codexSessionId: session.codexSessionId!,
+    provider: session.provider.kind,
+    threadId,
     sessionName: name,
     sourceCwd: cwd,
     repoName: session.repo.name,
@@ -364,7 +380,6 @@ function portableSession(
     transcriptBytes: transcript.length,
     transcriptSha256: sha256(transcript),
     gitBranchId,
-    provider: { kind: "codex", threadId: session.codexSessionId, rolloutPath: null },
     name,
     cwd
   };
@@ -417,15 +432,17 @@ function parseManifest(value: Buffer | undefined): Manifest {
   try { raw = JSON.parse(value.toString("utf8")); } catch { throw new SessionTransferError("Session archive manifest is invalid JSON"); }
   if (!raw || typeof raw !== "object") throw new SessionTransferError("Session archive manifest is invalid");
   const manifest = raw as Manifest;
-  if (![6, 7].includes(manifest.formatVersion) || !Array.isArray(manifest.sessions)
+  if (![6, 7, 8].includes(manifest.formatVersion) || !Array.isArray(manifest.sessions)
     || manifest.sessions.length === 0 || manifest.sessions.length > MAX_SESSIONS) {
     throw new SessionTransferError("Unsupported or invalid session archive manifest");
   }
+  if (manifest.formatVersion < 8) manifest.sessions = manifest.sessions.map((session) => legacyPortableSession(session));
   const ids = new Set<string>();
   for (const [sessionIndex, session] of manifest.sessions.entries()) {
     if (!session || typeof session !== "object" || Array.isArray(session)
-      || Object.keys(session).some((key) => !PORTABLE_SESSION_KEYS.has(key as keyof PortableSession))
-      || typeof session.codexSessionId !== "string" || !/^[a-zA-Z0-9-]{8,80}$/.test(session.codexSessionId)
+      || Object.keys(session).some((key) => !PORTABLE_SESSION_KEYS.has(key))
+      || !isAgentProviderKind(session.provider)
+      || typeof session.threadId !== "string" || !/^[a-zA-Z0-9-]{8,80}$/.test(session.threadId)
       || typeof session.sessionName !== "string" || session.sessionName.length > 200
       || typeof session.sourceCwd !== "string" || session.sourceCwd.length === 0 || session.sourceCwd.length > 4096
       || typeof session.repoName !== "string" || session.repoName.length > 512
@@ -433,30 +450,51 @@ function parseManifest(value: Buffer | undefined): Manifest {
       || !Number.isSafeInteger(session.transcriptBytes) || session.transcriptBytes <= 0 || session.transcriptBytes > 1024 * 1024 * 1024
       || typeof session.transcriptSha256 !== "string" || !/^[a-f0-9]{64}$/.test(session.transcriptSha256)
       || !validPortablePreferences(session)
-      || !["directory", "git"].includes(session.workspaceMode) || ids.has(session.codexSessionId)) {
+      || !["directory", "git"].includes(session.workspaceMode) || ids.has(providerThreadIdentity(session.provider, session.threadId))) {
       throw new SessionTransferError("Session archive manifest contains invalid session metadata");
     }
     if ((session.workspaceMode === "git" && typeof session.gitBranchId !== "string")
         || (session.workspaceMode === "directory" && session.gitBranchId !== null)) {
       throw new SessionTransferError("Session archive manifest contains invalid Git branch metadata");
     }
-    if (session.provider?.kind !== "codex"
-        || session.provider.threadId !== session.codexSessionId
-        || session.provider.rolloutPath !== null
-        || typeof session.name !== "string" || session.name !== session.sessionName
+    if (typeof session.name !== "string" || session.name !== session.sessionName
         || typeof session.cwd !== "string" || session.cwd !== session.sourceCwd) {
       throw new SessionTransferError("Session archive manifest contains invalid provider metadata");
     }
-    if (manifest.formatVersion >= 7 && (!session.environment || typeof session.environment !== "object" || Array.isArray(session.environment)
+    if ((manifest.formatVersion === 7 || session.environment !== undefined) && (!session.environment || typeof session.environment !== "object" || Array.isArray(session.environment)
         || Object.entries(session.environment).some(([name, entry]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof entry !== "string" || entry.includes("\0"))
-        || (session.environmentParentCodexSessionId !== null && typeof session.environmentParentCodexSessionId !== "string"))) {
+        || (session.environmentParentThreadId !== null && typeof session.environmentParentThreadId !== "string"))) {
       throw new SessionTransferError("Session archive manifest contains invalid environment metadata");
     }
     validateDocumentManifest(session, sessionIndex);
-    ids.add(session.codexSessionId);
+    ids.add(providerThreadIdentity(session.provider, session.threadId));
   }
   validateGitBranchManifest(manifest);
   return manifest;
+}
+
+/** Converts a format 6/7 Codex session entry into the provider-neutral shape, rejecting malformed legacy metadata. */
+function legacyPortableSession(value: unknown): PortableSession {
+  const session = value as Record<string, unknown> | null;
+  if (!session || typeof session !== "object" || Array.isArray(session)
+    || Object.keys(session).some((key) => !LEGACY_PORTABLE_SESSION_KEYS.has(key))) {
+    throw new SessionTransferError("Session archive manifest contains invalid session metadata");
+  }
+  const provider = session.provider as Record<string, unknown> | undefined;
+  if (provider?.kind !== "codex" || provider.threadId !== session.codexSessionId || provider.rolloutPath !== null) {
+    throw new SessionTransferError("Session archive manifest contains invalid provider metadata");
+  }
+  const { codexSessionId, environmentParentCodexSessionId, provider: _provider, forkedFrom, ...rest } = session;
+  const origin = forkedFrom as Record<string, unknown> | null | undefined;
+  return {
+    ...rest,
+    provider: "codex",
+    threadId: codexSessionId,
+    ...(origin ? {
+      forkedFrom: { provider: "codex", threadId: origin.codexSessionId, sessionId: origin.sessionId, sessionName: origin.sessionName }
+    } : origin === null ? { forkedFrom: null } : {}),
+    ...("environmentParentCodexSessionId" in session ? { environmentParentThreadId: environmentParentCodexSessionId } : {})
+  } as unknown as PortableSession;
 }
 
 function validateTranscripts(manifest: Manifest, contents: Map<string, Buffer>): void {
@@ -470,12 +508,7 @@ function validateTranscripts(manifest: Manifest, contents: Map<string, Buffer>):
     if (!transcript || transcript.length !== session.transcriptBytes || sha256(transcript) !== session.transcriptSha256) {
       throw new SessionTransferError(`Transcript validation failed for '${session.sessionName}'`);
     }
-    const firstLine = transcript.subarray(0, Math.min(transcript.length, 256 * 1024)).toString("utf8").split("\n").find((line) => line.includes('"session_meta"'));
-    if (!firstLine) throw new SessionTransferError(`Transcript for '${session.sessionName}' has no Codex session metadata`);
-    try {
-      const parsed = JSON.parse(firstLine) as { payload?: { id?: string; session_id?: string } };
-      if ((parsed.payload?.id ?? parsed.payload?.session_id) !== session.codexSessionId) throw new Error();
-    } catch { throw new SessionTransferError(`Transcript identity does not match '${session.sessionName}'`); }
+    validateTranscriptIdentity(session, transcript);
   }
   for (const session of manifest.sessions) sessionDocuments(session, contents);
   for (const branch of manifest.gitBranches) {
@@ -650,11 +683,34 @@ function safeFilenameStem(value: string): string {
 }
 
 function completeJsonlPrefix(transcript: Buffer): Buffer {
-  if (transcript.length === 0) throw new SessionTransferError("Codex transcript is empty", 409);
+  if (transcript.length === 0) throw new SessionTransferError("Transcript is empty", 409);
   if (transcript[transcript.length - 1] === 0x0a) return transcript;
   const newline = transcript.lastIndexOf(0x0a);
-  if (newline < 0) throw new SessionTransferError("Codex transcript has no complete records", 409);
+  if (newline < 0) throw new SessionTransferError("Transcript has no complete records", 409);
   return transcript.subarray(0, newline + 1);
+}
+
+function validateTranscriptIdentity(session: PortableSession, transcript: Buffer): void {
+  const lines = transcript.subarray(0, Math.min(transcript.length, 256 * 1024)).toString("utf8").split("\n");
+  if (session.provider === "codex") {
+    const firstLine = lines.find((line) => line.includes('"session_meta"'));
+    if (!firstLine) throw new SessionTransferError(`Transcript for '${session.sessionName}' has no Codex session metadata`);
+    try {
+      const parsed = JSON.parse(firstLine) as { payload?: { id?: string; session_id?: string } };
+      if ((parsed.payload?.id ?? parsed.payload?.session_id) !== session.threadId) throw new Error();
+    } catch { throw new SessionTransferError(`Transcript identity does not match '${session.sessionName}'`); }
+    return;
+  }
+  const identified = lines.flatMap((line) => {
+    try {
+      const parsed = JSON.parse(line) as { sessionId?: unknown };
+      return typeof parsed.sessionId === "string" ? [parsed.sessionId] : [];
+    } catch {
+      return [];
+    }
+  });
+  if (identified.length === 0) throw new SessionTransferError(`Transcript for '${session.sessionName}' has no Claude session metadata`);
+  if (identified.some((id) => id !== session.threadId)) throw new SessionTransferError(`Transcript identity does not match '${session.sessionName}'`);
 }
 
 function validPortablePreferences(session: PortableSession): boolean {
@@ -663,8 +719,9 @@ function validPortablePreferences(session: PortableSession): boolean {
   if (session.targetBranch !== null && typeof session.targetBranch !== "string") return false;
   if (session.lastActivityAt !== null && typeof session.lastActivityAt !== "string") return false;
   if (session.forkedFrom !== undefined && session.forkedFrom !== null
-    && (typeof session.forkedFrom.codexSessionId !== "string"
-      || !/^[a-zA-Z0-9-]{8,80}$/.test(session.forkedFrom.codexSessionId)
+    && (!isAgentProviderKind(session.forkedFrom.provider)
+      || typeof session.forkedFrom.threadId !== "string"
+      || !/^[a-zA-Z0-9-]{8,80}$/.test(session.forkedFrom.threadId)
       || session.forkedFrom.sessionId !== null
       || typeof session.forkedFrom.sessionName !== "string"
       || session.forkedFrom.sessionName.length > 200)) return false;

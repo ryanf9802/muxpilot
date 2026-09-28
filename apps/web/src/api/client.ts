@@ -3,13 +3,14 @@ import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
   ApprovalReviewerSettingsResponse,
-  AppServerCompatibility,
-  CodexSkillsResponse,
-  CodexModelCatalogResponse,
+  AgentProviderKind,
+  AgentSkillsResponse,
+  ProviderModelCatalogResponse,
   GlobalModelSettingsResponse,
-  CodexUsageSummaryResponse,
-  CodexAuthState,
-  CodexTokenUsageResponse,
+  ProviderUsageSummary,
+  ProviderAuthState,
+  ProvidersResponse,
+  ProviderTokenUsageResponse,
   ConsumeCodexResetCreditRequest,
   ConsumeCodexResetCreditResponse,
   CollaborationMode,
@@ -39,6 +40,8 @@ import type {
   QuestionResponse,
   ResolveApprovalRequest,
   SessionDirectoriesResponse,
+  SessionAgentMessagesResponse,
+  SessionAgentsResponse,
   SessionDocumentResponse,
   SessionDocumentsResponse,
   SessionEnvironmentResponse,
@@ -112,7 +115,11 @@ export const api = {
     json<AccessResponse>("/api/access", { method: "POST", body: JSON.stringify({ accessKey }) }),
   logout: () => json<{ ok: true }>("/api/logout", { method: "POST" }),
   connectivity: () => json<ConnectivityResponse>("/api/connectivity"),
-  appServerCompatibility: () => json<AppServerCompatibility>("/api/app-server/compatibility"),
+  providers: () => json<ProvidersResponse>("/api/providers"),
+  setDefaultProvider: (provider: AgentProviderKind) =>
+    json<ProvidersResponse>("/api/providers/default", { method: "PATCH", body: JSON.stringify({ provider }) }),
+  providerAuth: (kind: AgentProviderKind) => json<ProviderAuthState>(`${providerPath(kind)}/auth`),
+  refreshProviderAuth: (kind: AgentProviderKind) => json<ProviderAuthState>(`${providerPath(kind)}/auth/refresh`, { method: "POST" }),
   remoteAccess: () => json<RemoteAccessResponse>("/api/remote-access"),
   revokeRemoteAccess: () => json<RemoteAccessResponse>("/api/remote-access/revoke", { method: "POST" }),
   updateRemoteAccessSettings: (request: UpdateRemoteAccessSettingsRequest) =>
@@ -125,8 +132,9 @@ export const api = {
     json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "POST", body: JSON.stringify(request) }),
   deletePushSubscription: (endpoint: string) =>
     json<{ ok: true }>(`/api/notifications/push-subscriptions?deviceId=${encodeURIComponent(notificationDeviceId())}`, { method: "DELETE", body: JSON.stringify({ endpoint }) }),
-  codexSkills: (sessionId?: string) => json<CodexSkillsResponse>(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/codex/skills"),
-  gitWorkflowSkillStatus: () => json<MuxpilotGitSkillStatus>("/api/codex/skills/muxpilot-git-workflow/status"),
+  providerSkills: (kind: AgentProviderKind) => json<AgentSkillsResponse>(`${providerPath(kind)}/skills`),
+  sessionSkills: (sessionId: string) => json<AgentSkillsResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/skills`),
+  gitWorkflowSkillStatus: (kind: AgentProviderKind) => json<MuxpilotGitSkillStatus>(`${providerPath(kind)}/skills/muxpilot-git-workflow/status`),
   sessions: (q = "", status = "") =>
     json<{ sessions: ManagedSession[] }>(`/api/sessions?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}`),
   sessionSummaries: (q = "", status = "", signal?: AbortSignal) =>
@@ -179,22 +187,23 @@ export const api = {
     json<{ session: ManagedSession }>("/api/sessions", { method: "POST", body: JSON.stringify(request) }),
   forkSession: (id: string, request: ForkSessionRequest) =>
     json<ForkSessionResponse>(`/api/sessions/${encodeURIComponent(id)}/fork`, { method: "POST", body: JSON.stringify(request) }),
-  codexUsageSummary: (refresh = false) => json<CodexUsageSummaryResponse>(`/api/codex-usage/summary${refresh ? "?refresh=1" : ""}`),
-  codexUsageHistory: (days: 7 | 30, refresh = false) => json<CodexTokenUsageResponse>(`/api/codex-usage/history?days=${days}${refresh ? "&refresh=1" : ""}`),
-  consumeCodexResetCredit: (request: ConsumeCodexResetCreditRequest) =>
-    json<ConsumeCodexResetCreditResponse>("/api/codex-usage/reset", { method: "POST", body: JSON.stringify(request) }),
-  codexModels: () => json<CodexModelCatalogResponse>("/api/codex-models"),
-  codexAuth: () => json<CodexAuthState>("/api/codex-auth"),
-  refreshCodexAuth: () => json<CodexAuthState>("/api/codex-auth/refresh", { method: "POST" }),
-  globalModelSettings: () => json<GlobalModelSettingsResponse>("/api/model-settings/defaults"),
-  updateGlobalModelSettings: (request: UpdateGlobalModelSettingsRequest) =>
-    json<GlobalModelSettingsResponse>("/api/model-settings/defaults", {
+  providerUsageSummary: (kind: AgentProviderKind, refresh = false) =>
+    json<ProviderUsageSummary>(`${providerPath(kind)}/usage/summary${refresh ? "?refresh=1" : ""}`),
+  providerUsageHistory: (kind: AgentProviderKind, days: 7 | 30, refresh = false) =>
+    json<ProviderTokenUsageResponse>(`${providerPath(kind)}/usage/history?days=${days}${refresh ? "&refresh=1" : ""}`),
+  consumeResetCredit: (kind: AgentProviderKind, request: ConsumeCodexResetCreditRequest) =>
+    json<ConsumeCodexResetCreditResponse>(`${providerPath(kind)}/usage/reset`, { method: "POST", body: JSON.stringify(request) }),
+  providerModels: (kind: AgentProviderKind) => json<ProviderModelCatalogResponse>(`${providerPath(kind)}/models`),
+  globalModelSettings: (kind: AgentProviderKind) => json<GlobalModelSettingsResponse>(`${providerPath(kind)}/model-settings/defaults`),
+  updateGlobalModelSettings: (kind: AgentProviderKind, request: UpdateGlobalModelSettingsRequest) =>
+    json<GlobalModelSettingsResponse>(`${providerPath(kind)}/model-settings/defaults`, {
       method: "PATCH",
       body: JSON.stringify(request)
     }),
-  approvalReviewerSettings: () => json<ApprovalReviewerSettingsResponse>("/api/approval-reviewer/settings"),
-  updateApprovalReviewerSettings: (request: ApprovalReviewerSettingsResponse["settings"]) =>
-    json<ApprovalReviewerSettingsResponse>("/api/approval-reviewer/settings", {
+  approvalReviewerSettings: (kind: AgentProviderKind) =>
+    json<ApprovalReviewerSettingsResponse>(`${providerPath(kind)}/approval-reviewer/settings`),
+  updateApprovalReviewerSettings: (kind: AgentProviderKind, request: NonNullable<ApprovalReviewerSettingsResponse["settings"]>) =>
+    json<ApprovalReviewerSettingsResponse>(`${providerPath(kind)}/approval-reviewer/settings`, {
       method: "PATCH",
       body: JSON.stringify(request)
     }),
@@ -239,6 +248,12 @@ export const api = {
     json<BtwExchangeResponse>(`/api/sessions/${encodeURIComponent(id)}/btw/${encodeURIComponent(exchangeId)}/cancel`, {
       method: "POST"
     }),
+  listSessionAgents: (id: string) =>
+    json<SessionAgentsResponse>(`/api/sessions/${encodeURIComponent(id)}/agents`),
+  getSessionAgentMessages: (id: string, agentId: string) =>
+    json<SessionAgentMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/messages`),
+  stopSessionAgent: (id: string, agentId: string) =>
+    json<{ ok: true }>(`/api/sessions/${encodeURIComponent(id)}/agents/${encodeURIComponent(agentId)}/stop`, { method: "POST" }),
   queuedInputs: (id: string) => json<QueuedInputResponse>(`/api/sessions/${id}/queued-inputs`),
   enqueueInput: (id: string, text: string, mode?: CollaborationMode, content?: import("@muxpilot/core").MessageContentPart[]) =>
     json<{ queuedInput: QueuedInput }>(`/api/sessions/${id}/queued-inputs`, { method: "POST", body: JSON.stringify({ text, mode, content }) }),
@@ -322,4 +337,8 @@ function fallbackNotificationDeviceId(): string {
 
 function isNotificationDeviceId(value: string): boolean {
   return /^[a-zA-Z0-9_-]{8,80}$/.test(value);
+}
+
+function providerPath(kind: AgentProviderKind): string {
+  return `/api/providers/${encodeURIComponent(kind)}`;
 }

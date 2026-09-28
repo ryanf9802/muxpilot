@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexSessionStore, type SessionMeta } from "../src/codex/codexSessionStore.js";
+import { CodexSessionStore, type SessionMeta } from "../src/providers/codex/sessionStore.js";
 
 const stores: CodexSessionStore[] = [];
 

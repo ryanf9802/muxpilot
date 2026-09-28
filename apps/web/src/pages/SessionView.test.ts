@@ -20,6 +20,7 @@ import {
   activeVariableToken,
   applyPlanActionResponse,
   AgentGuardBanner,
+  AgentsButton,
   ApprovalBanner,
   appendUniqueTranscriptItems,
   appendUniqueMessages,
@@ -60,6 +61,7 @@ import {
   MarkdownBlock,
   messageListAutoPageAction,
   MessageBubble,
+  OpenAgentLink,
   ModeToggle,
   pendingActionRefreshForEvent,
   pendingProposedPlanMessage,
@@ -84,6 +86,9 @@ import {
   sessionWithPendingInputMode,
   sessionWithPendingFastMode,
   sessionModeShortcutAction,
+  sessionFastModeCapable,
+  sessionNativeAgentsCapable,
+  runtimeAttachCommandOrNull,
   saveComposerDraft,
   saveQuestionAnswerDraft,
   saveVimModePreference,
@@ -139,10 +144,22 @@ import {
   VimModeToggle,
   VIM_MODE_STORAGE_KEY,
   WorkingIndicator,
-  UserText
+  UserText,
+  runtimeLabel
 } from "./SessionView.js";
 import { ApiError } from "../api/client.js";
 import { childSessionAttentionItems } from "../utils/sessionStatus.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
+
+describe("runtimeLabel", () => {
+  it("names the runtime after the session provider", () => {
+    const runtime = { kind: "systemd_service", state: "connected" } as never;
+    expect(runtimeLabel({ runtime, provider: { kind: "codex", threadId: null, transcriptPath: null } })).toBe("App server · connected");
+    expect(runtimeLabel({ runtime, provider: { kind: "claude", threadId: null, transcriptPath: null } })).toBe("Claude runtime · connected");
+    expect(runtimeLabel({ runtime: { kind: "systemd_service", state: "hibernated" } as never, provider: { kind: "claude", threadId: null, transcriptPath: null } }))
+      .toBe("Claude runtime · sleeping");
+  });
+});
 
 describe("InputDeliveryFailureBanner", () => {
   it("offers retry and dismissal with the persisted delivery failure detail", () => {
@@ -346,6 +363,15 @@ describe("SessionTitleHeading", () => {
     expect(html).toContain('aria-label="Fork session"');
     expect(html).not.toContain(">Fork</button>");
   });
+
+  it("shows the provider badge beside the name only when requested", () => {
+    const html = renderToStaticMarkup(createElement(SessionTitleHeading, {
+      name: "claude-work",
+      onFork: () => undefined,
+      provider: "claude"
+    }));
+    expect(html).toContain('<h1>claude-work</h1><span class="provider-badge" data-provider="claude"');
+  });
 });
 
 describe("SessionHeaderMeta", () => {
@@ -358,7 +384,8 @@ describe("SessionHeaderMeta", () => {
           repo: { root: "/workspace/project", name: "project", branch: "main", dirty: false, worktree: null },
           gitWorkspace: null,
           forkedFrom: {
-            codexSessionId: "019f-parent-session-abcdef",
+            provider: "codex",
+            threadId: "019f-parent-session-abcdef",
             sessionId: "parent-session",
             sessionName: "original-chat"
           }
@@ -403,7 +430,7 @@ describe("SessionHeaderMeta", () => {
           state: "connected",
           unit: "muxpilot-session.service",
           socketPath: "/run/muxpilot-session.sock",
-          codexVersion: null
+          agentVersion: null
         },
         resourceUsage: {
           memoryCurrentBytes: 128 * 1024 ** 2,
@@ -549,6 +576,66 @@ function installLocalStorage(): Storage {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("native agents", () => {
+  it("gates the Agents toolbar button on the provider's nativeAgents capability", () => {
+    expect(sessionNativeAgentsCapable(providerDescriptor("claude"))).toBe(true);
+    expect(sessionNativeAgentsCapable(providerDescriptor("codex"))).toBe(false);
+    expect(sessionNativeAgentsCapable(null)).toBe(false);
+  });
+
+  it("renders the Agents button with a running-count badge", () => {
+    const idle = renderToStaticMarkup(createElement(AgentsButton, { open: false, runningCount: 0, onOpen: () => undefined }));
+    expect(idle).toContain('aria-label="Open agents"');
+    expect(idle).toContain("Agents");
+    expect(idle).not.toContain("agents-running-badge");
+    const busy = renderToStaticMarkup(createElement(AgentsButton, { open: true, runningCount: 2, onOpen: () => undefined }));
+    expect(busy).toContain('aria-label="Open agents (2 running)"');
+    expect(busy).toContain('<span class="agents-running-badge" aria-hidden="true">2</span>');
+    expect(busy).toContain('aria-expanded="true"');
+  });
+
+  it("adds an Open agent link to Agent tool-call rows", () => {
+    const toolCall = message("session-a", 4, "Explore the repo", "tool", "tool_call");
+    const html = renderToStaticMarkup(createElement(MessageBubble, {
+      message: { ...toolCall, payload: { toolName: "Agent", toolUseId: "toolu_1" } },
+      agentAction: createElement(OpenAgentLink, { agent: { id: "agent-1", description: "Explore the repo" }, onOpen: () => undefined })
+    }));
+    expect(html).toContain("Tool · Agent");
+    expect(html).toContain('class="agent-open-link"');
+    expect(html).toContain("Open agent");
+  });
+
+  it("labels approvals raised by a subagent", () => {
+    const approval: ApprovalRequest = {
+      id: "approval-sub",
+      sessionId: "session-a",
+      messageId: "message-sub",
+      kind: "command",
+      title: "Allow Bash?",
+      command: "rm -rf build",
+      toolName: "Bash",
+      cwd: null,
+      reason: null,
+      prefixRule: null,
+      options: [{ decision: "approve_once", label: "Allow", description: "" }],
+      createdAt: "2026-09-27T00:00:00.000Z",
+      requestedBy: { agentId: "agent-1", label: "Explore: map the repo" }
+    };
+    const labelled = renderToStaticMarkup(createElement(ApprovalBanner, { approval, busy: null, error: "", onDecision: () => undefined }));
+    expect(labelled).toContain("Requested by Explore: map the repo (subagent)");
+    const fallback = renderToStaticMarkup(createElement(ApprovalBanner, {
+      approval: { ...approval, requestedBy: { agentId: "agent-1", label: null } },
+      busy: null,
+      error: "",
+      onDecision: () => undefined,
+      onOpenAgent: () => undefined
+    }));
+    expect(fallback).toContain('<button type="button">agent-1</button>');
+    const main = renderToStaticMarkup(createElement(ApprovalBanner, { approval: { ...approval, requestedBy: undefined }, busy: null, error: "", onDecision: () => undefined }));
+    expect(main).not.toContain("Requested by");
+  });
 });
 
 describe("ApprovalBanner", () => {
@@ -1073,6 +1160,16 @@ describe("session mode shortcuts", () => {
     expect(sessionModeShortcutAction(keyEvent("n"), normal, null, ownerDocument)).toBeNull();
   });
 
+  it("ignores the Fast shortcut when the session or provider cannot use Fast mode", () => {
+    const normal = managedSession({ inputMode: "default", fastMode: false, fastModeAvailable: true, status: "waiting" });
+    expect(sessionModeShortcutAction(keyEvent("f"), normal, null, ownerDocument, false)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("f"), { ...normal, capabilities: { ...sessionCapabilities(), fastMode: false } }, null, ownerDocument)).toBeNull();
+    expect(sessionModeShortcutAction(keyEvent("p"), normal, null, ownerDocument, false)).toEqual({ type: "inputMode", mode: "plan" });
+    expect(sessionFastModeCapable(normal, providerDescriptor("claude", { capabilities: { ...providerDescriptor("claude").capabilities, fastMode: false } }))).toBe(false);
+    expect(sessionFastModeCapable({ capabilities: { ...sessionCapabilities(), fastMode: false } }, providerDescriptor("codex"))).toBe(false);
+    expect(sessionFastModeCapable(normal, null)).toBe(true);
+  });
+
   it("ignores typing, interactive controls, overlays, modifiers, repeats, and composition", () => {
     const session = managedSession({ inputMode: "default" });
     for (const target of ["input", "textarea", "button", ".cm-editor", "[contenteditable]"]) {
@@ -1242,6 +1339,29 @@ describe("skill composer helpers", () => {
       caret: 23
     });
   });
+
+  it("only treats Claude slash commands at the start of the message as skill tokens", () => {
+    const claude = { prefix: "/", position: "start" } as const;
+    expect(activeSkillToken("/rev", 4, claude)).toEqual({ start: 0, end: 4, query: "rev" });
+    expect(activeSkillToken("  /rev", 6, claude)).toEqual({ start: 2, end: 6, query: "rev" });
+    expect(activeSkillToken("please /rev", 11, claude)).toBeNull();
+    expect(activeSkillToken("$team", 5, claude)).toBeNull();
+    expect(activeSkillToken("/rev", 4)).toBeNull();
+  });
+
+  it("does not mistake paths for Claude slash commands", () => {
+    const claude = { prefix: "/", position: "start" } as const;
+    expect(activeSkillToken("/home/dev/project", 17, claude)).toBeNull();
+    expect(activeSkillToken("/home/dev/project", 5, claude)).toBeNull();
+    expect(activeSkillToken("/home", 5, claude)).toEqual({ start: 0, end: 5, query: "home" });
+  });
+
+  it("replaces a Claude token with a slash command", () => {
+    expect(replaceSkillToken("/rev please", { start: 0, end: 4, query: "rev" }, "review", { prefix: "/", position: "start" })).toEqual({
+      text: "/review please",
+      caret: 8
+    });
+  });
 });
 
 describe("shouldQueueComposerInput", () => {
@@ -1285,7 +1405,7 @@ describe("canSteerComposerInput", () => {
       unit: "muxpilot-session-0123456789abcdef01234567.service",
       socketPath: "/tmp/app.sock",
       state: "connected",
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     }
   });
 
@@ -1859,6 +1979,24 @@ describe("runtime presentation helpers", () => {
     expect(html).not.toContain("gpt-");
   });
 
+  it("uses the server attach command and hides attach for providers without one", () => {
+    const runtime = { kind: "systemd_service" as const, unit: "muxpilot-a.service", socketPath: "/run/a.sock", state: "connected" as const, agentVersion: "1.0.0" };
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime })).toBe("codex --remote 'unix:///run/a.sock'");
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime: { ...runtime, attachCommand: "custom attach" } })).toBe("custom attach");
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "claude", threadId: null, transcriptPath: null }, runtime })).toBeNull();
+    expect(runtimeAttachCommandOrNull({ provider: { kind: "codex", threadId: null, transcriptPath: null }, runtime: { ...runtime, attachCommand: null } })).toBeNull();
+    expect(runtimeAttachCommandOrNull({ runtime })).toBe("codex --remote 'unix:///run/a.sock'");
+
+    const claudeHtml = renderToStaticMarkup(createElement(RuntimeAttachButton, {
+      session: { provider: { kind: "claude", threadId: null, transcriptPath: null }, runtime },
+      copied: false,
+      accessMode: "local",
+      enabled: true,
+      onCopy: () => undefined
+    }));
+    expect(claudeHtml).toBe("");
+  });
+
   it("omits runtime attach on remote access", () => {
     const html = renderToStaticMarkup(createElement(RuntimeAttachButton, {
       session: managedSession(),
@@ -1976,19 +2114,18 @@ describe("session scroll behavior", () => {
   it("detects transcript source changes before merging transcript pages", () => {
     const session = managedSession({
       id: "session-a",
-      codexSessionId: "codex-a",
-      codexJsonlPath: "/tmp/codex-a.jsonl"
+      provider: { kind: "codex", threadId: "codex-a", transcriptPath: "/tmp/codex-a.jsonl" }
     });
     const currentSource = transcriptSourceKey(sessionTranscriptSource(session));
     const sameSource = transcriptSourceKey({
       sessionId: "session-a",
-      codexSessionId: "codex-a",
-      codexJsonlPath: "/tmp/codex-a.jsonl"
+      threadId: "codex-a",
+      transcriptPath: "/tmp/codex-a.jsonl"
     });
     const reboundSource = transcriptSourceKey({
       sessionId: "session-a",
-      codexSessionId: "codex-b",
-      codexJsonlPath: "/tmp/codex-b.jsonl"
+      threadId: "codex-b",
+      transcriptPath: "/tmp/codex-b.jsonl"
     });
 
     expect(shouldReplaceTranscriptForSource(null, currentSource)).toBe(false);
@@ -2639,6 +2776,39 @@ describe("UserText", () => {
 });
 
 describe("MessageBubble", () => {
+  it("renders reasoning as a collapsed Thinking block", () => {
+    const reasoning = message("session-a", 2, "Consider the **parser** first.", "assistant", "reasoning");
+    const html = renderToStaticMarkup(createElement(MemoryRouter, null, createElement(MessageBubble, { message: reasoning })));
+
+    expect(html).toContain("<span>Thinking</span>");
+    expect(html).toContain('<details class="reasoning-block">');
+    expect(html).toContain("<strong>parser</strong>");
+  });
+
+  it("renders a tool call task list as a checklist labelled with the tool name", () => {
+    const todo = message("session-a", 3, "TodoWrite", "tool", "tool_call", {
+      toolName: "TodoWrite",
+      taskList: { items: [{ text: "Write tests", status: "completed" }, { text: "Ship", status: "pending" }] }
+    });
+    const html = renderToStaticMarkup(createElement(MessageBubble, { message: todo }));
+
+    expect(html).toContain("<span>Tool · TodoWrite</span>");
+    expect(html).toContain('aria-label="Task list"');
+    expect(html).toContain("1/2 completed");
+    expect(renderToStaticMarkup(createElement(MessageBubble, { message: message("session-a", 4, "ls", "tool", "tool_call") }))).toContain("<span>Tool</span>");
+  });
+
+  it("collapses reasoning into turn activity and counts it as progress", () => {
+    const items = groupStackableMessages([
+      message("session-a", 1, "prompt"),
+      message("session-a", 2, "thinking", "assistant", "reasoning"),
+      message("session-a", 3, "done", "assistant", "assistant")
+    ]);
+    expect(items.map((item) => item.type)).toEqual(["message", "activity", "message"]);
+    const stacks = groupEventStacks([message("session-a", 1, "thinking", "assistant", "reasoning")]);
+    expect(stacks[0]).toMatchObject({ type: "stack" });
+  });
+
   it("marks pending user messages as in flight", () => {
     const pending = pendingUserMessageToChatMessage(createPendingUserMessage("session-a", "Ship this", "default", "2026-07-07T00:00:00.000Z"));
     const html = renderToStaticMarkup(createElement(MessageBubble, { message: pending, pending: true }));
@@ -2712,7 +2882,7 @@ describe("Codex turn failure events", () => {
       payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Network error" } } };
     const html = renderToStaticMarkup(createElement(UserAction, { message: failure }));
     expect(html).toContain('data-tone="error"');
-    expect(html).toContain("Codex turn failed");
+    expect(html).toContain("Agent turn failed");
     expect(html).toContain("Network error");
   });
 });
@@ -2959,8 +3129,8 @@ function queuedInput(overrides: Partial<QueuedInput> = {}): QueuedInput {
     mode: "plan",
     status: "queued",
     error: null,
-    codexSessionId: "codex-a",
-    codexJsonlPath: "/tmp/codex-a.jsonl",
+    threadId: "codex-a",
+    transcriptPath: "/tmp/codex-a.jsonl",
     actorSessionId: null,
     createdAt: "2026-07-07T00:00:00.000Z",
     updatedAt: "2026-07-07T00:00:00.000Z",
@@ -3014,6 +3184,21 @@ describe("WorkingIndicator", () => {
 
     expect(html).toContain("Heavyweight command is running");
     expect(html).not.toContain("Codex is queued");
+  });
+
+  it("names the session provider", () => {
+    expect(renderToStaticMarkup(createElement(WorkingIndicator, { provider: "claude" }))).toContain("Claude is working");
+    expect(renderToStaticMarkup(createElement(WorkingIndicator, { provider: "claude", status: "planning" }))).toContain("Claude is planning...");
+    expect(renderToStaticMarkup(createElement(QueuedIndicator, { provider: "claude" }))).toContain("Claude is queued");
+    expect(renderToStaticMarkup(createElement(TranscriptSyncIndicator, { provider: "claude" }))).toContain("<span>Claude</span>");
+    expect(renderToStaticMarkup(createElement(InputDeliveryFailureBanner, {
+      busyAction: null,
+      detail: "",
+      provider: "claude",
+      error: "",
+      onRetry: () => undefined,
+      onDismiss: () => undefined
+    }))).toContain("Claude did not complete the last input.");
   });
 
   it("renders transcript synchronization without an elapsed runtime", () => {
@@ -3605,10 +3790,8 @@ function managedSession(overrides: Partial<ManagedSession> = {}): ManagedSession
     id: "session-a",
     name: "codex",
     cwd: "/workspace/muxpilot",
-    provider: { kind: "codex", threadId: "codex-session", rolloutPath: "/tmp/codex-session.jsonl" },
+    provider: { kind: "codex", threadId: "codex-session", transcriptPath: "/tmp/codex-session.jsonl" },
     repo: repo("muxpilot", "main"),
-    codexSessionId: "codex-session",
-    codexJsonlPath: "/tmp/codex-session.jsonl",
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,
@@ -3712,5 +3895,24 @@ function repo(name: string, branch: string | null): RepoMetadata {
     branch,
     dirty: false,
     worktree: null
+  };
+}
+
+function sessionCapabilities(): NonNullable<ManagedSession["capabilities"]> {
+  return {
+    start: true,
+    sendMessage: true,
+    steer: true,
+    resume: true,
+    fork: true,
+    verifiedInput: true,
+    interrupt: true,
+    kill: true,
+    approvals: true,
+    questions: true,
+    planActions: true,
+    fastMode: true,
+    terminalAttach: true,
+    hibernate: true
   };
 }

@@ -3,13 +3,15 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import type { GitWorkspaceState, ManagedSession } from "@muxpilot/core";
+import { ProviderUsagePanel } from "../components/ProviderUsagePanel.js";
 import {
-  CodexUsagePanel,
   DASHBOARD_STATUSES,
   DASHBOARD_USAGE_RECONCILE_INTERVAL_MS,
   dashboardLocationState,
   dashboardPreviewLines,
   DashboardPrimaryActions,
+  DashboardUsageGrid,
+  ModelDefaultsProviderTabs,
   dashboardStatusFilterFromSearchParams,
   filterSessionsByDashboardQuery,
   filterSessionsByDashboardStatus,
@@ -23,6 +25,9 @@ import {
   sessionNameValidationMessage,
 } from "./Dashboard.js";
 import { sessionDisplayName } from "../utils/sessionLabels.js";
+import { providerDescriptor } from "../testing/providerFixtures.js";
+import type { ProvidersState } from "../hooks/useProviders.js";
+import type { ProviderUsageMonitorState } from "./AppShell.js";
 
 const dashboardStyles = readFileSync(new URL("../styles/app.css", import.meta.url), "utf8");
 
@@ -45,6 +50,13 @@ describe("dashboard data ownership", () => {
     const matching = testSession({ id: "matching", paneId: "%111", windowName: "codex-cache" });
     const other = testSession({ id: "other", paneId: "%112", windowName: "ui" });
     expect(filterSessionsByDashboardQuery([matching, other], "CACHE")).toEqual([matching]);
+  });
+
+  it("matches sessions by provider label", () => {
+    const claude = testSession({ id: "claude", paneId: "%113", windowName: "work" });
+    claude.provider = { kind: "claude", threadId: null, transcriptPath: null };
+    const codex = testSession({ id: "codex", paneId: "%114", windowName: "work" });
+    expect(filterSessionsByDashboardQuery([claude, codex], "claude")).toEqual([claude]);
   });
 
   it("filters by the stable name after an app-server rename", () => {
@@ -497,7 +509,8 @@ describe("SessionCard", () => {
   it("labels forked conversations with their origin", () => {
     const session = testSession({ id: "fork", paneId: "%120", windowName: "alternate-route" });
     session.forkedFrom = {
-      codexSessionId: "codex-parent",
+      provider: "codex",
+      threadId: "codex-parent",
       sessionId: "parent",
       sessionName: "original-route"
     };
@@ -635,18 +648,23 @@ describe("dashboard repo session ordering", () => {
   });
 });
 
-describe("CodexUsagePanel", () => {
+describe("ProviderUsagePanel", () => {
   it("renders the account and Codex limit usage", () => {
     const html = renderToStaticMarkup(
-      createElement(CodexUsagePanel, {
-        usageMonitor: staticUsageMonitor,
+      createElement(ProviderUsagePanel, {
+        provider: "codex",
+        refreshError: null,
+        resetCredits: staticResetCredits,
         summary: {
+          provider: "codex",
           available: true,
           error: null,
           refreshedAt: "2026-07-07T12:00:00.000Z",
+          accountStatus: "authenticated",
           account: { kind: "chatgpt", email: "engineer@example.com", planType: "plus" },
-          limits: {
-            fiveHour: {
+          limits: [
+            {
+              id: "five_hour",
               label: "5h limit",
               limitName: "codex",
               usedPercent: 40,
@@ -654,7 +672,8 @@ describe("CodexUsagePanel", () => {
               windowDurationMins: 300,
               resetsAt: 1_784_000_000
             },
-            weekly: {
+            {
+              id: "weekly",
               label: "Weekly limit",
               limitName: "codex",
               usedPercent: 70,
@@ -662,7 +681,7 @@ describe("CodexUsagePanel", () => {
               windowDurationMins: 10_080,
               resetsAt: 1_784_300_000
             }
-          },
+          ],
           resetCredits: {
             availableCount: 1,
             credits: [{
@@ -694,15 +713,18 @@ describe("CodexUsagePanel", () => {
 
   it("keeps the panel visible when Codex usage is unavailable", () => {
     const html = renderToStaticMarkup(
-      createElement(CodexUsagePanel, {
-        usageMonitor: staticUsageMonitor,
+      createElement(ProviderUsagePanel, {
+        provider: "codex",
+        refreshError: null,
+        resetCredits: staticResetCredits,
         summary: {
+          provider: "codex",
           available: false,
           error: "Codex account authentication required.",
           refreshedAt: "2026-07-07T12:00:00.000Z",
           accountStatus: "signed_out",
           account: null,
-          limits: { fiveHour: null, weekly: null },
+          limits: [],
           resetCredits: null
         }
       })
@@ -714,14 +736,130 @@ describe("CodexUsagePanel", () => {
   });
 });
 
-const staticUsageMonitor = {
+describe("SessionCard provider badges", () => {
+  it("shows the provider only when badges are enabled and marks children from another provider", () => {
+    const root = testSession({ id: "root", paneId: "%120", windowName: "root" });
+    const child = testSession({ id: "child", paneId: "%121", windowName: "child" });
+    child.provider = { kind: "claude", threadId: null, transcriptPath: null };
+    child.agentOwnership = {
+      parentSessionId: "root",
+      rootSessionId: "root",
+      origin: "created",
+      createdAt: "2026-07-07T12:00:00.000Z",
+      workTokenBaseline: 0,
+      workTokenBudget: 1_000_000,
+      completedAt: null
+    };
+    const props = {
+      session: root,
+      displayName: "root",
+      previewLines: [],
+      notificationRules: [],
+      notificationRing: null,
+      children: [child],
+      onOpen: () => undefined,
+      onOpenMenu: () => undefined,
+      onOpenMenuFromButton: () => undefined
+    };
+
+    const hidden = renderToStaticMarkup(createElement(SessionCard, props));
+    expect(hidden).not.toContain('aria-label="Codex provider"');
+    expect(hidden).toContain('aria-label="Claude provider"');
+
+    const shown = renderToStaticMarkup(createElement(SessionCard, { ...props, showProvider: true }));
+    expect(shown).toContain('aria-label="Codex provider"');
+  });
+});
+
+describe("ModelDefaultsProviderTabs", () => {
+  it("renders one tab per enabled provider with the selected provider active", () => {
+    const html = renderToStaticMarkup(createElement(ModelDefaultsProviderTabs, {
+      providers: [providerDescriptor("codex"), providerDescriptor("claude")],
+      value: "claude",
+      onChange: () => undefined
+    }));
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('data-provider="codex" aria-selected="false"');
+    expect(html).toContain('data-provider="claude" aria-selected="true" data-active="true"');
+  });
+});
+
+describe("DashboardUsageGrid", () => {
+  it("renders one panel per installed provider that reports usage", () => {
+    const html = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: providersState([providerDescriptor("codex"), providerDescriptor("claude")]),
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+
+    expect(html).toContain('class="dashboard-usage-grid" data-count="2"');
+    expect(html).toContain("Codex usage");
+    expect(html).toContain("Claude usage");
+    expect(html.match(/Usage reset tokens/g)).toHaveLength(1);
+  });
+
+  it("omits providers that are not installed and waits for the catalog", () => {
+    const missingClaude = providerDescriptor("claude", { compatibility: { status: "missing_binary", available: false } });
+    const html = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: providersState([providerDescriptor("codex"), missingClaude]),
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+    expect(html).toContain('data-count="1"');
+    expect(html).not.toContain("Claude usage");
+
+    const loading = renderToStaticMarkup(createElement(DashboardUsageGrid, {
+      providers: { ...providersState([]), loaded: false },
+      usageMonitors: { codex: usageMonitor("codex"), claude: usageMonitor("claude") }
+    }));
+    expect(loading).not.toContain("Codex usage");
+    expect(loading).toContain("dashboard-usage-grid");
+  });
+});
+
+function providersState(providers: ProvidersState["providers"]): ProvidersState {
+  return {
+    loaded: true,
+    loading: false,
+    error: null,
+    defaultProvider: "codex",
+    providers,
+    reload: async () => undefined,
+    applyAuthUpdate: () => ({ applied: false, becameReady: false }),
+    refreshAuth: async () => null,
+    setDefaultProvider: async () => undefined
+  };
+}
+
+function usageMonitor(provider: "codex" | "claude"): ProviderUsageMonitorState {
+  const summary = {
+    provider,
+    available: true,
+    error: null,
+    refreshedAt: "2026-07-07T12:00:00.000Z",
+    accountStatus: "authenticated" as const,
+    account: { kind: provider === "codex" ? "chatgpt" : "claudeAi", email: `${provider}@example.com`, planType: null },
+    limits: [{ id: "five_hour", label: "5h limit", limitName: null, usedPercent: 10, remainingPercent: 90, windowDurationMins: 300, resetsAt: null }],
+    resetCredits: provider === "codex" ? { availableCount: 0, credits: [] } : null
+  };
+  return {
+    provider,
+    enabled: true,
+    summary,
+    initialLoading: false,
+    refreshError: null,
+    refreshSummary: async () => summary,
+    acceptExternalSummary: () => undefined,
+    currentSummary: () => summary,
+    resetCredits: staticResetCredits
+  };
+}
+
+const staticResetCredits = {
   pendingAttempt: null,
   resetAction: null,
   resetError: null,
   resetOutcome: null,
   resetObservation: null,
   resetRevision: 0,
-  refreshError: null,
   consumeReset: async () => undefined
 };
 
@@ -878,10 +1016,8 @@ function testSession(
     id: input.id,
     name: input.windowName,
     cwd: "/repo",
-    provider: { kind: "codex", threadId: null, rolloutPath: null },
+    provider: { kind: "codex", threadId: null, transcriptPath: null },
     repo: { root: input.repoRoot ?? "/repo", name: input.repoName ?? "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: null,
-    codexJsonlPath: null,
     discoveryConfidence: "medium",
     status: input.status ?? "waiting",
     initializing: input.initializing ?? false,

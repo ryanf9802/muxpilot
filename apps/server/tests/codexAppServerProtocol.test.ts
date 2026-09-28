@@ -9,7 +9,7 @@ import {
   REQUIRED_SERVER_NOTIFICATIONS,
   REQUIRED_SERVER_REQUESTS,
   type ProtocolRequester
-} from "../src/services/sessionDrivers/codexAppServerProtocol.js";
+} from "../src/providers/codex/protocol.js";
 
 describe("CodexAppServerProtocol", () => {
   it("matches the normalized Codex 0.152.0 initialize fixture", async () => {

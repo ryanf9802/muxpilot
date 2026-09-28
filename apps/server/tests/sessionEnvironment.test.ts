@@ -76,8 +76,8 @@ function database(sessions: Map<string, ManagedSession>): AppDatabase {
 
 function session(id: string, parentSessionId: string | null = null): ManagedSession {
   return {
-    id, name: id, cwd: "/tmp", provider: { kind: "codex", threadId: id, rolloutPath: null },
-    repo: { root: "/tmp", name: "test", branch: null }, codexSessionId: id, codexJsonlPath: null,
+    id, name: id, cwd: "/tmp", provider: { kind: "codex", threadId: id, transcriptPath: null },
+    repo: { root: "/tmp", name: "test", branch: null },
     discoveryConfidence: "high", status: "idle", lastActivityAt: null, preview: "", recentUserPrompts: [],
     approvalMode: "ask", inputMode: "default", models: { default: { model: null, reasoningEffort: null }, plan: { model: null, reasoningEffort: null } },
     transcriptSize: 0, unreadCount: 0, pinned: false, archived: false,

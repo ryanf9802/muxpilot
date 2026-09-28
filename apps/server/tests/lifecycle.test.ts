@@ -100,12 +100,12 @@ describe("production bundled skill startup", () => {
       const installedOrchestrationSkill = await readFile(join(home, "skills", "muxpilot-session-orchestration", "SKILL.md"), "utf8");
       expect(installedOrchestrationSkill).toContain("event-driven wait");
       expect(installedOrchestrationSkill).toContain("Approval decisions remain with the operator");
-      expect(installedOrchestrationSkill).toContain("Use built-in Codex subagents for routine bounded delegation");
+      expect(installedOrchestrationSkill).toContain("Use your provider's built-in subagents (Codex subagents or Claude Task subagents) for routine bounded delegation");
       expect(installedOrchestrationSkill).toContain("Do not create a nested muxpilot session merely to run a review in parallel");
       expect(installedOrchestrationSkill).toContain("only when the operator explicitly requests a nested muxpilot session");
       expect(installedOrchestrationSkill).toContain("Every agent-created muxpilot child session has its own private `$MUXPILOT_DOCUMENTS_DIR`");
       expect(installedOrchestrationSkill).toContain("returns a structured handoff");
-      expect(installedOrchestrationSkill).toContain("Built-in Codex subagents are not muxpilot child sessions");
+      expect(installedOrchestrationSkill).toContain("Built-in provider subagents are not muxpilot child sessions");
       const installedDocumentsSkill = await readFile(join(home, "skills", "muxpilot-documents", "SKILL.md"), "utf8");
       expect(installedDocumentsSkill).toContain("MUXPILOT_DOCUMENTS_DIR");
       expect(installedDocumentsSkill).toContain("Read `INDEX.md` first");
@@ -213,6 +213,11 @@ describe("shadow lifecycle isolation", () => {
     await writeFile(join(appRoot, markedId, "environment"), 'CODEX_HOME="/tmp/codex"\nMUXPILOT_SHADOW="1"\n');
     await writeFile(join(appRoot, unmarkedId, "environment"), 'MUXPILOT_SHADOW="0"\n');
 
+    const claudeId = "aaaaaaaaaaaaaaaaaaaaaaaa";
+    const claudeRoot = join(dataDir, "runtime", "claude-sessions");
+    await mkdir(join(claudeRoot, claudeId), { recursive: true });
+    await writeFile(join(claudeRoot, claudeId, "environment"), 'MUXPILOT_SHADOW="1"\n');
+
     const heavyRoot = join(dataDir, "heavy", "runs");
     await mkdir(join(heavyRoot, "valid-run"), { recursive: true });
     await mkdir(join(heavyRoot, "invalid-run"), { recursive: true });
@@ -229,7 +234,8 @@ describe("shadow lifecycle isolation", () => {
 
     expect(shadowOwnedSystemdUnits(dataDir)).toEqual([
       "muxpilot-heavy-workspace-0123456789ab-abcdef.service",
-      `muxpilot-session-${markedId}.service`
+      `muxpilot-session-${markedId}.service`,
+      `muxpilot-session-${claudeId}.service`
     ]);
   });
 });

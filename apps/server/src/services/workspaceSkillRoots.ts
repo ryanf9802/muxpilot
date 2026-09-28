@@ -5,12 +5,16 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 const MANAGED_LINK_PREFIX = "muxpilot-repo-skills-";
 const SKILL_ROOT_RELATIVE_PATHS = [join(".agents", "skills"), join(".codex", "skills")] as const;
 
-export function workspaceSkillRootCandidates(paths: string[], maxAncestorDepth = 4): string[] {
+export function workspaceSkillRootCandidates(
+  paths: string[],
+  skillDirs: readonly string[] = SKILL_ROOT_RELATIVE_PATHS,
+  maxAncestorDepth = 4
+): string[] {
   const candidates: string[] = [];
   for (const path of uniqueResolvedPaths(paths)) {
     let current = path;
     for (let depth = 0; depth <= maxAncestorDepth; depth += 1) {
-      for (const skillRoot of SKILL_ROOT_RELATIVE_PATHS) candidates.push(join(current, skillRoot));
+      for (const skillRoot of skillDirs) candidates.push(join(current, skillRoot));
       const parent = dirname(current);
       if (parent === current) break;
       current = parent;

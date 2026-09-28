@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:child_process", async (importOriginal) => ({ ...await importOriginal<typeof import("node:child_process")>(), spawn: vi.fn() }));
 
-import { CodexAppServerClient } from "../src/services/codexUsage.js";
+import { CodexAppServerClient } from "../src/providers/codex/usage.js";
 
 function appServer() {
   const child = Object.assign(new EventEmitter(), {

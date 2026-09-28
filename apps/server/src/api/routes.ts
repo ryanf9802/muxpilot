@@ -3,8 +3,10 @@ import { z } from "zod";
 import type {
   BtwExchangeResponse,
   BtwExchangesResponse,
-  AppServerCompatibility,
-  CodexSkillsResponse,
+  SessionAgentMessagesResponse,
+  SessionAgentsResponse,
+  ProviderCompatibility,
+  AgentSkillsResponse,
   CreateSessionRequest,
   DashboardSessionSummary,
   ForkSessionRequest,
@@ -31,7 +33,8 @@ import type {
   UpdateRemoteAccessSettingsRequest,
 } from "@muxpilot/core";
 import type { ManagedSession } from "@muxpilot/core";
-import { isValidSessionName, normalizeSessionName } from "@muxpilot/core";
+import { AGENT_PROVIDER_KINDS, isValidSessionName, normalizeSessionName } from "@muxpilot/core";
+import { registerProviderRoutes } from "./providerRoutes.js";
 import {
   ApprovalResolutionError,
   AgentSessionError,
@@ -53,17 +56,15 @@ import type { AppDatabase } from "../db/database.js";
 import type { AppConfig } from "../config/config.js";
 import type { AccessControl } from "../auth/auth.js";
 import { buildConnectivity, buildRemoteAccess } from "../services/connectivity.js";
-import { discoverCodexSkills } from "../services/skillDiscovery.js";
-import type { CodexUsageService } from "../services/codexUsage.js";
 import type { NotificationService } from "../services/notifications.js";
+import type { ProviderRegistry } from "../providers/registry.js";
 import { GitWorkspaceError } from "../services/gitWorkspaceManager.js";
-import { muxpilotGitWorkflowSkillStatus } from "../services/bundledSkills.js";
 import { SessionTransferError, type SessionTransferService } from "../services/sessionTransfer.js";
 import type { HeavyCommandService } from "../services/heavyCommands.js";
 import { SessionDocumentError } from "../services/sessionDocuments.js";
 import { BtwError, type BtwService } from "../services/btwService.js";
 import { SessionImageError, type SessionImageService } from "../services/sessionImages.js";
-import { CodexAuthUnavailableError, type CodexAuthLifecycle } from "../services/codexAuthLifecycle.js";
+import { ProviderAuthUnavailableError } from "../providers/shared/authLifecycle.js";
 import { SessionEnvironmentError, type SessionEnvironmentService } from "../services/sessionEnvironment.js";
 
 const collaborationModeSchema = z.enum(["default", "plan"]);
@@ -113,6 +114,7 @@ const sessionNameSchema = z
 const createSessionSchema = z.object({
   cwd: z.string().trim().min(1).max(4096),
   name: sessionNameSchema,
+  provider: z.enum(AGENT_PROVIDER_KINDS).optional(),
   workspace: z.discriminatedUnion("mode", [
     z.object({ mode: z.literal("directory") }),
     z.object({
@@ -126,6 +128,7 @@ const forkSessionSchema = z.object({
 }).strict();
 const queuedInputSchema = inputBodySchema;
 const btwQuestionSchema = z.object({ text: z.string().trim().min(1).max(20_000) });
+const agentParamsSchema = z.object({ id: z.string().min(1), agentId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) });
 const DEFAULT_MESSAGE_PAGE_SIZE = 80;
 const MAX_MESSAGE_PAGE_SIZE = 250;
 const DEFAULT_PROMPT_HISTORY_LIMIT = 30;
@@ -222,81 +225,41 @@ const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("kill") })
 ]);
 
-export function registerRoutes(
-  app: FastifyInstance,
-  manager: SessionManager,
-  events: EventBus,
-  db: AppDatabase,
-  config: AppConfig,
-  access: AccessControl,
-  codexUsage?: CodexUsageService,
-  notificationService?: NotificationService,
-  sessionTransfers?: SessionTransferService,
-  heavyCommands?: HeavyCommandService,
-  btw?: BtwService,
-  appServerCompatibility?: AppServerCompatibility,
-  sessionImages?: SessionImageService,
-  codexAuth?: CodexAuthLifecycle,
-  sessionEnvironment?: SessionEnvironmentService
-): void {
+export interface RouteDependencies {
+  manager: SessionManager;
+  events: EventBus;
+  db: AppDatabase;
+  config: AppConfig;
+  access: AccessControl;
+  providers: ProviderRegistry;
+  notificationService?: NotificationService;
+  sessionTransfers?: SessionTransferService;
+  heavyCommands?: HeavyCommandService;
+  btw?: BtwService;
+  sessionImages?: SessionImageService;
+  sessionEnvironment?: SessionEnvironmentService;
+}
+
+export function registerRoutes(app: FastifyInstance, dependencies: RouteDependencies): void {
+  const {
+    manager,
+    events,
+    db,
+    config,
+    access,
+    providers,
+    notificationService,
+    sessionTransfers,
+    heavyCommands,
+    btw,
+    sessionImages,
+    sessionEnvironment
+  } = dependencies;
+  registerProviderRoutes(app, { manager, providers, db, access });
+
   app.get("/api/connectivity", { preHandler: access.requireAccess }, async () =>
     buildConnectivity(config, undefined, access.isUnrestrictedRemoteAccessEnabled())
   );
-
-  if (appServerCompatibility) {
-    app.get("/api/app-server/compatibility", { preHandler: access.requireAccess }, async (): Promise<AppServerCompatibility> =>
-      appServerCompatibility
-    );
-  }
-
-  app.get("/api/codex-models", { preHandler: access.requireAccess }, async (_request, reply) => {
-    try {
-      return await manager.codexModelCatalog();
-    } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
-      throw error;
-    }
-  });
-
-  if (codexAuth) {
-    app.get("/api/codex-auth", { preHandler: access.requireAccess }, async () => codexAuth.state());
-    app.post("/api/codex-auth/refresh", { preHandler: access.requireAccess }, async () => codexAuth.refresh());
-  }
-
-  app.get("/api/model-settings/defaults", { preHandler: access.requireAccess }, async (_request, reply) => {
-    try {
-      return { settings: await manager.globalModelSettings() };
-    } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
-      throw error;
-    }
-  });
-
-  app.patch("/api/model-settings/defaults", { preHandler: access.requireAccess }, async (request, reply) => {
-    const body = modelSettingsSchema.parse(request.body);
-    try {
-      return { settings: await manager.updateGlobalModelSettings(body.mode, body.model, body.reasoningEffort) };
-    } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
-      if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
-      throw error;
-    }
-  });
-
-  app.get("/api/approval-reviewer/settings", { preHandler: access.requireAccess }, async () => ({
-    settings: await manager.approvalReviewerSettings()
-  }));
-
-  app.patch("/api/approval-reviewer/settings", { preHandler: access.requireAccess }, async (request, reply) => {
-    const body = approvalReviewerSettingsSchema.parse(request.body);
-    try {
-      return { settings: await manager.updateApprovalReviewerSettings(body.model, body.reasoningEffort) };
-    } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
-      if (error instanceof ModelSettingsError) return reply.code(error.statusCode).send({ error: error.message });
-      throw error;
-    }
-  });
 
   if (sessionTransfers) {
     app.post("/api/session-transfers/export", { preHandler: access.requireLocalAccess }, async (request, reply) => {
@@ -391,15 +354,7 @@ export function registerRoutes(
     return { ok: true };
   });
 
-  app.get("/api/codex/skills", { preHandler: access.requireAccess }, async (): Promise<CodexSkillsResponse> => ({
-    skills: await discoverCodexSkills(config.codexHome)
-  }));
-
-  app.get("/api/codex/skills/muxpilot-git-workflow/status", { preHandler: access.requireAccess }, async (): Promise<MuxpilotGitSkillStatus> => {
-    return muxpilotGitWorkflowSkillStatus(config.skillHome);
-  });
-
-  app.get("/api/sessions/:id/skills", { preHandler: access.requireAccess }, async (request, reply): Promise<CodexSkillsResponse | void> => {
+  app.get("/api/sessions/:id/skills", { preHandler: access.requireAccess }, async (request, reply): Promise<AgentSkillsResponse | void> => {
     const { id } = request.params as { id: string };
     const session = await manager.getSession(id);
     if (!session) {
@@ -408,7 +363,7 @@ export function registerRoutes(
     }
     const workspaceRoots = [session.gitWorkspace?.entryPath, session.repo.root, session.cwd]
       .filter((path): path is string => Boolean(path));
-    return { skills: await discoverCodexSkills(config.codexHome, workspaceRoots) };
+    return { skills: await providers.forSession(session).skills.discover(workspaceRoots) };
   });
 
   app.get("/api/sessions", { preHandler: access.requireAccess }, async (request) => {
@@ -462,7 +417,7 @@ export function registerRoutes(
     try {
       return await manager.restoreSession(id);
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNotFoundError || error instanceof SessionRestoreError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
@@ -480,7 +435,7 @@ export function registerRoutes(
     try {
       return await manager.restoreSessionRecovery(body.incidentId, body.sessionIds);
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionRestoreError || error instanceof SessionNotFoundError || error instanceof CreateSessionError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
@@ -498,13 +453,14 @@ export function registerRoutes(
   app.post("/api/sessions", { preHandler: access.requireAccess }, async (request, reply) => {
     const body = createSessionSchema.parse(request.body) as CreateSessionRequest;
     try {
-      if (body.workspace?.mode === "git" && (await muxpilotGitWorkflowSkillStatus(config.skillHome)).status !== "current") {
+      const provider = providers.get(body.provider ?? providers.defaultProvider());
+      if (body.workspace?.mode === "git" && (await provider.skills.gitWorkflowSkillStatus()).status !== "current") {
         return reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before creating a Git session", code: "git_skill_required" });
       }
       const session = await manager.createSession(body);
       return reply.code(201).send({ session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNameError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof CreateSessionError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof GitWorkspaceError) return reply.code(409).send({ error: error.message, code: error.code });
@@ -518,14 +474,14 @@ export function registerRoutes(
     try {
       const source = await manager.getSession(id);
       if (!source) throw new SessionNotFoundError("Session not found");
-      if (source.gitWorkspace && (await muxpilotGitWorkflowSkillStatus(config.skillHome)).status !== "current") {
+      if (source.gitWorkspace && (await providers.forSession(source).skills.gitWorkflowSkillStatus()).status !== "current") {
         await reply.code(409).send({ error: "Run pnpm app start prod to install or update the muxpilot Git workflow skill before forking a Git session", code: "git_skill_required" });
         return;
       }
       const session = await manager.forkSession(id, body.name);
       return reply.code(201).send({ session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) {
+      if (error instanceof ProviderAuthUnavailableError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
       }
@@ -750,7 +706,7 @@ export function registerRoutes(
         ? { ok: true, session: null, message: null, queuedInput: result.queuedInput }
         : { ok: true, ...result, queuedInput: null });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof InputModeSwitchError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
@@ -789,6 +745,34 @@ export function registerRoutes(
     }
   });
 
+  const agentRoute = async <T>(reply: FastifyReply, operation: () => Promise<T>): Promise<T | void> => {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return reply.code(404).send({ error: error.message });
+      if (error instanceof AgentSessionError) return reply.code(409).send({ error: error.message });
+      throw error;
+    }
+  };
+
+  app.get("/api/sessions/:id/agents", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionAgentsResponse | void> => {
+    const { id } = request.params as { id: string };
+    return agentRoute(reply, async () => ({ agents: await manager.listAgents(id) }));
+  });
+
+  app.get("/api/sessions/:id/agents/:agentId/messages", { preHandler: access.requireAccess }, async (request, reply): Promise<SessionAgentMessagesResponse | void> => {
+    const { id, agentId } = agentParamsSchema.parse(request.params);
+    return agentRoute(reply, () => manager.agentMessages(id, agentId));
+  });
+
+  app.post("/api/sessions/:id/agents/:agentId/stop", { preHandler: access.requireAccess }, async (request, reply) => {
+    const { id, agentId } = agentParamsSchema.parse(request.params);
+    return agentRoute(reply, async () => {
+      await manager.stopAgent(id, agentId);
+      return { ok: true };
+    });
+  });
+
   app.get("/api/sessions/:id/btw", { preHandler: access.requireAccess }, async (request, reply): Promise<BtwExchangesResponse | void> => {
     const { id } = request.params as { id: string };
     if (!btw) {
@@ -816,7 +800,7 @@ export function registerRoutes(
     try {
       return reply.code(202).send({ exchange: await btw.ask(id, body.text) });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) {
+      if (error instanceof ProviderAuthUnavailableError) {
         await reply.code(error.statusCode).send({ error: error.message });
         return;
       }
@@ -858,7 +842,7 @@ export function registerRoutes(
       const input = await manager.enqueueInput(id, canonicalInputText(body), body.mode, null, body.content);
       return reply.code(201).send({ queuedInput: input });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof QueuedInputError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionImageError) return reply.code(error.statusCode).send({ error: error.message });
       throw error;
@@ -897,7 +881,7 @@ export function registerRoutes(
       const session = await manager.act(id, action);
       return reply.code(202).send({ ok: true, session });
     } catch (error) {
-      if (error instanceof CodexAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
+      if (error instanceof ProviderAuthUnavailableError) return reply.code(error.statusCode).send({ error: error.message });
       if (error instanceof SessionNameError) {
         return reply.code(error.statusCode).send({ error: error.message });
       }
@@ -921,38 +905,6 @@ export function registerRoutes(
       }
       throw error;
     }
-  });
-
-  app.get("/api/codex-usage/summary", { preHandler: access.requireAccess }, async (request) => {
-    const { refresh } = z.object({ refresh: z.enum(["0", "1"]).optional() }).parse(request.query);
-    if (!codexUsage) {
-      return {
-        available: false,
-        error: "Codex usage service is not configured.",
-        refreshedAt: new Date().toISOString(),
-        account: null,
-        limits: { fiveHour: null, weekly: null },
-        resetCredits: null
-      };
-    }
-    return codexUsage.summary(refresh === "1");
-  });
-
-  app.get("/api/codex-usage/history", { preHandler: access.requireAccess }, async (request) => {
-    const parsed = z.object({
-      days: z.coerce.number().pipe(z.union([z.literal(7), z.literal(30)])).default(30),
-      refresh: z.enum(["0", "1"]).optional()
-    }).parse(request.query);
-    if (!codexUsage) {
-      return { available: false, error: "Codex usage service is not configured.", refreshedAt: new Date().toISOString(), days: parsed.days, summary: null, points: null };
-    }
-    return codexUsage.tokenUsage(parsed.days, parsed.refresh === "1");
-  });
-
-  app.post("/api/codex-usage/reset", { preHandler: access.requireAccess }, async (request, reply) => {
-    if (!codexUsage) return reply.code(503).send({ error: "Codex usage service is not configured." });
-    const body = codexResetCreditSchema.parse(request.body);
-    return codexUsage.consumeResetCredit(body.idempotencyKey, body.creditId);
   });
 
   app.get("/api/events", { websocket: true, preHandler: access.requireAccess }, (socket, request) => {
@@ -997,8 +949,6 @@ export function dashboardSessionSummary(session: ManagedSession): DashboardSessi
       dirty: session.repo.dirty,
       worktree: null
     },
-    codexSessionId: session.codexSessionId,
-    codexJsonlPath: null,
     discoveryConfidence: session.discoveryConfidence,
     status: session.status,
     initializing: session.initializing,

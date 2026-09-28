@@ -1,8 +1,9 @@
 import { ClipboardList, MessageSquare, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import type {
-  CodexModel,
-  CodexModelCatalogResponse,
+  AgentModel,
+  AgentProviderKind,
+  ProviderModelCatalogResponse,
   CollaborationMode,
   ApprovalMode,
   ApprovalReviewerSettings,
@@ -12,10 +13,11 @@ import type {
 } from "@muxpilot/core";
 import { Modal } from "./Modal.js";
 import { Button, DialogActions } from "./Button.js";
+import { providerLabel } from "../utils/providers.js";
 
 export function effectiveModelSettings(
   session: Pick<ManagedSession, "models">,
-  defaults: CodexModelCatalogResponse["defaults"],
+  defaults: ProviderModelCatalogResponse["defaults"],
   mode: CollaborationMode
 ): SessionModelSettings {
   const saved = session.models[mode];
@@ -27,6 +29,9 @@ export function effectiveModelSettings(
 
 export function ModelSettingsDrawer({
   open,
+  provider,
+  providerFastMode = true,
+  toolbar = null,
   title,
   description,
   selections,
@@ -48,12 +53,18 @@ export function ModelSettingsDrawer({
   onApprovalModeChange
 }: {
   open: boolean;
+  /** Scopes radio groups and copy so drawers for different providers never share form state. */
+  provider: AgentProviderKind;
+  /** Whether the provider supports Fast mode at all; the Fast-mode warning is meaningless otherwise. */
+  providerFastMode?: boolean;
+  /** Optional controls rendered above the options, e.g. provider tabs for global defaults. */
+  toolbar?: ReactNode;
   title: string;
   description: string;
   selections: SessionModelSelections;
   activeMode: CollaborationMode | null;
   fastMode?: boolean | null;
-  catalog: CodexModelCatalogResponse | null;
+  catalog: ProviderModelCatalogResponse | null;
   loading: boolean;
   error: string;
   applying: CollaborationMode | "reviewer" | null;
@@ -88,14 +99,14 @@ export function ModelSettingsDrawer({
 
   const changedNormal = draftModel !== normal.model || draftEffort !== normal.reasoningEffort;
   const changedPlan = draftModel !== plan.model || draftEffort !== plan.reasoningEffort;
-  const changedReviewer = reviewerSettings !== undefined && reviewerSettings !== null
-    && (draftModel !== reviewerSettings.model || draftEffort !== reviewerSettings.reasoningEffort);
+  const changedReviewer = Boolean(reviewerSettings)
+    && (draftModel !== reviewerSettings!.model || draftEffort !== reviewerSettings!.reasoningEffort);
   const valid = Boolean(selectedModel) && (
     selectedModel!.supportedReasoningEfforts.length === 0
       ? draftEffort === null
       : selectedModel!.supportedReasoningEfforts.some((option) => option.reasoningEffort === draftEffort)
   );
-  const fastUnavailable = fastMode === true && selectedModel !== null && !supportsFast(selectedModel);
+  const fastUnavailable = providerFastMode && fastMode === true && selectedModel !== null && !selectedModel.supportsFastMode;
   const activeSelectionChanged = activeMode === "plan" ? changedPlan : activeMode === "default" ? changedNormal : false;
   const badgeSelections = useMemo(() => ({ normal, plan }), [normal.model, normal.reasoningEffort, plan.model, plan.reasoningEffort]);
 
@@ -121,6 +132,7 @@ export function ModelSettingsDrawer({
       initialFocusRef={initialFocusRef}
     >
       <div className="model-settings-intro">
+        {toolbar}
         <p>{description}</p>
         <div className="model-settings-legend" aria-label="Option badge legend">
           <Badge icon={<MessageSquare />} label="Current Normal selection" legend />
@@ -136,7 +148,7 @@ export function ModelSettingsDrawer({
             <Button size="small" onClick={onRetry} disabled={busy}>Retry</Button>
           </div>
         ) : null}
-        {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No Codex models are currently available.</p> : null}
+        {catalog && catalog.models.length === 0 ? <p className="model-settings-state">No {providerLabel(provider)} models are currently available.</p> : null}
         {catalog && catalog.models.length > 0 ? (
           <>
             <fieldset className="model-settings-options">
@@ -146,7 +158,7 @@ export function ModelSettingsDrawer({
                   <input
                     ref={index === 0 ? initialFocusRef : undefined}
                     type="radio"
-                    name="codex-model"
+                    name={`${provider}-model`}
                     value={model.model}
                     checked={draftModel === model.model}
                     disabled={busy}
@@ -176,7 +188,7 @@ export function ModelSettingsDrawer({
                   <label className="model-settings-option" key={option.reasoningEffort}>
                     <input
                       type="radio"
-                      name="codex-reasoning-effort"
+                      name={`${provider}-reasoning-effort`}
                       value={option.reasoningEffort}
                       checked={draftEffort === option.reasoningEffort}
                       disabled={busy}
@@ -278,7 +290,7 @@ function Badge({ icon, label, legend = false }: { icon: ReactElement; label: str
   );
 }
 
-function validEffort(model: CodexModel | null | undefined, preferred: string | null): string | null {
+function validEffort(model: AgentModel | null | undefined, preferred: string | null): string | null {
   if (!model || model.supportedReasoningEfforts.length === 0) return null;
   if (preferred && model.supportedReasoningEfforts.some((option) => option.reasoningEffort === preferred)) return preferred;
   if (model.defaultReasoningEffort && model.supportedReasoningEfforts.some((option) => option.reasoningEffort === model.defaultReasoningEffort)) {
@@ -291,11 +303,7 @@ function effortLabel(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function supportsFast(model: CodexModel): boolean {
-  return model.serviceTiers.some((tier) => tier.id.toLowerCase() === "fast" || tier.id.toLowerCase() === "priority");
-}
-
-const emptyDefaults: CodexModelCatalogResponse["defaults"] = {
+const emptyDefaults: ProviderModelCatalogResponse["defaults"] = {
   default: { model: null, reasoningEffort: null },
   plan: { model: null, reasoningEffort: null }
 };

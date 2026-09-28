@@ -1,16 +1,16 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { CodexAppServerConnectionManager } from "../src/services/sessionDrivers/codexAppServerConnectionManager.js";
-import { CodexAppServerProtocol } from "../src/services/sessionDrivers/codexAppServerProtocol.js";
-import type { ProtocolJournal, ProtocolJournalEntry } from "../src/services/sessionDrivers/protocolJournal.js";
-import type { RuntimeProxyConnection, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/services/sessionDrivers/types.js";
+import { CodexAppServerConnectionManager } from "../src/providers/codex/connectionManager.js";
+import { CodexAppServerProtocol } from "../src/providers/codex/protocol.js";
+import type { ProtocolJournal, ProtocolJournalEntry } from "../src/runtime/protocolJournal.js";
+import type { RuntimeProxyConnection, RuntimeSupervisor, SystemdSessionRuntimeRef } from "../src/providers/types.js";
 
 const runtime: SystemdSessionRuntimeRef = {
   kind: "systemd_service",
   unit: "muxpilot-session-0123456789abcdef01234567.service",
   socketPath: "/runtime/app-server.sock",
   state: "connected",
-  codexVersion: "0.152.0"
+  agentVersion: "0.152.0"
 };
 
 describe("CodexAppServerConnectionManager", () => {

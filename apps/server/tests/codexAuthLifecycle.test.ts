@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CodexAuthLifecycle } from "../src/services/codexAuthLifecycle.js";
+import { CodexAuthLifecycle } from "../src/providers/codex/authLifecycle.js";
 import { EventBus } from "../src/services/eventBus.js";
 
 const roots: string[] = [];
@@ -273,8 +273,14 @@ async function createFixture(
   const lifecycle = new CodexAuthLifecycle(
     {
       clearCodexAuthProfiles: clearProfiles,
-      getCodexAuthReconciledPrincipal: getReconciledPrincipal,
-      setCodexAuthReconciledPrincipal: setReconciledPrincipal
+      getProviderAuthReconciledPrincipal: async (provider: string) => {
+        expect(provider).toBe("codex");
+        return getReconciledPrincipal();
+      },
+      setProviderAuthReconciledPrincipal: async (provider: string, principal: string, updatedAt: string) => {
+        expect(provider).toBe("codex");
+        return (setReconciledPrincipal as unknown as (principal: string, updatedAt: string) => Promise<void>)(principal, updatedAt);
+      }
     },
     new EventBus(),
     codexHome,

@@ -3,8 +3,9 @@
 Prerequisites:
 
 - WSL2 Ubuntu or another local Linux-like host.
-- A persistent user-systemd manager for the Codex app-server runtime.
-- Codex CLI.
+- A persistent user-systemd manager for provider session runtimes.
+- Codex CLI for Codex sessions.
+- Claude Code CLI for Claude sessions, plus `bubblewrap` and `socat` for its mandatory sandbox (`sudo apt install bubblewrap socat` on Ubuntu).
 - Node.js 24 or newer.
 - pnpm 11.21.0, matching the repository's `packageManager` pin.
 
@@ -23,6 +24,23 @@ Open:
 ```text
 http://127.0.0.1:12778
 ```
+
+## Providers
+
+Each session runs on one provider: Codex (through Codex app-server) or Claude (through Claude Code and the Claude Agent SDK). Both are enabled by default. Use `MUXPILOT_PROVIDERS` to enable only one, and `MUXPILOT_DEFAULT_PROVIDER` to choose the initial default. See [Configuration](configuration.md#providers).
+
+Provider sign-in is managed by each provider's CLI on the muxpilot host. muxpilot has no login button; it shows the command to run when a provider is signed out:
+
+```bash
+codex login
+claude auth login
+```
+
+muxpilot watches each provider's credentials independently. While a provider's account is changing, new sessions and input for that provider are held. After a sign-out, its live sessions stop at a safe boundary and must be resumed after sign-in; after an account change, they restart under the new account. The other provider is unaffected.
+
+Claude sessions use the CLI login, not API keys: muxpilot removes `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` from Claude runtimes unless `MUXPILOT_CLAUDE_ALLOW_API_KEY=1` is set. If `bwrap` or `socat` is missing, the Claude provider reports `sandbox_unavailable` and Claude sessions cannot start until both are installed and muxpilot is restarted.
+
+`pnpm app status` prints one availability line per enabled provider.
 
 
 Useful production commands:
@@ -91,7 +109,7 @@ Open the app on your desktop, press the Connect device button in the top bar, an
 https://192.168.1.25:12778
 ```
 
-Use the Connect device modal on the host machine to copy the generated access key or scan the QR code. The phone browser talks to the Web UI over the LAN, and the backend controls the local Codex runtimes on the desktop.
+Use the Connect device modal on the host machine to copy the generated access key or scan the QR code. The phone browser talks to the Web UI over the LAN, and the backend controls the local provider runtimes on the desktop.
 
 If the phone cannot reach the URL, install and verify the host firewall rule. On native Linux:
 
@@ -136,9 +154,10 @@ Session exports are encrypted with a passphrase entered in the transfer dialog. 
 - Native Linux: use [Native Linux LAN Access](./linux-lan.md) to install and verify the required local firewall rule.
 - Windows 11 + WSL2: use [Windows WSL LAN Access](./windows-wsl-lan.md) to install and verify the required Windows/Hyper-V firewall rules.
 - Access key rejected: open the Connect device modal on the host machine and use the current generated access key.
-- Skill suggestions missing: confirm `MUXPILOT_CODEX_HOME` points at the Codex home that contains your skills/plugins.
+- Skill suggestions missing: confirm `MUXPILOT_CODEX_HOME` or `MUXPILOT_CLAUDE_CONFIG_DIR` points at the provider home that contains your skills/plugins.
+- Provider unavailable or signed out: run `pnpm app status` for each provider's availability, install anything the status names, and sign in on the host with `codex login` or `claude auth login`.
 - Stale PID or port conflict: run `pnpm app status`, inspect `data/runtime/<mode>/`, and stop the conflicting process before starting again.
-- Submitted input is preserved but blocked: open the session's `input_failed` banner and retry only after checking the live composer, or dismiss it without assuming Codex received it.
+- Submitted input is preserved but blocked: open the session's `input_failed` banner and retry only after checking the live composer, or dismiss it without assuming the provider received it.
 - Heavy command appears stuck: open the heavyweight-command indicator for queue/run state, recent output, process/container activity, deadlines, and terminate control.
 - Sessions missing after an unclean host shutdown: use the startup recovery dialog or restore the conversation from the New session History tab.
 

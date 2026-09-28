@@ -127,7 +127,7 @@ describe("ResourceGovernor", () => {
         unit,
         socketPath: "/tmp/app-server.sock",
         state: runtimeState,
-        codexVersion: "0.152.0"
+        agentVersion: "0.152.0"
       }
     }], { info: vi.fn(), warn: vi.fn() }, controller);
 
@@ -157,7 +157,7 @@ describe("ResourceGovernor", () => {
         unit,
         socketPath: "/tmp/app-server.sock",
         state: "connected",
-        codexVersion: "0.152.0"
+        agentVersion: "0.152.0"
       }
     }], { info: vi.fn(), warn: vi.fn() }, controller);
 
@@ -192,7 +192,7 @@ describe("ResourceGovernor", () => {
         unit,
         socketPath: "/tmp/app-server.sock",
         state: "connected",
-        codexVersion: "0.152.0"
+        agentVersion: "0.152.0"
       }
     }], logger, controller);
 
@@ -283,13 +283,13 @@ function session(id: string, status: SessionStatus): ManagedSession {
     id,
     name: id,
     cwd: "/repo",
-    provider: { kind: "codex", threadId: id, rolloutPath: null },
+    provider: { kind: "codex", threadId: id, transcriptPath: null },
     runtime: {
       kind: "systemd_service",
       unit: `muxpilot-session-${id}.service`,
       socketPath: `/tmp/${id}.sock`,
       state: "connected",
-      codexVersion: "0.152.0"
+      agentVersion: "0.152.0"
     },
     status,
     initializing: false,

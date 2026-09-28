@@ -5,16 +5,16 @@
 <h1 align="center">muxpilot</h1>
 
 <p align="center">
-  A local, phone-friendly control surface for parallel Codex sessions.
+  A local, phone-friendly control surface for parallel Codex and Claude Code sessions.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-1ff989" alt="MIT license"></a>
 </p>
 
-muxpilot gives one operator a single place to watch multiple Codex sessions, answer the ones that need attention, and send follow-up prompts without hunting through terminal windows. Use it from the development machine or check in from a phone on the same network.
+muxpilot gives one operator a single place to watch multiple Codex and Claude Code sessions, answer the ones that need attention, and send follow-up prompts without hunting through terminal windows. Use it from the development machine or check in from a phone on the same network.
 
-muxpilot is a local companion to Codex, not a hosted agent platform or a general remote shell. Codex app-server is the sole session runtime, with muxpilot-owned user services and SQLite-backed operator state.
+muxpilot is a local companion to Codex and Claude Code, not a hosted agent platform or a general remote shell. Each session chooses a provider: Codex runs through Codex app-server, and Claude runs through Claude Code and the Claude Agent SDK. Both run under muxpilot-owned user services with SQLite-backed operator state.
 
 > [!WARNING]
 > muxpilot is designed for one trusted machine and optional same-LAN access. Do not expose it directly to the internet.
@@ -25,13 +25,14 @@ Running one coding agent in a terminal is easy. Running several across repositor
 
 muxpilot adds an operator layer without replacing the tools already doing the work:
 
-- **One dashboard for every session.** Group Codex sessions by repository and see their branch, worktree, activity, and attention state.
-- **Structured conversations.** Read Codex JSONL as a focused transcript instead of a raw terminal dump.
+- **One dashboard for every session.** Group Codex and Claude sessions by repository and see their branch, worktree, activity, and attention state.
+- **Structured conversations.** Read Codex or Claude Code JSONL as a focused transcript instead of a raw terminal dump.
 - **Interactive control.** Send or queue prompts with verified delivery, answer questions and approvals, act on proposed plans, switch Normal, Plan, Fast, and Vim controls, interrupt work, and start or fork sessions.
 - **Managed local Git work.** Launch repository sessions in isolated worktrees with focused validation, self-review, atomic commits, and local integration safeguards.
-- **Visible delegated work.** Run durable agent-managed child sessions with independent context and resources, bounded budgets, parent/child status rollups, and event-driven wake-ups.
-- **Non-interrupting side questions.** Use BTW for an independent answer or safe document update while the main Codex turn keeps working.
-- **Durable local history.** Search past prompts, resume sessions, and transfer conversations between machines with passphrase encryption.
+- **Visible delegated work.** Follow and stop Claude Code's native subagents and background tasks in each session's Agents view, or run durable agent-managed child sessions with independent context and resources, bounded budgets, parent/child status rollups, and event-driven wake-ups.
+- **Native where it counts.** Claude sessions use Claude Code's own subagents, workflows, scheduling, plan mode, and auto-approval classifier. muxpilot makes them visible instead of re-implementing them.
+- **Non-interrupting side questions.** Use BTW for an independent answer or safe document update while the main turn keeps working.
+- **Durable local history.** Search past prompts, resume sessions (including Claude sessions older than Claude Code's transcript retention window, from muxpilot's own archive), and transfer conversations between machines with passphrase encryption.
 - **Private session variables.** Save write-only variables and secrets for one session and its agent-created children without putting values in prompts or command text.
 - **Agent-managed documents.** Let long-running agents maintain persistent Markdown plans, checklists, reminders, and acceptance criteria outside the conversation context.
 - **Recovery and resource controls.** Restore conversations after an unclean shutdown, inspect failed input and heavyweight commands, and keep sessions and managed Docker work inside shared limits.
@@ -48,10 +49,12 @@ Desktop or phone browser
                                               │
                          ┌────────────────────┼────────────────────┐
                          ▼                    ▼                    ▼
-              app-server services      Codex JSONL             SQLite
+               provider services     provider JSONL             SQLite
+          (Codex app-server or       (Codex sessions or
+           Claude session host)       Claude projects)
 ```
 
-Structured app-server protocol state and muxpilot-owned systemd services are authoritative for lifecycle and input. Codex session files provide durable transcript evidence, and SQLite holds queued input, prompt history, gates, recovery state, and parsed messages.
+Structured provider protocol state and muxpilot-owned systemd services are authoritative for lifecycle and input. Codex and Claude Code session files provide durable transcript evidence, and SQLite holds queued input, prompt history, gates, recovery state, and parsed messages.
 
 ## Quick start
 
@@ -59,7 +62,8 @@ Structured app-server protocol state and muxpilot-owned systemd services are aut
 
 - WSL2 Ubuntu or another local Linux-like host
 - systemd user services
-- [Codex CLI](https://github.com/openai/codex)
+- [Codex CLI](https://github.com/openai/codex) for Codex sessions
+- [Claude Code](https://github.com/anthropics/claude-code) plus `bubblewrap` and `socat` for Claude sessions
 - Node.js 24 or newer
 - pnpm 11.21.0, matching the repository's `packageManager` pin
 
@@ -75,7 +79,14 @@ pnpm app start
 
 Open [http://127.0.0.1:12778](http://127.0.0.1:12778).
 
-The production command builds the workspace, starts a background supervisor, waits for both services to become healthy, and installs or refreshes muxpilot's bundled Codex skills in your Codex home.
+The production command builds the workspace, starts a background supervisor, waits for both services to become healthy, and installs or refreshes muxpilot's bundled skills for each provider.
+
+Sign in on the host with each provider's own CLI; muxpilot does not handle provider logins:
+
+```bash
+codex login
+claude auth login
+```
 
 ```bash
 pnpm app status
@@ -110,7 +121,8 @@ muxpilot is intentionally local-first:
 - Loopback access is trusted and does not require an access key.
 - LAN access is opt-in and requires a generated access key by default.
 - The browser talks to constrained HTTP and WebSocket endpoints; it cannot submit arbitrary shell commands.
-- The server runs as the current user because it owns app-server services and reads that user's Codex session files.
+- The server runs as the current user because it owns provider session services and reads that user's Codex and Claude Code session files.
+- Claude sessions always run inside Claude Code's sandbox; muxpilot refuses to start them when the sandbox is unavailable.
 - HTTPS support uses a local certificate authority. Keep its private key private.
 - Internet-reachable deployment, multi-user isolation, and remote shell access are out of scope.
 
@@ -122,7 +134,7 @@ The dashboard is organized around attention: red sessions need input, yellow ses
 
 The [usage guide](docs/usage.md) covers:
 
-- Creating, forking, resuming, and transferring sessions
+- Choosing a provider, and creating, forking, resuming, and transferring sessions
 - Managed and standalone Git worktrees and target branches
 - Nested agent sessions, BTW side questions, and persistent documents
 - Queued input, approvals, questions, and proposed plans
@@ -153,13 +165,13 @@ pnpm app logs dev --process all
 pnpm app stop dev
 ```
 
-The workspace contains a React/Vite web app, a Fastify server, and a shared TypeScript core package. See the [development guide](docs/development.md) and [architecture overview](docs/architecture.md) before making structural changes. Never commit private Codex transcripts; test fixtures should be small and sanitized.
+The workspace contains a React/Vite web app, a Fastify server, and a shared TypeScript core package. See the [development guide](docs/development.md) and [architecture overview](docs/architecture.md) before making structural changes. Never commit private Codex or Claude transcripts; test fixtures should be small and sanitized.
 
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
-| [Setup](docs/setup.md) | Installation, runtime commands, phone access, updates, and troubleshooting |
+| [Setup](docs/setup.md) | Installation, provider sign-in, runtime commands, phone access, updates, and troubleshooting |
 | [Usage](docs/usage.md) | Session workflows, interactive controls, shortcuts, notifications, and statuses |
 | [Local Git workflow](docs/git-workflow.md) | Managed and standalone worktrees, targets, guards, validation, and local integration |
 | [Agent orchestration](docs/agent-orchestration.md) | Nested sessions, ownership, tool contracts, budgets, waits, evidence, documents, and BTW |
@@ -175,7 +187,7 @@ The workspace contains a React/Vite web app, a Fastify server, and a shared Type
 
 ## Project status
 
-muxpilot is early-stage, maintainer-built software shaped around a durable, local Codex workflow. Interfaces and behavior may change as that workflow evolves.
+muxpilot is early-stage, maintainer-built software shaped around a durable, local coding-agent workflow. Interfaces and behavior may change as that workflow evolves.
 
 ## License
 

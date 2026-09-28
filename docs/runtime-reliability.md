@@ -10,18 +10,34 @@ Stop and restart terminate tracked descendants and process groups, not only the 
 
 See [Setup](setup.md), [Deployment](deployment.md), and [Configuration](configuration.md) for commands and paths.
 
-## Managed Codex Launches
+## Managed Session Launches
 
-muxpilot launches new, resumed, and forked Codex sessions as muxpilot-owned app-server user services. Each launch applies the requested collaboration and model settings, provisions a private Unix socket, and injects only the capability-bound MCP servers needed by the session. The service and its cgroup own the complete process tree.
+muxpilot launches new, resumed, and forked sessions as muxpilot-owned user services: a Codex app-server for Codex sessions, or a muxpilot Claude session host for Claude sessions. The Claude host holds one streaming Claude Agent SDK query, persists its state beside the service, and speaks JSON-RPC to the backend over a private Unix socket, so interactive requests survive a backend restart. Each launch applies the requested collaboration and model settings, provisions a private Unix socket, and injects only the capability-bound MCP servers needed by the session. The service and its cgroup own the complete process tree.
+
+Claude sessions launch only with Claude Code's sandbox enabled; if `bwrap` or `socat` is missing, the provider reports `sandbox_unavailable` and refuses to start Claude sessions rather than run them unsandboxed.
+
+## Claude Transcript Retention
+
+Claude Code deletes session transcripts, subagent transcripts, and tool results older than `cleanupPeriodDays` (30 by default). Any Claude process on the host runs that sweep, including an interactive `claude` started outside muxpilot, so a per-session setting can't protect muxpilot's sessions. muxpilot keeps its own copy instead:
+
+- **Mirroring.** After every Claude turn, on hibernate, at backend startup, and every six hours, muxpilot copies each Claude transcript and its session directory into `<MUXPILOT_DATA_DIR>/claude-archive/<session-id>/`. Transcripts are append-only, so a copy only ever replaces a shorter one.
+- **Restoring.** Before resuming, waking, forking, answering BTW, reviewing an approval, reconciling input, or exporting a Claude session, muxpilot restores a missing or shorter native transcript from the archive.
+- **History.** Parsed transcript history stays in SQLite regardless, so an old session remains readable even before it is restored.
+
+Your Claude Code configuration is never changed.
+
+## Provider Authentication
+
+Each provider's sign-in is managed by its CLI on the host (`codex login`, `claude auth login`). muxpilot observes the account, re-checks it periodically and when credential files change, and tracks each provider independently. When the account changes, muxpilot holds new sessions and queued input for that provider, restarts its live sessions under the new account at safe boundaries, and releases admission once every affected runtime is reconciled. When the provider signs out, its live sessions stop at a safe boundary and show a sign-in notice; after signing in, the operator resumes each session before sending it more work. Sessions with pending work, gates, or active turns are deferred until they reach a safe boundary.
 
 ## Runtime and Transcript Reconciliation
 
 
-At startup muxpilot reconnects persisted app-server services and thread identities, then catches up transcript history in the background with recent JSONL files first. Notifications start only after catch-up establishes a quiet baseline, preventing old status transitions from producing a burst of alerts.
+At startup muxpilot reconnects persisted session services and thread identities, then catches up transcript history in the background with recent JSONL files first. Notifications start only after catch-up establishes a quiet baseline, preventing old status transitions from producing a burst of alerts.
 
-Runtime reconciliation and parsing continue independently. The parser persists byte offsets and can make multiple bounded passes over a growing transcript. When a session binds to a different Codex JSONL source, muxpilot changes the source identity and resets the displayed transcript instead of mixing two conversations.
+Runtime reconciliation and parsing continue independently. The parser persists byte offsets and can make multiple bounded passes over a growing transcript. When a session binds to a different JSONL source, muxpilot changes the source identity and resets the displayed transcript instead of mixing two conversations.
 
-Initializing sessions remain visible while Codex reaches its ready screen. Live WebSocket events update the dashboard immediately, while periodic reconciliation repairs missed or stale client state.
+Initializing sessions remain visible while the runtime reaches its ready state. Live WebSocket events update the dashboard immediately, while periodic reconciliation repairs missed or stale client state.
 
 ## Verified Input Delivery
 
@@ -30,28 +46,28 @@ Operator and agent messages are persisted before runtime delivery begins. A subm
 Delivery then follows a guarded state machine:
 
 1. Send the structured request with a stable client message ID and exact provider/thread identity.
-2. Persist the app-server receipt and associated turn identity.
-3. Reconcile uncertain transport outcomes with `thread/read` before attempting any retry.
+2. Persist the runtime receipt and associated turn identity.
+3. Reconcile uncertain transport outcomes with an authoritative read, `thread/read` for Codex or `input/lookup` on the Claude host, before attempting any retry.
 4. Stop with `input_failed` rather than guessing when acknowledgement cannot be established.
 
-While an ordinary app-server turn is active, the composer can steer that exact turn with `turn/steer`. The driver supplies its tracked active turn as the `expectedTurnId` precondition. A definitive completed, changed, or non-steerable turn response converts the same durable submission into an ordinary queued input. Transport-uncertain steering is reconciled by stable client message ID and is never blindly queued or resent.
+While an ordinary turn is active, the composer can steer that exact turn with `turn/steer`. The driver supplies its tracked active turn as the `expectedTurnId` precondition. A definitive completed, changed, or non-steerable turn response converts the same durable submission into an ordinary queued input. Transport-uncertain steering is reconciled by stable client message ID and is never blindly queued or resent.
 
-An input failure blocks new composer messages. The session view preserves the exact submitted message and exposes **Retry input** and **Dismiss**. Retry first reconciles the stable client message ID against authoritative app-server state. Dismiss clears the blocking state without claiming that Codex received the message.
+An input failure blocks new composer messages. The session view preserves the exact submitted message and exposes **Retry input** and **Dismiss**. Retry first reconciles the stable client message ID against authoritative runtime state. Dismiss clears the blocking state without claiming that the provider received the message.
 
-Pending deliveries are reconciled after backend restart, service reconnection, transcript rollover, and queued-input processing. A matching Codex lifecycle event marks the persisted submission acknowledged; a completed restored delivery is not sent again.
+Pending deliveries are reconciled after backend restart, service reconnection, transcript rollover, and queued-input processing. A matching provider lifecycle event marks the persisted submission acknowledged; a completed restored delivery is not sent again.
 
 ## Queued Input
 
-Input is queued when Codex is busy or another item is already queued. The queue is persisted in SQLite and bound to the current Codex transcript source. Operators can edit the text or collaboration mode, or delete the item, until delivery begins.
+Input is queued when the agent is busy or another item is already queued. The queue is persisted in SQLite and bound to the current transcript source. Operators can edit the text or collaboration mode, or delete the item, until delivery begins.
 
-Only one queued item is processed at a time. It advances when app-server reports a ready session and no unresolved interactive gate or failed delivery remains. A source change prevents queued text from leaking into a different Codex run.
+Only one queued item is processed at a time. It advances when the runtime reports a ready session and no unresolved interactive gate or failed delivery remains. A source change prevents queued text from leaking into a different run.
 
 ## Crash Session Recovery
 
-Before shutdown, muxpilot records the non-archived app-server sessions expected to remain available. After an unclean restart, stopped or missing services become recovery candidates. Restoring a candidate resumes its exact Codex thread through a new app-server service while retaining muxpilot metadata, documents, and managed Git bindings.
+Before shutdown, muxpilot records the non-archived sessions expected to remain available. After an unclean restart, stopped or missing services become recovery candidates. Restoring a candidate resumes its exact provider conversation through a new service while retaining muxpilot metadata, documents, and managed Git bindings.
 
 
-Eligible idle app-server sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
+Eligible idle Codex and Claude sessions hibernate after 15 minutes by default. Pending input, interactive gates, BTW/document work, orchestration waits, heavyweight work, active turns, and background terminals block hibernation. For Claude, running background subagents and a pending `ScheduleWakeup` or cron job also block it, because Claude Code only fires schedules while its runtime is alive. Manual Hibernate uses the same checks; Wake and new input resume the same thread. Hibernated services retain green idle status and have no live service or child process.
 
 ## Heavyweight Command Scheduler
 
@@ -65,7 +81,7 @@ The helper refreshes both the run record and its slot lease. If heartbeat or con
 
 New operator messages are held while a run is waiting or reserved, and while a resumed command is active. If an operator interrupt ends the deferred phase, the held message is delivered normally and any later resume request for that run is stale; the agent must not replay the abandoned command on its own.
 
-Operator interrupt treats deferred-command cancellation and Codex turn interruption as independent outcomes. An already-completed Codex turn is an idempotent success, while genuine protocol failures remain visible and are audited alongside whether heavyweight cancellation was requested. When a command becomes inactive, muxpilot clears its projected activity status only after current thread, interaction, terminal, input-delivery, and queue evidence all confirm that no newer work owns the session. The same evidence-based repair runs after scheduler restart and before authentication reconciliation can treat a projected activity status as a global safe-boundary blocker.
+Operator interrupt treats deferred-command cancellation and agent turn interruption as independent outcomes. An already-completed turn is an idempotent success, while genuine protocol failures remain visible and are audited alongside whether heavyweight cancellation was requested. When a command becomes inactive, muxpilot clears its projected activity status only after current thread, interaction, terminal, input-delivery, and queue evidence all confirm that no newer work owns the session. The same evidence-based repair runs after scheduler restart and before authentication reconciliation can treat a projected activity status as a global safe-boundary blocker.
 
 The session header indicator opens an operator view containing:
 
@@ -107,7 +123,7 @@ SQLite stores managed sessions, parsed messages, parser offsets, prompt search, 
 
 Development and production databases are isolated. Stop a lane before running its compaction command. Compaction removes unused transient event history, verifies the replacement database, and retains a timestamped original backup. Reset commands are intended for development and refuse active ports unless explicitly forced.
 
-Session transfers package portable transcript prefixes, preferences, documents, and eligible committed Git branch objects. They do not include live processes, queued inputs, dirty files, dependencies, or machine-wide Codex settings. See [Usage](usage.md#moving-sessions-between-hosts).
+Session transfers package portable transcript prefixes, preferences, documents, and eligible committed Git branch objects. They do not include live processes, queued inputs, dirty files, dependencies, or machine-wide Codex or Claude settings. See [Usage](usage.md#moving-sessions-between-hosts).
 
 ## Failure Diagnosis
 
@@ -117,4 +133,4 @@ Use the narrowest evidence that answers the problem:
 2. `pnpm app logs <mode> --process all --lines 80` for recent server/web/supervisor errors.
 3. The session status, failed-input banner, heavy-command modal, and Git workspace panel.
 
-A ready session with no queued input can simply be idle. Do not resend input unless the persisted submission, provider/thread identity, app-server reconciliation state, and queue state support that exact action.
+A ready session with no queued input can simply be idle. Do not resend input unless the persisted submission, provider/thread identity, runtime reconciliation state, and queue state support that exact action.

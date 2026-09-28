@@ -1,0 +1,118 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import type { ProviderCompatibility } from "@muxpilot/core";
+import { checkGeneratedProtocolSchema } from "./protocol.js";
+
+const execFileAsync = promisify(execFile);
+
+export interface AppServerProbeExecutor {
+  codexVersion(): Promise<string>;
+  appServerHelp(): Promise<string>;
+  proxyHelp(): Promise<string>;
+  protocolSchema(): Promise<string>;
+}
+
+export async function probeAppServerCompatibility(
+  userSystemdAvailable: boolean,
+  executor: AppServerProbeExecutor = new CodexCliAppServerProbeExecutor(),
+  now: () => Date = () => new Date()
+): Promise<ProviderCompatibility> {
+  const checkedAt = now().toISOString();
+  if (!userSystemdAvailable) {
+    return {
+      provider: "codex",
+      status: "user_systemd_unavailable",
+      available: false,
+      version: null,
+      detail: "A persistent user-systemd manager is required for app-server sessions.",
+      checkedAt,
+      missingCapabilities: ["user-systemd"]
+    };
+  }
+
+  let version: string | null = null;
+  try {
+    const versionOutput = await executor.codexVersion();
+    version = codexVersionFromOutput(versionOutput);
+    const appServerHelp = await executor.appServerHelp();
+    const proxyHelp = await executor.proxyHelp();
+    const schema = await executor.protocolSchema();
+    const missingCapabilities = checkGeneratedProtocolSchema(schema).missingCapabilities;
+    if (!appServerHelp.includes("--listen") || !appServerHelp.includes("unix://")) {
+      missingCapabilities.push("unix-listen");
+    }
+    if (!proxyHelp.includes("--sock")) missingCapabilities.push("unix-proxy");
+    if (missingCapabilities.length > 0) {
+      return {
+        provider: "codex",
+        status: "incompatible_protocol",
+        available: false,
+        version,
+        detail: `Codex app-server is missing required capabilities: ${missingCapabilities.join(", ")}.`,
+        checkedAt,
+        missingCapabilities
+      };
+    }
+    return {
+      provider: "codex",
+      status: "available",
+      available: true,
+      version,
+      detail: "Codex app-server, Unix socket proxying, and the required protocol methods are available.",
+      checkedAt,
+      missingCapabilities: []
+    };
+  } catch (error) {
+    return {
+      provider: "codex",
+      status: "failed_health_probe",
+      available: false,
+      version,
+      detail: `Codex app-server health probe failed: ${probeErrorMessage(error)}`,
+      checkedAt,
+      missingCapabilities: []
+    };
+  }
+}
+
+export class CodexCliAppServerProbeExecutor implements AppServerProbeExecutor {
+  async codexVersion(): Promise<string> {
+    return (await execFileAsync("codex", ["--version"], { timeout: 5_000 })).stdout;
+  }
+
+  async appServerHelp(): Promise<string> {
+    return (await execFileAsync("codex", ["app-server", "--help"], { timeout: 5_000 })).stdout;
+  }
+
+  async proxyHelp(): Promise<string> {
+    return (await execFileAsync("codex", ["app-server", "proxy", "--help"], { timeout: 5_000 })).stdout;
+  }
+
+  async protocolSchema(): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), "muxpilot-app-server-schema-"));
+    try {
+      await execFileAsync("codex", ["app-server", "generate-json-schema", "--experimental", "--out", directory], {
+        timeout: 15_000
+      });
+      const files = [
+        "codex_app_server_protocol.v2.schemas.json",
+        "ServerRequest.json"
+      ];
+      return JSON.stringify(await Promise.all(files.map(async (file) => JSON.parse(await readFile(join(directory, file), "utf8")))));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+}
+
+function codexVersionFromOutput(output: string): string | null {
+  return output.match(/\b(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\b/)?.[1] ?? null;
+}
+
+function probeErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.split("\n", 1)[0]?.trim() || "unknown error";
+}

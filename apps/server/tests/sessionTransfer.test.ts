@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +34,7 @@ describe.sequential("SessionTransferService", () => {
     const entries = await tarEntries(gunzipSync(file.subarray(9)));
     expect([...entries.keys()]).toEqual(["manifest.json", "sessions/0001.jsonl", "sessions/0002.jsonl"]);
     expect(JSON.parse(entries.get("manifest.json")!.toString("utf8"))).toMatchObject({
-      formatVersion: 6,
+      formatVersion: 8,
       gitBranches: [],
       sessions: [
         expect.objectContaining({ fastMode: true, name: "work-0", cwd: fixture.root }),
@@ -41,11 +42,11 @@ describe.sequential("SessionTransferService", () => {
       ]
     });
     expect(JSON.parse(entries.get("manifest.json")!.toString("utf8")).sessions[0]).not.toHaveProperty("runtime");
-    expect([...entries.keys()].join(" ")).not.toContain(fixture.sessions[0]!.codexSessionId);
+    expect([...entries.keys()].join(" ")).not.toContain(fixture.sessions[0]!.provider.threadId);
 
     const preview = await service.inspect(file);
     expect(preview.encrypted).toBe(false);
-    expect(preview.formatVersion).toBe(6);
+    expect(preview.formatVersion).toBe(8);
     expect(preview.sessions.every((session) => session.documentCount === 0)).toBe(true);
     expect(preview.sessions).toHaveLength(2);
     expect(preview.mappings).toEqual([{ sourceCwd: fixture.root, repoName: "fixture", workspaceMode: "directory", targetBranch: null, branches: [] }]);
@@ -56,7 +57,8 @@ describe.sequential("SessionTransferService", () => {
   it("exports fork origins without machine-local session ids", async () => {
     const fixture = await createFixture(1);
     fixture.sessions[0]!.forkedFrom = {
-      codexSessionId: "019f-parent-session-abcdef",
+      provider: "codex",
+      threadId: "019f-parent-session-abcdef",
       sessionId: "local-parent-session",
       sessionName: "parent-session"
     };
@@ -65,7 +67,8 @@ describe.sequential("SessionTransferService", () => {
     const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
     const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
     expect(manifest.sessions[0].forkedFrom).toEqual({
-      codexSessionId: "019f-parent-session-abcdef",
+      provider: "codex",
+      threadId: "019f-parent-session-abcdef",
       sessionId: null,
       sessionName: "parent-session"
     });
@@ -99,12 +102,13 @@ describe.sequential("SessionTransferService", () => {
     const fixture = await createFixture(1);
     const documents = [{ name: "plan.md", contents: Buffer.from("- [ ] ship\n"), updatedAt: "2026-08-25T00:00:00.000Z" }];
     const importPortableSession = vi.fn(async (
-      session: { codexSessionId: string; sessionName: string },
+      session: { provider: "codex" | "claude"; threadId: string; sessionName: string },
       _transcript: Buffer,
       _mapping: unknown,
       _documents: unknown
     ) => ({
-      codexSessionId: session.codexSessionId,
+      provider: session.provider,
+      threadId: session.threadId,
       sessionName: session.sessionName,
       status: "resumed" as const,
       sessionId: "imported-session",
@@ -112,6 +116,7 @@ describe.sequential("SessionTransferService", () => {
     }));
     const manager = {
       snapshotDocuments: async () => documents,
+      ensureTranscriptAvailable: async () => undefined,
       assertPortableRuntimeAvailable: () => undefined,
       validatePortableMapping: async () => undefined,
       importPortableSession
@@ -143,7 +148,7 @@ describe.sequential("SessionTransferService", () => {
     const tampered = Buffer.from(file);
     tampered[tampered.length - 20] ^= 1;
     await expect(encrypted.inspect(tampered)).rejects.toBeInstanceOf(SessionTransferError);
-    expect((await encrypted.inspect(file)).sessions[0]?.codexSessionId).toBe(fixture.sessions[0]?.codexSessionId);
+    expect((await encrypted.inspect(file)).sessions[0]?.threadId).toBe(fixture.sessions[0]?.provider.threadId);
   });
 
   it("encrypts environment values with a passphrase and expands child exports to include their parent", async () => {
@@ -163,8 +168,9 @@ describe.sequential("SessionTransferService", () => {
     const db = { getSession: async (id: string) => fixture.sessions.find((session) => session.id === id) ?? null } as AppDatabase;
     const manager = {
       snapshotDocuments: async () => [], assertPortableRuntimeAvailable: () => undefined,
+      ensureTranscriptAvailable: async () => undefined,
       validatePortableMapping: async () => undefined,
-      importPortableSession: async (session: { codexSessionId: string; sessionName: string }) => ({ codexSessionId: session.codexSessionId, sessionName: session.sessionName, status: "resumed" as const, sessionId: `imported-${session.codexSessionId}`, error: null })
+      importPortableSession: async (session: { provider: "codex" | "claude"; threadId: string; sessionName: string }) => ({ provider: session.provider, threadId: session.threadId, sessionName: session.sessionName, status: "resumed" as const, sessionId: `imported-${session.threadId}`, error: null })
     } as unknown as SessionManager;
     const service = new SessionTransferService(db, manager, environment);
     await service.initialize();
@@ -174,14 +180,60 @@ describe.sequential("SessionTransferService", () => {
     expect(preview.sessions).toHaveLength(2);
     await service.import(preview.token, [{ sourceCwd: fixture.root, destinationCwd: fixture.root }]);
     expect(imported).toContainEqual(expect.objectContaining({ values: { PAYLOCITY_SECRET: "archive-secret" } }));
-    expect(imported.find((entry) => entry.values.PAYLOCITY_SECRET === undefined)?.parentSessionId).toBe(`imported-${fixture.sessions[0]!.codexSessionId}`);
+    expect(imported.find((entry) => entry.values.PAYLOCITY_SECRET === undefined)?.parentSessionId).toBe(`imported-${fixture.sessions[0]!.provider.threadId}`);
   });
 
   it("rejects selecting duplicate records for one Codex session", async () => {
     const fixture = await createFixture();
-    fixture.sessions[1] = { ...fixture.sessions[1]!, codexSessionId: fixture.sessions[0]!.codexSessionId, codexJsonlPath: fixture.sessions[0]!.codexJsonlPath };
+    fixture.sessions[1] = { ...fixture.sessions[1]!, provider: { ...fixture.sessions[0]!.provider } };
     const service = transferService(fixture.sessions);
     await expect(service.export(fixture.sessions.map((session) => session.id))).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("imports format 6 Codex archives into the provider-neutral shape", async () => {
+    const fixture = await createFixture(1);
+    const service = transferService(fixture.sessions);
+    const archive = await service.export([fixture.sessions[0]!.id]);
+    const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    const { provider, threadId, ...rest } = manifest.sessions[0];
+    manifest.formatVersion = 6;
+    manifest.sessions[0] = {
+      ...rest,
+      codexSessionId: threadId,
+      provider: { kind: provider, threadId, rolloutPath: null },
+      forkedFrom: { codexSessionId: "019f-parent-session-abcdef", sessionId: null, sessionName: "parent" }
+    };
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const legacy = Buffer.concat([Buffer.from("MPSESSN2", "ascii"), Buffer.from([0]), gzipSync(await tarArchive(entries))]);
+
+    const preview = await service.inspect(legacy);
+
+    expect(preview.formatVersion).toBe(6);
+    expect(preview.sessions[0]).toMatchObject({ provider: "codex", threadId: fixture.sessions[0]!.provider.threadId });
+  });
+
+  it("exports Claude transcripts and validates their session identity", async () => {
+    const fixture = await createFixture(1);
+    const threadId = "4f7a8c2e-1111-4222-8333-944455556666";
+    const transcriptPath = join(fixture.root, "claude.jsonl");
+    await writeFile(transcriptPath, `${JSON.stringify({ type: "user", sessionId: threadId, uuid: "u-1", message: { role: "user", content: "hi" } })}\n`);
+    fixture.sessions[0] = { ...fixture.sessions[0]!, provider: { kind: "claude", threadId, transcriptPath } };
+    const service = transferService(fixture.sessions);
+    const archive = await service.export([fixture.sessions[0]!.id]);
+
+    const preview = await service.inspect(archive.contents);
+    expect(preview.sessions[0]).toMatchObject({ provider: "claude", threadId });
+
+    const entries = await tarEntries(gunzipSync(archive.contents.subarray(9)));
+    const foreign = Buffer.from(`${JSON.stringify({ type: "user", sessionId: "4f7a8c2e-0000-4222-8333-944455556666", uuid: "u-1" })}\n`);
+    const manifest = JSON.parse(entries.get("manifest.json")!.toString("utf8"));
+    manifest.sessions[0].transcriptBytes = foreign.length;
+    manifest.sessions[0].transcriptSha256 = createHash("sha256").update(foreign).digest("hex");
+    entries.set("sessions/0001.jsonl", foreign);
+    entries.set("manifest.json", Buffer.from(JSON.stringify(manifest)));
+    const tampered = Buffer.concat([Buffer.from("MPSESSN2", "ascii"), Buffer.from([0]), gzipSync(await tarArchive(entries))]);
+    await expect(service.inspect(tampered)).rejects.toThrow(/Transcript identity does not match/);
   });
 
   it("uses a safe session name for single plaintext exports", async () => {
@@ -280,10 +332,8 @@ async function createFixture(count = 2): Promise<{ root: string; sessions: Manag
       id: `session-${index}`,
       name: `work-${index}`,
       cwd: root,
-      provider: { kind: "codex", threadId: codexSessionId, rolloutPath: transcriptPath },
+      provider: { kind: "codex", threadId: codexSessionId, transcriptPath: transcriptPath },
       repo: { root, name: "fixture", branch: "main", dirty: false, worktree: null },
-      codexSessionId,
-      codexJsonlPath: transcriptPath,
       discoveryConfidence: "high",
       status: "missing",
       lastActivityAt: "2026-07-11T12:01:00.000Z",
@@ -309,7 +359,10 @@ function transferService(
   documents = new Map<string, Array<{ name: string; contents: Buffer; updatedAt: string }>>()
 ): SessionTransferService {
   const db = { getSession: async (id: string) => sessions.find((session) => session.id === id) ?? null } as AppDatabase;
-  const manager = { snapshotDocuments: async (id: string) => documents.get(id) ?? [] } as unknown as SessionManager;
+  const manager = {
+    snapshotDocuments: async (id: string) => documents.get(id) ?? [],
+    ensureTranscriptAvailable: async () => undefined
+  } as unknown as SessionManager;
   return new SessionTransferService(db, manager, key);
 }
 

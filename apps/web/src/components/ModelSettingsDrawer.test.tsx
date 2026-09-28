@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CodexModelCatalogResponse, ManagedSession } from "@muxpilot/core";
+import type { ManagedSession, ProviderModelCatalogResponse } from "@muxpilot/core";
 import { effectiveModelSettings, ModelSettingsDrawer } from "./ModelSettingsDrawer.js";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -30,6 +30,7 @@ describe("ModelSettingsDrawer", () => {
       root.render(
         <ModelSettingsDrawer
           open
+          provider="codex"
           title="Session model settings"
           description="Choose settings"
           selections={{
@@ -89,6 +90,7 @@ describe("ModelSettingsDrawer", () => {
       root.render(
         <ModelSettingsDrawer
           open
+          provider="codex"
           title="Session model settings"
           description="Choose settings"
           selections={session().models}
@@ -129,6 +131,7 @@ describe("ModelSettingsDrawer", () => {
       root.render(
         <ModelSettingsDrawer
           open
+          provider="codex"
           title="Settings"
           description="Choose settings"
           selections={session().models}
@@ -181,6 +184,7 @@ describe("ModelSettingsDrawer", () => {
       root.render(
         <ModelSettingsDrawer
           open
+          provider="codex"
           title="Settings"
           description="Choose settings"
           selections={session().models}
@@ -208,11 +212,135 @@ describe("ModelSettingsDrawer", () => {
   });
 });
 
+describe("ModelSettingsDrawer for Claude", () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+  });
+
+  it("scopes radio names, hides effort for effort-less models and applies a null effort", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const apply = vi.fn(async () => undefined);
+
+    await act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open
+          provider="claude"
+          providerFastMode={false}
+          title="Session model settings"
+          description="Choose settings"
+          selections={{ default: { model: "sonnet", reasoningEffort: "high" }, plan: { model: "sonnet", reasoningEffort: "high" } }}
+          activeMode="default"
+          fastMode
+          catalog={claudeCatalog}
+          loading={false}
+          error=""
+          applying={null}
+          reviewerSettings={null}
+          onClose={() => undefined}
+          onRetry={() => undefined}
+          onApply={apply}
+          onApplyReviewer={async () => undefined}
+        />
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('input[name="codex-model"]')).toBeNull();
+    expect(container.querySelectorAll('input[name="claude-model"]')).toHaveLength(2);
+    expect(container.querySelectorAll('input[name="claude-reasoning-effort"]')).toHaveLength(2);
+    expect(container.textContent).not.toContain("Apply Reviewer");
+
+    await act(async () => { container.querySelector<HTMLInputElement>('input[name="claude-model"][value="haiku"]')!.click(); });
+    expect(container.querySelector('input[name="claude-reasoning-effort"]')).toBeNull();
+    expect(container.textContent).not.toContain("Reasoning effort");
+    expect(container.textContent).not.toContain("turn off Fast mode");
+
+    await act(async () => {
+      button(container, "Apply Normal").click();
+      await Promise.resolve();
+    });
+    expect(apply).toHaveBeenCalledWith("default", "haiku", null);
+    act(() => root.unmount());
+  });
+
+  it("warns about Fast mode only for providers that support it", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const render = async (providerFastMode: boolean) => act(async () => {
+      root.render(
+        <ModelSettingsDrawer
+          open
+          provider="claude"
+          providerFastMode={providerFastMode}
+          title="Session model settings"
+          description="Choose settings"
+          selections={{ default: { model: "sonnet", reasoningEffort: "high" }, plan: { model: "sonnet", reasoningEffort: "high" } }}
+          activeMode="default"
+          fastMode
+          catalog={claudeCatalog}
+          loading={false}
+          error=""
+          applying={null}
+          onClose={() => undefined}
+          onRetry={() => undefined}
+          onApply={async () => undefined}
+        />
+      );
+      await Promise.resolve();
+    });
+
+    await render(true);
+    await act(async () => { container.querySelector<HTMLInputElement>('input[name="claude-model"][value="haiku"]')!.click(); });
+    expect(container.textContent).toContain("will turn off Fast mode");
+    act(() => root.unmount());
+  });
+});
+
+const claudeCatalog: ProviderModelCatalogResponse = {
+  provider: "claude",
+  models: [
+    {
+      id: "sonnet",
+      model: "sonnet",
+      displayName: "Sonnet",
+      description: "Balanced",
+      hidden: false,
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "medium", description: "Balanced" },
+        { reasoningEffort: "high", description: "Deeper" }
+      ],
+      defaultReasoningEffort: "medium",
+      supportsFastMode: true
+    },
+    {
+      id: "haiku",
+      model: "haiku",
+      displayName: "Haiku",
+      description: "Fast",
+      hidden: false,
+      isDefault: false,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: null,
+      supportsFastMode: false
+    }
+  ],
+  defaults: {
+    default: { model: "sonnet", reasoningEffort: "medium" },
+    plan: { model: "sonnet", reasoningEffort: "high" }
+  }
+};
+
 function button(container: HTMLElement, label: string): HTMLButtonElement {
   return Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.trim() === label)!;
 }
 
-const catalog: CodexModelCatalogResponse = {
+const catalog: ProviderModelCatalogResponse = {
+  provider: "codex",
   models: [
     {
       id: "gpt-default",
@@ -226,7 +354,7 @@ const catalog: CodexModelCatalogResponse = {
         { reasoningEffort: "high", description: "Deeper" }
       ],
       defaultReasoningEffort: "medium",
-      serviceTiers: [{ id: "fast", name: "Fast", description: "Priority" }]
+      supportsFastMode: true
     },
     {
       id: "gpt-other",
@@ -240,7 +368,7 @@ const catalog: CodexModelCatalogResponse = {
         { reasoningEffort: "high", description: "Deep" }
       ],
       defaultReasoningEffort: "low",
-      serviceTiers: []
+      supportsFastMode: false
     }
   ],
   defaults: {
@@ -254,10 +382,8 @@ function session(overrides: Partial<ManagedSession> = {}): ManagedSession {
     id: "session-1",
     name: "session-1",
     cwd: "/repo",
-    provider: { kind: "codex", threadId: "thread-1", rolloutPath: null },
+    provider: { kind: "codex", threadId: "thread-1", transcriptPath: null },
     repo: { root: "/repo", name: "repo", branch: "main", dirty: false, worktree: null },
-    codexSessionId: "thread-1",
-    codexJsonlPath: null,
     discoveryConfidence: "high",
     status: "waiting",
     lastActivityAt: null,

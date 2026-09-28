@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { open, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import type { ManagedSession } from "@muxpilot/core";
+import { providerDisplayName, type AgentProviderKind, type ManagedSession } from "@muxpilot/core";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_FILE_READ_BYTES = 64 * 1024;
@@ -12,7 +12,7 @@ const APP_SERVER_UNIT = /^muxpilot-session-([a-f0-9]{24})\.service$/;
 
 type CommandRunner = (command: string, args: string[]) => Promise<{ stdout: string }>;
 
-export interface RawCodexFile {
+export interface RawTranscriptFile {
   relativePath: string;
   sizeBytes: number;
   modifiedAtMs: number;
@@ -39,8 +39,8 @@ export interface RawSessionEvidence {
     endOffset: number;
     text: string;
   }>;
-  listCodexSessionFiles(limit: number, offset: number): Promise<{ root: string; files: RawCodexFile[]; nextOffset: number | null }>;
-  readCodexSessionFile(relativePath: string, offset: number | null, length: number): Promise<{
+  listTranscriptFiles(provider: AgentProviderKind, limit: number, offset: number): Promise<{ root: string; files: RawTranscriptFile[]; nextOffset: number | null }>;
+  readTranscriptFile(provider: AgentProviderKind, relativePath: string, offset: number | null, length: number): Promise<{
     relativePath: string;
     fileSize: number;
     startOffset: number;
@@ -49,16 +49,29 @@ export interface RawSessionEvidence {
   }>;
 }
 
+/** Where each provider keeps its native transcripts and muxpilot keeps its protocol journals. */
+export interface RawEvidenceRoots {
+  transcripts: Partial<Record<AgentProviderKind, string>>;
+  journals?: Partial<Record<AgentProviderKind, string>>;
+}
+
+const DEFAULT_JOURNAL_DIRECTORIES: Record<AgentProviderKind, string> = {
+  codex: "app-server-sessions",
+  claude: "claude-sessions"
+};
+
 export class RawSessionEvidenceReader implements RawSessionEvidence {
-  private readonly codexSessionsRoot: string;
+  private readonly transcriptRoots: Partial<Record<AgentProviderKind, string>>;
+  private readonly journalDirectories: Record<AgentProviderKind, string>;
 
   constructor(
-    codexHome: string,
+    roots: RawEvidenceRoots,
     private readonly runCommand: CommandRunner = async (command, args) => execFileAsync(command, args, { maxBuffer: 4 * 1024 * 1024 }),
     private readonly procRoot = "/proc",
     private readonly dataDir: string | null = null
   ) {
-    this.codexSessionsRoot = resolve(codexHome, "sessions");
+    this.transcriptRoots = Object.fromEntries(Object.entries(roots.transcripts).map(([kind, root]) => [kind, resolve(root)]));
+    this.journalDirectories = { ...DEFAULT_JOURNAL_DIRECTORIES, ...roots.journals };
   }
 
   async readSessionRuntime(session: ManagedSession): Promise<Record<string, unknown>> {
@@ -78,7 +91,8 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
       resourceUnit: session.resourceUnit ?? runtime.unit,
       systemd: properties,
       socketPresent: socket?.isSocket() === true,
-      attachmentCommand: `codex --remote ${shellQuote(`unix://${runtime.socketPath}`)}`
+      attachmentCommand: runtime.attachCommand
+        ?? (session.provider.kind === "codex" ? `codex --remote ${shellQuote(`unix://${runtime.socketPath}`)}` : null)
     };
   }
 
@@ -110,7 +124,7 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
       ? session.runtime.unit.match(APP_SERVER_UNIT)?.[1]
       : null;
     if (!capabilityId) throw new Error("App-server session has no valid owned runtime unit");
-    const path = join(resolve(this.dataDir), "protocol", "app-server-sessions", capabilityId, "protocol.jsonl");
+    const path = join(resolve(this.dataDir), "protocol", this.journalDirectories[session.provider.kind], capabilityId, "protocol.jsonl");
     const result = await readFileSlice(path, offset, length);
     return { sessionId: session.id, ...result };
   }
@@ -130,33 +144,34 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     return { processes, truncated: pending.length > 0 };
   }
 
-  async listCodexSessionFiles(limit: number, offset: number): Promise<{ root: string; files: RawCodexFile[]; nextOffset: number | null }> {
-    const files = await walkJsonlFiles(this.codexSessionsRoot);
+  async listTranscriptFiles(provider: AgentProviderKind, limit: number, offset: number): Promise<{ root: string; files: RawTranscriptFile[]; nextOffset: number | null }> {
+    const root = this.transcriptRoot(provider);
+    const files = await walkJsonlFiles(root);
     const records = (await Promise.all(files.map(async (path) => {
       const metadata = await stat(path).catch(() => null);
       if (!metadata?.isFile()) return null;
       return {
-        relativePath: relative(this.codexSessionsRoot, path),
+        relativePath: relative(root, path),
         sizeBytes: metadata.size,
         modifiedAtMs: metadata.mtimeMs
-      } satisfies RawCodexFile;
-    }))).filter((record): record is RawCodexFile => record !== null)
+      } satisfies RawTranscriptFile;
+    }))).filter((record): record is RawTranscriptFile => record !== null)
       .sort((first, second) => second.modifiedAtMs - first.modifiedAtMs || first.relativePath.localeCompare(second.relativePath));
     const filesPage = records.slice(offset, offset + limit);
     const nextOffset = offset + filesPage.length < records.length ? offset + filesPage.length : null;
-    return { root: this.codexSessionsRoot, files: filesPage, nextOffset };
+    return { root, files: filesPage, nextOffset };
   }
 
-  async readCodexSessionFile(relativePath: string, offset: number | null, length: number): Promise<{
+  async readTranscriptFile(provider: AgentProviderKind, relativePath: string, offset: number | null, length: number): Promise<{
     relativePath: string;
     fileSize: number;
     startOffset: number;
     endOffset: number;
     text: string;
   }> {
-    const path = await this.resolveCodexJsonl(relativePath);
+    const path = await this.resolveTranscriptJsonl(provider, relativePath);
     const metadata = await stat(path);
-    if (!metadata.isFile()) throw new Error("Codex session path is not a file");
+    if (!metadata.isFile()) throw new Error("Transcript path is not a file");
     const startOffset = offset === null ? Math.max(0, metadata.size - length) : Math.min(offset, metadata.size);
     const readLength = Math.min(length, Math.max(0, metadata.size - startOffset));
     const file = await open(path, "r");
@@ -198,13 +213,19 @@ export class RawSessionEvidenceReader implements RawSessionEvidence {
     };
   }
 
-  private async resolveCodexJsonl(relativePath: string): Promise<string> {
+  private transcriptRoot(provider: AgentProviderKind): string {
+    const root = this.transcriptRoots[provider];
+    if (!root) throw new Error(`${providerDisplayName(provider)} transcripts are not available on this host`);
+    return root;
+  }
+
+  private async resolveTranscriptJsonl(provider: AgentProviderKind, relativePath: string): Promise<string> {
     if (!relativePath || isAbsolute(relativePath) || relativePath.includes("\0") || !relativePath.endsWith(".jsonl")) {
-      throw new Error("relativePath must identify a Codex JSONL file");
+      throw new Error("relativePath must identify a transcript JSONL file");
     }
-    const root = await realpath(this.codexSessionsRoot);
+    const root = await realpath(this.transcriptRoot(provider));
     const candidate = await realpath(resolve(root, relativePath));
-    if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) throw new Error("Codex session path escapes the configured sessions root");
+    if (candidate !== root && !candidate.startsWith(`${root}${sep}`)) throw new Error("Transcript path escapes the provider's transcript root");
     return candidate;
   }
 }
@@ -277,4 +298,4 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-export const RAW_CODEX_DEFAULT_READ_BYTES = DEFAULT_FILE_READ_BYTES;
+export const RAW_TRANSCRIPT_DEFAULT_READ_BYTES = DEFAULT_FILE_READ_BYTES;
