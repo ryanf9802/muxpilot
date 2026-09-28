@@ -24,7 +24,14 @@ export interface ClaudeTranscriptContext {
  * messages carry the same item identity as live projections and deduplicate against them.
  */
 export async function parseClaudeJsonl(path: string, offset: number, context: ClaudeTranscriptContext): Promise<ParseResult> {
-  const file = await open(path, "r");
+  let file: FileHandle;
+  try {
+    file = await open(path, "r");
+  } catch (error) {
+    // Claude Code creates the transcript with the session's first message; until then there is nothing to read.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return { messages: [], nextOffset: offset, pendingSkillNames: [], notices: [], complete: true, contextUsage: null };
+  }
   try {
     const size = (await file.stat()).size;
     const start = Math.min(offset, size);

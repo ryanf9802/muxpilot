@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeAuthObserver } from "../src/providers/claude/auth.js";
+import { claudeRuntimeEnvironment } from "../src/providers/claude/host/claudeHost.js";
 import { probeClaudeCompatibility, type ClaudeProbeExecutor } from "../src/providers/claude/compatibility.js";
 
 function runner(status: Record<string, unknown>) {
@@ -164,5 +165,16 @@ describe("probeClaudeCompatibility", () => {
 
   it("tolerates unparseable version output", async () => {
     await expect(probeClaudeCompatibility(true, null, executor({ version: "dev build" }), now)).resolves.toMatchObject({ status: "available", version: null });
+  });
+});
+
+describe("claudeRuntimeEnvironment", () => {
+  it("scrubs API keys and nested-session markers and gives shells a terminal type", () => {
+    const env = claudeRuntimeEnvironment({ ANTHROPIC_API_KEY: "k", CLAUDECODE: "1", PATH: "/bin" });
+    expect(env).toMatchObject({ PATH: "/bin", TERM: "dumb", DISABLE_AUTOUPDATER: "1" });
+    expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
+    expect(env).not.toHaveProperty("CLAUDECODE");
+    expect(claudeRuntimeEnvironment({ TERM: "xterm" }).TERM).toBe("xterm");
+    expect(claudeRuntimeEnvironment({ ANTHROPIC_API_KEY: "k", MUXPILOT_CLAUDE_ALLOW_API_KEY: "1" }).ANTHROPIC_API_KEY).toBe("k");
   });
 });

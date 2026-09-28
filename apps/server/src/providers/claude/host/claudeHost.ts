@@ -195,7 +195,9 @@ export function parseHostArguments(argv: string[]): HostArguments {
  * operator opts in, and nested-agent markers from a parent Claude process never leak into a session.
  */
 export function claudeRuntimeEnvironment(environment: NodeJS.ProcessEnv): Record<string, string | undefined> {
-  const result: Record<string, string | undefined> = { ...environment, DISABLE_AUTOUPDATER: "1" };
+  // Session units have no terminal; without TERM, shell startup files that call tput print an error into every
+  // Bash tool result.
+  const result: Record<string, string | undefined> = { TERM: "dumb", ...environment, DISABLE_AUTOUPDATER: "1" };
   if (environment.MUXPILOT_CLAUDE_ALLOW_API_KEY !== "1") {
     delete result.ANTHROPIC_API_KEY;
     delete result.ANTHROPIC_AUTH_TOKEN;

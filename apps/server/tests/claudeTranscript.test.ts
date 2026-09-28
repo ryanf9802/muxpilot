@@ -107,6 +107,11 @@ describe("parseClaudeJsonl", () => {
     expect(result.contextUsage!.contextPercent).toBeCloseTo((1_250 / 200_000) * 100);
   });
 
+  it("treats a transcript that does not exist yet as empty", async () => {
+    await expect(parseClaudeJsonl(join(tmpdir(), "missing-claude-transcript.jsonl"), 42, { threadId: "t", previousContextUsage: null }))
+      .resolves.toEqual({ messages: [], nextOffset: 42, pendingSkillNames: [], notices: [], complete: true, contextUsage: null });
+  });
+
   it("parses incrementally from an offset, holding back a partial trailing record", async () => {
     const path = join(tempDir(), `${SESSION}.jsonl`);
     const firstChunk = line(USER) + line(TOOL_CALL);
