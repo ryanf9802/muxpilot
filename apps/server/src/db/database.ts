@@ -53,7 +53,7 @@ import {
   withApprovalDecisionEventPayload,
   withSessionWaitEventPayload
 } from "@muxpilot/core";
-import { codexTurnFailure, type CodexTurnFailure } from "../utils/codexTurnFailure.js";
+import { providerTurnFailure, type ProviderTurnFailure } from "../utils/turnFailure.js";
 
 const UNRESTRICTED_REMOTE_ACCESS_SETTING = "unrestricted_remote_access_enabled";
 const PUSH_VAPID_KEYS_SETTING = "push_vapid_keys";
@@ -225,7 +225,7 @@ export interface AppServerProjectionInput {
   status: SessionStatus | null;
   message: Omit<ChatMessage, "sessionId" | "sequence"> | null;
   evidence: unknown;
-  turnFailure?: CodexTurnFailure | null;
+  turnFailure?: ProviderTurnFailure | null;
   observedAt: string;
 }
 
@@ -3302,7 +3302,7 @@ export class SyncAppDatabase {
     sessionId: string,
     threadId: string,
     turnId: string,
-    failure: CodexTurnFailure,
+    failure: ProviderTurnFailure,
     failedAt: string
   ): ChatMessage | null {
     const candidate = this.findAppServerTurnSubmission(sessionId, threadId, turnId);
@@ -3359,7 +3359,7 @@ export class SyncAppDatabase {
     ).all() as unknown as AppServerReconciliationRow[];
     for (const row of rows) {
       const evidence = parseJsonObject(row.evidence_json);
-      const failure = codexTurnFailure(evidence);
+      const failure = providerTurnFailure(evidence);
       if (!failure || !row.turn_id) continue;
       const existingSession = this.db.prepare("SELECT status, data_json FROM managed_sessions WHERE id = ?")
         .get(row.session_id) as Pick<SessionRow, "status" | "data_json"> | undefined;

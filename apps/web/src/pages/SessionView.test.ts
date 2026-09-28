@@ -2808,7 +2808,7 @@ describe("Codex turn failure events", () => {
       payload: { turnFailure: { failureCode: "turn_failed", providerErrorCode: null, failureReason: "Network error" } } };
     const html = renderToStaticMarkup(createElement(UserAction, { message: failure }));
     expect(html).toContain('data-tone="error"');
-    expect(html).toContain("Codex turn failed");
+    expect(html).toContain("Agent turn failed");
     expect(html).toContain("Network error");
   });
 });

@@ -21,5 +21,5 @@ export function turnFailureEventFromPayload(payload: unknown): TurnFailureEvent 
 export function turnFailureEventLabel(event: TurnFailureEvent): string {
   return event.providerErrorCode === "usageLimitExceeded"
     ? "Session stopped — usage limit reached"
-    : "Codex turn failed";
+    : "Agent turn failed";
 }

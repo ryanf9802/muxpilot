@@ -9,7 +9,7 @@ import { eventId } from "../../utils/ids.js";
 import type { EventBus } from "../../services/eventBus.js";
 import type { AppServerEventProjection } from "../codex/events.js";
 import type { DriverEvent, DriverEventSink, DriverInterruptIntent } from "../types.js";
-import { codexTurnFailure, codexTurnInterruption } from "../../utils/codexTurnFailure.js";
+import { providerTurnFailure, providerTurnInterruption } from "../../utils/turnFailure.js";
 
 export interface AppServerProjectionStore {
   applyAppServerProjection(projection: AppServerProjectionInput): Promise<AppServerProjectionResult>;
@@ -160,7 +160,7 @@ export class ProjectionReconciler implements DriverEventSink {
       this.latestProjectedTurnIds.get(threadTurnKey(sessionId, threadId)),
       restoredAt
     )) return;
-    const intentionalInterruption = codexTurnInterruption(latestTurn) && latestTurnId
+    const intentionalInterruption = providerTurnInterruption(latestTurn) && latestTurnId
       ? await this.store.getAppServerTurnInterruptionKind(sessionId, threadId, latestTurnId)
       : null;
     if (intentionalInterruption === "budget_guard") return;
@@ -172,7 +172,7 @@ export class ProjectionReconciler implements DriverEventSink {
       }, recoveryGuard);
       return;
     }
-    if (codexTurnFailure({ turn: latestTurn })) {
+    if (providerTurnFailure({ turn: latestTurn })) {
       await this.handleExclusive(sessionId, {
         method: "turn/completed",
         params: { threadId, turn: latestTurn },
@@ -180,7 +180,7 @@ export class ProjectionReconciler implements DriverEventSink {
       }, recoveryGuard, true);
       return;
     }
-    if (codexTurnInterruption(latestTurn)) {
+    if (providerTurnInterruption(latestTurn)) {
       const applied = await this.handleExclusive(sessionId, {
         method: "turn/completed",
         params: { threadId, turn: latestTurn, muxpilotUnexpectedInterruption: true },
@@ -220,7 +220,7 @@ export class ProjectionReconciler implements DriverEventSink {
 function input(
   sessionId: string,
   projection: AppServerEventProjection,
-  turnFailure: ReturnType<typeof codexTurnFailure>,
+  turnFailure: ReturnType<typeof providerTurnFailure>,
   observedAt: string
 ): AppServerProjectionInput {
   return {
@@ -235,10 +235,10 @@ function input(
   };
 }
 
-function turnFailure(params: unknown): ReturnType<typeof codexTurnFailure> {
+function turnFailure(params: unknown): ReturnType<typeof providerTurnFailure> {
   const root = params && typeof params === "object" && !Array.isArray(params) ? params as Record<string, unknown> : null;
-  return codexTurnFailure(params)
-    ?? (root?.muxpilotUnexpectedInterruption === true ? codexTurnInterruption(root.turn) : null);
+  return providerTurnFailure(params)
+    ?? (root?.muxpilotUnexpectedInterruption === true ? providerTurnInterruption(root.turn) : null);
 }
 
 function stringValue(value: unknown): string | null {

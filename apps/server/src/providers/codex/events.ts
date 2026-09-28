@@ -13,7 +13,7 @@ import {
   type SessionStatus
 } from "@muxpilot/core";
 import type { JsonRpcNotification } from "../../runtime/jsonRpcConnection.js";
-import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
+import { providerTurnFailure } from "../../utils/turnFailure.js";
 
 export interface AppServerEventIdentity {
   threadId: string;
@@ -78,7 +78,7 @@ export function projectAppServerEvent(
   if (notification.method === "turn/completed") {
     const eventIdentity = identity(threadId, turnId, null, null);
     const unexpectedInterruption = params.muxpilotUnexpectedInterruption === true;
-    const failure = codexTurnFailure(params);
+    const failure = providerTurnFailure(params);
     return projection(
       notification,
       eventIdentity,

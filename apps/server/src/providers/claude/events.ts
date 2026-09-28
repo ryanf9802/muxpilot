@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ChatMessage, SessionStatus } from "@muxpilot/core";
 import type { JsonRpcNotification } from "../../runtime/jsonRpcConnection.js";
-import { codexTurnFailure } from "../../utils/codexTurnFailure.js";
+import { providerTurnFailure } from "../../utils/turnFailure.js";
 import type { AppServerEventIdentity, AppServerEventProjection } from "../codex/events.js";
 import type { ProjectionAdapter } from "../shared/projectionReconciler.js";
 import type { DriverEvent } from "../types.js";
@@ -174,7 +174,7 @@ function turnCompletedProjection(
   const turnId = string(turn?.id);
   if (!turn || !turnId) return null;
   const eventIdentity = identity(threadId, turnId, null, null);
-  const failure = codexTurnFailure(params);
+  const failure = providerTurnFailure(params);
   const unexpected = params.muxpilotUnexpectedInterruption === true;
   const status = completedTurnStatus(turn);
   const message = failure

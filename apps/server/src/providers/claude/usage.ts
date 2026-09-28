@@ -446,7 +446,7 @@ function usageAccount(info: Record<string, unknown>): ProviderUsageAccount {
   const provider = stringValue(info.apiProvider);
   const kind = provider && provider !== "firstParty"
     ? provider
-    : stringValue(info.subscriptionType) || stringValue(info.tokenSource) === "oauth" ? "claudeAi" : "apiKey";
+    : (stringValue(info.subscriptionType) || stringValue(info.tokenSource) === "oauth") ? "claudeAi" : "apiKey";
   return { kind, email: stringValue(info.email), planType: stringValue(info.subscriptionType) };
 }
 
