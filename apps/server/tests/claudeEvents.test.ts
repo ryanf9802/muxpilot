@@ -79,6 +79,8 @@ describe("claudeRecordMessages", () => {
     expect(claudeRecordMessages(user("u1", " hello "))).toEqual([{ itemId: "u1", type: "user", role: "user", text: "hello", status: null, payload: {} }]);
     expect(claudeRecordMessages(user("u2", [{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }]))[0]!.text).toBe("a\nb");
     expect(claudeRecordMessages(user("u3", "[Request interrupted by user]"))).toEqual([]);
+    expect(claudeRecordMessages(user("u4", "<task-notification>\n<task-id>t</task-id>\n</task-notification>"))).toEqual([]);
+    expect(claudeRecordMessages(user("u5", "Background work finished", { promptSource: "system" }))).toEqual([]);
     expect(claudeRecordMessages(user("u4", "<command-name>/clear</command-name>"))).toEqual([]);
     expect(claudeRecordMessages(user("u5", "hi", { isSidechain: true }))).toEqual([]);
     expect(claudeRecordMessages(user("u6", "hi", { isMeta: true }))).toEqual([]);

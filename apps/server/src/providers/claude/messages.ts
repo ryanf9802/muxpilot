@@ -43,7 +43,11 @@ export function claudeRecordMessages(
   const message = objectValue(record.message);
   const content = message?.content;
   if (record.type === "assistant") return assistantMessages(uuid, Array.isArray(content) ? content : []);
-  if (record.type === "user") return userMessages(uuid, content, objectValue(record.tool_use_result ?? record.toolUseResult), toolUses);
+  if (record.type === "user") {
+    // Prompts Claude Code injects itself (background task notifications and similar) are not operator input.
+    const systemPrompt = record.promptSource === "system";
+    return userMessages(uuid, content, objectValue(record.tool_use_result ?? record.toolUseResult), toolUses, systemPrompt);
+  }
   return [];
 }
 
@@ -117,15 +121,18 @@ function userMessages(
   uuid: string,
   content: unknown,
   toolUseResult: Record<string, unknown> | null,
-  toolUses: Record<string, ClaudeToolUse>
+  toolUses: Record<string, ClaudeToolUse>,
+  systemPrompt = false
 ): ClaudeRecordMessage[] {
   if (typeof content === "string") {
+    if (systemPrompt) return [];
     const text = content.trim();
     return text && !isHarnessText(text) ? [{ itemId: uuid, type: "user", role: "user", text, status: null, payload: {} }] : [];
   }
   if (!Array.isArray(content)) return [];
   const toolResults = content.map(objectValue).filter((block): block is Record<string, unknown> => block?.type === "tool_result");
   if (toolResults.length === 0) {
+    if (systemPrompt) return [];
     const text = content.map(objectValue).flatMap((block) => block?.type === "text" && string(block.text) ? [string(block.text)!] : [])
       .join("\n").trim();
     return text && !isHarnessText(text) ? [{ itemId: uuid, type: "user", role: "user", text, status: null, payload: {} }] : [];
@@ -229,6 +236,7 @@ function toolResultText(content: unknown): string {
 function isHarnessText(text: string): boolean {
   return /^\[Request interrupted by user/.test(text)
     || text.startsWith("<command-name>")
+    || text.startsWith("<task-notification>")
     || text.startsWith("<local-command-")
     || text.startsWith("Caveat: The messages below were generated");
 }

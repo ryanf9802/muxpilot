@@ -207,6 +207,28 @@ describe("HostSession", () => {
     expect(persisted.at(-1)).toMatchObject({ activeTurn: null, latestTurn: { id: TURN_UUID, status: "completed" } });
   });
 
+  it("opens an autonomous turn when Claude wakes itself and closes it on the result", async () => {
+    const h = harness();
+    await h.session.open(openParams());
+    await flush();
+    const query = h.queries.latest();
+    query.push({ type: "assistant", uuid: "wake-1", parent_tool_use_id: null, session_id: SESSION_ID, message: { role: "assistant", content: [{ type: "text", text: "The task finished." }] } });
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.turnStarted)).toEqual([{
+      threadId: SESSION_ID,
+      turn: { id: "auto-wake-1", status: "inProgress" },
+      clientMessageId: null,
+      messageUuid: null
+    }]);
+    expect(h.of(HOST_NOTIFICATION.threadStatus).at(-1)).toEqual({ threadId: SESSION_ID, status: { type: "active", activeFlags: [] } });
+    query.push(result([]));
+    await flush();
+    expect(h.of(HOST_NOTIFICATION.turnCompleted)).toEqual([expect.objectContaining({ turn: { id: "auto-wake-1", status: "completed" } })]);
+    expect(h.of(HOST_NOTIFICATION.threadStatus).at(-1)).toEqual({ threadId: SESSION_ID, status: { type: "idle" } });
+    // A later muxpilot turn starts normally.
+    await expect(startTurn(h)).resolves.toEqual({ turnId: TURN_UUID, messageUuid: TURN_UUID });
+  });
+
   it("completes a steered turn from one result naming every input", async () => {
     const h = harness();
     await h.session.open(openParams());

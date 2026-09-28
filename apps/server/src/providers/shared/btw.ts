@@ -41,6 +41,7 @@ export interface BtwEngine {
 
 export function btwReadOnlyInstructions(providerName: string, documentsUnavailable: boolean): string {
   const base = `You are answering one quick side question from a snapshot of another ${providerName} conversation.
+Earlier turns in this conversation ran under the main session's own permissions; the limits below apply only to your answer to this side request.
 Answer directly and concisely. Do not continue, steer, or modify the source task.
 This thread is strictly read-only: do not edit files, change repository state, send messages, create goals, delegate work, request user input, use network access, or perform external side effects.
 You may inspect local files with read-only tools only when needed to answer accurately.
@@ -52,6 +53,7 @@ If the snapshot is incomplete or the answer cannot be established safely, say so
 
 export function btwDocumentInstructions(providerName: string, documentsRoot: string, sourceCwd: string | null): string {
   return `You are answering one quick side request from a snapshot of another ${providerName} conversation.
+Earlier turns in this conversation ran under the main session's own permissions; the limits below apply only to your answer to this side request.
 Answer directly and concisely. Do not continue, steer, interrupt, or message the source task.
 You may create or update Markdown session documents only when the operator explicitly asks you to do so. The only writable directory is ${JSON.stringify(documentsRoot)}.
 Keep INDEX.md current when creating documents. Do not delete or rename documents. Do not edit repository files, change repository state, create goals, delegate work, request user input, use network access, or perform any other side effect.

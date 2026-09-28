@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -75,6 +76,8 @@ interface ActiveTurnState {
   resultSeen: SDKMessage | null;
   rateLimited: boolean;
   authenticationError: string | null;
+  /** Started by Claude Code itself (for example after a background task finishes), not by muxpilot input. */
+  autonomous?: boolean;
 }
 
 interface PendingRequestEntry extends HostPendingRequest {
@@ -402,6 +405,7 @@ export class HostSession {
   }
 
   private handleMessage(message: SDKMessage): void {
+    if (!this.active && (message.type === "assistant" || message.type === "stream_event")) this.beginAutonomousTurn(message.uuid);
     const turnId = this.active?.turn.id ?? null;
     if (message.type === "result") {
       this.options.notify(HOST_NOTIFICATION.sdkMessage, { threadId: this.sessionIdValue, turnId, message });
@@ -469,12 +473,40 @@ export class HostSession {
     this.options.notify(HOST_NOTIFICATION.sdkMessage, { threadId: this.sessionIdValue, turnId, message });
   }
 
+  /**
+   * Claude Code wakes itself for some events (a background task finishing re-prompts the model). Model output
+   * with no muxpilot turn open becomes an autonomous turn so the session shows as working until its result.
+   */
+  private beginAutonomousTurn(uuid: string | undefined): void {
+    if (this.active || !this.sessionIdValue) return;
+    const turnId = `auto-${uuid ?? randomUUID()}`;
+    this.active = {
+      turn: { id: turnId, status: "inProgress" },
+      inputs: new Set(),
+      completedInputs: new Set(),
+      interruptRequested: false,
+      planProposed: false,
+      resultSeen: null,
+      rateLimited: false,
+      authenticationError: null,
+      autonomous: true
+    };
+    this.options.notify(HOST_NOTIFICATION.turnStarted, {
+      threadId: this.sessionIdValue,
+      turn: { id: turnId, status: "inProgress" },
+      clientMessageId: null,
+      messageUuid: null
+    });
+    this.notifyStatus();
+    void this.persist();
+  }
+
   private observeResult(message: Extract<SDKMessage, { type: "result" }>): void {
     const active = this.active;
     if (!active) return;
     const uuids = [message.user_message_uuid, ...(message.user_message_uuids ?? [])].filter((value): value is string => typeof value === "string");
     // A result without submission identity closes a streaming segment aborted by queued input, not the turn.
-    if (uuids.length === 0 && !active.interruptRequested) return;
+    if (uuids.length === 0 && !active.interruptRequested && !active.autonomous) return;
     for (const uuid of uuids) active.completedInputs.add(uuid);
     active.resultSeen = message;
     this.maybeCompleteTurn();
